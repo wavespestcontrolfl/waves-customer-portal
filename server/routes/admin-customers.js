@@ -10,6 +10,7 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
@@ -1637,8 +1638,28 @@ router.post('/fix-tiers', requireAdmin, async (req, res, next) => {
       else newTier = 'Platinum';
 
       if (newTier !== c.waveguard_tier) {
-        await db('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
-        updated++;
+        // Tier writes participate in the customer-comms serialization
+        // (codex #3426 r5 P2): the previsit backstop sweep holds
+        // `customer-comms:<id>` through its membership recheck AND the SMS
+        // dispatch, so a membership-making tier write here either commits
+        // before the sweep's in-lock recheck reads (excluding the customer)
+        // or waits until after the send. Comms lock BEFORE the customers
+        // row lock (customer-comms-lock.js contract), and the skip/no-op
+        // decisions are re-derived from the LOCKED row — the pre-loop
+        // snapshot may be stale by the time this customer's turn comes.
+        const wrote = await withCustomerCommsLock(db, c.id, async (trx) => {
+          const locked = await trx('customers')
+            .where({ id: c.id })
+            .whereNull('deleted_at')
+            .forUpdate()
+            .first();
+          if (!locked) return false;
+          if (NON_MEMBERSHIP_TIER_KEYS.has(membershipTierKey(locked.waveguard_tier))) return false;
+          if (locked.waveguard_tier === newTier) return false;
+          await trx('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
+          return true;
+        });
+        if (wrote) updated++;
       }
     }
 
@@ -2594,7 +2615,7 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] service_photos: ${e.message}`); return []; }),
       db('notification_prefs').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] notification_prefs: ${e.message}`); return null; }),
       db('referral_promoters').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] referral_promoters: ${e.message}`); return null; }),
-      db('property_application_history').where({ customer_id: c.id }).orderBy('application_date', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
+      db('property_application_history').where({ customer_id: c.id }).whereNull('retracted_at').orderBy('application_date', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
       db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
       db('property_nutrient_ledger')
         .where({ customer_id: c.id, application_year: currentYear })
@@ -3234,13 +3255,26 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       let emailSync = null;
       try {
         await db.transaction(async (trx) => {
+          // Membership-affecting edits participate in the customer-comms
+          // serialization (codex #3426 r4 P2): the previsit backstop sweep
+          // holds `customer-comms:<id>` through its membership recheck AND
+          // the SMS dispatch, so a tier/rate write that makes this customer
+          // a plan member either commits before the sweep's in-lock recheck
+          // reads (and excludes them) or waits until after the send. Rung-6
+          // ordering: BEFORE the customers row lock below (customer-comms-
+          // lock.js contract — revertMerge takes comms first, then
+          // FOR-UPDATEs rows; row-lock-first-then-wait-here would deadlock).
+          if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
+            await lockCustomerComms(trx, req.params.id);
+          }
           // Combined-session lock BEFORE the customer row lock (codex #3427
           // r16 P1): /setup acquires pay.combined.customer and then reads/
           // writes customer state on other connections — taking the row
           // lock first here and waiting on the advisory lock inside the
           // release helper forms an application-level deadlock PostgreSQL
           // can't fully see. Advisory-then-rows puts both paths in one
-          // order; the later release call re-acquires re-entrantly.
+          // order (comms → combined → rows here); the later release call
+          // re-acquires re-entrantly.
           if (updates.payer_id) {
             await require('../services/pay-combined').lockCombinedCustomers(trx, [String(req.params.id)]);
           }

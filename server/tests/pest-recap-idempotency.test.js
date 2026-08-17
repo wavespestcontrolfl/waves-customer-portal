@@ -32,6 +32,11 @@ jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn().mockResolvedValue({ category: 'pest_control' }),
 }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-05-29' }));
+// The FDACS writer is its own unit (compliance-ledger.test.js) — here we
+// only assert the recap invokes it in-trx after the product replace.
+jest.mock('../services/compliance', () => ({
+  createComplianceRecords: jest.fn().mockResolvedValue([]),
+}));
 
 const { transitionJobStatus } = require('../services/job-status');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -61,19 +66,56 @@ function makeKnex(store) {
   function tableApi(table) {
     const q = {
       _table: table,
-      where: jest.fn().mockReturnThis(),
+      where: jest.fn(function where(...args) {
+        q._where = args;
+        return q;
+      }),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn(function whereNotIn(col, vals) {
+        q._whereNotIn = { col, vals };
+        return q;
+      }),
+      whereIn: jest.fn(function whereIn(col, vals) {
+        q._whereIn = { col, vals };
+        return q;
+      }),
+      whereRaw: jest.fn(function whereRaw(...args) {
+        q._whereRaw = args;
+        return q;
+      }),
       orderBy: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
-      select: jest.fn().mockReturnThis(),
+      // The preserve-prior-rate lookup reads the existing service_products
+      // rows; a test opts in by seeding store.priorProductRows.
+      select: table === 'service_products'
+        ? jest.fn(() => Promise.resolve(store.priorProductRows || []))
+        // The legacy product-less ledger capture — a test opts in by
+        // seeding store.legacyLedgerRows.
+        : table === 'property_application_history'
+          ? jest.fn(() => Promise.resolve(store.legacyLedgerRows || []))
+          : jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
       del: jest.fn(() => {
-        if (table === 'service_products') store.productDeletes = (store.productDeletes || 0) + 1;
+        if (table === 'service_products') {
+          store.productDeletes = (store.productDeletes || 0) + 1;
+          store.productDeleteScopes = (store.productDeleteScopes || []).concat([
+            q._whereRaw ? { partial: true, names: q._whereRaw[1] } : { partial: false },
+          ]);
+        }
+        if (table === 'property_application_history') {
+          store.ledgerDeletes = store.ledgerDeletes || [];
+          store.ledgerDeletes.push({ where: q._where?.[0], notIn: q._whereNotIn || null });
+        }
         return Promise.resolve(1);
       }),
     };
 
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
+      // The ledger-sync catalog resolution (name ilike) — a test opts in
+      // by seeding store.catalogRow.
+      if (table === 'products_catalog') return store.catalogRow;
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
         return latest
@@ -93,11 +135,29 @@ function makeKnex(store) {
         store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
-      if (table === 'service_products') store.productInserts = (store.productInserts || 0) + 1;
+      if (table === 'service_products') {
+        store.productInserts = (store.productInserts || 0) + 1;
+        const rows = Array.isArray(row) ? row : [row];
+        store.productRows = (store.productRows || []).concat(rows);
+        // The ledger sync reads the inserted rows back (with ids).
+        const returned = rows.map((r, i) => ({
+          id: `sp-${(store.productRows || []).length - rows.length + i + 1}`,
+          product_name: r.product_name,
+          application_rate: r.application_rate ?? null,
+          rate_unit: r.rate_unit ?? null,
+        }));
+        return { returning: jest.fn().mockResolvedValue(returned) };
+      }
       return { returning: jest.fn().mockResolvedValue([]) };
     });
 
     q.update = jest.fn((patch) => {
+      if (table === 'property_application_history') {
+        store.ledgerUpdates = store.ledgerUpdates || [];
+        store.ledgerUpdates.push({
+          where: q._where?.[0], notIn: q._whereNotIn || null, whereIn: q._whereIn || null, patch,
+        });
+      }
       if (table === 'service_records') {
         store.recordUpdates = store.recordUpdates || [];
         store.recordUpdates.push(patch);
@@ -136,6 +196,8 @@ function makeKnex(store) {
     return tableApi(table);
   });
 
+  knex.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+
   knex.transaction = jest.fn(async (cb) => {
     const result = await cb(knex);
     // First successful completion flips live status to terminal, like the
@@ -146,6 +208,11 @@ function makeKnex(store) {
 
   return knex;
 }
+
+// The ledger receives two kinds of updates: per-row re-link syncs (carry
+// service_product_id) and the deselection retraction sweep.
+const syncUpdates = (store) => (store.ledgerUpdates || []).filter((u) => 'service_product_id' in u.patch);
+const retractionSweeps = (store) => (store.ledgerUpdates || []).filter((u) => u.patch.retraction_reason === 'recap_deselected');
 
 describe('pest recap idempotency (Codex P1)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -411,6 +478,524 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect((store.recordUpdates || []).some((patch) => patch.pdf_storage_key === null)).toBe(true);
   });
 
+  test('an edited rate syncs the compliance ledger row and re-links it (codex P1 r7)', async () => {
+    // The visit was previously completed through /complete, which ledgered
+    // its applications in property_application_history. The recap replace
+    // (delete + insert) SET-NULLs the ledger's service_product_id link, so
+    // the sync must re-link the replacement row AND carry the edited rate
+    // into the ledger — the DACS export and application-limit caps read
+    // the ledger, not service_products.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-termidor' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Corrected the recorded rate.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    const { where, patch } = syncs[0];
+    expect(where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-termidor' });
+    expect(patch.application_rate).toBe(0.8);
+    expect(patch.rate_unit).toBe('fl_oz/gal');
+    expect(patch.service_product_id).toBe('sp-1');
+    // A re-link also clears any prior retraction of this row.
+    expect(patch.retracted_at).toBeNull();
+    expect(patch.retraction_reason).toBeNull();
+  });
+
+  test('a rate-less replacement row re-links the ledger without touching its rate', async () => {
+    // Older client / API caller re-submitting with no rate and no prior
+    // recorded rate: absence must never erase the ledger's observed value.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-termidor' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'admin',
+      actorId: 'admin-1',
+      technicianNotes: 'Re-saved without a rate.',
+      products: [{ product_name: 'Termidor' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    const { patch } = syncs[0];
+    expect(patch.service_product_id).toBe('sp-1');
+    expect(patch).not.toHaveProperty('application_rate');
+    expect(patch).not.toHaveProperty('rate_unit');
+  });
+
+  test('a submitted catalog id is validated, persisted, and keys the ledger exactly (codex P1 r9)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-exact' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Exact catalog identity.',
+      products: [{ product_id: 'cat-exact', product_name: 'Advion Cockroach Gel', application_rate: '0.5', rate_unit: 'g/spot', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The validated id lands on the service_products row (exact-ID path in
+    // the FDACS writer) and keys the ledger sync — no name-pattern match.
+    expect(store.productRows[0].product_id).toBe('cat-exact');
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0].where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-exact' });
+  });
+
+  test('recap metadata binds to the validated catalog row, not caller-supplied fields (codex P1 r10)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: {
+        id: 'cat-exact', name: 'Advion Cockroach Gel Bait', category: 'Bait',
+        active_ingredient: 'Indoxacarb', moa_group: '22A', application_method: 'bait_placement',
+      },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Stale caller metadata.',
+      products: [{ product_id: 'cat-exact', product_name: 'Advion Cockroach Gel', product_category: 'Wrong', active_ingredient: 'Wrong AI', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const row = store.productRows[0];
+    expect(row.product_name).toBe('Advion Cockroach Gel Bait');
+    expect(row.product_category).toBe('Bait');
+    expect(row.active_ingredient).toBe('Indoxacarb');
+    expect(row.moa_group).toBe('22A');
+    expect(row.application_method).toBe('bait_placement');
+  });
+
+  test('a CONFIRMED cleared rate is not restored and clears the ledger rate (codex P1 r9)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-termidor' },
+      // Prior recorded rate that a legacy omission WOULD restore.
+      priorProductRows: [{ product_name: 'Termidor', application_rate: 0.8, rate_unit: 'fl_oz/gal' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Cleared a wrong rate.',
+      products: [{ product_name: 'Termidor', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The deliberate clear survives: no prior-rate restore on the row…
+    expect(store.productRows[0].application_rate).toBeUndefined();
+    // …and the ledger rate is cleared with it (still re-linked).
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0].patch).toEqual({
+      service_product_id: 'sp-1', retracted_at: null, retraction_reason: null,
+      application_rate: null, rate_unit: null,
+    });
+  });
+
+  test('deselected products are retracted from the ledger (codex P1 r9)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-a' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Reselected only product A.',
+      products: [{ product_name: 'Product A', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // Null-linked ledger rows for catalog products NOT in the replacement
+    // set are RETRACTED — never deleted (append-safe ledger, codex P1
+    // r10) — in the same trx. Product-less legacy rows survive via the
+    // whereNotNull guard.
+    expect(store.ledgerDeletes || []).toHaveLength(0);
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].where).toEqual({ service_record_id: 'rec-old' });
+    expect(sweeps[0].notIn).toEqual({ col: 'product_id', vals: ['cat-a'] });
+    expect(sweeps[0].patch.retracted_at).toBeInstanceOf(Date);
+  });
+
+  test('a submitted catalog id that does not resolve is REJECTED, not name-matched (codex P1 r11)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined, // the id resolves to nothing
+    };
+    const knex = makeKnex(store);
+
+    await expect(submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Stale id.',
+      products: [{ product_id: 'gone-id', product_name: 'Ghost Product', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    })).rejects.toThrow('Product not found: gone-id');
+    // The trx rolled back — nothing was replaced.
+    expect(store.productInserts || 0).toBe(0);
+  });
+
+  test('an unsupported rate unit is rejected before it reaches the ledger (codex P1 r11)', async () => {
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    await expect(submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Typo unit.',
+      products: [{ product_name: 'Termidor', application_rate: '4', rate_unit: 'fl-oz/gallon', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    })).rejects.toThrow('Invalid product unit for Termidor');
+    expect(store.productInserts || 0).toBe(0);
+  });
+
+  test('a CONFIRMED empty set clears recorded products and retracts their ledger rows (codex P1 r11)', async () => {
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Deselected everything.',
+      products: [],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The replace ran: rows deleted, nothing inserted, every attributable
+    // ledger row swept into retraction (no whereNotIn — nothing linked).
+    expect(store.productDeletes).toBe(1);
+    expect(store.productInserts || 0).toBe(0);
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].notIn).toBeNull();
+    expect(createComplianceRecords).not.toHaveBeenCalled();
+  });
+
+  test('an UNCONFIRMED partial submit replaces only the named rows and never retracts (codex P1 r12)', async () => {
+    // A recorded product missing from the active catalog flips
+    // productsConfirmed off in the modal; resubmitting the representable
+    // subset must not delete the unmatched row or retract its ledger row.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-a' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Partial resubmit.',
+      products: [{ product_name: 'Product A', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The delete was scoped to the submitted names — unmatched rows survive.
+    expect(store.productDeleteScopes).toEqual([{ partial: true, names: [['product a']] }]);
+    // And no retraction sweep ran: absence from an unconfirmed set proves nothing.
+    expect(retractionSweeps(store)).toHaveLength(0);
+  });
+
+  test('a same-name replacement re-adopts a product-less legacy ledger row (codex P1 r14)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined, // no catalog match -> no identified-row sync
+      legacyLedgerRows: [{ ledger_id: 'led-1', product_name: 'Termidor' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Legacy row adoption.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal', rate_confirmed: true }],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const adoption = (store.ledgerUpdates || []).find((u) => u.where && u.where.id === 'led-1');
+    expect(adoption).toBeDefined();
+    expect(adoption.patch.service_product_id).toBe('sp-1');
+    expect(adoption.patch.application_rate).toBe(0.8);
+    // Adopted, so the leftover retraction never targets it.
+    expect((store.ledgerUpdates || []).filter((u) => u.whereIn)).toHaveLength(0);
+  });
+
+  test('an authoritative clear retracts captured product-less legacy rows (codex P1 r14)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      legacyLedgerRows: [{ ledger_id: 'led-1', product_name: 'Old Legacy Product' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Cleared everything, legacy row included.',
+      products: [],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The sweep can't reach a null-product row — the captured-id pass must.
+    const leftover = (store.ledgerUpdates || []).find((u) => u.whereIn);
+    expect(leftover).toBeDefined();
+    expect(leftover.whereIn).toEqual({ col: 'id', vals: ['led-1'] });
+    expect(leftover.patch.retraction_reason).toBe('recap_deselected');
+  });
+
+  test('an authoritative set preserves NAMED unrepresentable rows and clears the rest (codex P1 r16)', async () => {
+    // Mixed record: one product the picker could not represent (named in
+    // productsPreserve) + visible products. Deselecting a visible product
+    // must clear it — only the named rows survive the replace.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-c' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Kept C, deselected B; Ghost preserved.',
+      products: [{ product_name: 'Product C', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
+      productsPreserve: ['Ghost Product'],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The delete excluded ONLY the preserved names — deselected visible
+    // rows (Product B) are cleared with everything else.
+    expect(store.productDeleteScopes).toEqual([{ partial: true, names: [['ghost product']] }]);
+    // The set is authoritative, so the retraction sweep still runs.
+    expect(retractionSweeps(store)).toHaveLength(1);
+  });
+
+  test('a renamed product restores its prior rate by catalog id (codex P2 r17)', async () => {
+    // The catalog row was renamed since the visit; the modal matched by
+    // stable id and submits the NEW name with no rate. The prior recorded
+    // rate can only be found through product_id — the recorded row still
+    // carries the old name.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-x', name: 'New Name' },
+      priorProductRows: [{ product_name: 'Old Name', application_rate: 0.7, rate_unit: 'oz', product_id: 'cat-x' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Renamed product resubmit.',
+      products: [{ product_id: 'cat-x', product_name: 'New Name' }],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBe(0.7);
+    expect(store.productRows[0].rate_unit).toBe('oz');
+  });
+
+  test('a preserved product\'s orphaned ledger row is re-linked, not swept (codex P1 r17)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-c' },
+      // The surviving preserved row an earlier replace left with an
+      // orphaned identified ledger row.
+      priorProductRows: [{ id: 'sp-ghost', product_name: 'Ghost Product', product_id: 'cat-ghost' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Preserved ghost, kept C.',
+      products: [{ product_id: 'cat-c', product_name: 'Product C', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
+      productsPreserve: ['Ghost Product'],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The orphaned identified row is re-linked to the surviving source row…
+    const relink = (store.ledgerUpdates || []).find(
+      (u) => u.where && u.where.product_id === 'cat-ghost',
+    );
+    expect(relink).toBeDefined();
+    expect(relink.patch).toEqual({ service_product_id: 'sp-ghost' });
+    // …and its catalog id is excluded from the retraction sweep.
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].notIn.vals).toEqual(['cat-c', 'cat-ghost']);
+  });
+
+  test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      productDeletes: 0,
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Resend only.',
+      products: [],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productDeletes).toBe(0);
+    expect(retractionSweeps(store)).toHaveLength(0);
+  });
+
+  test('a fresh recap completion runs the FDACS writer so its applications get ledgered (codex P1 r8)', async () => {
+    // No prior /complete: there are no ledger rows for the sync UPDATE to
+    // hit, so the recap must invoke the shared idempotent writer or the
+    // application never reaches the FDACS ledger / application-limit caps.
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'First-time recap completion.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(createComplianceRecords).toHaveBeenCalledTimes(1);
+    expect(createComplianceRecords).toHaveBeenCalledWith(result.recordId, { trx: knex });
+  });
+
+  test('an empty product submit does not invoke the FDACS writer', async () => {
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Re-send only.',
+      products: [],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(createComplianceRecords).not.toHaveBeenCalled();
+  });
+
+  test('a product with no catalog match skips the ledger sync', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined,
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Unmatched product.',
+      products: [{ product_name: 'One-off borrowed product', application_rate: '2', rate_unit: 'oz' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(syncUpdates(store)).toHaveLength(0);
+  });
+
   test('a brand-new recap record issues no pdf cache invalidation (nothing cached yet)', async () => {
     const store = { serviceStatus: 'scheduled', records: [] };
     const knex = makeKnex(store);
@@ -428,5 +1013,117 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(result.ok).toBe(true);
     const updates = store.recordUpdates || [];
     expect(updates.some((patch) => patch && Object.prototype.hasOwnProperty.call(patch, 'pdf_storage_key'))).toBe(false);
+  });
+
+  // Recap rates are TECHNICIAN-CONFIRMED (codex P1, PR #3419 r5): the modal
+  // collects the rate in an editable prefilled field; the server records
+  // only a submitted rate, preserves a previously recorded one when a
+  // re-submit omits it, and never writes a catalog default as observed.
+  test('a submitted rate is recorded as the applied rate', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Baited kitchen and bath.',
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows).toHaveLength(1);
+    expect(store.productRows[0].application_rate).toBe(0.5);
+    expect(store.productRows[0].rate_unit).toBe('g/spot');
+  });
+
+  test('a rate-less re-submit preserves the rate recorded on the visit', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-1', recap_sms_sent_at: null }],
+      priorProductRows: [
+        { product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' },
+      ],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Re-sent recap.',
+      products: [{ product_name: 'Advion Ant Bait Gel' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows).toHaveLength(1);
+    expect(store.productRows[0].application_rate).toBe(0.5);
+    expect(store.productRows[0].rate_unit).toBe('g/spot');
+  });
+
+  test('a submitted rate outranks the previously recorded one', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-1', recap_sms_sent_at: null }],
+      priorProductRows: [
+        { product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' },
+      ],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Corrected the applied rate.',
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0.7, rate_unit: 'g/spot' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBe(0.7);
+  });
+
+  test('no submitted rate and no prior record keeps a null rate — a catalog default is never fabricated', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Foam application.',
+      products: [{ product_name: 'Termidor Foam' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBeUndefined();
+    expect(store.productRows[0].rate_unit).toBeUndefined();
+  });
+
+  test('a zero/invalid submitted rate is not recorded', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Cleared the rate field.',
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0, rate_unit: 'g/spot' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBeUndefined();
+    expect(store.productRows[0].rate_unit).toBeUndefined();
   });
 });

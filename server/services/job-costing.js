@@ -268,6 +268,8 @@ async function calcProductsCost(db, serviceRecordId) {
   try {
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
+      // Retracted applications (recap corrections) carry no material cost.
+      .whereNull('retracted_at')
       .select('product_id', 'quantity_applied', 'quantity_unit');
 
     for (const r of rows) {

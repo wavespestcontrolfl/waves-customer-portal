@@ -184,6 +184,111 @@ describe('detectCategory with the evidence guard', () => {
   });
 });
 
+describe('county-attested small parcels stay residential (≥5-unit ruling, 2026-08-11)', () => {
+  // Florida PAOs file duplex/guest-house parcels under DOR 08xx and the
+  // parcel parsers map every 08xx to the string "Multifamily" — the owner's
+  // ruling is that fewer than five units is residential, so the bare
+  // multifamily text vote defers to a county-attested count ≤4. The
+  // reclassification only runs with the unit-scope guardrails gate ON —
+  // estimator drafts depend on that machinery to catch unit-suffixed
+  // requests against whole-building measurements.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
+  function countyDuplexParcel(overrides = {}) {
+    return {
+      formattedAddress: '48 Osprey Bend, Osprey, FL 34229',
+      propertyType: 'Multifamily',
+      _source: 'county',
+      _parcel: {
+        county: 'Sarasota',
+        dorUseCode: '0810',
+        residentialUnits: 2,
+      },
+      _raw: { landUse: 'Multi-family, fewer than 10 units' },
+      ...overrides,
+    };
+  }
+
+  test('DOR 0810 two-unit county parcel classifies RESIDENTIAL despite the Multifamily string', () => {
+    expect(detectCategory(countyDuplexParcel(), {})).toBe('RESIDENTIAL');
+  });
+
+  test('the boundary is four: 4 units residential, 5 units commercial', () => {
+    expect(detectCategory(countyDuplexParcel({ _parcel: { county: 'Sarasota', dorUseCode: '0830', residentialUnits: 4 } }), {})).toBe('RESIDENTIAL');
+    expect(detectCategory(countyDuplexParcel({ _parcel: { county: 'Sarasota', dorUseCode: '0830', residentialUnits: 5 } }), {})).toBe('COMMERCIAL');
+  });
+
+  test('the association aggregate shape (unitCount 1 beside parcel units 36) stays COMMERCIAL — the larger count wins', () => {
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Manatee', residentialUnits: 36 },
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
+    expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
+  });
+
+  test('the shaped unitCount: 1 seed on a county record is NOT attested — GIS omitted unit data (codex P1)', () => {
+    // shapeAsPropertyRecord seeds unitCount: 1 on every record, so a county
+    // multifamily parcel whose GIS response carried no residentialUnits
+    // arrives with a synthetic 1 — _source alone must not turn it into a
+    // county-attested small parcel.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Sarasota', dorUseCode: '0810' },
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('authoritative unitCount field evidence on a hybrid also suppresses the vote', () => {
+    expect(detectCategory(hybridCountyWonRecord({
+      propertyType: 'Multifamily',
+      unitCount: 3,
+      _fieldEvidence: {
+        propertyType: {
+          value: 'Multifamily', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100,
+        },
+        unitCount: {
+          value: 3, confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100,
+        },
+      },
+    }), {})).toBe('RESIDENTIAL');
+  });
+
+  test('a web-sourced small unitCount cannot suppress the vote (no county attestation)', () => {
+    expect(detectCategory(hybridCountyWonRecord({
+      propertyType: 'Multifamily',
+      unitCount: 2,
+      _fieldEvidence: {
+        propertyType: {
+          value: 'Multifamily', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100,
+        },
+        unitCount: {
+          value: 2, confidence: 'low', sourceType: 'web', fieldVerify: false, score: 30,
+        },
+      },
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('HOA common-area strings stay COMMERCIAL regardless of a small unit count', () => {
+    expect(detectCategory(countyDuplexParcel({
+      _raw: { landUse: 'HOA common area' },
+      propertyType: '',
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('hasCommercialSignalText synthetic defaults keep the multifamily text vote (no provenance)', () => {
+    expect(detectCategory({ propertyType: 'Multifamily', unitCount: 1 }, {})).toBe('COMMERCIAL');
+  });
+
+  test('gate OFF: even an attested duplex keeps the conservative COMMERCIAL verdict (codex P1)', () => {
+    // With GATE_UNIT_SCOPE_GUARDRAILS off, estimator drafts have no
+    // unit-scope protection — the reclassification must not outrun it.
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    expect(detectCategory(countyDuplexParcel(), {})).toBe('COMMERCIAL');
+  });
+});
+
 describe('hybrid county land-use survives an untrusted type (codex rd2 P1)', () => {
   // A hybrid whose propertyType was won by an unverified web hit, but whose
   // county GIS donated authoritative land-use strings in _raw —

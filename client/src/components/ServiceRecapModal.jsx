@@ -14,6 +14,7 @@
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 
 const PALETTES = {
   dark: {
@@ -44,6 +45,33 @@ const TIMELINE_LABELS = {
   skipped: { label: 'Skipped', icon: '⏭️' },
 };
 
+// Catalog rate prefill for a selected product — the SHARED resolver
+// CompletionPanel uses (lib/product-rate-prefill.js), so the same visit and
+// product prefill the same rate on either completion path: verified per-1k
+// rate first, then the pest 4-oz perimeter house default, then a per-basis
+// display default's LOW bound in its label-native unit ("0.1 g/spot"). The
+// recap path is server-gated to pest control, so the service line is fixed.
+// The value is only a STARTING point: the tech edits/confirms it before
+// submit, and only the submitted value is recorded.
+function catalogRatePrefill(p, serviceType) {
+  if (!p) return null;
+  const applicationMethod = defaultApplicationMethodForLine(p, 'pest', { serviceType });
+  const resolved = resolveRatePrefill(p, { applicationMethod, serviceLine: 'pest' });
+  const rate = Number(resolved.rate);
+  if (!Number.isFinite(rate) || rate <= 0 || !resolved.rateUnit) return null;
+  // The label ceiling for the inline high-rate warning (codex P1 r18):
+  // per-basis bands carry their upper bound from the resolver; per-1,000
+  // rates use the verified catalog max. Neither applies to the 4-oz house
+  // default (its 'oz' unit is not the catalog rate's basis).
+  const maxRaw = resolved.perBasisUnit
+    ? resolved.labelMaxRate
+    : resolved.usePestSprayDefault
+      ? null
+      : parseFloat(String(p.max_label_rate_per_1000 ?? ''));
+  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
+}
+
 function fmtTime(ts) {
   if (!ts) return '';
   try {
@@ -70,6 +98,10 @@ export default function ServiceRecapModal({
 
   const [note, setNote] = useState('');
   const [selected, setSelected] = useState(() => new Set());
+  // productId -> { rate: string, unit: string }. Seeded from the rate
+  // already recorded on the visit (reopen) or the catalog prefill
+  // (fresh selection); the tech edits it before submit.
+  const [rates, setRates] = useState(() => ({}));
   const [message, setMessage] = useState('');
   const [sendText, setSendText] = useState(true);
 
@@ -82,6 +114,16 @@ export default function ServiceRecapModal({
   // twice before `submitting` re-renders the disabled button. The server is
   // idempotent regardless, but this avoids the redundant second request.
   const submitInFlight = useRef(false);
+  // True unless a context load failure means the checkbox list cannot
+  // enumerate the recorded state at all — only then does the submission
+  // drop authority (productsConfirmed) entirely (codex P1 r11/r13/r15).
+  const selectionAuthoritative = useRef(true);
+  // Recorded products that matched NO active catalog row (renamed or
+  // deactivated since the visit). The submission stays authoritative and
+  // names these for the server to PRESERVE — dropping authority for the
+  // whole set would let a deselected VISIBLE product survive the partial
+  // path (codex P1 r16).
+  const unrepresentedProducts = useRef([]);
 
   useEffect(() => {
     let active = true;
@@ -95,16 +137,66 @@ export default function ServiceRecapModal({
         // catalog by name, so re-sending/editing a recap preserves them
         // instead of starting empty (which would wipe the product history).
         const recorded = data?.existingRecord?.products || [];
+        // A failed recorded-products load means the picker cannot speak
+        // for what was applied — fail closed, never authoritative
+        // (codex P1 r13). Same for a failed service-record lookup (codex
+        // P1 r15): "no record" reported over a transient error must not
+        // authorize an empty replacement of a real completed visit.
+        if (data?.existingRecord?.productsLoadFailed || data?.existingRecordLoadFailed) {
+          selectionAuthoritative.current = false;
+        }
+        if (recorded.length && !Array.isArray(data?.products)) {
+          selectionAuthoritative.current = false;
+        }
         if (recorded.length && Array.isArray(data?.products)) {
-          const idByName = new Map(
-            data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p.id]),
+          // Stable catalog id first (codex P2 r16: a rename between
+          // visits must not read as a different product), name fallback
+          // for rows recorded before product_id was captured.
+          const byId = new Map(
+            data.products.map((p) => [String(p.id), p]),
+          );
+          const byName = new Map(
+            data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p]),
           );
           const preselect = new Set();
+          const seededRates = {};
           recorded.forEach((rp) => {
-            const id = idByName.get(String(rp.product_name || '').trim().toLowerCase());
-            if (id != null) preselect.add(id);
+            const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
+              || byName.get(String(rp.product_name || '').trim().toLowerCase());
+            if (!cat) {
+              // Recorded product not representable in the picker — name
+              // it for server-side preservation; the rest of the
+              // selection stays authoritative.
+              if (rp.product_name) unrepresentedProducts.current.push(rp.product_name);
+              return;
+            }
+            preselect.add(cat.id);
+            // The rate RECORDED on the visit outranks the catalog prefill —
+            // reopening a recap must show (and re-submit) what was applied,
+            // not rewrite it to the current catalog default.
+            if (rp.application_rate != null && Number(rp.application_rate) > 0) {
+              // A recorded rate missing its unit (legacy rows) falls back
+              // to the catalog unit — an empty unit would hide the rate
+              // editor while rate_confirmed still marked the field
+              // deliberate, and the server would read that as a clear
+              // (codex P1 r11).
+              const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
+              const unit = rp.rate_unit || prefill?.unit || '';
+              seededRates[cat.id] = {
+                rate: String(rp.application_rate),
+                unit,
+                // The label ceiling only applies in its own unit.
+                ...(prefill?.max != null && prefill.unit === unit ? { max: prefill.max } : {}),
+              };
+            } else {
+              const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
+              if (prefill) seededRates[cat.id] = prefill;
+            }
           });
-          if (preselect.size) setSelected(preselect);
+          if (preselect.size) {
+            setSelected(preselect);
+            setRates(seededRates);
+          }
         }
         if (!data?.service?.hasPhone) setSendText(false);
       } catch (err) {
@@ -126,9 +218,24 @@ export default function ServiceRecapModal({
   const toggleProduct = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // Seed the editable rate on first selection only — a re-toggle
+        // keeps whatever the tech already typed.
+        setRates((prevRates) => {
+          if (prevRates[id]) return prevRates;
+          const prefill = catalogRatePrefill(productById.get(id), ctx?.service?.serviceType);
+          return prefill ? { ...prevRates, [id]: prefill } : prevRates;
+        });
+      }
       return next;
     });
+  }, [ctx, productById]);
+
+  const setRateValue = useCallback((id, value) => {
+    setRates((prev) => ({ ...prev, [id]: { ...(prev[id] || { unit: '' }), rate: value } }));
   }, []);
 
   const handleDraft = useCallback(async () => {
@@ -172,17 +279,50 @@ export default function ServiceRecapModal({
       const productPayload = [...selected]
         .map((id) => productById.get(id))
         .filter(Boolean)
-        .map((p) => ({
-          product_name: p.name,
-          product_category: p.category,
-          active_ingredient: p.active_ingredient,
-          moa_group: p.moa_group,
-        }));
+        .map((p) => {
+          // Technician-confirmed rate from the editable field. Cleared or
+          // unresolvable -> no rate submitted; rate_confirmed tells the
+          // server the field state is deliberate (a cleared rate is an
+          // edit, not a legacy client's omission — codex P1 r9), so the
+          // server must NOT restore a previously recorded rate.
+          const entry = rates[p.id];
+          const rate = entry ? parseFloat(entry.rate) : NaN;
+          const hasRate = Number.isFinite(rate) && rate > 0 && !!entry?.unit;
+          return {
+            // The selected catalog row's id, so the server records
+            // service_products.product_id and the compliance ledger keys
+            // on the exact product instead of a name-pattern match
+            // (codex P1 r9: "Advion Cockroach Gel" vs "... Gel Bait").
+            product_id: p.id,
+            product_name: p.name,
+            product_category: p.category,
+            active_ingredient: p.active_ingredient,
+            moa_group: p.moa_group,
+            // Confirm the rate field only when it was actually shown (the
+            // editor renders per-unit) or a rate is being sent — never
+            // vouch for a field the technician couldn't see (codex P1
+            // r11); unconfirmed omission keeps the server's
+            // preserve-prior behavior.
+            rate_confirmed: hasRate || !!entry?.unit,
+            ...(hasRate ? { application_rate: rate, rate_unit: entry.unit } : {}),
+          };
+        });
       const result = await request(base, {
         method: 'POST',
         body: JSON.stringify({
           technicianNotes: note,
           products: productPayload,
+          // The selection state is deliberate (recorded products are
+          // pre-selected on open), so an empty set is a full deselection,
+          // not a resend-only omission — unless the context load failed,
+          // in which case the server keeps its preserve-on-omission
+          // behavior (codex P1 r11). Recorded products the picker could
+          // not represent are named for preservation instead of dropping
+          // authority for the whole set (codex P1 r16).
+          productsConfirmed: selectionAuthoritative.current,
+          ...(selectionAuthoritative.current && unrepresentedProducts.current.length
+            ? { productsPreserve: unrepresentedProducts.current }
+            : {}),
           customerRecap: message,
           sendSms: willSend,
         }),
@@ -193,7 +333,7 @@ export default function ServiceRecapModal({
       setSubmitting(false);
       submitInFlight.current = false;
     }
-  }, [base, ctx, message, note, onCompleted, productById, request, selected, sendText]);
+  }, [base, ctx, message, note, onCompleted, productById, rates, request, selected, sendText]);
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
 
@@ -313,6 +453,54 @@ export default function ServiceRecapModal({
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Application rates for the selected products — editable so the
+                recorded rate is what the tech actually applied, not the
+                catalog default it starts from. Products with no known unit
+                (no catalog default, nothing recorded) record no rate. */}
+            {[...selected].some((id) => rates[id]?.unit) && (
+              <div style={{
+                background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
+                padding: '10px 12px', marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: P.muted, marginBottom: 6 }}>
+                  Application rates (adjust to what you applied)
+                </div>
+                {[...selected]
+                  .map((id) => ({ id, p: productById.get(id), entry: rates[id] }))
+                  .filter((row) => row.p && row.entry?.unit)
+                  .map(({ id, p, entry }) => (
+                    <div key={id} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '4px 0', fontSize: 13, color: P.text,
+                    }}>
+                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.name}
+                      </span>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        step="any"
+                        value={entry.rate}
+                        onChange={(e) => setRateValue(id, e.target.value)}
+                        aria-label={`Application rate for ${p.name}`}
+                        style={{
+                          width: 72, boxSizing: 'border-box', textAlign: 'right',
+                          background: P.bg, color: P.text, border: `1px solid ${P.border}`,
+                          borderRadius: 8, padding: '5px 8px', fontSize: 13, fontFamily: P.bodyFont,
+                        }}
+                      />
+                      <span style={{ color: P.muted, fontSize: 12, minWidth: 56 }}>{entry.unit}</span>
+                      {entry.max != null && parseFloat(entry.rate) > entry.max && (
+                        <span style={{ color: P.red, fontSize: 11, whiteSpace: 'nowrap' }}>
+                          &gt; label max {entry.max}
+                        </span>
+                      )}
+                    </div>
+                  ))}
               </div>
             )}
 

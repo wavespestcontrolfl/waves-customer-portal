@@ -104,6 +104,7 @@ router.get('/reports/usage', async (req, res, next) => {
     let query = db('property_application_history')
       .where('application_date', '>=', start)
       .where('application_date', '<=', end)
+      .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .leftJoin('customers', 'property_application_history.customer_id', 'customers.id')
       .leftJoin('technicians', 'property_application_history.technician_id', 'technicians.id')

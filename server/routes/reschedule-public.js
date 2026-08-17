@@ -56,6 +56,8 @@ const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
@@ -200,6 +202,16 @@ function eligibility(svc, now = new Date()) {
   if (status === 'cancelled' || status === 'canceled') return { ok: false, reason: 'cancelled' };
   if (status === 'en_route' || status === 'on_site') return { ok: false, reason: 'in_progress' };
   if (!RESCHEDULABLE_STATUSES.has(status)) return { ok: false, reason: 'not_available' };
+  // Same dispatch-owned guard as the authenticated schedule routes (codex
+  // #3429 r2 P1): a call-created booking the office hasn't reviewed is
+  // hidden from the customer's list/confirm/reschedule, so the bearer-token
+  // page must refuse it too — reminder rows now arm before office confirm,
+  // and reschedule tokens never expire.
+  if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+    && status === 'pending'
+    && !svc.customer_confirmed) {
+    return { ok: false, reason: 'not_available' };
+  }
 
   // A pending/confirmed visit whose time already passed was MISSED, not
   // served — the customer may rebook it from the same link (owner ruling
@@ -253,6 +265,8 @@ async function loadByToken(token) {
       's.window_start',
       's.window_end',
       's.status',
+      's.source_action',
+      's.customer_confirmed',
       's.service_type',
       's.estimated_duration_minutes',
       's.is_recurring',

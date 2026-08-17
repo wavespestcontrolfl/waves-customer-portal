@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
     chain.where = record('where');
     chain.whereNull = record('whereNull');
     chain.whereIn = record('whereIn');
+    chain.whereNotIn = record('whereNotIn');
     chain.whereNot = record('whereNot');
     chain.forUpdate = record('forUpdate');
     chain.whereNotNull = record('whereNotNull');
@@ -318,6 +319,80 @@ describe('checks 3+4 — dedup and the one-text-ever claim', () => {
     const inserts = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
     expect(inserts).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('backstop trigger — existing-recurring-customer prohibition (owner ruling 2026-08-15)', () => {
+  // The recheck is the only scheduled_services .first() with a whereNotIn
+  // clause (shared TERMINAL_STATUSES vocabulary) — route on it so the visit
+  // lookup keeps its fixture.
+  function visitFirstWithRecurring(recurringRow) {
+    return (chain) => (chain.calls.some(([op]) => op === 'whereNotIn') ? recurringRow : { ...VISIT });
+  }
+
+  test('live recurring evidence AFTER the claim → skip, claim released, no SMS', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring({ id: 'rec-1' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('existing_recurring_customer');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+  });
+
+  test('no recurring evidence → the backstop still sends', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.action).toBe('sent');
+  });
+
+  test("booking-time triggers are unaffected — a new plan's own recurring rows must not block its invite", async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring({ id: 'rec-1' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+    expect(res.action).toBe('sent');
+  });
+
+  test('the in-funnel recheck reads the canonical recurring marker TRIO (codex #3426 r4 P1)', () => {
+    const src = require('fs').readFileSync(
+      require.resolve('../services/appointment-card-request'), 'utf8',
+    );
+    expect(src).toContain("qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id').orWhereNotNull('recurring_pattern')");
+  });
+
+  test('customer-LEVEL plan evidence (tier, no recurring row) → skip, claim released, no SMS (codex #3426 r3 P1)', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: 'Silver' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('existing_plan_member');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+  });
+
+  test('legacy member — positive monthly_rate, tier never populated → skip', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: null, monthly_rate: '49.00' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('existing_plan_member');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test("non-membership tier value ('none') is not plan evidence — the backstop still sends", async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: 'none', monthly_rate: 0 });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.action).toBe('sent');
+  });
+
+  test('recheck lookup failure fails toward NOT texting — prohibition, not eligibility', async () => {
+    mockTableHandlers.scheduled_services.first = (chain) => {
+      if (chain.calls.some(([op]) => op === 'whereNotIn')) throw new Error('boom');
+      return { ...VISIT };
+    };
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('recurring_recheck_failed');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });

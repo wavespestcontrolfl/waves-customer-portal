@@ -220,6 +220,10 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
     const appRows = await db('property_application_history as pah')
       .leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
       .whereIn('sr.scheduled_service_id', completedJobIds)
+      // A job whose only ledger rows were retracted (recap correction)
+      // has NO active applications — the required-material-log alert must
+      // fire for it (codex P1, PR #3419).
+      .whereNull('pah.retracted_at')
       .select('sr.scheduled_service_id')
       .catch(() => []);
     const withApplications = new Set(appRows.map((r) => r.scheduled_service_id));

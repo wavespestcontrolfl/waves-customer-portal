@@ -12,14 +12,18 @@ class ApplicationLimitChecker {
     const yearStart = this.getYearStart(proposedDate);
 
     // Product-specific history
+    // Retracted rows (recap deselection corrections) never count toward
+    // application limits.
     const history = await db('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
       .where('application_date', '>=', yearStart)
+      .whereNull('retracted_at')
       .orderBy('application_date', 'desc');
 
     // MOA group history
     const moaHistory = product.moa_group ? await db('property_application_history')
       .where({ customer_id: customerId, moa_group: product.moa_group })
+      .whereNull('retracted_at')
       .orderBy('application_date', 'desc').limit(10) : [];
 
     // Get applicable limits
@@ -136,6 +140,7 @@ class ApplicationLimitChecker {
 
     const applications = await db('property_application_history')
       .where({ customer_id: customerId }).where('application_date', '>=', yearStart)
+      .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .select('property_application_history.*', 'products_catalog.name as product_name')
       .orderBy('application_date', 'desc');

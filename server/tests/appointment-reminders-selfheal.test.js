@@ -44,7 +44,7 @@ describe('selfHealMissingReminderRows', () => {
         forUpdate: jest.fn(() => ({
           first: jest.fn(async () => {
             const row = (trxVisitRows || []).find((v) => v.id === id);
-            return row ? { customer_id: row.customer_id } : null;
+            return row ? { ...row } : null;
           }),
         })),
       })),
@@ -191,5 +191,250 @@ describe('selfHealMissingReminderRows', () => {
 
     expect(healed).toBe(0);
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Self-heal registration sweep failed'));
+  });
+});
+
+describe('owner ruling 2026-08-17 — reminders arm for every future visit', () => {
+  let trxVisitRows;
+  const makeTrxConn = () => {
+    const trx = jest.fn((table) => ({
+      where: jest.fn(({ id }) => ({
+        forUpdate: jest.fn(() => ({
+          first: jest.fn(async () => {
+            const row = (trxVisitRows || []).find((v) => v.id === id);
+            return row ? { ...row } : null;
+          }),
+        })),
+      })),
+    }));
+    trx.__isTrxConn = true;
+    return trx;
+  };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    trxVisitRows = [];
+    db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
+  });
+
+  test('the sweep no longer builds the dispatch-owned pending carve-out', async () => {
+    const chain = sweepChain([]);
+    db.mockImplementation(() => chain);
+
+    await AppointmentReminders.selfHealMissingReminderRows();
+
+    // The carve-out was the only whereNot in the sweep query; the ruling
+    // removed it so call-created pending visits arm like every other visit.
+    expect(chain.whereNot).not.toHaveBeenCalled();
+    expect(chain.where).not.toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  test('a dispatch-owned pending call-followup visit registers via the sweep', async () => {
+    const visit = {
+      id: 'svc-followup',
+      customer_id: 'cust-f',
+      scheduled_date: new Date('2026-08-25T00:00:00.000Z'),
+      window_start: '13:00:00',
+      service_type: 'Cockroach Treatment',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
+      .mockResolvedValue({ id: 'rem-f' });
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(1);
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), expect.objectContaining({
+      scheduledServiceId: 'svc-followup',
+      appointmentTime: '2026-08-25T13:00',
+      source: 'cron_selfheal',
+    }));
+  });
+
+  test('a silent null return from registration is logged with the visit inputs', async () => {
+    const visit = {
+      id: 'svc-null',
+      customer_id: 'cust-n',
+      scheduled_date: new Date('2026-08-25T00:00:00.000Z'),
+      window_start: '13:00:00',
+      service_type: 'Cockroach Treatment',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
+    jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx').mockResolvedValue(null);
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(0);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('returned null for svc-null'));
+  });
+});
+
+describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+  });
+  const makeConn = (captured) => {
+    const estimateLookup = {
+      leftJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const lookup = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const sameTime = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      whereExists: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const insertRow = {
+      insert: jest.fn((row) => { captured.row = row; return insertRow; }),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-x' }]),
+    };
+    const queue = [estimateLookup, lookup, sameTime, insertRow];
+    const conn = jest.fn(() => queue.shift());
+    conn.raw = jest.fn().mockResolvedValue();
+    return conn;
+  };
+  const isoHoursFromNow = (h) => {
+    const d = new Date(Date.now() + h * 3600000);
+    // registerVisitReminderInTx parses ET wall-time strings; build one from the instant
+    const et = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
+    const get = (t) => et.find((p) => p.type === t).value;
+    return `${get('year')}-${get('month')}-${get('day')}T${get('hour') === '24' ? '00' : get('hour')}:${get('minute')}`;
+  };
+
+  test('a STALE self-healed row inside a started window pre-closes it (no late text)', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-old',
+      customerId: 'cust-old',
+      appointmentTime: isoHoursFromNow(10), // inside BOTH bands
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+      createdAt: new Date('2026-08-10T00:00:00Z'), // backlog: booked before the rollout cutoff
+    });
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(true);
+  });
+
+  test('a POST-CUTOFF booking keeps its 24h reminder however late the heal (codex r3+r4 P1)', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-fresh',
+      customerId: 'cust-fresh',
+      appointmentTime: isoHoursFromNow(10), // booked <24h out, heal delayed hours by an outage
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+      createdAt: new Date('2026-09-01T00:00:00Z'), // any post-cutoff booking
+    });
+    // Booking-path boundaries: 72h band already missed, 24h still sendable.
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+
+  test('a self-healed row ahead of both windows arms them normally', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-future',
+      customerId: 'cust-future',
+      appointmentTime: isoHoursFromNow(200),
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+      createdAt: new Date('2026-08-10T00:00:00Z'),
+    });
+    expect(captured.row.reminder_72h_sent).toBe(false);
+    expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+
+  test('booking-path registrations keep the original late-send boundaries', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-seed',
+      customerId: 'cust-seed',
+      appointmentTime: isoHoursFromNow(10),
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'system_seed',
+    });
+    // 10h out: 72h band already missed under original rule, 24h still sendable
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+});
+
+describe('codex #3429 r2 — locked-row slot re-read and terminal skip', () => {
+  let trxVisitRows;
+  const makeTrxConn = () => {
+    const trx = jest.fn(() => ({
+      where: jest.fn(({ id }) => ({
+        forUpdate: jest.fn(() => ({
+          first: jest.fn(async () => {
+            const row = (trxVisitRows || []).find((v) => v.id === id);
+            return row ? { ...row } : null;
+          }),
+        })),
+      })),
+    }));
+    trx.__isTrxConn = true;
+    return trx;
+  };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    trxVisitRows = [];
+    db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
+  });
+
+  test('a mid-sweep staff move registers the LOCKED slot, not the sweep snapshot', async () => {
+    const sweepSnapshot = {
+      id: 'svc-moved',
+      customer_id: 'cust-m',
+      scheduled_date: new Date('2026-08-20T00:00:00.000Z'),
+      window_start: '09:00:00',
+      service_type: 'Quarterly Pest Control Service',
+      created_at: new Date('2026-08-01T12:00:00.000Z'),
+    };
+    db.mockImplementation(() => sweepChain([sweepSnapshot]));
+    // Staff moved the visit between the sweep read and the row lock.
+    trxVisitRows = [{
+      ...sweepSnapshot,
+      scheduled_date: new Date('2026-08-22T00:00:00.000Z'),
+      window_start: '14:00:00',
+      service_type: 'Quarterly Pest + Termite Control Service',
+    }];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
+      .mockResolvedValue({ id: 'rem-m' });
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(1);
+    expect(register).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      appointmentTime: '2026-08-22T14:00',
+      serviceType: 'Quarterly Pest + Termite Control Service',
+    }));
+  });
+
+  test('a visit that went terminal mid-sweep skips silently — no heal, no error', async () => {
+    const visit = {
+      id: 'svc-gone',
+      customer_id: 'cust-g',
+      scheduled_date: new Date('2026-08-20T00:00:00.000Z'),
+      window_start: '09:00:00',
+      service_type: 'Quarterly Pest Control Service',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [{ ...visit, status: 'cancelled' }];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx');
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(0);
+    expect(register).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

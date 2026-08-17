@@ -53,6 +53,19 @@ const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'res
 // Bounds each 15-min cron run; a large backlog drains within a few hours.
 const SELF_HEAL_REGISTRATION_LIMIT = 25;
 
+// Rollout cutoff for the 2026-08-17 owner ruling ("reminder texts apply
+// automatically… I don't want the OLD reminders to go out"). Visits BOOKED
+// before this fixed instant are the pre-ruling unarmed backlog: the sweep
+// arms them silently, pre-closing any reminder window that already started.
+// Visits booked after it always keep the booking-path window boundaries,
+// however late their registration heals (codex #3429 r4 P1: a relative
+// lateness test would also silence future bookings delayed by an outage).
+// Set BEFORE this change's own commit instant (r5 P2), so no booking
+// created after any possible deployment of this code can classify as
+// backlog; the residual pre-deploy sliver misclassifies in the safe
+// direction (normal boundaries — a reminder may send).
+const NO_CATCHUP_BACKLOG_CUTOFF = new Date('2026-08-17T02:59:00Z');
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -1640,9 +1653,25 @@ const AppointmentReminders = {
     // so the first visit can be past/too-close. Without this the cron would keep
     // re-reading the row every 15 min for a window it can never satisfy. 72h band
     // is (24.25h, 72.25h]; the 24h reminder can still fire for any future time.
+    //
+    // A BACKLOG self-heal arm additionally pre-closes any window whose send
+    // moment has already passed (owner ruling 2026-08-17: no catch-up texts
+    // for the old unarmed backlog — "function as normal moving forward").
+    // A backlog row healed inside the 24h band would otherwise text a
+    // "24-hour" reminder an hour before the visit. Backlog = the visit was
+    // BOOKED before the ruling's rollout cutoff, a FIXED instant (codex
+    // #3429 r4 P1: a moving lateness threshold would also silence a future
+    // booking whose heal was merely delayed by an outage — delayed repairs
+    // of post-cutoff bookings must retain every still-reachable reminder,
+    // exactly like a booking-path registration). Post-cutoff heals always
+    // keep the booking-path boundaries.
     const hoursUntil = (apptTime.getTime() - now.getTime()) / 3600000;
-    const seventyTwoMissed = hoursUntil <= 24.25;
-    const twentyFourMissed = hoursUntil <= 0;
+    const bookedAtMs = createdAt ? new Date(createdAt).getTime() : NaN;
+    const backlogArm = reminderSource === 'cron_selfheal'
+      && Number.isFinite(bookedAtMs)
+      && bookedAtMs < NO_CATCHUP_BACKLOG_CUTOFF.getTime();
+    const seventyTwoMissed = hoursUntil <= (backlogArm ? 72.25 : 24.25);
+    const twentyFourMissed = hoursUntil <= (backlogArm ? 24.25 : 0);
     const [record] = await conn('appointment_reminders')
       .insert({
         scheduled_service_id: scheduledServiceId,
@@ -1943,7 +1972,6 @@ const AppointmentReminders = {
   async selfHealMissingReminderRows() {
     let healed = 0;
     try {
-      const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const missing = await db('scheduled_services as ss')
         .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
         .whereNull('ar.id')
@@ -1954,17 +1982,16 @@ const AppointmentReminders = {
         // boundary by the session offset).
         .where('ss.scheduled_date', '>=', etDateString(new Date()))
         // Dispatch-owned pending bookings (call follow-ups, outbound-review
-        // bookings) are left unarmed ON PURPOSE until the office confirms —
-        // arming them here would text the customer first. admin-schedule
-        // registers them at the office-confirm transition. NULL-safe on
-        // purpose: NOT (pending AND source_action IN (...)) is NULL — not
-        // true — for NULL source_action, which would silently drop ordinary
-        // pending visits with no source marker from the sweep.
-        .where(function () {
-          this.whereNot('ss.status', 'pending')
-            .orWhereNull('ss.source_action')
-            .orWhereNotIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
-        })
+        // bookings) used to be left unarmed until the office confirmed —
+        // owner ruling 2026-08-17: reminders arm AUTOMATICALLY for every
+        // future visit; the only opt-out is the customer's own portal/app
+        // notification prefs (and SMS suppression), both enforced at send
+        // time. Two call-created visits sat unarmed for weeks under the old
+        // carve-out and their customers got zero reminder texts. Healed rows
+        // still never send a booking-confirmation text (confirmation_sent
+        // is stamped true at registration), and the customer self-service
+        // visibility guards on DISPATCH_OWNED_PENDING_SOURCE_ACTIONS are
+        // untouched — this only arms the 72h/24h reminder lane.
         .whereNotExists(function () {
           this.select(1)
             .from('customers')
@@ -1977,37 +2004,61 @@ const AppointmentReminders = {
 
       for (const svc of missing) {
         try {
-          // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
-          // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
-          // Formatting that instant in ET would move the day back by one.
-          const datePart = svc.scheduled_date instanceof Date
-            ? svc.scheduled_date.toISOString().slice(0, 10)
-            : String(svc.scheduled_date || '').slice(0, 10);
-          const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
-          const record = await db.transaction(async (trx) => {
-            // Owner from the LOCKED visit row (Codex #3109 r26): a
-            // merge-undo can reverse-repoint the visit between the sweep's
-            // unlocked read and this insert — the FOR UPDATE serializes
-            // against that repoint, so the reminder always stamps the
-            // visit's CURRENT owner (a vanished/ownerless row skips).
+          const res = await db.transaction(async (trx) => {
+            // EVERYTHING from the LOCKED visit row, not the sweep's unlocked
+            // snapshot (Codex #3109 r26 for the owner; #3429 r2 P1 for the
+            // slot): a merge-undo can reverse-repoint the visit, and staff
+            // can move its date/window, between the sweep read and this
+            // insert. No reminder row existed while the move ran, so the
+            // schedule-change sync trigger had nothing to update — a row
+            // registered from the stale snapshot would remind for the
+            // superseded slot forever. FOR UPDATE serializes against both;
+            // a vanished/ownerless row skips, and a row that went terminal
+            // mid-sweep skips silently (the next sweep won't select it).
             const lockedVisit = await trx('scheduled_services')
-              .where({ id: svc.id }).forUpdate().first('customer_id');
-            if (!lockedVisit || !lockedVisit.customer_id) return null;
-            return AppointmentReminders.registerVisitReminderInTx(trx, {
-            scheduledServiceId: svc.id,
-            customerId: lockedVisit.customer_id,
-            appointmentTime: `${datePart}T${windowStart}`,
-            serviceType: svc.service_type,
-            source: 'cron_selfheal',
-            // Preserve the visit's real booking time: the 72h pass skips
-            // "booked < 72h before appointment" off created_at, and a healed
-            // row stamped with the cron time would wrongly skip that reminder.
-            createdAt: svc.created_at,
+              .where({ id: svc.id }).forUpdate()
+              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status');
+            if (!lockedVisit || !lockedVisit.customer_id) return { skip: 'vanished' };
+            if (SELF_HEAL_TERMINAL_STATUSES.has(String(lockedVisit.status || '').toLowerCase())) {
+              return { skip: 'terminal' };
+            }
+            // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
+            // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
+            // Formatting that instant in ET would move the day back by one.
+            const datePart = lockedVisit.scheduled_date instanceof Date
+              ? lockedVisit.scheduled_date.toISOString().slice(0, 10)
+              : String(lockedVisit.scheduled_date || '').slice(0, 10);
+            const windowStart = String(lockedVisit.window_start || '').slice(0, 5) || '08:00';
+            const record = await AppointmentReminders.registerVisitReminderInTx(trx, {
+              scheduledServiceId: svc.id,
+              customerId: lockedVisit.customer_id,
+              appointmentTime: `${datePart}T${windowStart}`,
+              serviceType: lockedVisit.service_type,
+              source: 'cron_selfheal',
+              // Preserve the visit's real booking time: the 72h pass skips
+              // "booked < 72h before appointment" off created_at, and a healed
+              // row stamped with the cron time would wrongly skip that reminder.
+              createdAt: lockedVisit.created_at,
             });
+            return { record };
           });
-          if (record) healed += 1;
+          if (res && res.skip) continue;
+          const record = res && res.record;
+          if (record) {
+            healed += 1;
+          } else {
+            // A null return with the visit still present is registerVisitReminderInTx
+            // declining silently (bad ids / unparseable time) — a visit stuck in this
+            // state re-nulls EVERY run with no trace, which is how an unarmed row
+            // hid for days. Name it in the log so the next one is diagnosable.
+            logger.error(
+              `[appt-remind] Self-heal registration returned null for ${svc.id} `
+              + `(window_start=${svc.window_start ?? 'NULL'}, scheduled_date=${svc.scheduled_date})`
+            );
+          }
         } catch (err) {
-          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);
+          const where = (err.stack || '').split('\n')[1]?.trim() || '';
+          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}${where ? ` @ ${where}` : ''}`);
         }
       }
       if (healed) {

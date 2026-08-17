@@ -19,6 +19,8 @@ jest.mock('../models/db', () => {
   const db = jest.fn(() => qb);
   // trx behaves like db() — the executor only uses trx('customers').where().update()
   db.transaction = jest.fn(async (cb) => cb(db));
+  // advisory locks (customer-comms / customer-email) go through trx.raw
+  db.raw = jest.fn(() => Promise.resolve());
   db.__qb = qb;
   return db;
 });

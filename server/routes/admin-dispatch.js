@@ -7017,12 +7017,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const insertedServiceProducts = [];
         if (products?.length) {
           const seenProductIds = new Set();
-          const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'fl_oz/gal', 'g/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
+          // Shared closeout allowlist (inventory-units.js) — the pest
+          // recap validates against the same vocabulary (codex P1 r11).
+          const { isValidRateUnit } = require('../services/inventory-units');
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;
             seenProductIds.add(p.productId);
-            if (p.rateUnit && !validRateUnits.has(String(p.rateUnit).toLowerCase())) {
+            if (p.rateUnit && !isValidRateUnit(p.rateUnit)) {
               const err = new Error(`Invalid product unit for ${p.name || p.productId}`);
               err.isOperational = true; err.statusCode = 400;
               throw err;
@@ -7076,7 +7078,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            if (appliedAmountUnit && !validRateUnits.has(String(appliedAmountUnit).toLowerCase())) {
+            if (appliedAmountUnit && !isValidRateUnit(appliedAmountUnit)) {
               const err = new Error(`Invalid product amount unit for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
               throw err;
@@ -11559,13 +11561,17 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     const { actorType, actorId } = recapActor(req);
-    const { technicianNotes, products, customerRecap, sendSms, clientPestRating } = req.body || {};
+    const {
+      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,
+    } = req.body || {};
     const result = await PestRecap.submitRecap({
       serviceId: req.params.serviceId,
       actorType,
       actorId,
       technicianNotes,
       products,
+      productsConfirmed: productsConfirmed === true,
+      productsPreserve: Array.isArray(productsPreserve) ? productsPreserve : [],
       customerRecap,
       sendSms: !!sendSms,
       clientPestRating: clientPestRating == null ? null : clientPestRating,
