@@ -309,7 +309,7 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
     return `${get('year')}-${get('month')}-${get('day')}T${get('hour') === '24' ? '00' : get('hour')}:${get('minute')}`;
   };
 
-  test('a self-healed row inside a started window pre-closes it (no late text)', async () => {
+  test('a STALE self-healed row inside a started window pre-closes it (no late text)', async () => {
     const captured = {};
     await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
       scheduledServiceId: 'svc-old',
@@ -317,9 +317,25 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
       appointmentTime: isoHoursFromNow(10), // inside BOTH bands
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
+      createdAt: new Date(Date.now() - 72 * 3600000), // backlog: booked days ago
     });
     expect(captured.row.reminder_72h_sent).toBe(true);
     expect(captured.row.reminder_24h_sent).toBe(true);
+  });
+
+  test('a FRESH last-minute booking healed next sweep keeps its 24h reminder (codex r3 P1)', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-fresh',
+      customerId: 'cust-fresh',
+      appointmentTime: isoHoursFromNow(10), // booked <24h out, healed 15 min later
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+      createdAt: new Date(Date.now() - 15 * 60000),
+    });
+    // Booking-path boundaries: 72h band already missed, 24h still sendable.
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(false);
   });
 
   test('a self-healed row ahead of both windows arms them normally', async () => {
@@ -330,6 +346,7 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
       appointmentTime: isoHoursFromNow(200),
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
+      createdAt: new Date(Date.now() - 72 * 3600000),
     });
     expect(captured.row.reminder_72h_sent).toBe(false);
     expect(captured.row.reminder_24h_sent).toBe(false);

@@ -1641,17 +1641,23 @@ const AppointmentReminders = {
     // re-reading the row every 15 min for a window it can never satisfy. 72h band
     // is (24.25h, 72.25h]; the 24h reminder can still fire for any future time.
     //
-    // cron_selfheal additionally pre-closes any window whose send moment has
-    // ALREADY PASSED (owner ruling 2026-08-17: no catch-up texts for the old
-    // unarmed backlog — "function as normal moving forward"). A row healed
-    // inside the 24h band would otherwise text a "24-hour" reminder an hour
-    // before the visit; a row healed inside the 72h band would send that
-    // reminder late. Healed rows only deliver windows that have not opened
-    // yet; booking-path registrations keep the original boundaries.
+    // A STALE self-heal arm additionally pre-closes any window whose send
+    // moment has already passed (owner ruling 2026-08-17: no catch-up texts
+    // for the old unarmed backlog — "function as normal moving forward").
+    // A backlog row healed inside the 24h band would otherwise text a
+    // "24-hour" reminder an hour before the visit. Stale = the visit was
+    // BOOKED more than an hour before this registration (≥2 sweep periods):
+    // a fresh booking the sweep is that row's normal registration path for
+    // (created minutes ago, healed next 15-min tick) keeps the booking-path
+    // boundaries, so a last-minute booking still gets its 24h reminder
+    // exactly as if it had registered at booking time (codex #3429 r3 P1).
     const hoursUntil = (apptTime.getTime() - now.getTime()) / 3600000;
-    const skipStartedWindows = reminderSource === 'cron_selfheal';
-    const seventyTwoMissed = hoursUntil <= (skipStartedWindows ? 72.25 : 24.25);
-    const twentyFourMissed = hoursUntil <= (skipStartedWindows ? 24.25 : 0);
+    const bookedAtMs = createdAt ? new Date(createdAt).getTime() : NaN;
+    const staleArm = reminderSource === 'cron_selfheal'
+      && Number.isFinite(bookedAtMs)
+      && now.getTime() - bookedAtMs > 60 * 60 * 1000;
+    const seventyTwoMissed = hoursUntil <= (staleArm ? 72.25 : 24.25);
+    const twentyFourMissed = hoursUntil <= (staleArm ? 24.25 : 0);
     const [record] = await conn('appointment_reminders')
       .insert({
         scheduled_service_id: scheduledServiceId,

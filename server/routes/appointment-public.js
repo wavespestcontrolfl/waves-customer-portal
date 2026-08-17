@@ -93,6 +93,16 @@ const UPCOMING_STATUSES = new Set(['pending', 'confirmed']);
 // portal. Shared invariant with routes/schedule.js.
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 
+// A call-created booking the office hasn't reviewed: still 'pending',
+// dispatch-owned, and never customer-confirmed. Shared by the confirmable
+// flag and the rescheduleToken suppression so the page can neither confirm
+// nor reschedule a visit the authenticated routes hide (codex #3429 r3 P2).
+function dispatchOwnedUnreviewed(svc) {
+  return DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+    && String(svc.status || '').toLowerCase() === 'pending'
+    && !svc.customer_confirmed;
+}
+
 function gateOpen() {
   return process.env.GATE_APPOINTMENT_PAGE === 'true';
 }
@@ -343,7 +353,7 @@ router.get('/:token', async (req, res, next) => {
       // follow-up / outbound-review awaiting office confirmation) may be
       // customer-confirmed, so the button never renders into a 409.
       confirmable: String(svc.status).toLowerCase() === 'pending'
-        && !(DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action) && !svc.customer_confirmed),
+        && !dispatchOwnedUnreviewed(svc),
       tech: svc.technician_id
         ? { firstName: firstNameOf(svc.tech_name), photoUrl: techPhotoUrl || null, sameAsLastVisit: sameTech }
         : null,
@@ -355,7 +365,11 @@ router.get('/:token', async (req, res, next) => {
         collectiveAnchor: !!svc.is_recurring && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true',
       },
       weather,
-      rescheduleToken: svc.reschedule_token,
+      // Mirror the reschedule-link/reschedule-public dispatch-owned guard
+      // (codex #3429 r3 P2): an unreviewed dispatch-owned booking's reminder
+      // now arms before office confirm, and the page must not render a
+      // "See open times" CTA whose destination deterministically refuses.
+      rescheduleToken: dispatchOwnedUnreviewed(svc) ? null : svc.reschedule_token,
     });
   } catch (err) {
     next(err);
@@ -610,6 +624,7 @@ router._test = {
   ARRIVAL_PROMISE_MINUTES,
   arrivalWindowLabel,
   slotMatchesShown,
+  dispatchOwnedUnreviewed,
 };
 
 module.exports = router;
