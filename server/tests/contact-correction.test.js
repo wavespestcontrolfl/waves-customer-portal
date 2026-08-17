@@ -4048,3 +4048,83 @@ describe('round-57 hardening', () => {
     expect(res.applied.map((a) => a.field)).toContain('email');
   });
 });
+
+describe('round-58 hardening', () => {
+  it('an after-scoped replacement defers until it occurs', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'after i get married, my new email is future@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'After I get married, my new email is future@example.com', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('a when-scoped effective condition defers too', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'when we sell the house my new email is future@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'When we sell the house my new email is future@example.com', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('a past-narrative "when I signed up" correction still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'right@example.com', quote: 'my email was entered wrong, it should be right@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'When I signed up my email was entered wrong, it should be right@example.com', knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+
+  it('a polite "when you get a chance" framing still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'fix@example.com', quote: 'fix my email, it should be fix@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'When you get a chance, fix my email, it should be fix@example.com', knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+
+  it('a purpose clause after a change request does not defer it', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'change my email to now@example.com so i receive the reminder next week', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Change my email to now@example.com so I receive the reminder next week', knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+
+  it('a bare trailing effective date still defers (unchanged by the purpose fix)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'change my email to future@example.com next month', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Please change my email to future@example.com next month', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('an inline unit too long to persist fails the whole group closed', async () => {
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), address_line2: 'Unit 4' }], agent_decisions: [] });
+    const monsterUnit = `Suite ${'B'.repeat(120)}`;
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: `99 Pine Ave ${monsterUnit}`, quote: `we moved to 99 Pine Ave ${monsterUnit}`, confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved, city is Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: `We moved to 99 Pine Ave ${monsterUnit}, Sarasota. Zip is 34231`, knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
+  });
+});
