@@ -2451,7 +2451,14 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // Fail CLOSED: an unreadable PI throws so Stripe redelivers.
   if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
     const freshFailStripe = getStripe();
-    if (freshFailStripe) {
+    // Fail CLOSED on a missing Stripe client (codex r35 P1): skipping the
+    // freshness check would apply an UNVERIFIED stale failure — marking
+    // rows failed and reopening invoices while a newer attempt on the
+    // reusable PI may be live. Throw so Stripe retries the event.
+    if (!freshFailStripe) {
+      throw new Error(`Combined payment_failed for PI ${piId} cannot be freshness-checked (Stripe client unavailable); retry`);
+    }
+    {
       const currentFailIntent = await freshFailStripe.paymentIntents.retrieve(piId);
       if (['processing', 'succeeded', 'requires_capture'].includes(currentFailIntent.status)
         // A NEWER attempt awaiting microdeposit verification is also live
@@ -2501,7 +2508,12 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)
     && !require('../config/feature-gates').isEnabled('payIncludeBalance')) {
     const gateOffStripe = getStripe();
-    if (gateOffStripe) {
+    // Same fail-closed posture as the freshness check (codex r35 P1):
+    // a null client must not silently skip the kill-switch revoke.
+    if (!gateOffStripe) {
+      throw new Error(`Gate-off revoke of failed combined PI ${piId} cannot run (Stripe client unavailable); retry`);
+    }
+    {
       try {
         await gateOffStripe.paymentIntents.cancel(piId);
         gateOffRevokedPi = true;
@@ -5114,7 +5126,13 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
     return;
   }
   const stripe = getStripe();
-  if (stripe) {
+  // Fail CLOSED on a missing client (codex r35 P1 class): the freshness
+  // and attempt-identity checks below are load-bearing — an unverified
+  // processing event must not move money state.
+  if (!stripe) {
+    throw new Error(`Combined processing event for PI ${piId} cannot be freshness-checked (Stripe client unavailable); retry`);
+  }
+  {
     const currentIntent = await stripe.paymentIntents.retrieve(piId);
     if (currentIntent.status !== 'processing') {
       logger.info(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}; current status is ${currentIntent.status}`);
