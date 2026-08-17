@@ -820,6 +820,18 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         await recordResidual(trx, paymentIntent, entry, `invoice bound to ${invoice.stripe_payment_intent_id}`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
         continue;
       }
+      // Amount-due recheck under the ROW LOCK (codex r38 P0): an
+      // out-of-band prepayment or total edit (e.g. a technician applying
+      // recorded cash between the last server verification and the
+      // browser's direct confirm) changes the remainder without touching
+      // status or the PI binding — settling the ORIGINAL share would
+      // charge money the invoice no longer owes and book it beside the
+      // cash. Quarantine the mismatched share for the operator instead.
+      if (amountDueCents(invoice) !== entry.cents) {
+        logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} share was priced at ${entry.cents}c but ${amountDueCents(invoice)}c is now due — out-of-band change raced the capture; recording residual for PI ${piId}`);
+        await recordResidual(trx, paymentIntent, entry, `share priced at ${entry.cents}c but invoice now has ${amountDueCents(invoice)}c due — an out-of-band payment or edit raced the capture; refund/credit the captured share`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
+        continue;
+      }
 
       const invoiceUpdates = {
         status: invoiceStatus,

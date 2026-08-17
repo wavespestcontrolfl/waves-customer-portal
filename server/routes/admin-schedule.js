@@ -7460,6 +7460,15 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
 
       return db.transaction(async (trx) => {
+        // Combined-session reservation (codex #3427 r38 P0): applying a
+        // recorded out-of-band prepayment changes the remainder (or
+        // settles the invoice) while a combined PI priced from the OLD
+        // remainder may still be browser-confirmable — release the session
+        // first, same in-transaction contract as every other collection
+        // rail (advisory lock + fresh read held through this commit;
+        // in-flight money refuses with a 409). The settle-side amount
+        // recheck remains the backstop.
+        await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'applying a recorded prepayment' });
         const lockedInvoice = await trx('invoices')
           .where({ id: invoice.id })
           .forUpdate()
