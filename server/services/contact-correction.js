@@ -484,10 +484,21 @@ const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|zipcode|p
 // owners entirely.
 const TP_OWNER_SRC = "[\\p{L}\\p{M}]+";
 const TP_MODIFIER_SRC = "(?:[\\p{L}\\p{M}\\p{N}]+\\s+){0,3}";
+// Inverse ownership forms (codex #3413 r29): "the email FOR my accountant"
+// and "my accountant HAS a new email" name the owner after/around the
+// topic instead of possessively before it. Self-referential and
+// document-ish owners are excluded so "the email for me / the account /
+// the invoice" stays first-person.
+const TP_SELF_OWNERS = '(?:me|myself|mine|us|ours|account|file|record|records|invoice|invoices|receipt|receipts|statement|statements|service|billing|booking|appointment)';
+const tpInverseForms = (topicSrc) => (
+  `|\\b${topicSrc}\\s+(?:for|of)\\s+(?:my|our|the)?\\s*(?!${TP_SELF_OWNERS}\\b)${TP_OWNER_SRC}\\b`
+  + `|\\b(?!(?:i|we)\\b)${TP_OWNER_SRC}\\s+has\\s+${TP_MODIFIER_SRC}${topicSrc}\\b`
+);
 const THIRD_PARTY_ADDRESS_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
-  + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`,
+  + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`
+  + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );
 // Same ownership doctrine for email and name (codex #3413 r22): "my
@@ -498,7 +509,8 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
 // statements likewise never rename the account holder.
 const THIRD_PARTY_CONTACT_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`
-  + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`,
+  + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`
+  + tpInverseForms('(?:e-?mail|name|surname)'),
   'iu',
 );
 
@@ -904,6 +916,15 @@ async function applyContactCorrections({ customerId, corrections, source, source
       }
       if (!Object.keys(updates).length) return;
 
+      // Stale coordinates fall with the address (codex #3413 r29, same as
+      // the canonical admin edit path): the post-commit regeocode is
+      // best-effort, and if it fails the null coords are what the
+      // geocoder's backstop selects for retry — coords left pointing at
+      // the OLD property would route the tech there indefinitely.
+      if (ADDRESS_FIELDS.some((f) => updates[f] !== undefined)) {
+        updates.latitude = null;
+        updates.longitude = null;
+      }
       await trx('customers').where({ id: customerId }).update({ ...updates, updated_at: new Date() });
       const after = { ...before, ...updates };
 
@@ -1283,6 +1304,21 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       if (call) call.external_phone = externalPhone || null;
       const callerTail = tail10(externalPhone);
       callerIsPrimary = !isOutbound && Boolean(callerTail) && callerTail === tail10(owner?.phone);
+      // The caller number must map to a UNIQUE active customer (codex
+      // #3413 r29) — same doctrine as the SMS lane's
+      // findSingleCustomerByPhone: a number shared by two active accounts
+      // (or a historical link predating a duplicate) means the corrector
+      // could be the OTHER customer, and renaming this one on their word
+      // is exactly the misattribution the primary-caller gate exists to
+      // prevent.
+      if (callerIsPrimary) {
+        const sharedMatches = await knex('customers')
+          .whereNull('deleted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [callerTail])
+          .limit(2)
+          .select('id');
+        callerIsPrimary = sharedMatches.length === 1 && String(sharedMatches[0].id) === String(customerId);
+      }
       // Snapshot for the compare-and-set in the apply transaction — a name
       // an admin corrected must not be overwritten by this pass's staged
       // (older) extraction; the phone is the identity anchor and stales the

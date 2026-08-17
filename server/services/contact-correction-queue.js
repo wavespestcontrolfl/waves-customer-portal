@@ -139,6 +139,30 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
 }
 
 /**
+ * Attach the message body once the route's eligibility gates have passed
+ * (codex #3413 r27/r29): the reservation itself is taken at TRUE entry so
+ * its bigserial id records arrival order ahead of every variable-latency
+ * await, but the body is withheld until the duplicate-SID claim, spam
+ * block, and managed-number checks admit the message — blocked traffic
+ * leaves only a body-less row that the finally cancels and retention
+ * purges. A reservation whose route dies before this attach carries no
+ * body, and the stale sweep cancels it (no intent derivable) — fail
+ * closed.
+ */
+async function attachReservationBody(jobId, body, { knex = db } = {}) {
+  if (!jobId) return false;
+  try {
+    const updated = await knex('contact_correction_jobs')
+      .where({ id: jobId, status: 'reserved' })
+      .update({ body: body || null, updated_at: knex.fn.now() });
+    return updated > 0;
+  } catch (err) {
+    logger.warn(`[contact-correction-queue] body attach failed for job ${jobId}: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Stamp the SOURCE-TIME context on a reservation as soon as the route
  * matches the sender to a customer (codex #3413 r19): linkage + the
  * match-time CAS baseline. Promotion of a crash-orphaned reservation
@@ -616,6 +640,7 @@ async function processDueContactCorrectionJobs({ limit = 3, knex = db } = {}) {
 
 module.exports = {
   reserveContactCorrectionJob,
+  attachReservationBody,
   attachContactCorrectionContext,
   enqueueContactCorrectionJob,
   cancelContactCorrectionJob,

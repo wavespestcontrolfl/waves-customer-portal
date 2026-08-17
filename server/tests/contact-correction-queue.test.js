@@ -789,3 +789,22 @@ describe('round-28 hardening', () => {
     expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
   });
 });
+
+describe('round-29 hardening', () => {
+  it('body attaches only to a still-reserved row and a body-less stale row cancels', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, body: null }),
+        jobRow({ id: 2, body: null, customer_id: CUSTOMER_ID, created_at: Date.now() - 11 * 60_000 }),
+      ],
+    });
+    expect(await queue.attachReservationBody(1, 'My email is wrong, use a@b.co', { knex })).toBe(true);
+    expect(knex._data.contact_correction_jobs[0].body).toBe('My email is wrong, use a@b.co');
+    // Row 2's route died before the body attach — the sweep cancels it
+    // (no intent derivable from a null body), fail closed.
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    expect(summary.promoted).toBe(0);
+    expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('stale_no_intent');
+  });
+});

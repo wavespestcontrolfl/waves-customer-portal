@@ -128,8 +128,13 @@ function makeStubKnex(rowsByTable = {}) {
           preds.push((r) => (r.metadata && r.metadata.dedupeKey) === params[0]);
           return chain;
         }
+        if (/RIGHT\(regexp_replace/.test(sql)) {
+          preds.push((r) => String(r.phone || '').replace(/\D/g, '').slice(-10) === String(params[0]));
+          return chain;
+        }
         throw new Error(`stub knex: unsupported whereRaw ${sql}`);
       },
+      limit() { return chain; },
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return chain; },
       modify(cb) { cb(chain); return chain; },
@@ -2767,6 +2772,78 @@ describe('round-28 hardening', () => {
     mockCallAnthropic.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: "my fiancé's email is wrong; use spouse@example.com", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});
+
+describe('round-29 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a caller phone shared by two active customers never auto-applies', async () => {
+    const knex = makeStubKnex({
+      customers: [
+        baseCustomer(),
+        { id: '00000000-0000-4000-8000-0000000000c2', deleted_at: null, phone: PRIMARY_PHONE, first_name: 'Other', last_name: 'Holder' },
+      ],
+      call_log: [callLogRow()],
+      customer_field_candidates: [candidate({ id: 'n1' })],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'name', reason: 'caller_not_primary' });
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('an applied address correction clears stale coordinates in the same transaction', async () => {
+    const knex = makeStubKnex({
+      customers: [{ ...baseCustomer(), latitude: 27.1, longitude: -82.4 }],
+      agent_decisions: [],
+    });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'city', new_value: 'Sarasota', quote: 'my city is wrong, it should be Sarasota', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My city is wrong, it should be Sarasota', knex });
+    expect(res.applied.map((a) => a.field)).toContain('city');
+    expect(knex._data.customers[0].latitude).toBeNull();
+    expect(knex._data.customers[0].longitude).toBeNull();
+  });
+
+  it("inverse ownership: 'the email for my accountant' is third-party", async () => {
+    const body = 'The email for my accountant is wrong; change it to bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email for my accountant is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("inverse ownership: 'the city for my tenant' is third-party", async () => {
+    const body = 'The city for my tenant is wrong; change it to Tampa';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'city', new_value: 'Tampa', quote: 'the city for my tenant is wrong; change it to Tampa', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("owner-verb ownership: 'my accountant has a new email' is third-party", async () => {
+    const body = 'My accountant has a new email; use bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my accountant has a new email; use bookkeeper@example.com', confidence: 'high' }] },
     });
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
