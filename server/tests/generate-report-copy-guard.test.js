@@ -331,6 +331,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // usage-verb lowercase positional codes + drying/re-entry-scoped
+    // timing confirmations (r88)
+    expect(reportCopyRejection('Use blue at the keypad.')).toBe('access_code');
+    expect(reportCopyRejection('Enter waves at the side keypad.')).toBe('access_code');
+    expect(reportCopyRejection('Use caution near the keypad.')).toBeNull();
+    const applicationTiming = parseCopy('WHAT WE DID\n\nWe treated the lawn; the technician confirmed application timing and the treated area is safe once dry.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(applicationTiming.body).toBeNull();
+    const reentryTiming = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician confirmed re-entry timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(reentryTiming.body).toBeTruthy();
     // decimal re-entry durations + digit-before-location credentials (r87)
     expect(reportCopyRejection('Keep pets out of the treated area for 1.5 hours.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Use 4417 at the side gate.')).toBe('access_code');
