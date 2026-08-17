@@ -4973,6 +4973,20 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
       logger.warn(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}: event allocation/amount differs from the live intent (retry superseded it)`);
       return;
     }
+    // Same-balance retries keep allocation AND amount identical (codex r25
+    // P2) — the ATTEMPT identity is the charge. A delayed prior-attempt
+    // event would restore failed rows to 'processing' under the OLD charge
+    // id, which the current attempt's event can then never repair. Fail
+    // CLOSED when sameness can't be established — the live attempt's own
+    // delivery carries a matching charge.
+    const eventCharge = typeof paymentIntent.latest_charge === 'string'
+      ? paymentIntent.latest_charge : paymentIntent.latest_charge?.id || null;
+    const liveCharge = typeof currentIntent.latest_charge === 'string'
+      ? currentIntent.latest_charge : currentIntent.latest_charge?.id || null;
+    if (!eventCharge || !liveCharge || eventCharge !== liveCharge) {
+      logger.warn(`[stripe-webhook] Ignoring combined processing event for PI ${piId}: event charge ${eventCharge || 'unknown'} does not match the live intent's ${liveCharge || 'unknown'} (prior-attempt delivery or unestablishable identity)`);
+      return;
+    }
   }
 
   let allocation;

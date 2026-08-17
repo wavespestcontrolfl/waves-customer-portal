@@ -771,7 +771,14 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
             }),
           });
         }
-        if (isAnchor) anchorPaymentRow = existing;
+        // Re-read AFTER the in-place updates above (codex r25 P2): the
+        // captured `existing` object predates the paid flip, and /confirm
+        // reports its status to the client — returning the stale 'failed'
+        // snapshot made a successful retry read as a failed charge and
+        // skipped the paid-only hold-release action.
+        if (isAnchor) {
+          anchorPaymentRow = await trx('payments').where({ id: existing.id }).first() || existing;
+        }
         settledInvoiceIds.push(invoice.id);
         continue;
       }
