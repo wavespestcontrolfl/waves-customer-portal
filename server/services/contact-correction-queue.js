@@ -51,9 +51,19 @@ function tail10(p) {
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
+// Readiness is CACHED per connection once true (codex #3413 r31): the
+// reservation's bigserial id is the source-order token, and a per-request
+// hasTable await before the insert let a later request's schema query
+// finish first and take the lower id. After the first positive check
+// (warmed by the boot worker pass) the reserve path goes straight to the
+// insert.
+const tableReadyByKnex = new WeakMap();
 async function tableReady(knex) {
+  if (tableReadyByKnex.get(knex)) return true;
   try {
-    return await knex.schema.hasTable('contact_correction_jobs');
+    const ready = await knex.schema.hasTable('contact_correction_jobs');
+    if (ready) tableReadyByKnex.set(knex, true);
+    return ready;
   } catch {
     return false;
   }
@@ -80,10 +90,23 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
       .returning('id');
     return inserted?.[0]?.id ?? inserted?.[0] ?? null;
   } catch (err) {
-    // 23505 on the live-sid partial unique index = a Twilio redelivery of
-    // a message whose original delivery already holds a live job — the
-    // desired outcome, not an error (migration 20260816000005).
+    // 23505 on the live-sid partial unique index (migration
+    // 20260816000005): another delivery of the same message holds the
+    // live row. If that row is still RESERVED, ADOPT it (codex #3413
+    // r31): with two concurrent deliveries, the request that inserted the
+    // reservation is not necessarily the one that wins the inbound SID
+    // claim — the claim winner must be able to carry the correction
+    // through, and the claim loser nulls its handle instead of
+    // cancelling (see the route's duplicate-claim exit). A row already
+    // past 'reserved' is genuinely owned elsewhere.
     if (err && err.code === '23505') {
+      try {
+        const live = await knex('contact_correction_jobs')
+          .where({ message_sid: messageSid || null, status: 'reserved' })
+          .orderBy('id', 'desc')
+          .first('id');
+        if (live?.id) return live.id;
+      } catch { /* fall through */ }
       logger.info('[contact-correction-queue] duplicate delivery reservation rejected (sid already live)');
       return null;
     }
@@ -192,7 +215,16 @@ async function attachContactCorrectionContext(jobId, { customerId, expectedValue
         .whereNull('deleted_at')
         .forUpdate()
         .first();
-      const snapshot = (row && contactCorrection.snapshotContactCasFields(row)) || expectedValues;
+      // The MATCH-TIME snapshot is the baseline of record (codex #3413
+      // r31): a locked reread here would adopt an admin edit made between
+      // the webhook match and this transaction as the expected baseline —
+      // and the older SMS would then overwrite it. With the match-time
+      // values stored, any intervening non-queue write reads as a
+      // concurrent change at the CAS (admin wins); an intervening QUEUE
+      // write lands at/below the floor computed under this lock and
+      // stales conservatively too — fail closed in both directions. The
+      // locked reread remains only for callers with no match-time row.
+      const snapshot = expectedValues || (row && contactCorrection.snapshotContactCasFields(row)) || null;
       const floorRow = await trx('contact_correction_jobs')
         .where({ customer_id: customerId, status: 'done' })
         .orderBy('id', 'desc')
@@ -368,9 +400,18 @@ async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex 
       .skipLocked();
 
     const claimedIds = [];
+    const exhaustedIds = [];
     const blockedSenders = new Set();
     for (const job of candidates) {
       if (claimedIds.length >= limit) break;
+      // Attempts cap enforced AT CLAIM (codex #3413 r31): stale-lock
+      // recovery requeues without checking the budget, so a repeatedly
+      // slow job could otherwise be reclaimed (and re-extracted, paid)
+      // past max_attempts before any terminal mark.
+      if (Number(job.attempts || 0) >= Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS)) {
+        exhaustedIds.push(job.id);
+        continue;
+      }
       // One claim per sender per pass — a claimed job blocks its
       // sender's later jobs until it finishes.
       if (blockedSenders.has(job.sender_key)) continue;
@@ -382,6 +423,18 @@ async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex 
       if (earlier) { blockedSenders.add(job.sender_key); continue; }
       blockedSenders.add(job.sender_key);
       claimedIds.push(job.id);
+    }
+    if (exhaustedIds.length) {
+      await trx('contact_correction_jobs')
+        .whereIn('id', exhaustedIds)
+        .update({
+          status: 'failed',
+          last_error: 'attempts exhausted (claim-time cap)',
+          completed_at: trx.fn.now(),
+          locked_at: null,
+          locked_by: null,
+          updated_at: trx.fn.now(),
+        });
     }
     if (!claimedIds.length) return [];
 

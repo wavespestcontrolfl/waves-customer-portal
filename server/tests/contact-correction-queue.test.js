@@ -710,10 +710,13 @@ describe('round-25 hardening', () => {
 });
 
 describe('round-26 hardening', () => {
-  it('attach captures snapshot and floor together from the locked customer row', async () => {
-    // The route's earlier read said Riverz, but a queue job committed
-    // Riverson before the attach — the serialized capture reads the LIVE
-    // row, so snapshot and floor stay mutually consistent.
+  it('attach stores the MATCH-TIME snapshot with a lock-consistent floor', async () => {
+    // (Contract updated in r31.) The route's match-time read said Riverz;
+    // a write landed before the attach. The match-time values are the
+    // baseline of record — a locked reread would adopt a post-match admin
+    // edit and let the older SMS overwrite it — so any intervening write
+    // (queue or admin) reads as a concurrent change at the CAS and fails
+    // closed.
     const knex = makeStubKnex({
       contact_correction_jobs: [
         jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
@@ -723,12 +726,12 @@ describe('round-26 hardening', () => {
     });
     await queue.attachContactCorrectionContext(7, {
       customerId: CUSTOMER_ID,
-      expectedValues: { last_name: 'Riverz' }, // stale route read — must NOT win
+      expectedValues: { last_name: 'Riverz' }, // match-time read — the baseline of record
       knex,
     });
     const job = knex._data.contact_correction_jobs[1];
     expect(job.rebase_floor_id).toBe(3);
-    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverz');
   });
 
   it('the stale sweep independently rejects wrong-number bodies', async () => {
@@ -779,14 +782,14 @@ describe('round-28 hardening', () => {
     });
     const ok = await queue.enqueueContactCorrectionJob(7, {
       customerId: CUSTOMER_ID, smsLogId: 'sms-1',
-      expectedValues: { last_name: 'Riverz' }, // stale route read — live row must win
+      expectedValues: { last_name: 'Riverz' }, // match-time read — the baseline of record (r31)
       knex,
     });
     expect(ok).toBe(true);
     const job = knex._data.contact_correction_jobs[1];
     expect(job.status).toBe('queued');
     expect(job.rebase_floor_id).toBe(3);
-    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverz');
   });
 });
 
@@ -806,5 +809,34 @@ describe('round-29 hardening', () => {
     expect(summary.promoted).toBe(0);
     expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
     expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('stale_no_intent');
+  });
+});
+
+describe('round-31 hardening', () => {
+  it('adopts a live reserved row on a duplicate-sid insert conflict', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ id: 1, body: null })] });
+    // Simulate the partial unique index: reject the insert with 23505.
+    const orig = knex;
+    const wrapped = (t) => {
+      const c = orig(t);
+      const ins = c.insert.bind(c);
+      c.insert = () => { const e = new Error('duplicate key'); e.code = '23505'; throw e; };
+      return c;
+    };
+    Object.assign(wrapped, orig);
+    wrapped._data = orig._data;
+    const id = await queue.reserveContactCorrectionJob({ senderPhone: '+15550001111', messageSid: 'SM-test-1', knex: wrapped });
+    expect(id).toBe(1); // the concurrent sibling's reservation is adopted
+  });
+
+  it('a job at its attempts cap is failed at claim instead of re-extracted', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID, attempts: 3, max_attempts: 3 })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.claimed).toBe(0);
+    expect(mockRunSms).not.toHaveBeenCalled();
+    expect(knex._data.contact_correction_jobs[0].status).toBe('failed');
   });
 });

@@ -196,6 +196,12 @@ router.post('/sms', async (req, res) => {
     claimOwned = smsClaim.owned;
     if (!smsClaim.processable) {
       logger.info(`[twilio-webhook] Duplicate inbound SMS ${MessageSid} ignored (already processed)`);
+      // With concurrent duplicate deliveries, the reservation may be
+      // ADOPTED by the claim-winning sibling request (codex #3413 r31) —
+      // the loser must not let its finally cancel the row out from under
+      // the winner. A true orphan (winner also died) is a body-less
+      // reserved row the stale sweep cancels.
+      correctionJobId = null;
       return res.type('text/xml').send('<Response></Response>');
     }
 

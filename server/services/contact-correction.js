@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -290,6 +290,12 @@ async function extractSmsContactCorrections({ body }) {
       text: `Inbound customer SMS:\n"""${text.slice(0, 1500)}"""`,
       jsonMode: true,
       maxTokens: 500,
+      // Deadline WELL below the queue's 10-minute worker lease (codex
+      // #3413 r31): with a timeoutMs budget the SDK makes a single bounded
+      // attempt, so a stalled provider can never outlive the lease and
+      // trigger a duplicate paid extraction via stale-lock recovery. A
+      // timeout surfaces as ok:false → null → the queue's own retry.
+      timeoutMs: 120_000,
     });
     if (!res?.ok || !Array.isArray(res.json?.corrections)) {
       logger.warn('[contact-correction] sms extraction provider failure (retryable)');
@@ -499,7 +505,9 @@ const TP_NOT_OWNER = `(?:my|our|the|${TP_SELF_OWNERS.slice(3, -1)})`;
 const tpOwnerAfter = `(?:(?:my|our|the)\\s+)?(?!${TP_NOT_OWNER}\\b)${TP_OWNER_SRC}\\b`;
 const tpInverseForms = (topicSrc) => (
   `|\\b${topicSrc}\\s+(?:for|of)\\s+${tpOwnerAfter}`
-  + `|\\b(?!(?:i|we)\\b)${TP_OWNER_SRC}\\s+has\\s+${TP_MODIFIER_SRC}${topicSrc}\\b`
+  // The has-subject takes the same determiner-safe self-owner exclusion
+  // (r31): "My account has the wrong email" is the customer's own.
+  + `|\\b(?:(?:my|our|the)\\s+)?(?!(?:i|we|${TP_NOT_OWNER.slice(3, -1)})\\b)${TP_OWNER_SRC}\\s+has\\s+${TP_MODIFIER_SRC}${topicSrc}\\b`
   // "The email belongs to my accountant …" (r30): explicit ownership
   // stated after the topic, within the same clause.
   + `|\\b${topicSrc}\\b[^.;!?\\n]{0,40}\\bbelongs?\\s+to\\s+${tpOwnerAfter}`

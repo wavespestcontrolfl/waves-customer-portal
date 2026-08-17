@@ -2879,3 +2879,30 @@ describe('round-30 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-31 prefilter + self-owner', () => {
+  it('component should-be corrections pass the entry prefilter', () => {
+    expect(detectContactCorrectionIntent('My city should be Sarasota')).toBe(true);
+    expect(detectContactCorrectionIntent('My state should be GA')).toBe(true);
+    expect(detectContactCorrectionIntent('My zip should be 31401')).toBe(true);
+  });
+
+  it("'my account has the wrong email' stays first-person", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my account has the wrong email; change it to me@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My account has the wrong email; change it to me@example.com', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['email']);
+  });
+
+  it("'my accountant has a new email' still rejects after the self-owner fix", async () => {
+    const body = 'My accountant has a new email; use bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my accountant has a new email; use bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});
