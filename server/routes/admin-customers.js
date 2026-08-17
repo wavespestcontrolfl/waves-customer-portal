@@ -10,7 +10,7 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
@@ -1638,8 +1638,28 @@ router.post('/fix-tiers', requireAdmin, async (req, res, next) => {
       else newTier = 'Platinum';
 
       if (newTier !== c.waveguard_tier) {
-        await db('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
-        updated++;
+        // Tier writes participate in the customer-comms serialization
+        // (codex #3426 r5 P2): the previsit backstop sweep holds
+        // `customer-comms:<id>` through its membership recheck AND the SMS
+        // dispatch, so a membership-making tier write here either commits
+        // before the sweep's in-lock recheck reads (excluding the customer)
+        // or waits until after the send. Comms lock BEFORE the customers
+        // row lock (customer-comms-lock.js contract), and the skip/no-op
+        // decisions are re-derived from the LOCKED row — the pre-loop
+        // snapshot may be stale by the time this customer's turn comes.
+        const wrote = await withCustomerCommsLock(db, c.id, async (trx) => {
+          const locked = await trx('customers')
+            .where({ id: c.id })
+            .whereNull('deleted_at')
+            .forUpdate()
+            .first();
+          if (!locked) return false;
+          if (NON_MEMBERSHIP_TIER_KEYS.has(membershipTierKey(locked.waveguard_tier))) return false;
+          if (locked.waveguard_tier === newTier) return false;
+          await trx('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
+          return true;
+        });
+        if (wrote) updated++;
       }
     }
 

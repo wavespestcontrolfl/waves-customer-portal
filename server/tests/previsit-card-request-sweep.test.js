@@ -173,6 +173,33 @@ describe('previsitCardInviteEligible', () => {
     expect(recheckIdx).toBeGreaterThan(lockIdx);
     expect(funnelIdx).toBeGreaterThan(recheckIdx);
   });
+
+  test('every admin tier writer joins the customer-comms lock — editor AND fix-tiers (codex #3426 r4+r5)', () => {
+    const adminCustomers = require('fs').readFileSync(
+      require.resolve('../routes/admin-customers'), 'utf8',
+    );
+    // Two writers can flip waveguard_tier from the admin surface: the
+    // customer editor (PUT /:id) and the bulk recalculator
+    // (POST /fix-tiers). Both must hold `customer-comms:<id>` for the
+    // write, or a membership-making commit can land between the sweep's
+    // in-lock recheck and its SMS dispatch. The editor takes the lock
+    // inside its own transaction; fix-tiers has none of its own, so it
+    // wraps each write in withCustomerCommsLock and re-derives the
+    // skip/no-op decisions from the row read under the lock.
+    expect(adminCustomers).toContain("require('../utils/customer-comms-lock')");
+    expect(adminCustomers).toContain('await lockCustomerComms(trx, req.params.id);');
+    const fixTiersIdx = adminCustomers.indexOf("router.post('/fix-tiers'");
+    const lockedWriteIdx = adminCustomers.indexOf('await withCustomerCommsLock(db, c.id, async (trx) => {');
+    const nextRouteIdx = adminCustomers.indexOf("router.post('/backfill-review-status'");
+    expect(fixTiersIdx).toBeGreaterThan(-1);
+    expect(lockedWriteIdx).toBeGreaterThan(fixTiersIdx);
+    expect(lockedWriteIdx).toBeLessThan(nextRouteIdx);
+    // The tier UPDATE itself runs on the lock's trx, not the bare db —
+    // an update outside the transaction would release-before-write.
+    const fixTiersBody = adminCustomers.slice(fixTiersIdx, nextRouteIdx);
+    expect(fixTiersBody).toContain("await trx('customers').where({ id: c.id }).update({ waveguard_tier: newTier });");
+    expect(fixTiersBody).not.toContain("await db('customers').where({ id: c.id }).update");
+  });
 });
 
 describe('sweep gating', () => {
