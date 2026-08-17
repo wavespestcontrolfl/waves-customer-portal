@@ -504,7 +504,8 @@ const TP_SELF_OWNERS = '(?:me|myself|mine|us|ours|account|file|record|records|in
 const TP_NOT_OWNER = `(?:my|our|the|${TP_SELF_OWNERS.slice(3, -1)})`;
 const tpOwnerAfter = `(?:(?:my|our|the)\\s+)?(?!${TP_NOT_OWNER}\\b)${TP_OWNER_SRC}\\b`;
 const tpInverseForms = (topicSrc) => (
-  `|\\b${topicSrc}\\s+(?:for|of)\\s+${tpOwnerAfter}`
+  // Optional copula (r32): "the email IS for my accountant".
+  `|\\b${topicSrc}\\s+(?:(?:is|was|are|were)\\s+)?(?:for|of)\\s+${tpOwnerAfter}`
   // The has-subject takes the same determiner-safe self-owner exclusion
   // (r31): "My account has the wrong email" is the customer's own.
   + `|\\b(?:(?:my|our|the)\\s+)?(?!(?:i|we|${TP_NOT_OWNER.slice(3, -1)})\\b)${TP_OWNER_SRC}\\s+has\\s+${TP_MODIFIER_SRC}${topicSrc}\\b`

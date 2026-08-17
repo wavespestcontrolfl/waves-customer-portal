@@ -107,6 +107,17 @@ function makeStubKnex(rowsByTable = {}) {
       whereNot(col, val) { preds.push((r) => r[col] !== val); return chain; },
       whereNull(col) { preds.push((r) => r[col] == null); return chain; },
       orderBy(col, dir = 'asc') { order = { col, dir }; return chain; },
+      groupBy(col) { chain._groupCol = col; return chain; },
+      min(spec) {
+        const [alias, srcCol] = Object.entries(spec)[0];
+        const groups = new Map();
+        for (const r of data[table].filter((row) => preds.every((p) => p(row)))) {
+          const key = r[chain._groupCol];
+          const cur = groups.get(key);
+          if (cur === undefined || r[srcCol] < cur[srcCol]) groups.set(key, r);
+        }
+        return Promise.resolve([...groups.entries()].map(([key, row]) => ({ [chain._groupCol]: key, [alias]: row[srcCol] })));
+      },
       limit(n) { lim = n; return chain; },
       forUpdate() { return chain; },
       skipLocked() { return chain; },
@@ -838,5 +849,38 @@ describe('round-31 hardening', () => {
     expect(summary.claimed).toBe(0);
     expect(mockRunSms).not.toHaveBeenCalled();
     expect(knex._data.contact_correction_jobs[0].status).toBe('failed');
+  });
+});
+
+describe('round-32 hardening', () => {
+  it("a noisy sender's backlog cannot starve another sender's head", async () => {
+    // 20 queued jobs for sender A sit behind A's reserved predecessor;
+    // sender B's single eligible job has the highest id. Per-sender heads
+    // mean B is claimed on the first pass.
+    const jobs = [jobRow({ id: 1, status: 'reserved' })];
+    for (let i = 2; i <= 21; i += 1) jobs.push(jobRow({ id: i, status: 'queued', customer_id: CUSTOMER_ID }));
+    jobs.push(jobRow({
+      id: 22, status: 'queued', customer_id: CUSTOMER_ID,
+      sender_key: '5550002222', sender_phone: '+15550002222', message_sid: 'SM-other-1',
+      body: 'My email is wrong, use b@c.co',
+    }));
+    const knex = makeStubKnex({
+      contact_correction_jobs: jobs,
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    expect(summary.claimed).toBe(1);
+    expect(knex._data.contact_correction_jobs.find((r) => r.id === 22).status).toBe('done');
+  });
+
+  it('the queued transition carries the body even when the earlier attach failed', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, body: null, customer_id: CUSTOMER_ID, expected_values: { last_name: 'Riverz' } })],
+    });
+    const ok = await queue.enqueueContactCorrectionJob(1, {
+      customerId: CUSTOMER_ID, smsLogId: 'sms-1', body: 'My last name is wrong, it is Rivers', knex,
+    });
+    expect(ok).toBe(true);
+    expect(knex._data.contact_correction_jobs[0].body).toBe('My last name is wrong, it is Rivers');
   });
 });

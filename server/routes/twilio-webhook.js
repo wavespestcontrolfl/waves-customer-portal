@@ -281,6 +281,9 @@ router.post('/sms', async (req, res) => {
         customerId: customer.id,
         smsLogId: smsLogId || null,
         expectedValues: contactCorrection.snapshotContactCasFields(customer),
+        // Body rides the queued transition too (r32) — a transiently
+        // failed earlier attach must not queue a body-less job.
+        body: Body,
       });
       if (enqueued) correctionQueue.kickContactCorrectionQueue();
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);

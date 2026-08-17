@@ -2906,3 +2906,14 @@ describe('round-31 prefilter + self-owner', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-32 ownership', () => {
+  it("'the email is for my accountant' is third-party", async () => {
+    const body = 'The email is for my accountant and is wrong; change it to bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email is for my accountant and is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});

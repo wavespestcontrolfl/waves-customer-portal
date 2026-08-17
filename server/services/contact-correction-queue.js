@@ -57,16 +57,23 @@ function tail10(p) {
 // finish first and take the lower id. After the first positive check
 // (warmed by the boot worker pass) the reserve path goes straight to the
 // insert.
+// The readiness PROMISE is coalesced per connection (codex #3413 r32):
+// overlapping first requests share one schema query and resume in the
+// order they attached — so even during the pre-warm boot window the
+// bigserial ordering insert executes in arrival order. A negative result
+// clears so a later migration is picked up; the boot worker pass warms it
+// before real traffic in practice.
 const tableReadyByKnex = new WeakMap();
-async function tableReady(knex) {
-  if (tableReadyByKnex.get(knex)) return true;
-  try {
-    const ready = await knex.schema.hasTable('contact_correction_jobs');
-    if (ready) tableReadyByKnex.set(knex, true);
-    return ready;
-  } catch {
-    return false;
+function tableReady(knex) {
+  let entry = tableReadyByKnex.get(knex);
+  if (!entry) {
+    entry = Promise.resolve()
+      .then(() => knex.schema.hasTable('contact_correction_jobs'))
+      .catch(() => false);
+    tableReadyByKnex.set(knex, entry);
+    entry.then((ok) => { if (!ok) tableReadyByKnex.delete(knex); });
   }
+  return entry;
 }
 
 /**
@@ -122,7 +129,7 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
  * never resurrected); returns whether the job is now queued. Fail-soft:
  * on error the row stays 'reserved' and the stale sweep replays it.
  */
-async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, expectedValues = null, knex = db } = {}) {
+async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, expectedValues = null, body = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
     // Keep the ORIGINAL context when it was already attached (codex #3413
@@ -151,6 +158,11 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
         status: 'queued',
         customer_id: customerId,
         sms_log_id: smsLogId || null,
+        // The body rides the queued transition itself (codex #3413 r32):
+        // a transient failure of the earlier attachReservationBody would
+        // otherwise queue a body-less job the worker resolves as having
+        // no intent — silently losing the correction.
+        ...(body ? { body } : {}),
         next_attempt_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
@@ -391,11 +403,24 @@ async function promoteStaleReservations(knex) {
  */
 async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex = db } = {}) {
   return knex.transaction(async (trx) => {
-    const candidates = await trx('contact_correction_jobs')
+    // One candidate PER SENDER — the queued head — before any cap
+    // (codex #3413 r32): a fixed prefix limit let one noisy sender's
+    // backlog fill the candidate window and starve every other sender's
+    // eligible head behind it.
+    const headRows = await trx('contact_correction_jobs')
       .where({ status: 'queued' })
       .where('next_attempt_at', '<=', trx.fn.now())
+      .groupBy('sender_key')
+      .min({ id: 'id' });
+    const headIds = headRows
+      .map((r) => Number(r.id))
+      .sort((a, b) => a - b)
+      .slice(0, Math.max(limit * 5, 50));
+    if (!headIds.length) return [];
+    const candidates = await trx('contact_correction_jobs')
+      .whereIn('id', headIds)
+      .where({ status: 'queued' })
       .orderBy('id', 'asc')
-      .limit(Math.max(limit * 5, 15))
       .forUpdate()
       .skipLocked();
 

@@ -1043,6 +1043,11 @@ httpServer.listen(PORT, () => {
           logger.error(`[contact-correction-queue] processor failed: ${err.message}`);
         }
       };
+      // Immediate boot pass (codex #3413 r32): warms the queue's table-
+      // readiness cache before real webhook traffic and drains anything an
+      // exiting deploy left behind, so the reserve path's ordering insert
+      // never waits on a first-request schema check.
+      void runContactCorrectionQueue();
       setTimeout(runContactCorrectionQueue, 30 * 1000).unref();
       setInterval(runContactCorrectionQueue, 60 * 1000).unref();
     }
