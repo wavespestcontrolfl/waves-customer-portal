@@ -1278,8 +1278,13 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
         && PayCombined.isCombinedPiMetadata(pi.metadata)
         && String(pi.metadata?.waves_invoice_id || '') !== String(invoiceId)
         && PayCombined.paymentIntentOwnsInvoice(pi.metadata, invoiceId);
-      const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)
-        && pi.next_action?.type !== 'verify_with_microdeposits';
+      // NO microdeposit exemption (codex r11 P1): this release only fires
+      // for a SIBLING riding someone else's combined PI — the stop is an
+      // explicit "don't collect this invoice", and a pending bank
+      // verification is still an uncaptured session that would charge the
+      // stopped sibling once verified. Cancel it like the payer-change
+      // fence does; only processing/succeeded money is left alone.
+      const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
       if (isSiblingOnCombined && unconfirmed) {
         try {
           await StripeService.cancelPaymentIntent(pi.id);

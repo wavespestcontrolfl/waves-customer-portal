@@ -3534,7 +3534,15 @@ async function handleRefundFailed(refund) {
           if (invId) {
             const flipped = await trx('invoices')
               .where({ id: invId, status: 'refunded' })
-              .update({ status: 'paid', updated_at: new Date() });
+              .update({
+                status: 'paid',
+                // The refund cleared paid_at, and AR/overdue queries treat
+                // paid_at IS NULL as an outstanding balance (codex r11 P1)
+                // — restore the settlement timestamp with the status, from
+                // the ledger row's recorded settle time when available.
+                paid_at: meta.settled_event_at || new Date().toISOString(),
+                updated_at: new Date(),
+              });
             if (flipped > 0) restored.push(invId);
           }
         }
@@ -3876,7 +3884,11 @@ async function handleRefundFailed(refund) {
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
-        .update({ status: 'paid', updated_at: new Date() });
+        // paid_at restored with the status (codex r11 P1, same reasoning
+        // as the combined unwind): AR and overdue alerts key on
+        // paid_at IS NULL, so a status-only restore keeps the invoice on
+        // every outstanding-balance surface.
+        .update({ status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() });
       if (flipped > 0) {
         invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
         restoredInvoiceId = linkedInvoice.id;
