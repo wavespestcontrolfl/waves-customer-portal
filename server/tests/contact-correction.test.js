@@ -3944,3 +3944,38 @@ describe('round-55 hardening', () => {
     expect(res.applied.map((a) => a.field)).toContain('city');
   });
 });
+
+describe('round-56 hardening', () => {
+  const moveCorrections = (verb) => ({
+    ok: true,
+    json: {
+      corrections: [
+        { field: 'address_line1', new_value: '99 Pine Ave', quote: `${verb} 99 Pine Ave`, confidence: 'high' },
+        { field: 'city', new_value: 'Sarasota', quote: `${verb} 99 Pine Ave, Sarasota`, confidence: 'high' },
+        { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+      ],
+    },
+  });
+
+  it('a DATED progressive move holds until it occurs', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue(moveCorrections("i'm moving to"));
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "I'm moving to 99 Pine Ave, Sarasota next Friday. Zip is 34231", knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+  });
+
+  it('a leading-date progressive move holds too', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue(moveCorrections("we are moving to"));
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Next week we are moving to 99 Pine Ave, Sarasota. Zip is 34231', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('an UNDATED progressive move (in progress) still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue(moveCorrections('we are moving to'));
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231', knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line1');
+  });
+});
