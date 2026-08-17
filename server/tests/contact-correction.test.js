@@ -2848,3 +2848,34 @@ describe('round-29 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-30 hardening', () => {
+  it("'the email for my account' stays first-person (no determiner backtrack)", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'the email for my account is wrong; use me@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'The email for my account is wrong; use me@example.com', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['email']);
+    expect(knex._data.customers[0].email).toBe('me@example.com');
+  });
+
+  it("'the email belongs to my accountant' is third-party", async () => {
+    const body = 'The email belongs to my accountant and is wrong; use bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email belongs to my accountant and is wrong; use bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("'the email for my accountant' is still third-party after the determiner fix", async () => {
+    const body = 'The email for my accountant is wrong; change it to bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email for my accountant is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});

@@ -490,9 +490,19 @@ const TP_MODIFIER_SRC = "(?:[\\p{L}\\p{M}\\p{N}]+\\s+){0,3}";
 // document-ish owners are excluded so "the email for me / the account /
 // the invoice" stays first-person.
 const TP_SELF_OWNERS = '(?:me|myself|mine|us|ours|account|file|record|records|invoice|invoices|receipt|receipts|statement|statements|service|billing|booking|appointment)';
+// The determiner is consumed as a separate group and the owner class
+// EXCLUDES bare determiners (codex #3413 r30): with only an optional
+// determiner, "for my account" backtracked to owner='my' and the
+// self-owner lookahead never saw the excluded word — silently discarding
+// the customer's own correction.
+const TP_NOT_OWNER = `(?:my|our|the|${TP_SELF_OWNERS.slice(3, -1)})`;
+const tpOwnerAfter = `(?:(?:my|our|the)\\s+)?(?!${TP_NOT_OWNER}\\b)${TP_OWNER_SRC}\\b`;
 const tpInverseForms = (topicSrc) => (
-  `|\\b${topicSrc}\\s+(?:for|of)\\s+(?:my|our|the)?\\s*(?!${TP_SELF_OWNERS}\\b)${TP_OWNER_SRC}\\b`
+  `|\\b${topicSrc}\\s+(?:for|of)\\s+${tpOwnerAfter}`
   + `|\\b(?!(?:i|we)\\b)${TP_OWNER_SRC}\\s+has\\s+${TP_MODIFIER_SRC}${topicSrc}\\b`
+  // "The email belongs to my accountant …" (r30): explicit ownership
+  // stated after the topic, within the same clause.
+  + `|\\b${topicSrc}\\b[^.;!?\\n]{0,40}\\bbelongs?\\s+to\\s+${tpOwnerAfter}`
 );
 const THIRD_PARTY_ADDRESS_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
