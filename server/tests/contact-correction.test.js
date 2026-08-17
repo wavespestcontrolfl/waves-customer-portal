@@ -3780,3 +3780,14 @@ describe('round-51 hardening', () => {
     }
   });
 });
+
+describe('round-52 hardening', () => {
+  it("a 'then'-joined subjectless condition never applies", async () => {
+    const body = 'If approved then my new email is future@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'if approved then my new email is future@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});
