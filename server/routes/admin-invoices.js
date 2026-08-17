@@ -1821,7 +1821,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       }
       // Unbind combined siblings from the canceled intent — regardless of
       // who canceled it (codex #3427 r17 P2).
-      await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId);
+      await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId, { keepInvoiceIds: [String(invoice.id)] });
     }
 
     // ── Atomic credit draw-down + prepaid transition ──

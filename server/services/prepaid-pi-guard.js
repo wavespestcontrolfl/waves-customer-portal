@@ -60,7 +60,7 @@ async function guardOpenPaymentIntentForPrepaid(invoice) {
   // A combined PI is stamped on its siblings too — unbind every collectible
   // row from the (now-)canceled intent, regardless of who canceled it
   // (codex #3427 r17 P2).
-  await require('./pay-combined').clearPaymentIntentStamps(require('../models/db'), piId);
+  await require('./pay-combined').clearPaymentIntentStamps(require('../models/db'), piId, { keepInvoiceIds: [String(invoice.id)] });
   return { ok: true, piId };
 }
 

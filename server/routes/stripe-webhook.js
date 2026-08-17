@@ -2391,6 +2391,25 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // armed, the whereNull guards make it a no-op.
   await armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRowBeforeFailure);
 
+  // Stale-failure guard for COMBINED PIs (codex r20 P1): the reusable PI
+  // is retried after an ACH bounce, and a newer processing delivery can
+  // have already moved every row/invoice back to 'processing' before an
+  // OLDER failure delivery lands — the row-status terminal guard below
+  // can't see that ('processing' isn't terminal). Verify against the LIVE
+  // intent, exactly like the processing handler's freshness check; a
+  // still-moving replacement debit makes this failure event a no-op.
+  // Fail CLOSED: an unreadable PI throws so Stripe redelivers.
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const freshFailStripe = getStripe();
+    if (freshFailStripe) {
+      const currentFailIntent = await freshFailStripe.paymentIntents.retrieve(piId);
+      if (['processing', 'succeeded', 'requires_capture'].includes(currentFailIntent.status)) {
+        logger.warn(`[stripe-webhook] stale combined payment_failed for PI ${piId} — current status is ${currentFailIntent.status}; skipping ledger revert`);
+        return;
+      }
+    }
+  }
+
   // Terminal-status guard: Stripe doesn't guarantee event ordering, and
   // pay-page PIs are reused across attempts — a late-delivered
   // payment_failed from attempt 1 must not demote a row that attempt 2's
@@ -3636,7 +3655,22 @@ async function handleRefundFailed(refund) {
         // an unwind and a credit return that never happened. Name the real
         // event: the parked reconciliation case's refund attempt failed.
         if (!anyUnwound && !neutralizedMarker) {
-          await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: a PARKED partial-refund attempt (${refundId || 'unknown id'}) failed at the bank — no rows were ever stamped and no credit was returned; the reconciliation case in /admin/revenue stands, minus this bounced refund.`);
+          // The parked case itself resolves with the bounce (codex r20
+          // P2): Stripe kept the money, so there is no movement left to
+          // attribute — leaving the per-refund orphan open would keep the
+          // revenue queue reporting a refund that never cleared.
+          if (refundId) {
+            const resolvedParked = await trx('stripe_orphan_charges')
+              .where({ resolved: false, source: 'combined_pay_webhook' })
+              .where('stripe_payment_intent_id', 'like', `%:partial-refund:${refundId}`)
+              .update({
+                resolved: true,
+                resolved_at: new Date(),
+                resolution_notes: `Automatically resolved: refund ${refundId} FAILED at the bank — Stripe kept the money, no movement to reconcile`,
+              });
+            if (resolvedParked > 0) logger.info(`[stripe-webhook] bounce of parked partial refund ${refundId} resolved its reconciliation case`);
+          }
+          await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: a PARKED partial-refund attempt (${refundId || 'unknown id'}) failed at the bank — no rows were ever stamped and no credit was returned; its reconciliation case was auto-resolved (the money never moved).`);
           return;
         }
         await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).${restored.length ? ' Any annual-prepay coverage the refund CANCELLED is not auto-revived (revival is dispute-marker-gated) — the paid-sync re-runs post-commit, but if coverage stays cancelled on a restored invoice, reactivate it manually.' : ''}`);
@@ -5564,6 +5598,33 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded', 'disputed'])
     .update({ status: 'canceled' });
+
+  // Combined PI canceled AFTER entering processing (codex r20 P2, a rare
+  // but supported Stripe transition): the processing handler already moved
+  // every allocated invoice to 'processing' — without an allocation-aware
+  // revert they stay non-collectible forever (excluded from dunning,
+  // blocked from a replacement payment). Mirror the failure path's revert:
+  // reopen each stamped 'processing' invoice, clear the dead PI binding
+  // and the ACH-ack claim so a retry re-acknowledges.
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const canceledStamped = await db('invoices')
+      .where({ stripe_payment_intent_id: piId, status: 'processing' });
+    for (const stampedRow of canceledStamped) {
+      await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
+        status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+        paid_at: null,
+        stripe_payment_intent_id: null,
+        stripe_charge_id: null,
+        ach_processing_notified_at: null,
+        updated_at: db.fn.now(),
+      });
+    }
+    if (canceledStamped.length) {
+      logger.warn(`[stripe-webhook] canceled combined PI ${piId} — reopened ${canceledStamped.length} allocated invoice(s) from 'processing'`);
+    }
+    // Any remaining collectible stamps (not yet 'processing') unbind too.
+    await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+  }
 }
 
 /**

@@ -4956,7 +4956,7 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
       }
       // Unbind combined siblings from the canceled intent — regardless of
       // who canceled it (codex #3427 r17 P2).
-      await require('../services/pay-combined').clearPaymentIntentStamps(trx, piId);
+      await require('../services/pay-combined').clearPaymentIntentStamps(trx, piId, { keepInvoiceIds: [String(id)] });
     }
     const updated = await trx('invoices')
       .where({ id, status: invoice.status })
