@@ -449,6 +449,21 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
 
       const existing = rowForInvoice(invoice.id);
       if (existing) {
+        // ACH RETRY on the same reusable PI (codex r7 P2): the prior
+        // attempt's bounce left this row 'failed' — a new processing event
+        // must pull it back to 'processing' (failure metadata cleared) or
+        // the invoice sits in 'processing' over a 'failed' ledger row for
+        // the multi-day clearing window.
+        if (existing.status === 'failed' && invoiceStatus === 'processing') {
+          await trx('payments').where({ id: existing.id }).update({
+            status: 'processing',
+            failure_reason: null,
+            updated_at: new Date(),
+            metadata: trx.raw(
+              `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"processing"') - 'settled_event_at'`,
+            ),
+          });
+        }
         // ACH: the processing handler inserted this row — flip it in place.
         if (!['paid', 'refunded', 'disputed'].includes(existing.status) && invoiceStatus === 'paid') {
           await trx('payments').where({ id: existing.id }).update({
