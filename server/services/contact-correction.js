@@ -354,9 +354,10 @@ async function extractSmsContactCorrections({ body }) {
           || NEGATED_DIRECTION_RE.test(String(c.quote || ''))))
       // A directly negated value never applies (r47).
       && !valueNegatedInQuote(c.quote, c.new_value)
-      // A future-effective change waits for present-tense confirmation
-      // (r48).
-      && !sourceClausesFor(text, c.quote).some((p) => FUTURE_CHANGE_RE.test(p)));
+      // A future-effective or CONDITION-scoped change waits for
+      // present-tense confirmation (r48/r50).
+      && !sourceClausesFor(text, c.quote).some((p) => FUTURE_CHANGE_RE.test(p)
+        || CONDITIONAL_CHANGE_RE.test(p)));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -640,6 +641,13 @@ function valueNegatedInQuote(quote, value) {
 // customer's present-tense confirmation, not switch fan-outs weeks
 // early.
 const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
+
+// A CONDITION-scoped change is not a present correction (r50): "if I
+// accept the offer, my new email is …" must not switch anything before
+// the condition occurs. The conditional token must lead into a
+// subject/determiner so polite framings ("when you get a chance, fix my
+// email") stay licensed.
+const CONDITIONAL_CHANGE_RE = /\b(?:if|unless|in\s+case|assuming|once|should)\s+(?:i|we|they|he|she|it|the|my|that|things?|everything)\b/i;
 
 // A NEGATED name statement is not a correction (r46): "my name is not
 // Jane Smith anymore" states the OLD name — staging its components would

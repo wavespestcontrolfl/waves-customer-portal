@@ -3744,3 +3744,24 @@ describe('round-49 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-50 hardening', () => {
+  it('a condition-scoped change never applies', async () => {
+    const body = 'If I accept the offer, my new email is future@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'if i accept the offer, my new email is future@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a polite when-framing still corrects', async () => {
+    const body = 'When you get a chance — my email is wrong, it is me@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, it is me@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+});
