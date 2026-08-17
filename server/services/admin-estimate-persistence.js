@@ -1109,6 +1109,14 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // Commercial account-minimum replay (codex #3432 r2 P0): a pre-disarm
+    // commercial estimate stored at its era's minimum must keep its quoted
+    // price through this authoritative recompute too (membership-lapse
+    // reconciliation writes the result back over the stored totals). Same
+    // row evidence the public replay uses (savedFloorReplayOverrides).
+    if (require('./commercial-floor-replay').commercialFloorBoundEvidence(estimateData)) {
+      v1Input.commercialFloorsArmed = true;
+    }
   }
 
   try {

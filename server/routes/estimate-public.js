@@ -9833,7 +9833,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // ONLY warning off interior_spray === false (codex #3432 r1 P1).
           // Derived from the accepted line's snapshot so both selection
           // paths (customer PUT toggle and rep estimator preset) land here.
-          const commercialInterior = commercialInteriorOptionFromEstimateData(estData);
+          // Skipped for authored proposals — their retained engine rows are
+          // not the accepted quote (the proposal itemization is), so a stale
+          // row selection must not relabel the tech scope.
+          const commercialInterior = estData?.proposal?.enabled === true
+            ? null
+            : commercialInteriorOptionFromEstimateData(estData);
           if (commercialInterior && commercialInterior.selected === false) {
             prefs.interior_spray = false;
           }
@@ -12137,6 +12142,11 @@ function applySelectedCommercialInteriorToEstimateData(parsedData = {}, included
     if (row.onSiteMin !== undefined && Number.isFinite(Number(target.onSiteMin))) {
       row.onSiteMin = Number(target.onSiteMin);
     }
+    // Scope description must match the sold scope (codex #3432 r2 P1) —
+    // mixed-service pricing copies the row detail into its included rows.
+    if (typeof row.detail === 'string' && typeof target.detail === 'string') {
+      row.detail = target.detail;
+    }
     if (row.interiorOption && typeof row.interiorOption === 'object') {
       row.interiorOption.selected = included;
     }
@@ -12207,6 +12217,13 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
     catch { parsedData = {}; }
+
+    // Authored proposals: the proposal itemization is the authoritative
+    // quote — rewriting the retained engine rows would create two
+    // conflicting prices on one formal document (codex #3432 r2 P1).
+    if (parsedData?.proposal?.enabled === true) {
+      return res.status(400).json({ error: 'interior_option_not_available' });
+    }
 
     const outcome = applySelectedCommercialInteriorToEstimateData(parsedData, included);
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
@@ -13082,44 +13099,12 @@ function savedFloorReplayOverrides(estData) {
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
+  // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
+  // — codex #3432 r2 P0: the authoritative recompute path replays the same
+  // stored inputs and must resolve the same commercial-floor evidence.
+  const { commercialFloorBoundEvidence } = require('../services/commercial-floor-replay');
   if (commercialFloorBoundEvidence(estData)) overrides.commercialFloorsArmed = true;
   return overrides;
-}
-
-// Commercial account-minimum replay evidence (floors disarmed owner
-// 2026-08-17): a pre-disarm estimate whose stored commercial row sits
-// EXACTLY at its era's minimum was clamped there — replaying it live under
-// the disarmed engine would silently reopen the quote at the lower raw
-// buildup and acceptance would lock that drifted amount. Row evidence only
-// (the disarmed engine never lands on these exact values except when the
-// clamp bound; a coincidental exact-equality re-arms a clamp that is a
-// no-op at that price). minApplied is NOT usable as the signal — the
-// disarmed engine stamps it on every sub-reference price.
-const COMMERCIAL_LEGACY_MIN_ANNUAL = {
-  commercial_lawn: 1200,
-  commercial_tree_shrub: 900,
-  commercial_pest: 900,
-  commercial_mosquito: 720,
-  commercial_termite_bait: 900,
-  commercial_rodent_bait: 900,
-};
-
-function commercialFloorBoundEvidence(estData = {}) {
-  const rows = [];
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : null;
-  for (const rec of [result?.recurring, estData?.recurring]) {
-    if (rec && Array.isArray(rec.services)) rows.push(...rec.services);
-  }
-  for (const container of [estData?.engineResult, result]) {
-    if (container && Array.isArray(container.lineItems)) rows.push(...container.lineItems);
-  }
-  return rows.some((row) => {
-    if (!row || typeof row !== 'object') return false;
-    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[recurringServiceKey(row) || row.service];
-    if (!legacyMin) return false;
-    const annual = Number(row.annual);
-    return Number.isFinite(annual) && Math.abs(annual - legacyMin) < 0.005;
-  });
 }
 
 
@@ -17905,6 +17890,12 @@ function commercialInteriorOptionGateOn() {
 function attachCommercialInteriorSelector(services = [], estData = {}) {
   const section = (services || []).find((s) => s?.key === 'commercial_pest');
   if (!section) return services;
+  // Authored proposals are the authoritative quote (proposal line items +
+  // authored totals) — the engine rows a promoted estimate still carries are
+  // NOT the billed price, so exposing the selector there would let a token
+  // holder mint two conflicting prices on one formal proposal (codex #3432
+  // r2 P1). The mutation route enforces the same rule.
+  if (estData?.proposal?.enabled === true) return services;
   const option = commercialInteriorOptionFromEstimateData(estData);
   // Selector (unsold state) requires BOTH a persisted snapshot and the live
   // gate — sold state keeps pricing from the rewritten rows regardless.

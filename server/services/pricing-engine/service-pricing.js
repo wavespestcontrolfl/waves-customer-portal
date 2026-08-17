@@ -3127,14 +3127,25 @@ function priceCommercialPest(property = {}, options = {}) {
 
   // Both variants rounded once, deltas taken between the rounded values so the
   // customer-visible arithmetic is exact: exteriorOnly + add === combined.
-  const variantFigures = (annualR, mins) => ({
+  const variantFigures = (annualR, mins, detail) => ({
     annual: annualR,
     monthly: roundMoney(annualR / 12),
     perApp: roundMoney(annualR / visits),
     onSiteMin: roundMoney(mins),
+    // Scope description travels with the variant so the toggle endpoint can
+    // rewrite the stored row's customer-facing detail to match the sold scope.
+    detail,
   });
-  const combinedFigures = variantFigures(combinedAnnual, onSiteMinCombined);
-  const exteriorFigures = variantFigures(exteriorOnlyAnnual, extOnSiteMin);
+  const combinedFigures = variantFigures(
+    combinedAnnual,
+    onSiteMinCombined,
+    'Commercial pest program (interior service + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.',
+  );
+  const exteriorFigures = variantFigures(
+    exteriorOnlyAnnual,
+    extOnSiteMin,
+    'Commercial pest program (exterior barrier + monitoring; interior service available as an add-on). Estimated from property data — final price confirmed on site.',
+  );
   const interiorOption = {
     key: 'interior_service',
     label: 'Interior service',
@@ -3177,9 +3188,7 @@ function priceCommercialPest(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: interiorSelected
-      ? 'Commercial pest program (interior service + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.'
-      : 'Commercial pest program (exterior barrier + monitoring; interior service available as an add-on). Estimated from property data — final price confirmed on site.',
+    detail: selected.detail,
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     footprint,
     footprintUsed: footprint,

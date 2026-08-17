@@ -116,3 +116,43 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
     expect(extractEngineInputs(estData).commercialFloorsArmed).toBeUndefined();
   });
 });
+
+// codex #3432 r2 P0: the AUTHORITATIVE recompute (membership-lapse
+// reconciliation writes its result back over stored totals) replays the
+// stored inputs without going through extractEngineInputs — the same row
+// evidence must re-arm the floors there too.
+describe('serverRecomputeFromEstimateData replays commercial floors (persisted-estimate replays)', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+
+  const flooredEstimateData = () => ({
+    engineInputs: {
+      propertyType: 'commercial',
+      isCommercial: true,
+      footprintSqFt: 3000,
+      commercialPestCadence: 'quarterly',
+      services: { pest: {} },
+    },
+    engineResult: {
+      lineItems: [{ service: 'commercial_pest', annual: 900, monthly: 75, perApp: 225, visitsPerYear: 4 }],
+    },
+  });
+
+  test('declared persisted-estimate replay keeps the quoted floored price', async () => {
+    const out = await serverRecomputeFromEstimateData(flooredEstimateData(), {
+      replaySavedPricingKnobs: true,
+      needsSync: () => false,
+    });
+    expect(out.recomputed).toBe(true);
+    const row = out.serverResult.recurring.services.find((svc) => svc.service === 'commercial_pest');
+    expect(row.annual).toBe(900);
+  });
+
+  test('a fresh (non-replay) recompute prices live — evidence not injected', async () => {
+    const out = await serverRecomputeFromEstimateData(flooredEstimateData(), {
+      needsSync: () => false,
+    });
+    expect(out.recomputed).toBe(true);
+    const row = out.serverResult.recurring.services.find((svc) => svc.service === 'commercial_pest');
+    expect(row.annual).toBeCloseTo(629.53, 2);
+  });
+});

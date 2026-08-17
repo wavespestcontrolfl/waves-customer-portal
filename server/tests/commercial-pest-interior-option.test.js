@@ -198,6 +198,8 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     expect(row.annual).toBe(954.04);
     expect(row.perTreatment).toBe(79.5);
     expect(row.interiorOption.selected).toBe(false);
+    // Scope description follows the sold scope (codex #3432 r2 P1).
+    expect(row.detail).toMatch(/exterior barrier \+ monitoring; interior service available/i);
     expect(parsed.result.recurring.monthlyTotal).toBeCloseTo(before - 41.52, 2);
     expect(parsed.result.totals.year1).toBe(954.04);
     expect(parsed.result.totals.year2mo).toBe(79.5);
@@ -211,6 +213,7 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     const row = parsed.result.recurring.services.find((svc) => svc.service === 'commercial_pest');
     expect(row.mo).toBe(121.02);
     expect(row.annual).toBe(1452.22);
+    expect(row.detail).toMatch(/interior service \+ exterior barrier \+ monitoring/i);
     expect(parsed.result.recurring.monthlyTotal).toBe(121.02);
     expect(parsed.result.totals.year1).toBe(1452.22);
   });
@@ -302,6 +305,20 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     try {
       const services = [{ key: 'pest_control', frequencies: [] }];
       attachCommercialInteriorSelector(services, interiorEstimateData());
+      expect(services[0].interiorOption).toBeUndefined();
+    } finally {
+      delete process.env.GATE_COMMERCIAL_INTERIOR_OPTION;
+    }
+  });
+
+  test('authored proposals never expose the selector — proposal itemization is the quote', () => {
+    // codex #3432 r2 P1: a promoted estimate retains its engine rows (and
+    // their interiorOption), but the authored proposal is the billed price.
+    process.env.GATE_COMMERCIAL_INTERIOR_OPTION = 'true';
+    try {
+      const parsed = { ...interiorEstimateData(), proposal: { enabled: true } };
+      const services = [{ key: 'commercial_pest', frequencies: [] }];
+      attachCommercialInteriorSelector(services, parsed);
       expect(services[0].interiorOption).toBeUndefined();
     } finally {
       delete process.env.GATE_COMMERCIAL_INTERIOR_OPTION;
