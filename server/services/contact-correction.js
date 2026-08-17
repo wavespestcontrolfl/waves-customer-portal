@@ -290,7 +290,7 @@ async function extractSmsContactCorrections({ body }) {
     // and none of their corrections belong on the former owner's record.
     // The name form requires a capitalized token so "I'm not sure …"
     // stays harmless.
-    if (WRONG_PERSON_RE.test(String(body || ''))) return [];
+    if (WRONG_PERSON_RE.test(String(body || '').replace(/[\u2018\u2019]/g, "'"))) return [];
     const res = await callAnthropic({
       model: MODELS.FAST,
       system: EXTRACT_SYSTEM,
@@ -351,7 +351,9 @@ async function extractSmsContactCorrections({ body }) {
       // being retired, not the correction (r41).
       && !(OLD_VALUE_RE.test(String(c.quote || ''))
         && (!REPLACEMENT_DIRECTION_RE.test(String(c.quote || ''))
-          || NEGATED_DIRECTION_RE.test(String(c.quote || '')))));
+          || NEGATED_DIRECTION_RE.test(String(c.quote || ''))))
+      // A directly negated value never applies (r47).
+      && !valueNegatedInQuote(c.quote, c.new_value));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -611,6 +613,24 @@ const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|
 // value being RETIRED, not the correction (r41): "for reference, my old
 // email is old@example.com" must never overwrite the current mailbox.
 const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
+// A value the customer NEGATES is not the correction (r47): "my email
+// is not jane@example.com" states the wrong value — writing it would
+// commit exactly what was rejected. The negator must sit DIRECTLY
+// before the value in the quote.
+function valueNegatedInQuote(quote, value) {
+  const q = String(quote || '').replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').toLowerCase();
+  const v = String(value || '').replace(/\s+/g, ' ').toLowerCase();
+  if (!v) return false;
+  let from = 0;
+  while (true) {
+    const i = q.indexOf(v, from);
+    if (i < 0) return false;
+    const before = q.slice(Math.max(0, i - 14), i);
+    if (/(?:\bis\s+not|\bisn'?t|\bnot|\bnever|\bwas)\s*$/.test(before)) return true;
+    from = i + 1;
+  }
+}
+
 // A NEGATED name statement is not a correction (r46): "my name is not
 // Jane Smith anymore" states the OLD name — staging its components would
 // rename the customer to the very value being rejected.
@@ -1529,7 +1549,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // correction — names AND proposals — belongs to the number's new
     // holder. Checked on the ORIGINAL-CASE lines, since the name form
     // requires a capitalized token.
-    if (rawCallerLines.some((line) => WRONG_PERSON_RE.test(line))) {
+    if (rawCallerLines.some((line) => WRONG_PERSON_RE.test(line.replace(/[\u2018\u2019]/g, "'")))) {
       return { applied: [], skipped: [{ field: null, reason: 'identity_disclaimed' }], reason: 'identity_disclaimed' };
     }
     const callerLines = rawCallerLines.map((line) => line.toLowerCase());

@@ -3655,3 +3655,33 @@ describe('round-46 hardening', () => {
     expect(detectContactCorrectionIntent('We plan to move to 99 Pine Ave')).toBe(true);
   });
 });
+
+describe('round-47 hardening', () => {
+  it('a smart-apostrophe identity disclaimer still trips the veto', async () => {
+    const body = 'I’m not John anymore. My email is wrong; use newholder@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a directly NEGATED value never applies', async () => {
+    const body = 'My email is not jane@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'my email is not jane@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('an affirmed value beside a negated one still applies', async () => {
+    const body = 'My email is not jane@example.com, it is joan@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'joan@example.com', quote: 'my email is not jane@example.com, it is joan@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.newValue)).toEqual(['joan@example.com']);
+  });
+});
