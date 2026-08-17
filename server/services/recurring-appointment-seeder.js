@@ -589,6 +589,7 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  if (columns.property_id) query.select('property_id');
   if (columns.service_address_line1) query.select('service_address_line1');
   if (columns.service_address_line2) query.select('service_address_line2');
   if (columns.service_address_city) query.select('service_address_city');
@@ -612,23 +613,126 @@ async function findActiveRecurringSeries(conn, {
     const keyMatch = targetKey != null && parent.service_type
       && familyKeyOf(parent.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
-    if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
-      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
-      let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
-      if ((!parentStreet || scopeKeyLacksLocality(parentStreet)) && parent.source_estimate_id) {
-        // Unstamped parent: the post-commit linkage hook may not have run yet
-        // (or the gate is off), and under concurrent group accepts the other
-        // property's fresh series would otherwise read as the customer's
-        // primary street and falsely match (codex #3244 r2). The creating
-        // estimate's address committed in the SAME transaction as the parent,
-        // so it is authoritative and race-free.
+    if (serviceAddressScope
+      && ((serviceAddressScope.estimatePropertyId && columns.property_id)
+        || (columns.service_address_line1 && serviceAddressScope.estimateStreet))) {
+      // property_id is authoritative when BOTH sides carry it (codex #3431
+      // r4): a property-linked estimate scopes even with a blank/rejected
+      // address, and a stamped parent id decides without a street compare.
+      // Parent property id: the stamped column, or recovered from the
+      // creating estimate (codex #3431 r10 — a pid-linked accepting
+      // estimate with no usable address could not otherwise distinguish
+      // an unstamped legacy parent whose source estimate is linked to a
+      // DIFFERENT property, and would wrongly suppress the new series).
+      let parentPid = parent.property_id ? String(parent.property_id) : '';
+      if (serviceAddressScope.estimatePropertyId && !parentPid && parent.source_estimate_id) {
         try {
-          const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
-          parentStreet = normalizedEstimateStreet(src?.address);
-        } catch { /* fall back to the primary-street heuristic below */ }
+          const srcRow = await conn('estimates').where({ id: parent.source_estimate_id }).first('property_id');
+          if (srcRow?.property_id) parentPid = String(srcRow.property_id);
+        } catch { /* fall through to the address branch / fail-closed default */ }
       }
-      parentStreet = parentStreet || String(serviceAddressScope.customerPrimaryStreet || '');
-      if (parentStreet && !sameScopeKey(parentStreet, serviceAddressScope.estimateStreet)) continue;
+      if (serviceAddressScope.estimatePropertyId && parentPid) {
+        if (parentPid !== String(serviceAddressScope.estimatePropertyId)) continue;
+        // Same property by id — a duplicate candidate; no street compare.
+      } else if (serviceAddressScope.estimateStreet && columns.service_address_line1) {
+        const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+        // Unit-aware mode travels WITH the scope (codex #3431 r2): the scope's
+        // own candidate-key builders key parents the same way estimateStreet
+        // was keyed (unit-blind when the estimate is unitless), so a unitless
+        // estimate's re-quote still matches its unit-stamped parent series.
+        // Legacy plain-shape scopes (no builders) keep the unit-retaining keys.
+        const parentKeyOf = typeof serviceAddressScope.candidateKey === 'function'
+          ? serviceAddressScope.candidateKey
+          : normalizedStampedStreet;
+        const parentKeyFromRaw = typeof serviceAddressScope.candidateKeyFromRaw === 'function'
+          ? serviceAddressScope.candidateKeyFromRaw
+          : normalizedEstimateStreet;
+        // BLIND (unit-stripped) builders for street-IDENTITY questions —
+        // a unit token is not street identity (codex #3431 r9); legacy
+        // plain-shape scopes fall back to the retained builders.
+        const parentBlindOf = typeof serviceAddressScope.blindKey === 'function'
+          ? serviceAddressScope.blindKey
+          : parentKeyOf;
+        const parentBlindFromRaw = typeof serviceAddressScope.blindKeyFromRaw === 'function'
+          ? serviceAddressScope.blindKeyFromRaw
+          : parentKeyFromRaw;
+        let parentStreet = parentKeyOf(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
+        let parentBlind = parentBlindOf(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
+        if ((!parentStreet || scopeKeyLacksLocality(parentStreet)) && parent.source_estimate_id) {
+          // Unstamped parent: the post-commit linkage hook may not have run yet
+          // (or the gate is off), and under concurrent group accepts the other
+          // property's fresh series would otherwise read as the customer's
+          // primary street and falsely match (codex #3244 r2). The creating
+          // estimate's address committed in the SAME transaction as the parent,
+          // so it is authoritative and race-free.
+          try {
+            const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
+            const recovered = parentKeyFromRaw(src?.address);
+            if (recovered) {
+              parentStreet = recovered;
+              parentBlind = parentBlindFromRaw(src?.address);
+            }
+          } catch { /* fall back to the primary-street heuristic below */ }
+        }
+        const primary = String(serviceAddressScope.customerPrimaryStreet || '');
+        const primaryBlind = String(serviceAddressScope.customerPrimaryBlind || primary);
+        const estimateBlind = String(serviceAddressScope.blindEstimateKey || serviceAddressScope.estimateStreet || '');
+        const streetSegment = (key) => String(key || '').split('|')[0];
+        // Street-only ESTIMATE key: borrow the primary's locality when the
+        // (unit-blind) streets agree (codex #3431 r4 — sameScopeKey would
+        // otherwise wildcard a same-named street in another city).
+        let estimateStreet = serviceAddressScope.estimateStreet;
+        let effectiveEstimateBlind = estimateBlind;
+        if (scopeKeyLacksLocality(estimateStreet) && primary
+          && streetSegment(estimateBlind) === streetSegment(primaryBlind)) {
+          estimateStreet = primary;
+          effectiveEstimateBlind = primaryBlind;
+        }
+        if (parentStreet && scopeKeyLacksLocality(parentStreet)) {
+          // Locality-less PARENT key after recovery (codex #3431 r4/r5):
+          // borrow the primary's locality when the (unit-blind) streets
+          // agree; a PLAINLY DIFFERENT street token is itself proof of
+          // another property (r5 — a legacy line1-only secondary-property
+          // series must not suppress the new property's seeding); only an
+          // equal street token with unprovable locality counts as a
+          // duplicate (fail closed — never seed a possibly-second series
+          // on wildcard evidence).
+          if (primary && streetSegment(parentBlind) === streetSegment(primaryBlind)) {
+            parentStreet = primary;
+            parentBlind = primaryBlind;
+          } else if (streetSegment(parentBlind) !== streetSegment(effectiveEstimateBlind)) {
+            continue;
+          } else {
+            parentStreet = '';
+          }
+        } else if (!parentStreet) {
+          parentStreet = primary;
+          parentBlind = primaryBlind;
+        }
+        // UNIT-ONLY mismatch stays a DUPLICATE only for the PRIMARY's own
+        // unit (codex #3431 r9/r11): parent keys retain unit identity, so
+        // a unitless estimate's re-quote (which means the primary) at its
+        // own unit-stamped series mismatches on retained keys — the blind
+        // keys agree AND the parent's retained key equals the unit-bearing
+        // primary key, and seeding a second series there would
+        // double-bill. Fail closed. Any OTHER unit's parent at the street
+        // stays a different property and must not suppress this series.
+        const primaryRetained = String(serviceAddressScope.customerPrimaryRetained || '');
+        if (parentStreet && !sameScopeKey(parentStreet, estimateStreet)
+          && parentBlind && effectiveEstimateBlind && sameScopeKey(parentBlind, effectiveEstimateBlind)
+          && primaryRetained && sameScopeKey(parentStreet, primaryRetained)) {
+          parentStreet = '';
+        }
+        // DELIBERATE divergence from the adoption predicate's shared-
+        // locality requirement (codex #3431 r6): a street match on
+        // disjoint locality evidence (city-only vs zip-only) still counts
+        // as a DUPLICATE here. Seeding a second series on non-proof
+        // double-bills a same-property customer whose legacy stamp merely
+        // lacks the matching locality field; a suppressed legitimate
+        // new-property series surfaces in the duplicate-conflict payload
+        // and is staff-recoverable. Fail closed.
+        if (parentStreet && !sameScopeKey(parentStreet, estimateStreet)) continue;
+      }
     }
     const upcoming = await conn('scheduled_services')
       .where(function () {

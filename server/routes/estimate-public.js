@@ -839,6 +839,109 @@ function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
   return false;
 }
 
+// Property-scope predicate for appointment ADOPTION, shared by the
+// customer-wide selector below and the accept path's under-lock recheck.
+// EVERY estimate with an address is scoped — not just grouped ones. The
+// grouped-only arming (codex #3244 r8) left ordinary estimates fully
+// property-blind: an existing customer accepting a plan for a NEW property
+// adopted their OLD property's upcoming visit as the plan's first visit
+// (cross-property accept incident, 08-15 — the adopted row then suppressed
+// new-visit creation, the dup-series guard matched the old property's
+// series so the new property's series never seeded, and the first-service
+// invoice attached to the old property's visit).
+//
+// property_id is authoritative when BOTH sides carry it. Otherwise the
+// street compare: a candidate's stamped service address, falling back to
+// the customer's fully-qualified primary address for fully-unstamped rows
+// (the single-property common case — primary === estimate address, still
+// adopts). Keys are UNIT-AWARE (codex #3431 r2 P1): the unit token
+// discriminates only when the estimate supplies one, so a legacy unitless
+// estimate still adopts at the customer's unit-bearing primary
+// (makeEstimateScopeKeys — the estimateQuotesCustomerAddress semantics).
+// Adoption consumes a real visit — the highest-stakes scope consumer — so
+// it fails CLOSED on candidates that cannot prove their locality. The only
+// fail-open escape is an estimate with no property evidence at all (no
+// property_id, no parseable address) — the historical behavior. The
+// customer read is lazy + memoized: the selector loops paged candidates
+// and must not re-read per candidate.
+function makeAdoptionPropertyScope(conn, estimate) {
+  const {
+    makeEstimateScopeKeys, sameScopeKey, scopeKeyLacksLocality, scopeKeysShareLocality,
+  } = require('../services/estimate-property-linkage');
+  const scopeKeys = makeEstimateScopeKeys(estimate.address);
+  const estimateStreet = scopeKeys ? scopeKeys.estimateKey : '';
+  let primaryStreetPromise = null;
+  const primaryStreet = () => {
+    if (!primaryStreetPromise) {
+      primaryStreetPromise = (async () => {
+        try {
+          const cust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
+          // primaryKey, not candidateKey (codex #3431 r9): the unitless-
+          // compatibility mode applies ONLY to the customer's known
+          // primary — independently stamped candidates keep unit identity.
+          return scopeKeys.primaryKey(cust?.address_line1, cust?.address_line2, cust?.city, cust?.zip);
+        } catch {
+          return '';
+        }
+      })();
+    }
+    return primaryStreetPromise;
+  };
+  return async (cand) => {
+    if (estimate.property_id && cand?.property_id) {
+      return String(cand.property_id) === String(estimate.property_id);
+    }
+    // A property_id-LINKED estimate with no usable address still has
+    // property evidence (codex #3431 r5 P1): an unstamped candidate
+    // without an id cannot prove it belongs to that property — fail
+    // closed. A STRUCTURED locality-bearing parse that merely lacks a
+    // house number (a named commercial building — a real input class,
+    // see unit-scope-model's no-street-number docs) is also property
+    // evidence even though it yields no scope keys: adoption fails
+    // closed rather than reverting to the fail-open escape (codex #3431
+    // r12 P1). Only the true no-evidence estimate (no id, no structured
+    // parse) keeps the historical fail-open adopt.
+    if (!estimateStreet) {
+      if (estimate.property_id) return false;
+      const { parseEstimateAddress } = require('../services/estimate-property-linkage');
+      const parts = parseEstimateAddress(estimate.address);
+      return !(parts && parts.partial === false);
+    }
+    let candStreet = scopeKeys.candidateKey(cand?.service_address_line1, cand?.service_address_line2, cand?.service_address_city, cand?.service_address_zip);
+    // Candidates here always carry source_estimate_id IS NULL (the selector
+    // adopts only unclaimed rows), so source-estimate locality recovery can
+    // never apply (codex #3248 r7). Fully-unstamped rows fall back to the
+    // customer's fully-qualified primary address.
+    candStreet = candStreet || await primaryStreet();
+    if (!candStreet || scopeKeyLacksLocality(candStreet)) return false;
+    // Street-only ESTIMATE key (partial legacy parse — codex #3431 r3 P1):
+    // sameScopeKey wildcards the locality segments the estimate lacks, so a
+    // same-named street in ANOTHER city would otherwise match. The only
+    // locality evidence a street-only estimate has is the customer's primary:
+    // when the estimate's street IS the primary street, the candidate must
+    // share the primary's locality; a street-only estimate whose street
+    // differs from the primary has no locality evidence at all — fail closed
+    // (the slot picker books the quoted property a fresh visit).
+    if (scopeKeyLacksLocality(estimateStreet)) {
+      const primary = await primaryStreet();
+      const streetOf = (key) => String(key || '').split('|')[0];
+      if (!primary || streetOf(primary) !== streetOf(estimateStreet)) return false;
+      return sameScopeKey(candStreet, estimateStreet) && scopeKeysShareLocality(candStreet, primary);
+    }
+    // SHARED locality evidence required, not merely absence of
+    // contradiction (codex #3431 r6 P1): a city-only estimate key against
+    // a zip-only stamped candidate wildcards through sameScopeKey with
+    // ZERO common evidence — a same-named street in another city would
+    // adopt. Both keys are guaranteed at least one locality field here
+    // (locality-less candidates were refused above; a locality-less
+    // estimate key took the primary-borrow branch), so requiring a shared
+    // field only rejects disjoint-evidence pairs. Adoption consumes a real
+    // visit — refusing sends the customer to the slot picker, the safe
+    // direction.
+    return sameScopeKey(candStreet, estimateStreet) && scopeKeysShareLocality(candStreet, estimateStreet);
+  };
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -941,36 +1044,18 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    // PROPERTY-SCOPED for grouped estimates (codex #3244 r8): a secondary
-    // property's accept must not adopt an upcoming visit at the customer's
-    // primary property — the adopted row gets stamped to this estimate,
-    // repriced, and the accepted property ends up with NO booked visit
-    // while linkage can no longer correct the already-linked row. Fail
-    // CLOSED on candidates whose property can't be located.
-    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope, scopeKeyLacksLocality: adoptKeyLacksLocality } = require('../services/estimate-property-linkage');
-    const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
-    let adoptionPrimaryStreet = '';
-    if (adoptionEstimateStreet) {
-      try {
-        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
-        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2, adoptCust?.city, adoptCust?.zip);
-      } catch { /* candidates fall back to stamped/source streets only */ }
-    }
-    const candidateAtQuotedProperty = async (cand) => {
-      if (!adoptionEstimateStreet) return true;
-      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
-      // Candidates here always carry source_estimate_id IS NULL (the query
-      // adopts only unclaimed rows), so source-estimate locality recovery
-      // can never apply (codex #3248 r7). Adoption consumes a real visit —
-      // the HIGHEST-stakes scope consumer — so it fails CLOSED: a
-      // street-only stamped candidate that cannot prove its locality is
-      // not adoptable by a grouped estimate; the slot picker books the
-      // quoted property a fresh visit instead. Fully-unstamped rows still
-      // fall back to the customer's fully-qualified primary address.
-      candStreet = candStreet || adoptionPrimaryStreet;
-      if (!candStreet || adoptKeyLacksLocality(candStreet)) return false;
-      return adoptSameScope(candStreet, adoptionEstimateStreet);
-    };
+    // PROPERTY-SCOPED for EVERY estimate with property evidence (grouped
+    // scoping shipped in codex #3244 r8; widened to ungrouped estimates
+    // after the 08-15 cross-property accept incident — see
+    // makeAdoptionPropertyScope above): a
+    // new/secondary property's accept must not adopt an upcoming visit at
+    // another of the customer's properties — the adopted row gets stamped
+    // to this estimate, repriced, and the accepted property ends up with
+    // NO booked visit while linkage can no longer correct the
+    // already-linked row. Fails CLOSED on candidates whose property can't
+    // be located; the slot picker books the quoted property a fresh visit
+    // instead.
+    const candidateAtQuotedProperty = makeAdoptionPropertyScope(conn, estimate);
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -9959,7 +10044,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           });
           const lockedFamilyOk = lockedAnyModeKeys.size === 0
             || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
-          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk) {
+          // Property scope under lock, mirroring the preflight's coverage
+          // exactly (owner ruling 2026-08-15: the under-lock recheck must
+          // never reject a row the preflight admitted). The preflight
+          // property check runs only on the customer-wide fallback — rows
+          // this estimate explicitly links (estimate_data.
+          // scheduled_service_id) or already claims (source_estimate_id)
+          // resolve on the estimate-linked path without it — so the
+          // under-lock check skips those same shapes and re-applies the
+          // scope only to still-unclaimed adoptions, catching a stamp/link
+          // change between the preflight read and this lock.
+          const lockedRowExplicitlyLinked = !lockedAdoptRow
+            || String(estData?.scheduled_service_id || '') === String(existingAppointmentRow.id)
+            || (lockedAdoptRow.source_estimate_id != null
+              && String(lockedAdoptRow.source_estimate_id) === String(estimate.id));
+          const lockedPropertyOk = lockedRowExplicitlyLinked
+            || await makeAdoptionPropertyScope(trx, estimate)(lockedAdoptRow);
+          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
             assertExistingAppointmentUpdateApplied(0);
           }
           const updates = {
