@@ -64,25 +64,30 @@ async function readPrefs(customerId) {
 }
 
 // Commercial exterior-only plans price interior service OUT of the plan
-// (owner 2026-08-17), and interior_spray doubles as the tech surfaces'
-// sold-scope signal. The lock is deliberately NARROW (codex #3432 r10 P2):
-// only a commercial customer whose preference currently reads exterior-only
-// (the accept-time sold-scope stamp) is blocked from RE-ENABLING interior —
-// that transition would restore routine interior work without the priced
-// component. Every other commercial account (lawn-only, pre-split pest
-// plans, interior-included plans) keeps the preference exactly as before,
-// including turning interior off. Shared by GET (portal renders the locked
-// row with an explanation) and PUT (the trust boundary).
+// (owner 2026-08-17). The re-enable lock keys off the DISTINCT sold-scope
+// marker estimate acceptance stamps into the blob
+// (commercial_interior_scope: 'excluded') — never off the mutable
+// interior_spray value, which any commercial customer may legitimately
+// disable as a preference and later restore (codex #3432 r10 P2 + r11 P2).
+// The marker is server-only: the PUT schema can't set it, the write below
+// preserves it, and accepting a later interior-included commercial estimate
+// clears it (the office-reprice path back). Shared by GET (portal renders
+// the locked row with an explanation) and PUT (the trust boundary).
+const COMMERCIAL_SCOPE_KEY = 'commercial_interior_scope';
+
+async function readRawPrefsBlob(customerId) {
+  if (!(await db.schema.hasColumn('customers', 'service_preferences'))) return {};
+  const row = await db('customers').select('service_preferences').where({ id: customerId }).first();
+  if (!row) return {};
+  const raw = typeof row.service_preferences === 'string'
+    ? JSON.parse(row.service_preferences || '{}')
+    : (row.service_preferences || {});
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
 async function commercialInteriorReEnableLocked(customerId) {
-  const cust = await db('customers')
-    .select('waveguard_tier', 'property_type')
-    .where({ id: customerId })
-    .first();
-  const isCommercial = String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
-    || String(cust?.property_type || '').toLowerCase() === 'commercial';
-  if (!isCommercial) return false;
-  const prefs = await readPrefs(customerId);
-  return prefs.interior_spray === false;
+  const raw = await readRawPrefsBlob(customerId);
+  return raw[COMMERCIAL_SCOPE_KEY] === 'excluded';
 }
 
 // GET /api/service-preferences
@@ -143,8 +148,14 @@ router.put('/', async (req, res, next) => {
         : (row?.service_preferences || {});
       previous = normalize(raw);
       next = normalize({ ...previous, ...patch });
+      // The sold-scope marker survives every customer write — it is set and
+      // cleared only by estimate acceptance (server-side), and normalize()
+      // would otherwise strip it (codex #3432 r11 P2).
+      const stored = raw && typeof raw === 'object' && raw.commercial_interior_scope
+        ? { ...next, commercial_interior_scope: raw.commercial_interior_scope }
+        : next;
       await trx('customers').where({ id: req.customerId }).update({
-        service_preferences: JSON.stringify(next),
+        service_preferences: JSON.stringify(stored),
         updated_at: new Date(),
       });
     });

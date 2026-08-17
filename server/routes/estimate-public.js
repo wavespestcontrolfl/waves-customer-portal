@@ -9873,11 +9873,42 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               && String(existingProps[0].zip || '').trim().slice(0, 5) === String(parsedScopeAddr.zip || '').trim().slice(0, 5);
             if (existingProps.length === 0 || singlePropIsAcceptedAddress) {
               prefs.interior_spray = false;
+              // Distinct SOLD-scope marker (codex #3432 r11 P2): the portal
+              // re-enable lock must key off what was SOLD, not the mutable
+              // interior_spray value (any commercial customer may decline
+              // interior as a preference and later restore it). Server-only:
+              // the customer PUT's schema can't set it and the route
+              // preserves it across writes; a later accept of an
+              // interior-included commercial plan clears it below.
+              prefs.commercial_interior_scope = 'excluded';
             } else {
               logger.warn(`[estimate-accept] customer ${customerId}: exterior-only commercial scope NOT stamped to customer-level service_preferences (${existingProps.length} propert${existingProps.length === 1 ? 'y (address mismatch)' : 'ies'} on file) — annotate the plan/schedule for the tech.`);
             }
+          } else if (commercialInteriorRowsFromEstimateData(estData).length
+            && estData?.proposal?.enabled !== true) {
+            // Interior-included commercial accept: clear any prior
+            // exterior-only sold-scope marker — the reprice cycle (office
+            // sends a new interior-included estimate, customer accepts) is
+            // exactly how interior gets restored.
+            prefs.commercial_interior_scope = 'included';
           }
           if (await trx.schema.hasColumn('customers', 'service_preferences')) {
+            // Any OTHER accept (residential, non-pest commercial) writes the
+            // blob wholesale — carry an existing sold-scope marker through
+            // so it is only ever set/cleared by commercial-pest accepts.
+            // Guarded reads only, no inner try/catch: a failed statement
+            // would abort the whole accept transaction regardless (waves-db
+            // §5b), so the column guard above is the real protection.
+            if (!('commercial_interior_scope' in prefs)) {
+              const curRow = await trx('customers')
+                .select('service_preferences').where({ id: customerId }).first();
+              const curRaw = typeof curRow?.service_preferences === 'string'
+                ? JSON.parse(curRow.service_preferences || '{}')
+                : (curRow?.service_preferences || {});
+              if (curRaw && typeof curRaw === 'object' && curRaw.commercial_interior_scope) {
+                prefs.commercial_interior_scope = curRaw.commercial_interior_scope;
+              }
+            }
             await trx('customers').where({ id: customerId }).update({
               service_preferences: JSON.stringify(prefs),
             });
