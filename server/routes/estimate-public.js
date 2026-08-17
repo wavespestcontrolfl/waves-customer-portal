@@ -9831,16 +9831,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // through the SAME canonical preference the residential toggle
           // uses — nextstop-alerts and previsit-brief key their EXTERIOR
           // ONLY warning off interior_spray === false (codex #3432 r1 P1).
-          // Derived from the accepted line's snapshot so both selection
-          // paths (customer PUT toggle and rep estimator preset) land here.
+          // Derived from the accepted line's scope marker/snapshot so every
+          // selection path lands here — customer PUT toggle, rep estimator
+          // preset, and the snapshot-less exterior-only pricing (r4 P1).
           // Skipped for authored proposals — their retained engine rows are
           // not the accepted quote (the proposal itemization is), so a stale
           // row selection must not relabel the tech scope.
-          const commercialInterior = estData?.proposal?.enabled === true
-            ? null
-            : commercialInteriorOptionFromEstimateData(estData);
-          if (commercialInterior && commercialInterior.selected === false) {
-            prefs.interior_spray = false;
+          const commercialExteriorOnly = estData?.proposal?.enabled !== true
+            && commercialInteriorExcludedFromEstimateData(estData);
+          if (commercialExteriorOnly) {
+            // Customer-LEVEL preference: only safe to stamp when this is the
+            // customer's only property — previsit-brief reads the customer
+            // blob, and a multi-property customer's OTHER pest plans may
+            // include paid interior work (codex #3432 r4 P1). Multi-property:
+            // skip and log so the office annotates the plan instead.
+            const [{ count: propCount } = { count: 0 }] = await trx('customer_properties')
+              .where({ customer_id: customerId }).count('id as count');
+            if (Number(propCount) <= 1) {
+              prefs.interior_spray = false;
+            } else {
+              logger.warn(`[estimate-accept] customer ${customerId}: exterior-only commercial scope NOT stamped to customer-level service_preferences (${propCount} properties on file) — annotate the plan/schedule for the tech.`);
+            }
           }
           if (await trx.schema.hasColumn('customers', 'service_preferences')) {
             await trx('customers').where({ id: customerId }).update({
@@ -12075,6 +12086,16 @@ function commercialInteriorOptionFromEstimateData(parsedData = {}) {
   return withSnapshot ? withSnapshot.interiorOption : null;
 }
 
+// Sold-scope read for acceptance: exterior-only is signaled by the snapshot
+// selection OR the line-level interiorScope marker — the marker exists even
+// when no snapshot could be offered (exterior-only priced off an explicit
+// perimeter with a defaulted footprint; codex #3432 r4 P1).
+function commercialInteriorExcludedFromEstimateData(parsedData = {}) {
+  const rows = commercialInteriorRowsFromEstimateData(parsedData);
+  return rows.some((row) => row.interiorOption?.selected === false
+    || row.interiorScope === 'excluded');
+}
+
 // A toggle must reach every REPLAYABLE input shape too (the bond switcher's
 // codex #2915 r4 lesson applies identically): the bundle/accept path replays
 // extractEngineInputs(estData) through the live engine, so a rewrite that
@@ -12142,10 +12163,28 @@ function applySelectedCommercialInteriorToEstimateData(parsedData = {}, included
     if (row.onSiteMin !== undefined && Number.isFinite(Number(target.onSiteMin))) {
       row.onSiteMin = Number(target.onSiteMin);
     }
+    // Discounted mirrors (codex #3432 r4 P1): raw engine lines carry
+    // annual/monthly before/after-discount fields that downstream money
+    // paths PREFER (estimate-converter recurringLineAnnualAmount reads
+    // annualAfterDiscount first — the prepay taxable share would otherwise
+    // keep the stale combined amount). Commercial pest is never
+    // %-discountable (excludeFromPctDiscount), so list === net on this line
+    // and all mirrors take the selected variant's figures.
+    for (const key of ['annualAfterDiscount', 'annualBeforeDiscount']) {
+      if (row[key] !== undefined) row[key] = targetAnnual;
+    }
+    for (const key of ['monthlyAfterDiscount', 'monthlyBeforeDiscount']) {
+      if (row[key] !== undefined) row[key] = targetMonthly;
+    }
     // Scope description must match the sold scope (codex #3432 r2 P1) —
     // mixed-service pricing copies the row detail into its included rows.
     if (typeof row.detail === 'string' && typeof target.detail === 'string') {
       row.detail = target.detail;
+    }
+    // Sold-scope marker (r4 P1): acceptance reads this even when the
+    // snapshot is absent.
+    if ('interiorScope' in row || row.interiorOption) {
+      row.interiorScope = included ? 'included' : 'excluded';
     }
     if (row.interiorOption && typeof row.interiorOption === 'object') {
       row.interiorOption.selected = included;
@@ -22025,6 +22064,7 @@ module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBond
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 module.exports.applySelectedCommercialInteriorToEstimateData = applySelectedCommercialInteriorToEstimateData;
 module.exports.commercialInteriorOptionFromEstimateData = commercialInteriorOptionFromEstimateData;
+module.exports.commercialInteriorExcludedFromEstimateData = commercialInteriorExcludedFromEstimateData;
 module.exports.attachCommercialInteriorSelector = attachCommercialInteriorSelector;
 // Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
 // and the mirrored-section label rule.

@@ -106,8 +106,16 @@ describe('priceCommercialPest — exterior/interior component split', () => {
     // No snapshot: the interior component would price off the 2,000 sqft
     // fallback, so the toggle must not offer it.
     expect(r.interiorOption).toBeNull();
+    // The sold-scope marker survives snapshot-less pricing — acceptance
+    // reads it for the tech EXTERIOR ONLY preference (r4 P1).
+    expect(r.interiorScope).toBe('excluded');
     expect(r.pricingConfidence).toBe('LOW');
     expect(r.footprintEstimated).toBe(true);
+  });
+
+  test('every priced line carries the sold-scope marker', () => {
+    expect(priceCommercialPest({ footprint: 5000, perimeter: 283 }).interiorScope).toBe('included');
+    expect(priceCommercialPest({ footprint: 5000, perimeter: 283 }, { interiorService: 'excluded' }).interiorScope).toBe('excluded');
   });
 });
 
@@ -182,6 +190,7 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
   const {
     applySelectedCommercialInteriorToEstimateData,
     commercialInteriorOptionFromEstimateData,
+    commercialInteriorExcludedFromEstimateData,
     attachCommercialInteriorSelector,
   } = require('../routes/estimate-public');
 
@@ -287,6 +296,42 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     expect(engineResult.summary.year2Monthly).toBe(79.5);
     // Flat engine-input shape synced too.
     expect(parsed.engineInputs.commercialInteriorService).toBe('excluded');
+  });
+
+  test('raw engine lines get their discounted mirrors rewritten too (r4 P1)', () => {
+    // The converter's recurringLineAnnualAmount PREFERS annualAfterDiscount —
+    // a stale combined value there would tax-share the prepay off the old
+    // interior-inclusive amount after an exterior-only toggle.
+    const engineResult = generateEstimate(translateV2CallToV1Input(commercialProfile, ['PEST'], {}));
+    const line = engineResult.lineItems.find((l) => l.service === 'commercial_pest');
+    line.annualAfterDiscount = line.annual;
+    line.annualBeforeDiscount = line.annual;
+    line.monthlyAfterDiscount = line.monthly;
+    const parsed = { engineInputs: translateV2CallToV1Input(commercialProfile, ['PEST'], {}), engineResult };
+    applySelectedCommercialInteriorToEstimateData(parsed, false);
+    expect(line.annual).toBe(954.04);
+    expect(line.annualAfterDiscount).toBe(954.04);
+    expect(line.annualBeforeDiscount).toBe(954.04);
+    expect(line.monthlyAfterDiscount).toBe(79.5);
+    expect(line.interiorScope).toBe('excluded');
+  });
+
+  test('sold-scope read: snapshot selection, scope marker, and included states (r4 P1)', () => {
+    // Snapshot path: toggle off → excluded.
+    const parsed = interiorEstimateData();
+    expect(commercialInteriorExcludedFromEstimateData(parsed)).toBe(false);
+    applySelectedCommercialInteriorToEstimateData(parsed, false);
+    expect(commercialInteriorExcludedFromEstimateData(parsed)).toBe(true);
+    // Snapshot-less path (exterior-only priced off an explicit perimeter):
+    // the marker alone carries the sold scope.
+    const engineResult = generateEstimate(translateV2CallToV1Input(
+      { ...commercialProfile, homeSqFt: null, perimeterLF: 283 },
+      ['PEST'],
+      { commercialInteriorService: 'excluded' },
+    ));
+    const line = engineResult.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(line.interiorOption).toBeNull();
+    expect(commercialInteriorExcludedFromEstimateData({ engineResult })).toBe(true);
   });
 
   test('fails closed when no snapshot exists (pre-split estimates)', () => {

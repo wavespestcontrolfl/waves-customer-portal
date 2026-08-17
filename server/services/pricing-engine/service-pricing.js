@@ -3214,6 +3214,11 @@ function priceCommercialPest(property = {}, options = {}) {
     perApp,
     internalPerVisitRevenue: perApp,
     perVisit: perApp,
+    // Sold-scope marker, present even when no interiorOption snapshot can be
+    // offered (defaulted footprint + explicit perimeter): acceptance derives
+    // the tech EXTERIOR ONLY preference from this, never from the optional
+    // snapshot alone (codex #3432 r4 P1).
+    interiorScope: interiorSelected ? 'included' : 'excluded',
     interiorOption,
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,

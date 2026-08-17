@@ -855,8 +855,11 @@ function mapV1ToLegacyShape(v1Result) {
       commercialSubtype: li.commercialSubtype || null,
       pricingConfidence: li.pricingConfidence || null,
       // Interior-service option snapshot (commercial pest only) — must survive
-      // the mapper or the public page can't offer the toggle.
+      // the mapper or the public page can't offer the toggle. interiorScope is
+      // the sold-scope marker (present even snapshot-less) that acceptance
+      // reads for the tech EXTERIOR ONLY preference.
       interiorOption: li.interiorOption || null,
+      interiorScope: li.interiorScope || null,
       taxable: li.taxable === true,
       taxCategory: li.taxCategory || null,
       discountable: false,
