@@ -4128,3 +4128,65 @@ describe('round-58 hardening', () => {
     expect(knex._data.customers[0].address_line2).toBe('Unit 4');
   });
 });
+
+describe('round-59 hardening', () => {
+  it('a date-led replacement declaration defers', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'next month, my new email is future@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Next month, my new email is future@example.com', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('an undated replacement declaration still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my new email is now@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My new email is now@example.com', knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+
+  it('ZIP+4 does not defeat the alias acceptance', () => {
+    const { cityAcceptedForZip } = require('../utils/zip-to-city');
+    expect(cityAcceptedForZip('34211-1234', 'Lakewood Ranch')).toBe(true);
+    expect(cityAcceptedForZip('34211-1234', 'Venice')).toBe(false);
+  });
+
+  it('a unit-only correction does not call the geocoder post-commit', async () => {
+    const geocoder = require('../services/geocoder');
+    const spy = jest.spyOn(geocoder, 'regeocodeCustomerAddressGuarded').mockResolvedValue(undefined);
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), address_line2: 'Unit 4' }], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: 'Unit 7', quote: 'my unit number is wrong, it is Unit 7', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My unit number is wrong, it is Unit 7', knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line2');
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('a street change still triggers the guarded re-geocode', async () => {
+    const geocoder = require('../services/geocoder');
+    const spy = jest.spyOn(geocoder, 'regeocodeCustomerAddressGuarded').mockResolvedValue(undefined);
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Sarasota. Zip is 34231', knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line1');
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID);
+    spy.mockRestore();
+  });
+});

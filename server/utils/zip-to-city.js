@@ -154,7 +154,9 @@ function cityAcceptedForZip(zip, city) {
   const norm = String(city || '').trim().toLowerCase();
   if (!norm) return true;
   if (norm === primary.toLowerCase()) return true;
-  return (ZIP_CITY_ALIASES[String(zip || '').trim()] || []).includes(norm);
+  // Same five-digit key zipToCity uses — ZIP+4 must not defeat the alias.
+  const key = (String(zip || '').match(/\d{5}/) || [])[0] || '';
+  return (ZIP_CITY_ALIASES[key] || []).includes(norm);
 }
 
 module.exports = { zipToCity, ZIP_TO_CITY, ZIP_CITY_ALIASES, cityAcceptedForZip };
