@@ -5766,7 +5766,7 @@ const CallRecordingProcessor = {
           .where({ id: call.customer_id })
           .whereNull('deleted_at')
           .forUpdate()
-          .first('first_name', 'last_name', 'phone') || null;
+          .first('first_name', 'last_name', 'phone', 'updated_at') || null;
       }
       if (!opts.force) {
         // Reclaim stale 'processing' rows older than 10 min — server crash or
@@ -8441,10 +8441,18 @@ const CallRecordingProcessor = {
       // time baseline, so the lane's fallback read would adopt any admin
       // edit made during transcription as the CAS baseline and let the
       // older transcript overwrite it. No snapshot ⇒ proposal-only.
+      // …and the customer row untouched since the CALL (r42): a delayed
+      // first claim would otherwise adopt an admin edit made after the
+      // call as the baseline, letting the older transcript overwrite it —
+      // updated_at past the call start means someone changed something
+      // and the source-time baseline cannot be proven, so names stay in
+      // the review lane.
       allowNameAutoApply: !opts.force
         && procGeneration === 1
         && Boolean(claimSnapshotForTarget)
-        && (Date.now() - new Date(call.created_at || processingStartedAt).getTime()) < 24 * 60 * 60 * 1000,
+        && Boolean(call.created_at)
+        && new Date(claimSnapshotForTarget?.updated_at || 0).getTime() <= new Date(call.created_at).getTime()
+        && (Date.now() - new Date(call.created_at).getTime()) < 24 * 60 * 60 * 1000,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

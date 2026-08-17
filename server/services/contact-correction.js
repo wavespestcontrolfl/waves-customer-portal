@@ -343,7 +343,8 @@ async function extractSmsContactCorrections({ body }) {
       // A value marked OLD with no replacement direction is the value
       // being retired, not the correction (r41).
       && !(OLD_VALUE_RE.test(String(c.quote || ''))
-        && !REPLACEMENT_DIRECTION_RE.test(String(c.quote || ''))));
+        && (!REPLACEMENT_DIRECTION_RE.test(String(c.quote || ''))
+          || NEGATED_DIRECTION_RE.test(String(c.quote || '')))));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -595,12 +596,15 @@ const THIRD_PARTY_CONTACT_RE = new RegExp(
 // delivery address is not the SERVICE address this lane maintains —
 // "The new address for invoices is …" must never rewrite the property
 // the techs route to.
-const PURPOSE_ADDRESS_RE = /\b(?:address|street)\s+(?:is\s+)?for\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
+const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\bfor\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
 
 // A value marked as OLD contact data with no replacement direction is the
 // value being RETIRED, not the correction (r41): "for reference, my old
 // email is old@example.com" must never overwrite the current mailbox.
 const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
+// Negated direction verbs never count as replacement direction (r42):
+// "do not use my old email …" is a retirement, not a correction.
+const NEGATED_DIRECTION_RE = /\b(?:do\s+not|don'?t|no\s+longer|stop|never|cannot|can'?t|won'?t)\s+(?:us(?:e|ing)|send|reply|email|contact|write)\b/i;
 const REPLACEMENT_DIRECTION_RE = /\b(?:wrong|incorrect|misspell\w*|should\s+be|is\s+now|now\s+is|use|chang\w*\s+(?:it\s+)?to|updat\w*\s+(?:it\s+)?to|instead|new|correct)\b/i;
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
@@ -1019,7 +1023,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // best-effort, and if it fails the null coords are what the
       // geocoder's backstop selects for retry — coords left pointing at
       // the OLD property would route the tech there indefinitely.
-      if (ADDRESS_FIELDS.some((f) => updates[f] !== undefined)) {
+      // Only GEOCODED components clear coords (r42): buildAddress ignores
+      // the unit, so a line2-only fix keeps the still-valid coordinates —
+      // a failed post-commit lookup must not drop the customer from
+      // routing over a unit edit.
+      if (['address_line1', 'city', 'state', 'zip'].some((f) => updates[f] !== undefined)) {
         updates.latitude = null;
         updates.longitude = null;
       }
@@ -1057,10 +1065,9 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // the fan-out keeps sending the wrong values from the copies.
       const addressChanged = ADDRESS_FIELDS.some((f) => updates[f] !== undefined);
       if (addressChanged) {
-        // Stale coords must not survive an address change — clear them in
-        // the same statement window; the canonical admin path then
-        // re-geocodes post-commit (mirrored below).
-        await trx('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
+        // Stale-coord clearing rides the main update itself (r29/r42, see
+        // the geocoded-component guard above) — a unit-only fix keeps its
+        // still-valid coordinates.
         // Sparse-mirror guard (round-15): syncPrimaryAddress derives the
         // primary property's street/zip/key from the CUSTOMER row, so when
         // the mirror is incomplete (e.g. recordCallProperty created the

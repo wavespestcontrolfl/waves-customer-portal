@@ -3398,3 +3398,45 @@ describe('round-41 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-42 hardening', () => {
+  it("'do not use my old email' never applies the retired mailbox", async () => {
+    const body = 'Do not use my old email old@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: 'do not use my old email old@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a purpose address with intervening direction phrases is still rejected', async () => {
+    const body = 'The new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'the new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'the new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'the new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'the new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a unit-only correction keeps the still-valid coordinates', async () => {
+    const knex = makeStubKnex({
+      customers: [{ ...baseCustomer(), latitude: 27.1, longitude: -82.4 }],
+      agent_decisions: [],
+    });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: '4B', quote: 'my unit is wrong, it is 4B', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My unit is wrong, it is 4B', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['address_line2']);
+    expect(knex._data.customers[0].latitude).toBe(27.1);
+    expect(knex._data.customers[0].longitude).toBe(-82.4);
+  });
+});
