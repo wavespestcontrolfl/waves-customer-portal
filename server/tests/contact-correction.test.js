@@ -4209,3 +4209,51 @@ describe('round-60 hardening', () => {
     expect(cityAcceptedForZip('34212', 'Venice')).toBe(false);
   });
 });
+
+describe('round-61 hardening', () => {
+  it('a lowercase former-holder disclaimer vetoes the batch', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "i'm not john anymore. my email is wrong; use newholder@example.com", knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it("a lowercase third-person 'doesn't use this number' vetoes too", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'x@example.com', quote: 'the email should be x@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "john doesn't use this number anymore. the email should be x@example.com", knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it("'not home anymore' move phrasing is NOT an identity disclaimer", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "we're not home anymore, we moved to 99 Pine Ave, Sarasota. Zip is 34231", knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line1');
+  });
+
+  it('a sender retiring their OWN number is still the customer', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, use me@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "i don't use this number much, my email is wrong, use me@example.com", knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+});

@@ -290,7 +290,7 @@ async function extractSmsContactCorrections({ body }) {
     // and none of their corrections belong on the former owner's record.
     // The name form requires a capitalized token so "I'm not sure …"
     // stays harmless.
-    if (WRONG_PERSON_RE.test(String(body || '').replace(/[\u2018\u2019]/g, "'"))) return [];
+    if (wrongPersonDetected(String(body || '').replace(/[\u2018\u2019]/g, "'"))) return [];
     const res = await callAnthropic({
       model: MODELS.FAST,
       system: EXTRACT_SYSTEM,
@@ -666,6 +666,18 @@ const NEGATED_NAME_RE = /\b(?:name|surname)\s+(?:is\s+not|isn'?t|was|used\s+to\s
 // <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
 // "I am not happy" never trip it.
 const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b|\b(?:[A-Z][a-z]+|[A-Z]{2,})\s+(?:no\s+longer\s+(?:has|uses)|doesn'?t\s+(?:have|use)|does\s+not\s+(?:have|use)|used\s+to\s+have|stopped\s+using)\s+this\s+(?:number|phone)(?:\s+anymore)?\b/;
+
+// Lowercase former-holder declarations (codex #3413 r61): SMS routinely
+// arrives all-lowercase, so the capitalized-name branches above miss
+// "i'm not john anymore" / "john doesn't use this number". The
+// case-insensitive net keeps the false-positive guards structurally:
+// the identity branch requires a temporal tail (anymore/now) and
+// excludes non-name fillers ("I'm not home anymore" is a MOVE, not a
+// disclaimer), and the uses-this-number branch excludes first/second
+// person subjects (a sender retiring their own number is still the
+// customer).
+const WRONG_PERSON_CI_RE = /\b(?:i'?m\s+not|i\s+am\s+not|this\s+is\s+not|this\s+isn'?t|it\s+is\s+not|it\s+isn'?t)\s+(?!(?:home|here|there|sure|around|local|available|interested|living|staying|moving|coming|going|happy|able|certain|renewing|paying)\b)[a-z][a-z'-]+\s+(?:any\s*more|anymore|now)\b|\b(?!(?:i|we|you)\b)[a-z][a-z'-]+\s+(?:no\s+longer\s+(?:has|uses)|doesn'?t\s+(?:have|use)|does\s+not\s+(?:have|use)|used\s+to\s+have|stopped\s+using)\s+this\s+(?:number|phone)\b/i;
+const wrongPersonDetected = (text) => WRONG_PERSON_RE.test(text) || WRONG_PERSON_CI_RE.test(text);
 
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.
@@ -1604,7 +1616,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // correction — names AND proposals — belongs to the number's new
     // holder. Checked on the ORIGINAL-CASE lines, since the name form
     // requires a capitalized token.
-    if (rawCallerLines.some((line) => WRONG_PERSON_RE.test(line.replace(/[\u2018\u2019]/g, "'")))) {
+    if (rawCallerLines.some((line) => wrongPersonDetected(line.replace(/[\u2018\u2019]/g, "'")))) {
       return { applied: [], skipped: [{ field: null, reason: 'identity_disclaimed' }], reason: 'identity_disclaimed' };
     }
     const callerLines = rawCallerLines.map((line) => line.toLowerCase());
