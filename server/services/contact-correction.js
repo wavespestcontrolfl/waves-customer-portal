@@ -294,7 +294,13 @@ async function extractSmsContactCorrections({ body }) {
     const res = await callAnthropic({
       model: MODELS.FAST,
       system: EXTRACT_SYSTEM,
-      text: `Inbound customer SMS:\n"""${text.slice(0, 1500)}"""`,
+      // The COMPLETE body goes to the extractor (codex #3413 r57): the
+      // prefilter examined all of it, so truncating here would silently
+      // drop a correction near the end of a long concatenated SMS and
+      // finalize the job none_detected with no replay (durable SID
+      // claim). Twilio bounds inbound SMS at 1,600 chars — transport is
+      // the cap, not this call site.
+      text: `Inbound customer SMS:\n"""${text}"""`,
       jsonMode: true,
       maxTokens: 500,
       // Deadline WELL below the queue's 10-minute worker lease (codex
@@ -640,7 +646,7 @@ function valueNegatedInQuote(quote, value) {
 // "Starting next month, my email will change to …" must wait for the
 // customer's present-tense confirmation, not switch fan-outs weeks
 // early.
-const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\b(?:will\s+move|will\s+be\s+moving|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move)\s+(?:to|into)\b|(?:\b(?:am|are|is)|['’](?:m|re))\s+moving\s+(?:to|into)\b[^.;!?\n]{0,80}(?:next\s+(?:week(?:end)?|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|this\s+(?:coming\s+)?(?:week(?:end)?|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:a|an|two|three|four|five|six|seven|eight|nine|ten|a\s+couple(?:\s+of)?|a\s+few|\d+)\s+(?:day|week|month|year)s?\b|on\s+(?:the\s+\d{1,2}(?:st|nd|rd|th)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|(?:later|at\s+the\s+end\s+of)\s+(?:the\s+|this\s+)?(?:week|month|year)|\d{1,2}\/\d{1,2})|(?:next\s+(?:week(?:end)?|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|this\s+(?:coming\s+)?(?:week(?:end)?|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:a|an|two|three|four|five|six|seven|eight|nine|ten|a\s+couple(?:\s+of)?|a\s+few|\d+)\s+(?:day|week|month|year)s?\b|on\s+(?:the\s+\d{1,2}(?:st|nd|rd|th)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|(?:later|at\s+the\s+end\s+of)\s+(?:the\s+|this\s+)?(?:week|month|year)|\d{1,2}\/\d{1,2})[^.;!?\n]{0,60}(?:\b(?:am|are|is)|['’](?:m|re))\s+moving\s+(?:to|into)\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
+const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\b(?:will\s+move|will\s+be\s+moving|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move)\s+(?:to|into)\b|(?:\b(?:am|are|is)|['’](?:m|re))\s+moving\s+(?:to|into)\b[^.;!?\n]{0,80}(?:next\s+(?:week(?:end)?|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|this\s+(?:coming\s+)?(?:week(?:end)?|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:a|an|two|three|four|five|six|seven|eight|nine|ten|a\s+couple(?:\s+of)?|a\s+few|\d+)\s+(?:day|week|month|year)s?\b|on\s+(?:the\s+\d{1,2}(?:st|nd|rd|th)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|(?:later|at\s+the\s+end\s+of)\s+(?:the\s+|this\s+)?(?:week|month|year)|\d{1,2}\/\d{1,2})|(?:next\s+(?:week(?:end)?|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|this\s+(?:coming\s+)?(?:week(?:end)?|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:a|an|two|three|four|five|six|seven|eight|nine|ten|a\s+couple(?:\s+of)?|a\s+few|\d+)\s+(?:day|week|month|year)s?\b|on\s+(?:the\s+\d{1,2}(?:st|nd|rd|th)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|(?:later|at\s+the\s+end\s+of)\s+(?:the\s+|this\s+)?(?:week|month|year)|\d{1,2}\/\d{1,2})[^.;!?\n]{0,60}(?:\b(?:am|are|is)|['’](?:m|re))\s+moving\s+(?:to|into)\b|\b(?:change|switch|update|correct)(?:s|ing)?\b[^,;.!?\n]{0,80}(?:next\s+(?:week(?:end)?|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|this\s+(?:coming\s+)?(?:week(?:end)?|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:a|an|two|three|four|five|six|seven|eight|nine|ten|a\s+couple(?:\s+of)?|a\s+few|\d+)\s+(?:day|week|month|year)s?\b|on\s+(?:the\s+\d{1,2}(?:st|nd|rd|th)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|(?:later|at\s+the\s+end\s+of)\s+(?:the\s+|this\s+)?(?:week|month|year)|\d{1,2}\/\d{1,2})|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
 
 // A CONDITION-scoped change is not a present correction (r50): "if I
 // accept the offer, my new email is …" must not switch anything before
@@ -993,9 +999,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
         const cohZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
         const cohCity = byField.has('city') ? byField.get('city').newValue : normValue(before.city);
         if (cohZip && cohCity) {
-          const { zipToCity } = require('../utils/zip-to-city');
-          const knownCity = zipToCity(cohZip);
-          if (knownCity && knownCity.toLowerCase() !== cohCity.toLowerCase()) {
+          const { zipToCity, cityAcceptedForZip } = require('../utils/zip-to-city');
+          // Alias-aware (r57): community names the repo already treats as
+          // postal-city aliases (Lakewood Ranch for 34202/34211, Siesta
+          // Key for 34242, …) are accepted alongside the USPS primary.
+          if (zipToCity(cohZip) && !cityAcceptedForZip(cohZip, cohCity)) {
             rejectAddressGroup('city_zip_mismatch');
           }
         }

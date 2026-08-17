@@ -3979,3 +3979,72 @@ describe('round-56 hardening', () => {
     expect(res.applied.map((a) => a.field)).toContain('address_line1');
   });
 });
+
+describe('round-57 hardening', () => {
+  it('a trailing effective date defers an email change', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'change my email to future@example.com next month', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Please change my email to future@example.com next month', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('an immediate change with an unrelated dated clause still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my email is wrong, change it to now@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My email is wrong, change it to now@example.com, and see you on Friday', knex });
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+
+  it('a Lakewood Ranch alias city with its real ZIP is accepted', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Lakewood Ranch', quote: 'we moved to 99 Pine Ave, Lakewood Ranch', confidence: 'high' },
+          { field: 'zip', new_value: '34211', quote: 'zip is 34211', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Lakewood Ranch. Zip is 34211', knex });
+    expect(res.applied.map((a) => a.field)).toContain('city');
+  });
+
+  it('a non-alias wrong city with that ZIP still rejects', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Venice', quote: 'we moved to 99 Pine Ave, Venice', confidence: 'high' },
+          { field: 'zip', new_value: '34211', quote: 'zip is 34211', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Venice. Zip is 34211', knex });
+    expect(res.applied).toEqual([]);
+  });
+
+  it('a correction at the tail of a long concatenated SMS reaches the extractor', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const filler = 'Thanks for the great service last visit. '.repeat(40);
+    const body = `${filler}Also, my email is wrong, it should be tail@example.com`;
+    expect(body.length).toBeGreaterThan(1500);
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'tail@example.com', quote: 'my email is wrong, it should be tail@example.com', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    const sentText = mockCallAnthropic.mock.calls[mockCallAnthropic.mock.calls.length - 1][0].text;
+    expect(sentText).toContain('tail@example.com');
+    expect(res.applied.map((a) => a.field)).toContain('email');
+  });
+});
