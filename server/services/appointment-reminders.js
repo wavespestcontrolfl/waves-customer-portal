@@ -60,7 +60,11 @@ const SELF_HEAL_REGISTRATION_LIMIT = 25;
 // Visits booked after it always keep the booking-path window boundaries,
 // however late their registration heals (codex #3429 r4 P1: a relative
 // lateness test would also silence future bookings delayed by an outage).
-const NO_CATCHUP_BACKLOG_CUTOFF = new Date('2026-08-17T04:00:00Z');
+// Set BEFORE this change's own commit instant (r5 P2), so no booking
+// created after any possible deployment of this code can classify as
+// backlog; the residual pre-deploy sliver misclassifies in the safe
+// direction (normal boundaries — a reminder may send).
+const NO_CATCHUP_BACKLOG_CUTOFF = new Date('2026-08-17T02:59:00Z');
 
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
