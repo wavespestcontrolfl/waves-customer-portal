@@ -193,14 +193,15 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
-    // LIVE payer re-resolution for siblings (codex r4 P1): a payer assigned
-    // after mint lives on scheduled_services (or as the customer's default
-    // payer) while invoices.payer_id stays null — the same reason the
-    // initial selection resolves live. Fail CLOSED: a resolve failure or a
-    // resolved payer both refuse (payer-billed debt is never the
-    // homeowner's to pay). The ANCHOR is exempt — its own /pay surface
-    // already refuses payer-billed anchors at every seam.
-    if (String(row.id) !== String(anchorInvoiceId)) {
+    // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
+    // anchor exemption removed per codex r5 P1): a payer assigned after
+    // invoice creation lives on scheduled_services (or as the customer's
+    // default payer) while invoices.payer_id stays null — the pay POSTs
+    // load the raw anchor row, so without this live resolve the anchor
+    // passes every seam and the homeowner is charged debt now owned by
+    // third-party AP. Fail CLOSED: a resolve failure or a resolved payer
+    // both refuse (payer-billed debt is never the homeowner's to pay).
+    {
       const PayerService = require('./payer');
       try {
         const resolved = await PayerService.resolveForInvoice({
@@ -349,7 +350,12 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       .where({ stripe_payment_intent_id: piId, status: 'disputed' })
       .first('id');
     if (disputedRow) {
-      throw new Error('This payment was disputed after it succeeded — the invoices cannot be re-marked paid from the old payment session');
+      // Coded so the webhook records the orphan for the operator instead of
+      // retrying a permanently-fenced settle forever (a pre-settlement
+      // dispute marker also raises this — codex r5 P1).
+      const disputedErr = new Error('This payment was disputed after it succeeded — the invoices cannot be re-marked paid from the old payment session');
+      disputedErr.code = 'COMBINED_PI_DISPUTED';
+      throw disputedErr;
     }
 
     const existingRows = await trx('payments').where({ stripe_payment_intent_id: piId });

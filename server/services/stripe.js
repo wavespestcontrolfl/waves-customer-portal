@@ -3137,6 +3137,10 @@ const StripeService = {
     let coveredByCredit = false;
     let captureHeld = false;
     let combinedSummary = null;
+    // Non-null between a reused PI's Stripe update and the DB commit — the
+    // window where Stripe already carries a new amount/allocation the DB may
+    // yet refuse (codex r5 P1). The catch cancels the PI when set.
+    let mutatedReusedPiId = null;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -3486,6 +3490,13 @@ const StripeService = {
               updateParams.setup_future_usage = '';
             }
             paymentIntent = await stripe.paymentIntents.update(activeIntent.id, updateParams);
+            // Stripe now holds the NEW amount/allocation while the DB writes
+            // below can still roll back — flag the mutation so the catch can
+            // cancel the PI if they do (codex r5 P1): a previously opened
+            // tab retains this PI's client secret and could confirm the
+            // inflated combined total its session never displayed. Cleared
+            // after the transaction commits.
+            mutatedReusedPiId = paymentIntent.id;
             const invoiceUpdated = await trx('invoices')
               .where({ id: invoiceId })
               .whereNotIn('status', ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
@@ -3615,6 +3626,9 @@ const StripeService = {
         if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
         await stampCombinedSiblings(paymentIntent.id);
       });
+      // The transaction committed — the DB now backs whatever amount and
+      // allocation the reused PI carries, so the mutation needs no rollback.
+      mutatedReusedPiId = null;
 
       if (coveredByCredit) {
         if (captureHeld) {
@@ -3655,6 +3669,24 @@ const StripeService = {
         ...(combinedSummary ? { combined: combinedSummary } : {}),
       };
     } catch (err) {
+      // A reused PI was updated at Stripe but the DB transaction rolled back
+      // (codex r5 P1): the PI now carries an amount/metadata no committed row
+      // backs, the invoice still points at it, and an open tab's client
+      // secret could confirm a total its session never displayed. Cancel it,
+      // clear every stamp, and unbind the anchor so the next setup mints
+      // fresh. Runs for 409s too — a staleBalance refusal is exactly the
+      // rolled-back-after-update case.
+      if (mutatedReusedPiId) {
+        try {
+          await stripe.paymentIntents.cancel(mutatedReusedPiId);
+          await require('./pay-combined').clearPaymentIntentStamps(db, mutatedReusedPiId);
+          await db('invoices')
+            .where({ id: invoiceId, stripe_payment_intent_id: mutatedReusedPiId })
+            .update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+        } catch (restoreErr) {
+          logger.error(`[stripe] FAILED to cancel mutated reused PI ${mutatedReusedPiId} after rolled-back setup for invoice ${invoiceId}: ${restoreErr.message} — a stale client secret may confirm an amount the DB does not back; manual review needed`);
+        }
+      }
       if (err.statusCode) {
         if (savedCardChargeNeedsReconciliation(err)) {
           // The locked check aborts its invoice transaction before this catch.
@@ -3670,7 +3702,7 @@ const StripeService = {
         logger.warn(`[stripe] Invoice PaymentIntent setup blocked for invoice ${invoiceId}: ${err.message}`);
         throw err;
       }
-      if (paymentIntent?.id) {
+      if (paymentIntent?.id && String(paymentIntent.id) !== String(mutatedReusedPiId || '')) {
         try {
           const currentInvoice = await db('invoices').where({ id: invoiceId }).first();
           if (String(currentInvoice?.stripe_payment_intent_id || '') !== String(paymentIntent.id)) {

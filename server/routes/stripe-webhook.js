@@ -1194,6 +1194,15 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
       return;
     }
+    if (err.code === 'COMBINED_PI_DISPUTED') {
+      // A dispute (possibly pre-settlement — codex r5 P1) already clawed
+      // this money back: settling would mark invoices paid on funds that
+      // are gone. Terminal for this event — record the orphan for the
+      // operator instead of retrying forever.
+      logger.error(`[stripe-webhook] Refusing to settle disputed combined PI ${piId}: ${err.message}`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
+      return;
+    }
     throw err; // infrastructure failure → 500 → Stripe redelivers
   }
 
@@ -1227,6 +1236,15 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   await mirrorSavedMethodForSucceededIntent(paymentIntent);
 
   await maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated);
+
+  // Admin bell + push (codex r5 P2): the same one-shot PI-deduped notifier
+  // the single-invoice path fires — a combined card charge or cleared ACH
+  // debit is real revenue and must ring the same bell. Fire-and-forget for
+  // the same reason as the single path (never gate the webhook 2xx on
+  // notification fan-out).
+  notifyPaymentSuccess(paymentIntent).catch((err) => {
+    logger.warn(`[stripe-webhook] combined payment_succeeded notify failed: ${err.message}`);
+  });
 }
 
 async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
@@ -4580,6 +4598,26 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
   }, { eventCreated });
 
   const anchorInvoiceId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
+
+  // Stamp the SIBLING acknowledgment claims (codex r5 P1): every allocated
+  // invoice just moved to 'processing' with this PI, but only the anchor's
+  // claim is consumed by the combined-total notice below — a null sibling
+  // claim would make sweepUnacknowledgedAchProcessingAcks send additional
+  // per-invoice ACH acks after the customer already got the combined one.
+  // If the anchor's notice fails, the sweep rescue runs through the ANCHOR
+  // row (its claim is released/never taken), so stamping siblings first
+  // loses nothing.
+  const combinedSiblingIds = allocation
+    .map((a) => a.invoiceId)
+    .filter((id) => String(id) !== String(anchorInvoiceId));
+  if (combinedSiblingIds.length) {
+    await db('invoices')
+      .whereIn('id', combinedSiblingIds)
+      .where({ stripe_payment_intent_id: piId, status: 'processing' })
+      .whereNull('ach_processing_notified_at')
+      .update({ ach_processing_notified_at: new Date() });
+  }
+
   setImmediate(() => {
     dispatchAchProcessingAcknowledgment({
       invoiceId: anchorInvoiceId,
@@ -5058,6 +5096,26 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
       logger.info(`[stripe-webhook] ACH ack sweep skipping invoice ${row.invoice_number || row.id}: PI ${pi.id} is ${isBankDebit ? `status=${pi.status}` : `non-ACH (${methodTypes.join(',') || 'unknown'})`} — not an in-flight bank transfer`);
       continue;
     }
+    // Combined full-balance PI (codex r5 P1): the notice is COMBINED-total,
+    // dispatched once through the anchor. A swept SIBLING (missed the
+    // handler's claim stamp — e.g. a pre-stamping deploy) is covered by the
+    // anchor's notice: consume its claim without sending. A swept ANCHOR
+    // re-acknowledges with the ALLOCATION total, not its own row's amount.
+    let combinedAllocationForAck = null;
+    try {
+      combinedAllocationForAck = require('../services/pay-combined').parseCombinedAllocation(pi.metadata);
+    } catch { combinedAllocationForAck = null; }
+    if (combinedAllocationForAck) {
+      const ackAnchorId = pi.metadata?.waves_invoice_id || combinedAllocationForAck[0].invoiceId;
+      if (String(ackAnchorId) !== String(row.id)) {
+        await db('invoices')
+          .where({ id: row.id, stripe_payment_intent_id: row.stripe_payment_intent_id, status: 'processing' })
+          .whereNull('ach_processing_notified_at')
+          .update({ ach_processing_notified_at: new Date() });
+        logger.info(`[stripe-webhook] ACH ack sweep: invoice ${row.invoice_number || row.id} is a combined sibling of PI ${pi.id} — claim stamped, anchor notice covers it`);
+        continue;
+      }
+    }
     const priorEmailAttempt = await db('email_messages')
       .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
       .first('id')
@@ -5066,7 +5124,9 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     // (cash + applied credit) — subtract the credit back out so the
     // email states the actual bank transfer, never an overstated total
     // (sendAchProcessing's own fallback is the gross total).
-    const cashAmount = Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
+    const cashAmount = combinedAllocationForAck
+      ? require('../services/pay-combined').allocationTotalCents(combinedAllocationForAck) / 100
+      : Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
     logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,
@@ -5440,6 +5500,37 @@ async function handleDisputeCreated(dispute) {
       try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
     };
     if (combinedRows.length && combinedRows.some((r) => parseMeta(r).combined_payment)) {
+      // PARTIAL dispute (codex r5 P1): Stripe can dispute part of a charge.
+      // A charge-level partial cannot be attributed to a specific share
+      // (same reasoning as the partial-refund branch) — reopening EVERY
+      // invoice would make dunning chase the whole combined balance when
+      // only dispute.amount was withdrawn. Park it for the operator and
+      // touch nothing.
+      const combinedFullCents = combinedRows.reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      if (Number(dispute.amount) < combinedFullCents) {
+        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} ($${amount} of $${(combinedFullCents / 100).toFixed(2)}) on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
+        await db('stripe_orphan_charges')
+          .insert({
+            stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute`,
+            stripe_charge_id: chargeId,
+            customer_id: combinedRows[0]?.customer_id || null,
+            invoice_id: null,
+            amount: Number(amount),
+            source: 'combined_pay_webhook',
+            original_db_error: `Partial dispute ${dispute.id} of $${amount} on a combined balance charge (${reason}) — attribute and reconcile manually`,
+          })
+          .onConflict('stripe_payment_intent_id')
+          .ignore();
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `PARTIAL dispute on combined payment: $${amount}`,
+            `Dispute ${dispute.id} withdrew $${amount} of a $${(combinedFullCents / 100).toFixed(2)} combined charge ${chargeId} (${reason}). Shares can't be auto-attributed — reconcile manually AND respond with evidence in the Stripe dashboard.`,
+            { icon: '⚠️', link: '/admin/revenue' },
+          );
+        } catch (err) { logger.error(`[stripe-webhook] Combined partial-dispute notification failed: ${err.message}`); }
+        return;
+      }
       for (const row of combinedRows) {
         const meta = parseMeta(row);
         // Same late-replay guard as the single path: a dispute already
@@ -5459,18 +5550,22 @@ async function handleDisputeCreated(dispute) {
           // prepaid coverage must not ride on provisionally clawed-back
           // money — SUSPEND any live term this invoice paid for; the
           // closure branches re-activate (won) or cancel (lost) it.
-          try {
+          // ATOMIC with the reopen and UNCAUGHT (codex r5 P1, mirroring
+          // the single-invoice created path): a swallowed suspend would
+          // mark the event processed with coverage still riding on
+          // clawed-back money; a rollback fails the event and Stripe
+          // retries it, and the world only ever sees suspended-term +
+          // reopened-invoice together.
+          await db.transaction(async (trx) => {
             await require('../services/annual-prepay-renewals')
-              .suspendActiveTermsForDisputedInvoice(rowInvoice.id, db);
-          } catch (termErr) {
-            logger.warn(`[stripe-webhook] combined dispute term suspend failed for invoice ${rowInvoice.id}: ${termErr.message}`);
-          }
-          await db('invoices').where({ id: rowInvoice.id }).update({
-            status: 'overdue',
-            paid_at: null,
-            stripe_payment_intent_id: null,
-            stripe_charge_id: null,
-            updated_at: db.fn.now(),
+              .suspendActiveTermsForDisputedInvoice(rowInvoice.id, trx);
+            await trx('invoices').where({ id: rowInvoice.id }).update({
+              status: 'overdue',
+              paid_at: null,
+              stripe_payment_intent_id: null,
+              stripe_charge_id: null,
+              updated_at: trx.fn.now(),
+            });
           });
         }
       }
@@ -5490,6 +5585,58 @@ async function handleDisputeCreated(dispute) {
   // These are critical ledger writes: no .catch — a failure must
   // propagate so the event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  // Combined PI disputed BEFORE settlement (codex r5 P1): no payments rows
+  // exist yet, so the combined block above fell through — but the later
+  // combined succeeded/processing settle would mark every allocated invoice
+  // paid on money already clawed back. Persist a durable disputed marker on
+  // the PI; settleCombinedPaymentIntent's disputed-row fence refuses to
+  // settle while it stands (the succeeded handler records the orphan for
+  // the operator), and dispute.closed(won) flips the marker to 'paid',
+  // lifting the fence so a legitimate settle can proceed. Mirrors the
+  // statement and appointment-fee pre-settlement mechanisms.
+  if (!payment && dispute.payment_intent) {
+    const preStripe = getStripe();
+    if (preStripe) {
+      let disputedPi = null;
+      try {
+        disputedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
+      } catch (piErr) {
+        // Fail CLOSED: an unreadable PI could be a combined one — retry.
+        throw new Error(`Dispute ${dispute.id} pre-settlement PI ${dispute.payment_intent} unreadable (${piErr.message}); retry`);
+      }
+      if (require('../services/pay-combined').isCombinedPiMetadata(disputedPi?.metadata)) {
+        await db('payments').insert({
+          customer_id: null,
+          processor: 'stripe',
+          stripe_payment_intent_id: dispute.payment_intent,
+          stripe_charge_id: chargeId,
+          payment_date: etDateString(),
+          amount: Number(amount),
+          status: 'disputed',
+          failure_reason: `Dispute: ${reason}`,
+          description: 'Combined balance charge disputed before settlement (marker)',
+          metadata: JSON.stringify({
+            combined_payment: true,
+            pre_settlement: true,
+            dispute_id: dispute.id,
+            combined_anchor_invoice_id: disputedPi.metadata?.waves_invoice_id || null,
+            waves_customer_id: disputedPi.metadata?.waves_customer_id || null,
+          }),
+        });
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `Combined payment disputed pre-settlement: $${amount}`,
+            `Dispute ${dispute.id} on combined PI ${dispute.payment_intent} arrived before settlement (${reason}) — settlement is fenced. Respond with evidence in the Stripe dashboard.`,
+            { icon: '⚠️', link: '/admin/invoices' },
+          );
+        } catch (err) { logger.error(`[stripe-webhook] Combined pre-settlement dispute notification failed: ${err.message}`); }
+        return;
+      }
+    }
+  }
+
   let createdPaymentMeta = {};
   if (payment) {
     try {
@@ -5663,6 +5810,23 @@ async function handleDisputeClosed(dispute) {
       try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
     };
     if (combinedClosedRows.length && combinedClosedRows.some((r) => rowMetaOf(r).combined_payment)) {
+      // PARTIAL dispute closing (codex r5 P1): the created handler parked it
+      // (no statuses touched) because a charge-level partial can't be
+      // attributed to a share — the closure must not apply the full-charge
+      // transition either. Stamp nothing, notify, leave for the operator.
+      const combinedClosedFullCents = combinedClosedRows.reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      if (Number(dispute.amount) < combinedClosedFullCents) {
+        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — parked at created, still needs manual reconcile`);
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `PARTIAL combined dispute ${status}: $${amount}`,
+            `Partial dispute ${dispute.id} on combined charge ${chargeId} closed as ${status}. Shares were never auto-attributed — reconcile manually in /admin/revenue.`,
+            { icon: status === 'won' ? '✅' : '❌', link: '/admin/revenue' },
+          );
+        } catch { /* non-critical */ }
+        return;
+      }
       let restoredCount = 0;
       for (const row of combinedClosedRows) {
         const meta = rowMetaOf(row);
@@ -5688,12 +5852,12 @@ async function handleDisputeClosed(dispute) {
               restoredCount += 1;
               // Recovery sync on the restored money (codex r4 P1): a paid
               // prepay invoice re-activates its dispute-suspended term.
-              try {
-                const freshWon = await db('invoices').where({ id: invoice.id }).first();
-                if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
-              } catch (termErr) {
-                logger.warn(`[stripe-webhook] combined dispute-won term sync failed for invoice ${invoice.id}: ${termErr.message}`);
-              }
+              // UNCAUGHT (codex r5 P1): a swallowed failure marks the event
+              // processed with the term stranded in payment_pending even
+              // though the invoice is back to paid — propagate so Stripe
+              // redelivers and the idempotent loop re-runs the sync.
+              const freshWon = await db('invoices').where({ id: invoice.id }).first();
+              if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
             }
           }
         } else if (status === 'lost') {
@@ -5703,18 +5867,36 @@ async function handleDisputeClosed(dispute) {
             metadata: finalRowMeta,
           });
           if (invId) {
-            await db('invoices')
-              .where({ id: invId })
-              .whereIn('status', ['paid', 'processing'])
-              .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+            // Replacement-payment guard (codex r5 P1, exactly the single
+            // path's): if dispute.created reopened this invoice and the
+            // customer already re-paid it (a DIFFERENT live PI now backs
+            // it), the lost closure must not clear that valid payment and
+            // reopen collection a third time — and must not claw back the
+            // coverage the replacement money funds.
+            const lostInvoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
+            const lostDisputedPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            const lostStatus = String(lostInvoice?.status || '').toLowerCase();
+            if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
+              && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
+              await db('invoices')
+                .where({ id: invId })
+                .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+            }
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
-            // prepaid coverage this invoice funded, exactly like the
-            // single-invoice lost path.
-            try {
+            // prepaid coverage this invoice funded — but only when the
+            // DISPUTED payment still owns the invoice: PI match above, or
+            // the created-reopen shape (PI cleared, invoice sitting
+            // 'overdue' under this dispute's recorded binding). UNCAUGHT
+            // (codex r5 P1): critical lifecycle write, propagate for
+            // Stripe redelivery.
+            const lostDisputeOwnsInvoice = !!lostInvoice && (
+              (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
+              || (!lostInvoicePi && lostStatus === 'overdue')
+            );
+            if (lostDisputeOwnsInvoice) {
               await require('../services/annual-prepay-renewals')
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
-            } catch (termErr) {
-              logger.warn(`[stripe-webhook] combined dispute-lost term sync failed for invoice ${invId}: ${termErr.message}`);
             }
           }
         } else {
