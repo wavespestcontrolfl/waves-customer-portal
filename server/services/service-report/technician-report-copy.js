@@ -80,6 +80,11 @@ const REPORT_ACCESS_CODE_RES = [
   // ("the gate password is sunshineflorida") — concatenated-word
   // credentials routinely exceed the 12-char bound above (codex r78)
   /\b(?:passcode|password|passphrase)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,31}(?:-[a-z0-9#*]{1,15}){0,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
+  // ... and behind the continuing-state linkers too ("the gate password
+  // remains sunshineflorida") — descriptor prose is screened by the same
+  // stopword + -ly/-ed/-ing exclusions the multiword branch uses
+  // (codex r81)
+  /\b(?:passcode|password|passphrase)\b\s*(?:was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?!(?:the|a|an|same|not|no|still|confidential|private|secure|secured|protected|hidden|unchanged|active|valid|current|correct|operational|functional|effective|intact|okay|fine|good|stable|consistent|working|case|known|unknown|required|optional)\b)(?![a-z]+(?:ly|ed|ing)\b)["'‘’“”]?[a-z][a-z0-9#*]{3,31}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // continuing-state linkers (was/remains/stays/became/continue-to-be/
   // has-been/modal-be/going-to-be/changed-to) bind lowercase tokens too
   // (codex r72) — but ONLY hyphenated ones: after "was"/"remains" a plain

@@ -12060,11 +12060,14 @@ export function CompletionPanel({
     // added now would land in the submitted structured data but not in the prose
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
+    // The duplicate check runs FIRST (codex r81): re-clicking an
+    // already-selected product's search result changes nothing and must
+    // not clear a valid untouched report.
+    if (selectedProducts.find((p) => p.productId === product.id)) return;
     // Products feed the generation grounding (and T&S derives its treatments
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
-    if (selectedProducts.find((p) => p.productId === product.id)) return;
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,

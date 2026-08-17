@@ -331,6 +331,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // allow-pets timing, long continuing-state passwords (r81)
+    expect(reportCopyRejection('Wait thirty minutes before allowing pets onto the treated lawn.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate password remains sunshineflorida.')).toBe('access_code');
+    expect(reportCopyRejection('The password remains confidential per policy.')).toBeNull();
     // indoor-wait timing forms + non-treatment timing confirmations (r80)
     expect(reportCopyRejection('Keep pets indoors for thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Keep pets inside for 30 minutes.')).toMatch(/^banned:/);
