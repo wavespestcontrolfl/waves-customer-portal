@@ -603,7 +603,7 @@ const THIRD_PARTY_CONTACT_RE = new RegExp(
 // delivery address is not the SERVICE address this lane maintains —
 // "The new address for invoices is …" must never rewrite the property
 // the techs route to.
-const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|in)\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:invoices?|invoicing|billing|bills?|receipts?|correspondence|statements?|paperwork|payments?)\b[^.;!?\n]{0,30}\b(?:to|at)\s+(?:this\s+|the\s+|my\s+|our\s+|a\s+)?(?:new\s+)?address\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
+const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|in)\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:invoices?|invoicing|billing|bills?|receipts?|correspondence|statements?|paperwork|payments?)\b[^.;!?\n]{0,30}\b(?:to|at)\s+(?:this\s+|the\s+|my\s+|our\s+|a\s+)?(?:new\s+)?address\b|\baddress\b[^.;!?\n]{0,30}\b(?:to\s+)?(?:send|mail|forward|deliver|use)\b[^.;!?\n]{0,20}\b(?:invoices?|invoicing|billing|bills?|receipts?|statements?|correspondence|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
 
 // A value marked as OLD contact data with no replacement direction is the
 // value being RETIRED, not the correction (r41): "for reference, my old
@@ -614,7 +614,7 @@ const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+
 // to the number's new holder, not the linked customer. The bare "I'm not
 // <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
 // "I am not happy" never trip it.
-const WRONG_PERSON_RE = /\b(?:I'?m|I\s+am|[Tt]his\s+is)\s+not\s+[A-Z][a-z]+\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
+const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+[A-Z][a-z]+\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
 
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.
@@ -1512,11 +1512,20 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // speech to the caller — a transcript without Caller labels (or with no
     // transcript at all) grounds nothing (fail closed). Applies to BOTH
     // lanes — name auto-apply and the proposal bell.
-    const callerLines = String(call?.transcription || '')
+    const rawCallerLines = String(call?.transcription || '')
       .split(/\r?\n/)
       .filter((line) => /^\s*caller\s*:/i.test(line))
-      .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
+      .map((line) => line.replace(/\s+/g, ' ').trim())
       .filter(Boolean);
+    // A caller disclaiming the linked customer's identity kills the WHOLE
+    // batch (codex #3413 r45): "I'm not John anymore" means every stated
+    // correction — names AND proposals — belongs to the number's new
+    // holder. Checked on the ORIGINAL-CASE lines, since the name form
+    // requires a capitalized token.
+    if (rawCallerLines.some((line) => WRONG_PERSON_RE.test(line))) {
+      return { applied: [], skipped: [{ field: null, reason: 'identity_disclaimed' }], reason: 'identity_disclaimed' };
+    }
+    const callerLines = rawCallerLines.map((line) => line.toLowerCase());
     const quoteGrounded = (q) => {
       const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
       return needle.length >= 4 && callerLines.some((line) => line.includes(needle));

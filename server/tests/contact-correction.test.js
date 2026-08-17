@@ -3536,3 +3536,63 @@ describe('round-44 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-45 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it("'this isn't John anymore' invalidates the message", async () => {
+    const body = "This isn't John anymore. My email is newholder@example.com — your email is wrong";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('an address-to-purpose construction is rejected', async () => {
+    const body = 'Please use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a caller identity disclaimer kills the whole call batch', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          "Caller: I'm not John anymore.",
+          'Caller: You have my name wrong; it should be Jane Smith.',
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: 'you have my name wrong; it should be Jane Smith' }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: 'you have my name wrong; it should be Jane Smith' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('identity_disclaimed');
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});
