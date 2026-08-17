@@ -527,6 +527,10 @@ function visitSummaryCopy(data = {}, { skipPromotedBody = false } = {}) {
       ? 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.'
       : 'Today’s inspection is complete. The diagnostics and findings below document the condition of your property and what we observed on this visit.';
   }
+  // The dedup path (Today's Result already carries the promoted technician
+  // body) can reach here for one-time specialty visits with no reportV2 —
+  // neutral framing, never the recurring-service line (codex r86 #3420).
+  if (skipPromotedBody) return 'Today’s service is complete.';
   return 'Your routine service is complete.';
 }
 

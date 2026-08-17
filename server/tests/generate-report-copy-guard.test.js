@@ -331,6 +331,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // partitive combination prose is treatment copy, not a credential;
+    // linker-form combination credentials still reject (r86)
+    expect(reportCopyRejection('A combination of 12 bait stations was installed along the foundation.')).toBeNull();
+    expect(reportCopyRejection('Granular and liquid were applied in combination with 14 monitoring stations.')).toBeNull();
+    expect(reportCopyRejection('The gate combination is 4417.')).toBe('access_code');
     // device-first credential actions + wait-inside timing (r85)
     expect(reportCopyRejection('The gate opens with 4417.')).toBe('access_code');
     expect(reportCopyRejection('The garage door unlocks with 8842 after hours.')).toBe('access_code');

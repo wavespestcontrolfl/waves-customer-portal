@@ -52,8 +52,12 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // (case-sensitive by design — /i would match ordinary words), and
 // lowercase word codes behind an explicit is/:/= linker (codex r37).
 const REPORT_ACCESS_CODE_RES = [
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b/i,
-  /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  // partitive "combination of 12 bait stations" / "in combination with" is
+  // ordinary treatment prose, not a credential — the proximity shapes skip
+  // combo/combination when a partitive follows; the linker shapes below
+  // still catch "the combination is 4417" (codex r86)
+  /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b/i,
+  /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // a direct device assignment is a credential too ("The side gate is
   // 4417", codex r84) — ≥3 digits, and a trailing measurement unit keeps
   // dimensional prose legal ("the gate is 100 feet from the lanai")
@@ -70,8 +74,8 @@ const REPORT_ACCESS_CODE_RES = [
   // individually separated digits ("PIN is 1 2 3 4", "1-2-3-4") are the
   // same credential the contiguous shapes catch (codex r74) — three or
   // more single digits joined by spaces/hyphens beside a code noun
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b\d(?:[\s-]+\d){2,7}\b/i,
-  /\b\d(?:[\s-]+\d){2,7}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b\d(?:[\s-]+\d){2,7}\b/i,
+  /\b\d(?:[\s-]+\d){2,7}\b[^\n.!?]{0,15}\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // quote classes accept Unicode smart quotes — mobile keyboards curl them
   // (codex r40)
   // quoted credentials may span up to four tokens ("blue waves",
@@ -120,22 +124,22 @@ const REPORT_ACCESS_CODE_RES = [
   // UPPERCASE/quoted tokens get the same short positional window the digit
   // shapes already have before keypad/lockbox ("Use BLUE at the keypad") —
   // the uncovered reverse-alphabetic × device-noun intersection (codex r46)
-  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay))\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay))\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // ... and the positional window covers the ordinary code nouns too
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)
-  /(?:["'‘’“”][A-Za-z0-9#*][A-Za-z0-9#*-]{1,14}(?:\s+[A-Za-z0-9#*][A-Za-z0-9#*-]{0,11}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
+  /(?:["'‘’“”][A-Za-z0-9#*][A-Za-z0-9#*-]{1,14}(?:\s+[A-Za-z0-9#*][A-Za-z0-9#*-]{0,11}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo(?!\s+(?:of|with)\b)|[Cc]ombination(?!\s+(?:of|with)\b)|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
   // unquoted lowercase positional credentials (codex r71): hyphenated
   // tokens are distinctive enough to take the full positional window like
   // UPPERCASE does ("Use blue-waves at the keypad") — plain prose words
   // carry no hyphen, and the domain's ordinary hyphenated vocabulary
   // (follow-up, touch-up, re-entry, …) is excluded, so "a follow-up for
   // the keypad" and "use caution near the keypad" stay legal ...
-  /\b(?!(?:this|that|it|same|the|a|an|to|for|follow-up|touch-up|tune-up|clean-up|walk-through|check-in|move-in|move-out|drop-off|pick-up|on-site|re-entry|re-service|re-treat(?:ment)?|one-time|day-to-day|up-to-date|state-of-the-art)\b)[a-z][a-z0-9#*]*(?:-[a-z0-9#*]+){1,3}\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /\b(?!(?:this|that|it|same|the|a|an|to|for|follow-up|touch-up|tune-up|clean-up|walk-through|check-in|move-in|move-out|drop-off|pick-up|on-site|re-entry|re-service|re-treat(?:ment)?|one-time|day-to-day|up-to-date|state-of-the-art)\b)[a-z][a-z0-9#*]*(?:-[a-z0-9#*]+){1,3}\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // ... while ANY bounded lowercase token counts before an as-linked code
   // noun ("use bluewaves as the gate code") — the as-linker names the token
   // AS the credential, so only descriptive verbs/stopwords are excluded
-  /\b(?!(?:this|that|it|same|the|a|an|to|for|known|listed|used|posted|saved|stored|set|entered|kept|noted|labell?ed|marked|recorded|serves?|acts?|works?|functions?|doubles?)\b)[a-z][a-z0-9#*-]{1,14}\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
+  /\b(?!(?:this|that|it|same|the|a|an|to|for|known|listed|used|posted|saved|stored|set|entered|kept|noted|labell?ed|marked|recorded|serves?|acts?|works?|functions?|doubles?)\b)[a-z][a-z0-9#*-]{1,14}\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase)\b/i,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)

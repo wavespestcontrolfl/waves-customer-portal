@@ -13181,11 +13181,12 @@ export function CompletionPanel({
         body.completionTelemetry = {
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
-          // The recommendations-only recap draft was retired 2026-08-15 for
-          // the unified Generate AI report (which drafts NOTES) — this flag
-          // now records an installed unified generation, keeping the
-          // ai_draft_used adoption metric meaningful (codex r14).
-          aiDraftUsed: aiReportUsed,
+          // The recommendations-only recap draft was retired 2026-08-15 —
+          // its adoption flag stays false forever so the historical metric
+          // is never contaminated by a different feature; the unified
+          // Generate action records under its OWN key (codex r14 + r86).
+          aiDraftUsed: false,
+          aiReportUsed,
           recommendationTextEdited: typedRecommendationsEdited,
           activityScoreTouched: typedActivityTouched,
         };
@@ -13198,7 +13199,8 @@ export function CompletionPanel({
         body.completionTelemetry = {
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
-          aiDraftUsed: aiReportUsed,
+          aiDraftUsed: false,
+          aiReportUsed,
           recommendationTextEdited: typedRecommendationsEdited,
           activityScoreTouched: typedActivityTouched,
         };

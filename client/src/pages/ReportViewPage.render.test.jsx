@@ -327,7 +327,10 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     }));
     await screen.findByText('Visit Summary');
     expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the card only
-    await screen.findByText('Your routine service is complete.');
+    // neutral framing on the dedup path — never the recurring-service line
+    // for a one-time specialty visit (codex r86 #3420)
+    await screen.findByText('Today’s service is complete.');
+    expect(screen.queryByText('Your routine service is complete.')).toBeNull();
   });
 
   it('a companion-carried technician report suppresses the promoted summary the same way', async () => {
@@ -350,7 +353,7 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     }));
     await screen.findByText('Visit Summary');
     expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the companion card only
-    await screen.findByText('Your routine service is complete.');
+    await screen.findByText('Today’s service is complete.');
   });
 });
 
