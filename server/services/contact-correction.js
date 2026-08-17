@@ -984,21 +984,25 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // would commit an internally inconsistent address and re-key the
       // property on it. Full new-address groups were validated pre-
       // transaction; this covers the partial case using the stored row.
-      if ((byField.has('state') || byField.has('zip') || byField.has('city')) && !(hadNewStreet || moveContext)) {
-        const effState = byField.has('state') ? byField.get('state').newValue : normValue(before.state);
-        const effZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
-        const effCity = byField.has('city') ? byField.get('city').newValue : normValue(before.city);
-        // City/ZIP coherence via the service-area authority (r54): a
-        // ZIP-only fix must not commit "Bradenton, FL 34231" — when the
-        // effective ZIP is a KNOWN service-area ZIP, its USPS city must
-        // match the effective city; unknown ZIPs stay state-checked only.
-        if ((byField.has('zip') || byField.has('city')) && effZip && effCity) {
+      // City/ZIP coherence via the service-area authority (r54, extended
+      // to FULL replacement/move groups in r55): neither a ZIP-only fix
+      // NOR a stated full address may commit "Bradenton, FL 34231" — when
+      // the effective ZIP is a KNOWN service-area ZIP, its USPS city must
+      // match the effective city; unknown ZIPs stay state-checked only.
+      if (byField.has('zip') || byField.has('city')) {
+        const cohZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
+        const cohCity = byField.has('city') ? byField.get('city').newValue : normValue(before.city);
+        if (cohZip && cohCity) {
           const { zipToCity } = require('../utils/zip-to-city');
-          const knownCity = zipToCity(effZip);
-          if (knownCity && knownCity.toLowerCase() !== effCity.toLowerCase()) {
+          const knownCity = zipToCity(cohZip);
+          if (knownCity && knownCity.toLowerCase() !== cohCity.toLowerCase()) {
             rejectAddressGroup('city_zip_mismatch');
           }
         }
+      }
+      if ((byField.has('state') || byField.has('zip') || byField.has('city')) && !(hadNewStreet || moveContext)) {
+        const effState = byField.has('state') ? byField.get('state').newValue : normValue(before.state);
+        const effZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
         if (byField.size && effZip && effState) {
           const { stateForZip } = require('./data-hygiene/normalizers');
           const derived = stateForZip(effZip);

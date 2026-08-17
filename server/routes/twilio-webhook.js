@@ -174,7 +174,7 @@ router.post('/sms', async (req, res) => {
     // older write over the newer one. The BODY is withheld until the
     // eligibility gates pass (r27 storage boundary): blocked traffic
     // leaves only a body-less row for the finally to cancel.
-    correctionJobId = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
+    correctionJobId = shouldReserveCorrectionJob(Body, smsReaction)
       ? await correctionQueue.reserveContactCorrectionJob({ senderPhone: From, messageSid: MessageSid })
       : null;
     const schedulingIntent = hasSchedulingIntent(Body);
@@ -1384,9 +1384,20 @@ router.post('/status', async (req, res) => {
   res.sendStatus(200);
 });
 
+// Gate check FIRST (codex #3413 r55): with GATE_CONTACT_CORRECTION off —
+// the kill-switch state — the lane must not add awaited DB work or persist
+// duplicate SMS/PII on the webhook path at all; the worker-side gate_off
+// outcome is the backstop, not the boundary.
+function shouldReserveCorrectionJob(body, smsReaction) {
+  return Boolean(body && !smsReaction
+    && require('../config/feature-gates').isEnabled('contactCorrection')
+    && require('../services/contact-correction').detectContactCorrectionIntent(body));
+}
+
 router._internals = {
   extractContactNameFromSms,
   intakeOutcome,
+  shouldReserveCorrectionJob,
 };
 
 module.exports = router;

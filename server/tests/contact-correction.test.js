@@ -3893,3 +3893,54 @@ describe('round-54 hardening', () => {
     expect(applied.applied.map((a) => a.field)).toContain('address_line1');
   });
 });
+
+describe('round-55 hardening', () => {
+  it('a FULL stated address with an incoherent city/ZIP pair fails closed', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my new address is 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Bradenton', quote: 'my new address is 99 Pine Ave, Bradenton', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My new address is 99 Pine Ave, Bradenton, FL 34231', knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+  });
+
+  it('a FULL stated address with a coherent service-area pair still applies (move form)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Sarasota. Zip is 34231', knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line1');
+  });
+
+  it('a full address with an out-of-area ZIP keeps the state-only check', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Naples', quote: 'we moved to 99 Pine Ave, Naples', confidence: 'high' },
+          { field: 'zip', new_value: '34102', quote: 'zip is 34102', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Naples. Zip is 34102', knex });
+    expect(res.applied.map((a) => a.field)).toContain('city');
+  });
+});
