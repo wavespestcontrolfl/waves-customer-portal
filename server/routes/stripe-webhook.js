@@ -2441,6 +2441,27 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       if (!failedInvoice || String(r.id) !== String(failedInvoice.id)) failedInvoices.push(r);
     }
   }
+  // Kill-switch enforcement on failure (codex r26 P1): with the gate OFF,
+  // a failed combined debit returns the reusable PI to an unconfirmed
+  // state — a browser retaining its client secret could retry the old
+  // combined allocation despite the flip. Revoke the session as part of
+  // the failure handling: cancel fail-closed (a throw retries the event)
+  // and clear every stamp before the invoices reopen below.
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)
+    && !require('../config/feature-gates').isEnabled('payIncludeBalance')) {
+    const gateOffStripe = getStripe();
+    if (gateOffStripe) {
+      try {
+        await gateOffStripe.paymentIntents.cancel(piId);
+      } catch (cancelErr) {
+        const alreadyTerminal = /canceled|succeeded/i.test(cancelErr.message || '');
+        if (!alreadyTerminal) throw new Error(`Gate-off revoke of failed combined PI ${piId} could not cancel (${cancelErr.message}); retry`);
+      }
+      await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+      logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId} before reopening its invoices`);
+    }
+  }
+
   for (const failedRow of failedInvoices) {
     if (failedRow.status !== 'processing') continue;
     const nextStatus = nextInvoiceStatusAfterFailedPayment(failedRow);

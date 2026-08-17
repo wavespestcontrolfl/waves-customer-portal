@@ -1010,7 +1010,10 @@ httpServer.listen(PORT, () => {
       const kickGateOffRevoke = () => {
         require('./services/pay-combined').revokeOutstandingCombinedSessionsOnGateOff()
           .then((summary) => {
-            if (summary && !summary.skipped && summary.failed > 0) {
+            // Re-arm on failures AND on in-flight sessions (codex r26 P1):
+            // a processing combined ACH must stay watched until it settles
+            // or becomes cancelable.
+            if (summary && !summary.skipped && (summary.failed > 0 || summary.pending > 0)) {
               setTimeout(kickGateOffRevoke, 5 * 60 * 1000).unref();
             }
           })

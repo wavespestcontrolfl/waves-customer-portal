@@ -1305,7 +1305,13 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
       // stopped sibling once verified. Cancel it like the payer-change
       // fence does; only processing/succeeded money is left alone.
       const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
-      if (isSiblingOnCombined && unconfirmed) {
+      if (isSiblingOnCombined && pi.status === 'canceled') {
+        // A prior attempt's cancel succeeded but its transaction rolled
+        // back (codex r26 P2) — finish the stamp cleanup on retry instead
+        // of committing the stop past a dead-PI binding.
+        await PayCombined.clearPaymentIntentStamps(trx, pi.id);
+        logger.info(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number}: combined PI ${pi.id} was already canceled — stamps cleaned on retry`);
+      } else if (isSiblingOnCombined && unconfirmed) {
         try {
           await StripeService.cancelPaymentIntent(pi.id);
         } catch (err) {

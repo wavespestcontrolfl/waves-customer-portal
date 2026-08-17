@@ -414,7 +414,9 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
   const rows = await database('invoices')
     .whereIn('scheduled_service_id', ids)
     .whereNotNull('stripe_payment_intent_id')
-    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
+    // the in-flight signal the PI-status check must see and report.
+    .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
   return releaseUnconfirmedCombinedSessions(database, rows);
 }
@@ -428,7 +430,10 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
   const rows = await database('invoices')
     .where({ customer_id: customerId })
     .whereNotNull('stripe_payment_intent_id')
-    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    // 'processing' rows stay IN the scan (codex r26 P1): filtering them
+    // out hid the exact in-flight sessions the merge's defer check exists
+    // to detect.
+    .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
   return releaseUnconfirmedCombinedSessions(database, rows);
 }
@@ -516,12 +521,17 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
   if (isEnabled('payIncludeBalance')) return { skipped: true };
   const candidatePiIds = await db('invoices')
     .whereNotNull('stripe_payment_intent_id')
-    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    // 'processing' rows stay IN the candidate set (codex r26 P1): an
+    // in-flight combined ACH session must keep the sweep polling — if the
+    // debit later fails, Stripe returns the reusable intent to an
+    // unconfirmed state and THIS sweep is what revokes it.
+    .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .groupBy('stripe_payment_intent_id')
     .havingRaw('count(*) > 1')
     .pluck('stripe_payment_intent_id');
   let revoked = 0;
   let failed = 0;
+  let pending = 0;
   for (const piId of candidatePiIds) {
     const StripeService = require('./stripe');
     let pi;
@@ -547,7 +557,8 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
       continue;
     }
     if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
-      logger.warn(`[pay-combined] gate-off revoke: combined PI ${piId} is ${pi.status} — money may be in flight, left to the settle paths`);
+      logger.warn(`[pay-combined] gate-off revoke: combined PI ${piId} is ${pi.status} — money may be in flight; sweep keeps watching until it settles or becomes cancelable`);
+      pending += 1;
       continue;
     }
     try {
@@ -561,9 +572,9 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
     revoked += 1;
   }
   if (candidatePiIds.length) {
-    logger.warn(`[pay-combined] gate OFF — revoked ${revoked}/${candidatePiIds.length} outstanding combined session(s)${failed ? `, ${failed} failed (retry scheduled)` : ''}`);
+    logger.warn(`[pay-combined] gate OFF — revoked ${revoked}/${candidatePiIds.length} outstanding combined session(s)${failed ? `, ${failed} failed (retry scheduled)` : ''}${pending ? `, ${pending} in flight (sweep keeps watching)` : ''}`);
   }
-  return { revoked, failed, candidates: candidatePiIds.length };
+  return { revoked, failed, pending, candidates: candidatePiIds.length };
 }
 
 /**
