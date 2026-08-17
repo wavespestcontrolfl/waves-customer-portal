@@ -89,6 +89,14 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     )).toBeNull();
   });
 
+  test('an unquoted hyphenated word credential inside the body rejects (codex r70)', () => {
+    const parsed = technicianReportCustomerCopy(
+      'WHAT WE DID\n\nServiced all stations; the gate code is blue-waves.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'
+    );
+    expect(parsed.body).toBeNull();
+    expect(parsed.violations).toContain('access_code');
+  });
+
   test('a second paragraph inside a section is unreviewed free text — parses to null', () => {
     expect(technicianReportCustomerCopy(
       'WHAT WE DID\n\nTreated the perimeter.\n\nAlso replaced the bait stations.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'

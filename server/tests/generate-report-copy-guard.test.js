@@ -347,6 +347,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // usability adjectives join the accessible class + unquoted hyphenated
+    // word creds behind an is-linker (r70)
+    expect(reportCopyRejection('The treated area will be usable after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The treated lawn should be walkable in 30 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The patio will be open for use after two hours.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code is blue-waves.')).toBe('access_code');
     // accessible timing, adverb EPA, as-the-code creds, evidence absence (r65)
     expect(reportCopyRejection('The treated lawn will be accessible after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The EPA officially approved this treatment.')).toMatch(/^banned:/);

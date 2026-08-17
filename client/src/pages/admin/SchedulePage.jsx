@@ -9699,6 +9699,10 @@ export function CompletionPanel({
   // while it is empty or still equals the last auto-written value — the
   // moment the tech hand-edits one, autofill leaves it alone.
   const stationAutoCountsRef = useRef({});
+  // Set when the station autofill effect's applyCounts actually writes a
+  // count into findings/companion state; consumed by the invalidation
+  // effect below the state declarations (codex r70).
+  const stationAutoWroteRef = useRef(false);
   useEffect(() => {
     if (!stationFeatureOn) return;
     // While an AI report request is in flight, the payload snapshot must stay
@@ -9758,11 +9762,13 @@ export function CompletionPanel({
     // Auto-written counts that CHANGE after a report was installed are typed
     // edits too — a deferred registry write or mid-generation pin edit lands
     // here, bypassing the mutation handlers, and must invalidate an
-    // untouched draft the same way (codex r24). Unchanged re-runs (e.g. the
-    // generating->false re-fire) never clear a fresh draft.
-    const autoCountsChanged = Object.entries(counts)
-      .some(([key, value]) => String(lastAuto[key] ?? '') !== String(value));
-    if (autoCountsChanged) invalidateGeneratedReportOnTypedEdit();
+    // untouched draft the same way (codex r24). But only counts applyCounts
+    // ACTUALLY writes: a changed auto candidate against a hand-overridden
+    // field is discarded, and discarding it must not clear an untouched
+    // draft whose submitted inputs never moved (codex r70). The updater
+    // flags a real write; the follow-up effect below invalidates once the
+    // new findings state commits. Unchanged re-runs (e.g. the
+    // generating->false re-fire) never set the flag.
     const applyCounts = (values) => {
       let changed = false;
       const next = { ...values };
@@ -9774,6 +9780,9 @@ export function CompletionPanel({
           changed = true;
         }
       }
+      // Setting the ref from an updater is idempotent, so a StrictMode
+      // double-invoke is harmless.
+      if (changed) stationAutoWroteRef.current = true;
       return changed ? next : values;
     };
     const stationTypedFlow = stationProgram === "trapping" ? "rodent_trapping"
@@ -9819,6 +9828,16 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // Invalidate an untouched generated report only when the station autofill
+  // ACTUALLY wrote a count (flag set by its applyCounts) — never on a
+  // discarded auto candidate against a hand-overridden field (codex r70).
+  // Runs on the commit that applied the write, so the invalidation sees the
+  // same findings state the next generation payload would submit.
+  useEffect(() => {
+    if (!stationAutoWroteRef.current) return;
+    stationAutoWroteRef.current = false;
+    invalidateGeneratedReportOnTypedEdit();
+  }, [findingsValues, companionState]);
   // The trapping section — primary OR companion, `trap_visit_type` can
   // live in either — declares this visit as the initial trap setup. ONE
   // source for the serviced-pin rules: the handleSubmit mirror of the

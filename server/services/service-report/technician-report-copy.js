@@ -67,7 +67,10 @@ const REPORT_ACCESS_CODE_RES = [
   // bounded temporal adverbs may sit between linker and credential —
   // "The gate code is now BLUE" (codex r53)
   /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
+  // hyphen-linked lowercase word codes ("the gate code is blue-waves")
+  // count like the space-linked forms — bounded segments, so ordinary
+  // hyphenated prose never chains past four tokens (codex r70)
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}(?:-[a-z0-9#*]{1,11}){0,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
   // device nouns join the reverse shape ("WAVES is the lockbox") and
