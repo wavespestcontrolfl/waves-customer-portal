@@ -304,6 +304,57 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     await screen.findByText(NARRATIVE);
     await screen.findByText(TEMPLATE); // the card keeps its ratified copy
   });
+
+  // Accepted technician-report copy on a non-V2 layout: the snapshot bakes
+  // the prose into the Today's Result body (bodySource stamped) AND report-data
+  // promotes the same prose to data.summary — the legacy Visit Summary must
+  // fall back to its deterministic framing line, not repeat the paragraph
+  // (codex r69 #3420).
+  it('without Pest V2 an accepted technician report renders once — Visit Summary keeps the framing line', async () => {
+    const PROSE = 'We completed the palm injection treatment today and treated all four palms along the drive.';
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      summary: PROSE,
+      summarySource: 'technician_report',
+      typedReport: {
+        type: 'palm_injection',
+        todaysResult: {
+          headline: 'Palm Injection Treatment completed today',
+          body: `${PROSE} Continue watering as usual.`,
+          bodySource: 'technician_report',
+        },
+      },
+    }));
+    await screen.findByText('Visit Summary');
+    expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the card only
+    // neutral framing on the dedup path — never the recurring-service line
+    // for a one-time specialty visit (codex r86 #3420)
+    await screen.findByText('Today’s service is complete.');
+    expect(screen.queryByText('Your routine service is complete.')).toBeNull();
+  });
+
+  it('a companion-carried technician report suppresses the promoted summary the same way', async () => {
+    const PROSE = 'Termite bait stations were serviced today and two cartridges were replaced.';
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      typedReport: null,
+      activity: null,
+      summary: PROSE,
+      summarySource: 'technician_report',
+      companionReports: [{
+        type: 'termite_bait_station',
+        reportTypeLabel: 'Termite Bait Station Service',
+        todaysResult: {
+          headline: 'Bait station service completed today',
+          body: `${PROSE} We will recheck at your next visit.`,
+          bodySource: 'technician_report',
+        },
+      }],
+    }));
+    await screen.findByText('Visit Summary');
+    expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the companion card only
+    await screen.findByText('Today’s service is complete.');
+  });
 });
 
 describe('ReportViewPage — trapping station map card (program labels)', () => {

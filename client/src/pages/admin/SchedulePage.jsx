@@ -6565,6 +6565,36 @@ function pruneRestoredFindingsValues(restored, fields) {
 
 // Render-time fallback for a companion section with no state yet. Never
 // mutated — every companion handler spreads into fresh objects.
+// Typed zero states whose renderer refuses generated copy at completion —
+// buildTodaysResult keeps the fixed template for them, so Generate must
+// hold: the tech would review (and the business be billed for) prose the
+// report never publishes. Bait/trap gauges refuse on a zero score; flea,
+// knockdown, and mosquito stories refuse on their cleared/none-observed
+// states (codex r43/r44 bait rule, generalized in r45).
+function typedZeroStateRefusesBody(type, values, score) {
+  // Story lanes (exclusion/inspection) consume the reviewed body in their
+  // own branches at every score, so a generation is never wasted there.
+  if (type === "rodent_exclusion" || type === "rodent_inspection") return false;
+  if (type === "mosquito_event") return String(values?.activity_level ?? "") === "None observed";
+  // Derived from the renderer's refusal rule rather than an enumeration
+  // (codex r48): buildTodaysResult keeps the fixed template on a zero
+  // indicator score for EVERY gauge lane (bait/trapping, bed bug,
+  // cockroach, termite inspection, wildlife trapping, knockdowns, flea) —
+  // a non-gauge schema never carries a score, so the check is safe
+  // unconditionally.
+  if (score === 0) return true;
+  // Cleared select states refuse the same way when no score is pinned —
+  // reuse the shared cleared-boundary map instead of re-listing the lanes.
+  const rule = TYPED_SCORE_CLEARED_SELECT[type];
+  if (rule && score == null) return String(values?.[rule.field] ?? "") === rule.cleared;
+  // Non-gauge cleared states keep the fixed template in buildTodaysResult's
+  // zeroSeverity branch (severity / activity_level "None observed" or
+  // "No activity") — Generate must hold for them too (codex r66).
+  const clearedSelect = String(values?.severity ?? values?.activity_level ?? "").trim();
+  if (clearedSelect === "None observed" || clearedSelect === "No activity") return true;
+  return false;
+}
+
 const EMPTY_COMPANION_ENTRY = {
   values: {},
   chips: [],
@@ -6606,12 +6636,8 @@ export function TypedFindingsSection({
   onToggleChip,
   recommendations,
   onRecommendationsChange,
-  aiDrafting,
-  aiError,
-  includeComms,
-  onIncludeCommsChange,
-  onAiDraft,
   pesticideProductPresent = true,
+  frozen = false,
 }) {
   const mobile = variant === "mobile";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
@@ -6687,6 +6713,16 @@ export function TypedFindingsSection({
       <label style={labelCss}>
         {onRecommendationsChange ? "Service findings" : schema.label || "Service findings"}
       </label>
+      {/* While an AI report is generating, the request's findings snapshot
+          must stay what completion will persist — a disabled fieldset
+          natively freezes every descendant control (fields, chips, activity
+          buttons, recommendations) for pointer AND keyboard input, same rule
+          the notes/observations fields already follow. */}
+      <fieldset
+        disabled={frozen}
+        aria-disabled={frozen || undefined}
+        style={{ border: "none", margin: 0, padding: 0, minWidth: 0, opacity: frozen ? 0.55 : 1 }}
+      >
       {primaryFields.map(renderField)}
       {detailFields.length > 0 && (
         <details style={{ marginBottom: 12 }}>
@@ -6839,9 +6875,12 @@ export function TypedFindingsSection({
         </div>
         )}
       </div>
-      {/* Recommendations textarea + AI draft stay PRIMARY-only: companion
-          sections pass onRecommendationsChange={null} and are chips-first
-          deterministic copy (combined-service-completions.md). */}
+      {/* Recommendations textarea stays PRIMARY-only: companion sections pass
+          onRecommendationsChange={null} and are chips-first deterministic copy
+          (combined-service-completions.md). The old recommendations-only
+          "AI draft" was retired 2026-08-15 (owner): typed completions now use
+          the panel's single full "Generate AI report" action, whose payload
+          carries these structured findings (buildAiReportPayload). */}
       {onRecommendationsChange && (
       <div style={{ marginBottom: 4 }}>
         <div style={fieldLabelStyle}>Recommendations (optional)</div>
@@ -6862,60 +6901,9 @@ export function TypedFindingsSection({
             boxSizing: "border-box",
           }}
         />
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginTop: 8,
-            flexWrap: "wrap",
-          }}
-        >
-          <button
-            type="button"
-            onClick={onAiDraft}
-            disabled={aiDrafting}
-            style={{
-              height: 36,
-              padding: "0 14px",
-              borderRadius: 999,
-              background: "transparent",
-              color: accent,
-              border: `1px solid ${accent}`,
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: aiDrafting ? "wait" : "pointer",
-              opacity: aiDrafting ? 0.5 : 1,
-            }}
-          >
-            {aiDrafting ? "Drafting..." : "AI draft"}
-          </button>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 14,
-              color: textColor,
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={includeComms}
-              onChange={(e) => onIncludeCommsChange(e.target.checked)}
-              style={{ width: 16, height: 16, accentColor: accent }}
-            />
-            Include recent customer calls/texts/emails
-          </label>
-        </div>
-        {aiError && (
-          <div style={{ fontSize: 12, color: requiredColor, marginTop: 6 }}>
-            {aiError}
-          </div>
-        )}
       </div>
       )}
+      </fieldset>
     </div>
   );
 }
@@ -9681,8 +9669,18 @@ export function CompletionPanel({
   // while it is empty or still equals the last auto-written value — the
   // moment the tech hand-edits one, autofill leaves it alone.
   const stationAutoCountsRef = useRef({});
+  // Set when the station autofill effect's applyCounts actually writes a
+  // count into findings/companion state; consumed by the invalidation
+  // effect below the state declarations (codex r70).
+  const stationAutoWroteRef = useRef(false);
   useEffect(() => {
     if (!stationFeatureOn) return;
+    // While an AI report request is in flight, the payload snapshot must stay
+    // what the model saw — a late station-registry load must not rewrite the
+    // counts mid-generation (codex r3). The `generating` dep re-runs this
+    // effect when the request settles, so the auto-counts still land (and the
+    // tech reviews the draft against them before completing).
+    if (generating) return;
     // Never auto-write counts for a property whose map was never populated —
     // the tech may be entering counts by hand for unmapped stations. Once
     // pins exist (preloaded or dropped), the counts follow the map, INCLUDING
@@ -9731,6 +9729,16 @@ export function CompletionPanel({
     // reading the ref inside them would see the values we're about to
     // write below and misread every auto-owned field as hand-edited.
     const lastAuto = { ...stationAutoCountsRef.current };
+    // Auto-written counts that CHANGE after a report was installed are typed
+    // edits too — a deferred registry write or mid-generation pin edit lands
+    // here, bypassing the mutation handlers, and must invalidate an
+    // untouched draft the same way (codex r24). But only counts applyCounts
+    // ACTUALLY writes: a changed auto candidate against a hand-overridden
+    // field is discarded, and discarding it must not clear an untouched
+    // draft whose submitted inputs never moved (codex r70). The updater
+    // flags a real write; the follow-up effect below invalidates once the
+    // new findings state commits. Unchanged re-runs (e.g. the
+    // generating->false re-fire) never set the flag.
     const applyCounts = (values) => {
       let changed = false;
       const next = { ...values };
@@ -9742,6 +9750,9 @@ export function CompletionPanel({
           changed = true;
         }
       }
+      // Setting the ref from an updater is idempotent, so a StrictMode
+      // double-invoke is harmless.
+      if (changed) stationAutoWroteRef.current = true;
       return changed ? next : values;
     };
     const stationTypedFlow = stationProgram === "trapping" ? "rodent_trapping"
@@ -9757,7 +9768,7 @@ export function CompletionPanel({
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -9787,6 +9798,16 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // Invalidate an untouched generated report only when the station autofill
+  // ACTUALLY wrote a count (flag set by its applyCounts) — never on a
+  // discarded auto candidate against a hand-overridden field (codex r70).
+  // Runs on the commit that applied the write, so the invalidation sees the
+  // same findings state the next generation payload would submit.
+  useEffect(() => {
+    if (!stationAutoWroteRef.current) return;
+    stationAutoWroteRef.current = false;
+    invalidateGeneratedReportOnTypedEdit();
+  }, [findingsValues, companionState]);
   // The trapping section — primary OR companion, `trap_visit_type` can
   // live in either — declares this visit as the initial trap setup. ONE
   // source for the serviced-pin rules: the handleSubmit mirror of the
@@ -9806,16 +9827,47 @@ export function CompletionPanel({
   // technician-set — even on the same value.
   const [typedActivityTouched, setTypedActivityTouched] = useState(false);
   const [typedNextStepChips, setTypedNextStepChips] = useState([]);
+  // Companion-only profiles whose every customer-facing companion sits in a
+  // fixed-copy zero state can never publish generated copy — hold Generate
+  // the same way the primary zero states do (codex r44, generalized r45).
+  // Absent delivery (older feeds) defaults customer-facing, matching the
+  // server.
+  const customerFacingCompanions = companionSchemas.filter(
+    (schema) => schema.delivery !== "internal_only",
+  );
+  const zeroStateCompanionOnly = !isTypedFindings
+    && customerFacingCompanions.length > 0
+    && customerFacingCompanions.every((schema) => {
+      const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+      return typedZeroStateRefusesBody(schema.type, entry.values, entry.score);
+    });
   const [typedRecommendations, setTypedRecommendations] = useState("");
   const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
     useState(false);
-  const [typedAiDrafting, setTypedAiDrafting] = useState(false);
-  const [typedAiError, setTypedAiError] = useState("");
-  // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
-  // — they can carry PII, so the box starts unchecked.
-  // Default CHECKED (ratified Q13 — the owner is the only tech and uses it).
-  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(true);
-  const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
+  // True once a unified Generate AI report result was installed into the
+  // notes — persisted at completion as ai_draft_used (adoption telemetry,
+  // specialty completion contract).
+  const [aiReportUsed, setAiReportUsed] = useState(false);
+  // The exact text applyGeneratedReport installed — while the notes still
+  // equal it (untouched draft), a typed-findings edit clears the draft so
+  // stale AI prose can't publish beside contradicting structured findings
+  // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
+  const generatedReportTextRef = useRef(null);
+  const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
+  // Baseline for the generation-inputs watcher below — null means "not yet
+  // initialized" (fresh mount or just-restored draft), so the first run
+  // records without invalidating.
+  const generationInputsRef = useRef(null);
+  // The tech's own notes from BEFORE the first Generate — regeneration must
+  // ground in these, not in the previously installed AI prose (feeding a
+  // draft back as "technician-confirmed" serviceNotes would entrench the
+  // first model's claims — codex r43).
+  const preGenerationNotesRef = useRef(null);
+  // The chip-line ownership state that goes WITH those notes: restoring
+  // marker-bearing notes while the labels stay detached would let
+  // completion submit an action the tech deleted from the restored notes
+  // (codex r77).
+  const preGenerationChipDetachedRef = useRef(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -10926,6 +10978,30 @@ export function CompletionPanel({
         // post-AI-draft (no chip lines in notes) must restore as detached or
         // labelsStillInNotes would silently drop every structured selection.
         chipLinesDetached,
+        // AI-usage telemetry must survive the supported draft-resume flows
+        // (billing-409 detour, reload) or the resumed completion records
+        // aiDraftUsed: false for an AI-installed report (codex r17).
+        aiReportUsed,
+        // The installed-report identity restores too, so an UNTOUCHED
+        // restored draft stays invalidatable on later typed edits (codex r24).
+        generatedReportText: generatedReportTextRef.current,
+        // Photos themselves are not persisted — record how many the
+        // installed report was generated against so a restore that can't
+        // bring them back invalidates the prose they grounded (codex r78).
+        generationPhotoCount: servicePhotos.length,
+        // The lawn-assessment identity the installed report rode (same
+        // untouched-draft reasoning as the photo count) — a restore that
+        // finds a retaken/reconfirmed assessment must invalidate the
+        // prose generated from the old scores (codex r82).
+        generationLawnAssessmentId: lawnAssessmentId ?? null,
+        generationLawnAssessmentRevision: lawnAssessmentRevision ?? null,
+        preGenerationNotes: preGenerationNotesRef.current,
+        // ... and the chip-ownership state those notes carry (codex r77).
+        preGenerationChipDetached: preGenerationChipDetachedRef.current,
+        // The station auto-count baseline restores with it — otherwise the
+        // registry's post-reload load re-derives the SAME counts against an
+        // empty baseline and clears a valid draft (codex r28).
+        stationAutoCounts: stationAutoCountsRef.current,
         nextVisitNote,
         showNextVisitNote,
         treeShrubCloseout,
@@ -10995,6 +11071,7 @@ export function CompletionPanel({
     observationsText,
     recommendationsText,
     chipLinesDetached,
+    aiReportUsed,
     nextVisitNote,
     showNextVisitNote,
     treeShrubCloseout,
@@ -11198,6 +11275,22 @@ export function CompletionPanel({
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
+    // Older drafts lack the field → false, matching their pre-AI notes.
+    setAiReportUsed(savedDraft.aiReportUsed === true);
+    generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
+      ? savedDraft.generatedReportText
+      : null;
+    preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
+      ? savedDraft.preGenerationNotes
+      : null;
+    preGenerationChipDetachedRef.current = savedDraft.preGenerationChipDetached === true;
+    stationAutoCountsRef.current = savedDraft.stationAutoCounts
+      && typeof savedDraft.stationAutoCounts === "object"
+      ? { ...savedDraft.stationAutoCounts }
+      : {};
+    // Restoring sets the watched generation inputs — reset the watcher
+    // baseline so the restore itself never invalidates the restored draft.
+    generationInputsRef.current = null;
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
@@ -11205,12 +11298,39 @@ export function CompletionPanel({
     );
     // Type-aware pruning against the CURRENT schema — see
     // pruneRestoredFindingsValues for why key presence alone isn't enough.
+    // Any pruning that changes the generation inputs must ALSO invalidate a
+    // restored installed report below — the baseline reset above would
+    // otherwise adopt the pruned state as original and keep prose that
+    // describes facts no longer submitted (codex r64).
+    let restorePruned = false;
+    // The draft deliberately does not persist servicePhotos — if the
+    // installed report rode a nonzero photo set the restore couldn't bring
+    // back, the prose is grounded in inputs completion will no longer
+    // submit, so it invalidates like any other pruned generation input
+    // (codex r78).
+    if (generatedReportTextRef.current
+      && Number.isInteger(savedDraft.generationPhotoCount)
+      && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      restorePruned = true;
+    }
+    // Same contract for the lawn-assessment identity (codex r82): a
+    // retake/reconfirm while the draft waited means the installed prose
+    // describes the OLD scores — the baseline reset below would otherwise
+    // adopt the new assessment silently.
+    if (generatedReportTextRef.current
+      && 'generationLawnAssessmentId' in savedDraft
+      && ((savedDraft.generationLawnAssessmentId ?? null) !== (lawnAssessmentId ?? null)
+        || (savedDraft.generationLawnAssessmentRevision ?? null) !== (lawnAssessmentRevision ?? null))) {
+      restorePruned = true;
+    }
     const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
         : {};
     if (typedFindingsSchema?.fields) {
+      const prePruneFindings = JSON.stringify(restoredFindings);
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
       setTypedActivityScore(
         Number.isInteger(savedDraft.typedActivityScore)
@@ -11221,6 +11341,10 @@ export function CompletionPanel({
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
         ? savedDraft.typedNextStepChips
         : [];
+      if (typedFindingsSchema?.nextStepChips
+        && restoredChips.some((chip) => !typedFindingsSchema.nextStepChips.includes(chip))) {
+        restorePruned = true;
+      }
       setTypedNextStepChips(
         typedFindingsSchema?.nextStepChips
           ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
@@ -11243,6 +11367,7 @@ export function CompletionPanel({
         || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
         || String(savedDraft.typedRecommendations || "").trim() !== "";
       if (draftHadTypedEntries) {
+        restorePruned = true;
         alert(
           "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
         );
@@ -11270,17 +11395,18 @@ export function CompletionPanel({
               { values: {}, chips: [], score: null, scoreTouched: false },
             ];
           }
-          const values = pruneRestoredFindingsValues(
-            saved.values && typeof saved.values === "object"
-              ? { ...saved.values }
-              : {},
-            schema.fields || [],
-          );
+          const preValues = saved.values && typeof saved.values === "object"
+            ? { ...saved.values }
+            : {};
+          const prePruneCompanion = JSON.stringify(preValues);
+          const values = pruneRestoredFindingsValues(preValues, schema.fields || []);
+          if (JSON.stringify(values) !== prePruneCompanion) restorePruned = true;
           const chips = Array.isArray(saved.chips)
             ? saved.chips.filter((chip) =>
                 (schema.nextStepChips || []).includes(chip),
               )
             : [];
+          if (Array.isArray(saved.chips) && chips.length !== saved.chips.length) restorePruned = true;
           return [
             schema.type,
             {
@@ -11293,6 +11419,36 @@ export function CompletionPanel({
         }),
       ),
     );
+    // Saved companion types the profile no longer declares are dropped
+    // silently by the mapping above — that is pruning too.
+    if (Object.entries(savedCompanions).some(([type, saved]) => (
+      saved && typeof saved === "object"
+      && !companionSchemas.some((schema) => schema.type === type)
+      && (Object.keys(saved.values || {}).length > 0
+        || (Array.isArray(saved.chips) && saved.chips.length > 0)
+        || Number.isInteger(saved.score))
+    ))) {
+      restorePruned = true;
+    }
+    // Pruning changed the generation inputs — the restored installed
+    // report may describe facts that will no longer be submitted, so it
+    // invalidates like any other post-generation input change; an
+    // untouched draft falls back to the saved handwritten notes
+    // (codex r64).
+    if (restorePruned && generatedReportTextRef.current) {
+      const installed = generatedReportTextRef.current;
+      generatedReportTextRef.current = null;
+      setAiReportUsed(false);
+      if (String(savedDraft.notes || "").trim() === installed.trim()) {
+        setNotes(preGenerationNotesRef.current || "");
+        // Detachment restores with the notes (codex r77) — same contract
+        // as the invalidation path.
+        setChipLinesDetached(preGenerationChipDetachedRef.current === true);
+        preGenerationNotesRef.current = null;
+        preGenerationChipDetachedRef.current = false;
+        setGeneratedReportCleared(true);
+      }
+    }
     setShowDraftPrompt(false);
   }
 
@@ -11525,7 +11681,30 @@ export function CompletionPanel({
   // record (and interior-treatment safety scopes) survive drafting, and the
   // pills UI takes over as the deselect handle. (notes still holds the
   // pre-draft text here; setNotes(report) hasn't applied yet.)
-  function applyGeneratedReport(reportText) {
+  function applyGeneratedReport(reportText, { deterministic = false } = {}) {
+    // Telemetry (specialty completion contract): an installed AI report is
+    // an AI-assisted completion — persisted as ai_draft_used (codex r14).
+    // A double-provider miss returns deterministic template copy, which is
+    // NOT AI-assisted and must not inflate the metric (codex r19) — and a
+    // deterministic REGENERATION replaces a previously installed AI report,
+    // so the flag follows each installed result exactly (codex r29).
+    setAiReportUsed(!deterministic);
+    // Capture the tech's own notes the FIRST time a draft replaces them —
+    // an untouched installed draft is never the grounding for regeneration.
+    // An EDITED older draft still carries the two-section report shape and
+    // must not be captured either: invalidation would restore it and
+    // completion would publish stale generated copy that predates the
+    // final findings (codex r54). Only genuinely handwritten notes ground
+    // a regeneration; the previous handwritten capture is kept otherwise.
+    const notesLookGenerated = /^\s*WHAT WE DID:?\s*$/m.test(notes)
+      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
+    if (!notesLookGenerated
+      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+      preGenerationNotesRef.current = notes;
+      preGenerationChipDetachedRef.current = chipLinesDetached;
+    }
+    generatedReportTextRef.current = String(reportText || "").trim();
+    setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
         labelsStillInNotes(selectedProtocolActionLabels),
@@ -11545,6 +11724,12 @@ export function CompletionPanel({
   // actions). Products added by a protocol action stay — they have their own
   // remove control, same as deleting a tagged line never removed them.
   function removeSelectedLabel(kind, label) {
+    // Same freeze + invalidation contract as every other payload mutation
+    // (codex r34): the ×-pill changes the actions/observations/
+    // recommendations the completion submits, so it can't run mid-request
+    // and it clears an untouched installed draft.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
@@ -11605,7 +11790,102 @@ export function CompletionPanel({
     const recommendations = [
       ...activeSelectedLabels(selectedRecommendationLabels),
       ...freeTextLines(recommendationsText),
+      // Typed completions keep their own recommendations box (inside the
+      // findings section) — since the recap-only draft was retired, the full
+      // generate action is the one AI path and must see that text too.
+      // Submission persists this box as ONE collapsed 240-char entry
+      // (normalizeCompletionTextArray) — generation must see exactly what
+      // will persist, or the body can describe advice absent from the
+      // record (codex r61).
+      ...(isTypedFindings
+        ? (() => {
+          const packed = String(typedRecommendations || "")
+            .trim().replace(/\s+/g, " ").slice(0, 240);
+          return packed ? [packed] : [];
+        })()
+        : []),
     ];
+    // Typed structured findings ground the prompt the same way the retired
+    // findings-recap draft grounded its recommendations: only non-empty
+    // values ship. Companion sections ride along INDEPENDENTLY of the
+    // primary — companion-only profiles (e.g. lawn_tree_shrub_combo) have no
+    // primary findings type, and each companion carries its own chips and
+    // activity score with the same provenance split the server prompt draws.
+    // Schema-internal fields (compliance/calibration) never reach the prompt,
+    // so they can't open the generation gate either — mirrors the server's
+    // sections-based check (codex r4).
+    // Only CURRENT-schema, non-internal keys count — a restored draft can
+    // carry a value for a field removed from the schema, which the server's
+    // sections builder (schema-driven) would drop, 400ing a request that
+    // value alone opened (codex r26; mirrors the chip membership rule).
+    const nonInternalValuesNonEmpty = (schema, obj) => {
+      const countableKeys = new Set(
+        (schema?.fields || []).filter((f) => !f.internal).map((f) => f.key),
+      );
+      return Object.entries(obj || {}).some(
+        ([key, v]) => countableKeys.has(key)
+          && (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
+      );
+    };
+    const companionPayload = companionSchemas.length
+      ? {
+        companionFindings: companionSchemas.map((schema) => {
+          const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+          return {
+            type: schema.type,
+            values: entry.values,
+            nextStepChips: entry.chips,
+            activityScore: Number.isInteger(entry.score) ? entry.score : null,
+          };
+        }),
+      }
+      : {};
+    const typedFindingsPayload = {
+      ...(isTypedFindings && typedFindingsSchema
+        ? {
+          structuredFindings: {
+            type: typedFindingsSchema.type,
+            values: findingsValues,
+          },
+          nextStepChips: typedNextStepChips,
+          typedActivityScore: Number.isInteger(typedActivityScore) ? typedActivityScore : null,
+        }
+        : {}),
+      ...companionPayload,
+    };
+    // Only chips that don't conflict with the recorded findings count — a
+    // stale conflicted selection stays tappable for removal but the server's
+    // validatedChipCount gate would 400 a request it alone opened (codex r12).
+    // Membership in the CURRENT schema's chip list is required too — a
+    // restored draft can carry a chip removed from the schema, which the
+    // server's validateNextStepChips rejects (codex r24).
+    const validChipCount = (schema, chips, values) => (chips || []).filter(
+      (chip) => (schema?.nextStepChips || []).includes(chip)
+        && !typedNextStepChipConflict(schema?.type, chip, values),
+    ).length;
+    const typedHasFindingInput = (isTypedFindings && (
+      nonInternalValuesNonEmpty(typedFindingsSchema, findingsValues)
+      || (typedFindingsSchema && validChipCount(typedFindingsSchema, typedNextStepChips, findingsValues) > 0)
+      // zero-state gauges refuse the drafted body at completion — mirror
+      // the companion rule (codex r40)
+      || (Number.isInteger(typedActivityScore) && typedActivityScore > 0)
+    ))
+      || companionSchemas.some((schema) => {
+        // internal_only shadow companions render and submit but never open
+        // Generate — the server's strict gate filters them, so counting one
+        // here would enable a button that 400s (codex r11). Absent delivery
+        // (older feeds) defaults customer-facing, matching the server.
+        if (schema.delivery === "internal_only") return false;
+        const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+        // A manually tapped companion activity gauge is substantive on its
+        // own — same rule as the primary score (codex r3).
+        return nonInternalValuesNonEmpty(schema, entry.values)
+          || validChipCount(schema, entry.chips, entry.values) > 0
+          // A zero score alone can't open Generate — bait-station zero
+          // states replace the drafted body with fixed wording at
+          // completion (codex r25); the server gate mirrors this.
+          || (Number.isInteger(entry.score) && entry.score > 0);
+      });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -11673,7 +11953,16 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      serviceNotes: stripChipTagLines(notes),
+      // Regeneration grounds in the tech's OWN notes: when the notes box
+      // still holds the installed draft, the pre-generation notes are the
+      // grounding (codex r43) — a hand-edited draft is the tech's copy and
+      // grounds itself.
+      serviceNotes: stripChipTagLines(
+        generatedReportTextRef.current
+          && notes.trim() === String(generatedReportTextRef.current).trim()
+          ? (preGenerationNotesRef.current || "")
+          : notes,
+      ),
       productsApplied,
       areasServiced,
       actionsCompleted,
@@ -11681,9 +11970,15 @@ export function CompletionPanel({
       recommendations,
       customerInteraction: interactionLabel,
       customerConcern: concern,
+      // The generic pest-rating field stays the untyped customer chip row —
+      // typed panels send their 0–5 gauge as typedActivityScore instead, so
+      // the server can pair it with the indicator's OWN label ("Bait Station
+      // Activity") and bait-consumption scores never read as generic pest
+      // activity (codex r2).
       pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
       includeCustomerComms: aiReportIncludeComms,
+      ...typedFindingsPayload,
     };
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
@@ -11694,6 +11989,7 @@ export function CompletionPanel({
       recommendations.length > 0 ||
       Boolean(concern) ||
       payload.pestActivityRating !== null ||
+      typedHasFindingInput ||
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
       Boolean(payload.lawnAssessmentId) ||
@@ -11712,8 +12008,25 @@ export function CompletionPanel({
   }
   function applyProtocolAction(action) {
     if (!action) return;
+    // Same freeze + invalidation contract as every other payload mutation:
+    // a productless protocol action (or one whose product is already
+    // selected) never reaches addProduct's guards, but it still changes
+    // actionsCompleted at completion (codex r37).
+    if (generating) return;
     const noteText =
       action.note || action.label || action.raw || "Completed protocol item";
+    // Reselecting an entry the dropdown already marks "(applied)" changes
+    // nothing — appendUniqueLabel would dedupe, recordActionScope rewrites
+    // the same metadata, and the product is already on the visit — so it
+    // must not clear a valid untouched report (codex r80).
+    if (
+      selectedProtocolActionLabels.includes(noteText)
+      && (!action.product?.id
+        || selectedProducts.find((p) => p.productId === action.product.id))
+    ) {
+      return;
+    }
+    invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
     recordActionScope(noteText, action.scope, action.treatmentApplied);
     addChipNote(
@@ -11739,7 +12052,14 @@ export function CompletionPanel({
     // added now would land in the submitted structured data but not in the prose
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
+    // The duplicate check runs FIRST (codex r81): re-clicking an
+    // already-selected product's search result changes nothing and must
+    // not clear a valid untouched report.
     if (selectedProducts.find((p) => p.productId === product.id)) return;
+    // Products feed the generation grounding (and T&S derives its treatments
+    // from them), so a post-generation product change invalidates an
+    // untouched draft the same way a typed edit does (codex r28).
+    invalidateGeneratedReportOnTypedEdit();
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
@@ -11889,11 +12209,14 @@ export function CompletionPanel({
   }
   function removeProduct(productId) {
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
     );
   }
   function updateProduct(productId, field, value) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.map((p) => {
         if (p.productId !== productId) return p;
@@ -11966,6 +12289,13 @@ export function CompletionPanel({
     );
   }
   async function handlePhotoSelect(e) {
+    // Photo count is a generation input (payload photoCount) — the set is
+    // frozen while the model is drafting, same as every typed field
+    // (codex r44).
+    if (generating) {
+      if (photoInputRef.current) photoInputRef.current.value = "";
+      return;
+    }
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
       alert("Maximum 5 photos allowed.");
@@ -11996,6 +12326,7 @@ export function CompletionPanel({
     if (photoInputRef.current) photoInputRef.current.value = "";
   }
   function removePhoto(index) {
+    if (generating) return;
     setServicePhotos((prev) => prev.filter((_, i) => i !== index));
     setTypedPhotoSummary("");
   }
@@ -12799,7 +13130,26 @@ export function CompletionPanel({
         body.completionTelemetry = {
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
-          aiDraftUsed: typedAiDraftUsed,
+          // The recommendations-only recap draft was retired 2026-08-15 —
+          // its adoption flag stays false forever so the historical metric
+          // is never contaminated by a different feature; the unified
+          // Generate action records under its OWN key (codex r14 + r86).
+          aiDraftUsed: false,
+          aiReportUsed,
+          recommendationTextEdited: typedRecommendationsEdited,
+          activityScoreTouched: typedActivityTouched,
+        };
+      }
+      // Companion-only profiles (findingsType null, e.g. lawn_tree_shrub_combo)
+      // never enter the typed branch above, but their techs use the same
+      // unified Generate action — persist the telemetry so ai_draft_used
+      // doesn't undercount this supported flow (codex r16).
+      if (!body.completionTelemetry && companionSchemas.length && !isIncompleteVisit) {
+        body.completionTelemetry = {
+          ...completionTelemetryRef.current,
+          submitClickedAt: new Date().toISOString(),
+          aiDraftUsed: false,
+          aiReportUsed,
           recommendationTextEdited: typedRecommendationsEdited,
           activityScoreTouched: typedActivityTouched,
         };
@@ -13004,6 +13354,9 @@ export function CompletionPanel({
     // is value="" so it stays on the placeholder; nothing to reset.)
     if (generating) return;
     if (!protocolActions.length) {
+      // Legacy label path never reaches applyProtocolAction — same
+      // invalidation contract applies (codex r39).
+      invalidateGeneratedReportOnTypedEdit();
       appendUniqueLabel(setSelectedProtocolActionLabels, value);
       const chip = CHIP_ACTION_BY_LABEL[value];
       if (chip) recordActionScope(value, chip.scope, chip.treatmentApplied);
@@ -13021,7 +13374,80 @@ export function CompletionPanel({
         new Date().toISOString();
     }
   }
+  // EVERY generation input invalidates an untouched draft when it changes —
+  // buildAiReportPayload sends areas/observations/recommendations/
+  // interaction/concern/rating, and the typed branches now publish the
+  // reviewed prose, so an edit to any of them after generation can't leave
+  // stale copy beside the final record (codex r36). A value-diff watcher
+  // covers the many inline setters without wrapping each; the baseline
+  // resets on draft restore so restoring never invalidates.
+  useEffect(() => {
+    const snapshot = JSON.stringify([
+      areasServiced, observationsText, recommendationsText,
+      customerInteraction, customerConcern, clientPestRating,
+      // the payload sends photoCount — the set's size is a generation
+      // input like any other (codex r44)
+      servicePhotos.length,
+      // a retaken/reconfirmed lawn assessment changes what completion and
+      // the final report describe — the draft must invalidate with it
+      // (codex r58)
+      lawnAssessmentId,
+      lawnAssessmentRevision,
+      // the payload sends includeCustomerComms — unchecking it after
+      // generation means the installed draft was built from communications
+      // the visible setting now excludes (codex r72); the mid-request hold
+      // below invalidates an in-flight response on settle like any other
+      // input
+      aiReportIncludeComms,
+    ]);
+    if (generationInputsRef.current === null) {
+      generationInputsRef.current = snapshot;
+      return;
+    }
+    if (generationInputsRef.current !== snapshot) {
+      // Mid-request changes HOLD the old baseline (interaction/concern/
+      // rating controls stay enabled while generating) — when the request
+      // settles the mismatch is still visible here and the just-installed
+      // response invalidates immediately (codex r38).
+      if (generating) return;
+      generationInputsRef.current = snapshot;
+      invalidateGeneratedReportOnTypedEdit();
+    }
+  }, [areasServiced, observationsText, recommendationsText,
+    customerInteraction, customerConcern, clientPestRating,
+    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision,
+    aiReportIncludeComms]);
+  // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
+  // the installed prose described the old facts, and completion would
+  // publish it beside contradicting structured findings (codex r23). Prose
+  // the tech already edited is their reviewed copy and stays.
+  function invalidateGeneratedReportOnTypedEdit() {
+    const installed = generatedReportTextRef.current;
+    if (!installed) return;
+    generatedReportTextRef.current = null;
+    if (String(notes || "").trim() === installed) {
+      // The tech's handwritten pre-generation notes come BACK when the
+      // draft clears — clearing to empty would drop them from a
+      // no-regenerate completion and from the next generation's grounding
+      // (codex r44).
+      setNotes(preGenerationNotesRef.current || "");
+      // The restored notes' [Protocol]/[Found]/[Next] marker lines own
+      // selection again — the detachment state travels with the notes it
+      // described (codex r77).
+      setChipLinesDetached(preGenerationChipDetachedRef.current === true);
+      preGenerationNotesRef.current = null;
+      preGenerationChipDetachedRef.current = false;
+      setAiReportUsed(false);
+      setGeneratedReportCleared(true);
+    }
+  }
   function handleTypedFindingChange(key, value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
     // Derived prefill (contract §4): while the picker is untouched, the
@@ -13033,12 +13459,24 @@ export function CompletionPanel({
     }
   }
   function handleTypedActivityTap(n) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setTypedActivityTouched(true);
     setTypedActivityScore(n);
   }
   function toggleTypedNextStepChip(chip) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setTypedNextStepChips((prev) => {
       if (prev.includes(chip)) return prev.filter((c) => c !== chip);
@@ -13047,6 +13485,12 @@ export function CompletionPanel({
     });
   }
   function handleTypedRecommendationsChange(value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setTypedRecommendations(value);
     setTypedRecommendationsEdited(true);
@@ -13056,6 +13500,12 @@ export function CompletionPanel({
   // untouched, its score recomputes from the schema's derive-field select on
   // every change; the first tap pins technician-set.
   function handleCompanionFieldChange(type, key, value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
@@ -13069,6 +13519,12 @@ export function CompletionPanel({
     });
   }
   function handleCompanionActivityTap(type, n) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setCompanionState((prev) => ({
@@ -13081,6 +13537,12 @@ export function CompletionPanel({
     }));
   }
   function toggleCompanionNextStepChip(type, chip) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
@@ -13091,47 +13553,6 @@ export function CompletionPanel({
           : [...entry.chips, chip];
       return { ...prev, [type]: { ...entry, chips } };
     });
-  }
-  // Optional AI polish — failures surface inline and never block submit;
-  // the Complete button stays usable while a draft is in flight.
-  async function handleTypedAiDraft() {
-    if (typedAiDrafting || !typedFindingsSchema) return;
-    setTypedAiError("");
-    setTypedAiDrafting(true);
-    try {
-      const r = await adminFetch(
-        `/admin/dispatch/${service.id}/findings-recap/draft`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            structuredFindings: {
-              type: typedFindingsSchema.type,
-              values: findingsValues,
-            },
-            nextStepChips: typedNextStepChips,
-            // Tech-chosen solutions feed the draft prompt; productId lets
-            // the server derive the T&S treatment chips from the catalog.
-            products: selectedProducts.map((p) => ({
-              productId: p.productId,
-              name: p.displayName || p.name,
-              applicationMethod: p.applicationMethod || null,
-              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
-            })),
-            includeCustomerComms: typedAiIncludeComms,
-          }),
-        },
-      );
-      if (r?.draft) {
-        setTypedRecommendations(r.draft);
-        setTypedRecommendationsEdited(false);
-        setTypedAiDraftUsed(true);
-      } else {
-        setTypedAiError("AI draft unavailable — write manually or skip.");
-      }
-    } catch {
-      setTypedAiError("AI draft unavailable — write manually or skip.");
-    }
-    setTypedAiDrafting(false);
   }
   // Optional AI photo analysis — sends the attached photos (still local
   // data-URLs pre-submit) for a customer-facing summary + per-photo
@@ -13644,6 +14065,14 @@ export function CompletionPanel({
                   <button
                     type="button"
                     onClick={restoreDraft}
+                    // A lawn draft carrying an installed report must not
+                    // restore while the assessment is still loading —
+                    // lawnAssessmentId is null then, so the r82 identity
+                    // check (and the r58 watcher after baseline adoption)
+                    // would invalidate a matching saved report (codex r87).
+                    disabled={isLawn
+                      && lawnAssessmentReady === false
+                      && !!savedDraft?.generatedReportText}
                     style={{ ...primaryPill, height: 40, fontSize: 12 }}
                   >
                     Restore
@@ -14126,13 +14555,26 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report);
+                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
                   setGenerating(false);
                 }}
-                disabled={generating || (isLawn && lawnAssessmentReady === false)}
+                disabled={generating
+                  || (isLawn && lawnAssessmentReady === false)
+                  // A mid-load station registry would land counts AFTER the
+                  // model saw the snapshot (the paused autofill re-runs when
+                  // generating settles) — hold generation until it resolves
+                  // (codex r6).
+                  || (stationFeatureOn && stationRegistryState === "loading")
+                  // Fixed-copy zero states always refuse the drafted body —
+                  // don't bill a model call the report can never publish
+                  // (codex r43, generalized to every zero-state story in
+                  // r45); companion-only profiles hold the same way (r44).
+                  || (isTypedFindings
+                    && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
+                  || zeroStateCompanionOnly}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -14142,6 +14584,12 @@ export function CompletionPanel({
               >
                 {generating ? "Generating…" : "Generate AI report"}
               </button>
+            )}
+            {!quickComplete && generatedReportCleared && (
+              <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
+                Findings changed after the AI report was generated — the draft
+                was cleared. Generate again to include the updated findings.
+              </div>
             )}
             {/* Service photos — pure lawn visits capture turf photos in the
                 Lawn Assessment block above, which flow into the report gallery,
@@ -14209,10 +14657,10 @@ export function CompletionPanel({
                 <button
                   type="button"
                   onClick={() => photoInputRef.current?.click()}
-                  disabled={servicePhotos.length >= 5}
+                  disabled={servicePhotos.length >= 5 || generating}
                   style={{
                     ...secondaryPill,
-                    opacity: servicePhotos.length >= 5 ? 0.5 : 1,
+                    opacity: servicePhotos.length >= 5 || generating ? 0.5 : 1,
                   }}
                 >
                   Add photos
@@ -14246,6 +14694,7 @@ export function CompletionPanel({
                         <button
                           type="button"
                           onClick={() => removePhoto(i)}
+                          disabled={generating}
                           aria-label="Remove photo"
                           style={{
                             position: "absolute",
@@ -14407,6 +14856,7 @@ export function CompletionPanel({
             {isTypedFindings && (
               <TypedFindingsSection
                 variant="mobile"
+                frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
                 schema={typedFindingsSchema}
                 values={findingsValues}
@@ -14418,11 +14868,6 @@ export function CompletionPanel({
                 onToggleChip={toggleTypedNextStepChip}
                 recommendations={typedRecommendations}
                 onRecommendationsChange={handleTypedRecommendationsChange}
-                aiDrafting={typedAiDrafting}
-                aiError={typedAiError}
-                includeComms={typedAiIncludeComms}
-                onIncludeCommsChange={setTypedAiIncludeComms}
-                onAiDraft={handleTypedAiDraft}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -14434,6 +14879,7 @@ export function CompletionPanel({
                 <TypedFindingsSection
                   key={schema.type}
                   variant="mobile"
+                  frozen={generating}
                   pesticideProductPresent={pesticideProductPresent}
                   schema={schema}
                   values={entry.values}
@@ -14451,11 +14897,6 @@ export function CompletionPanel({
                   }
                   recommendations=""
                   onRecommendationsChange={null}
-                  aiDrafting={false}
-                  aiError=""
-                  includeComms={false}
-                  onIncludeCommsChange={() => {}}
-                  onAiDraft={() => {}}
                 />
               );
             })}
@@ -15904,6 +16345,11 @@ export function CompletionPanel({
                 {" "}
                 <button
                   onClick={restoreDraft}
+                  // Same lawn-assessment loading hold as the V2 Restore
+                  // button (codex r87).
+                  disabled={isLawn
+                    && lawnAssessmentReady === false
+                    && !!savedDraft?.generatedReportText}
                   style={{
                     ...btnBase,
                     width: "auto",
@@ -16331,13 +16777,20 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report);
+                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }
                 setGenerating(false);
               }}
-              disabled={generating || (isLawn && lawnAssessmentReady === false)}
+              disabled={generating
+                || (isLawn && lawnAssessmentReady === false)
+                // Same station-registry hold as the mobile Generate button.
+                || (stationFeatureOn && stationRegistryState === "loading")
+                // Same zero-state hold as the mobile button (codex r43/r45).
+                || (isTypedFindings
+                  && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
+                || zeroStateCompanionOnly}
               style={{
                 width: "100%",
                 padding: "10px 16px",
@@ -16361,6 +16814,12 @@ export function CompletionPanel({
               {generating ? "Generating Report..." : "Generate AI Service Report"}
             </button>
           )}
+          {!quickComplete && generatedReportCleared && (
+            <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
+              Findings changed after the AI report was generated — the draft
+              was cleared. Generate again to include the updated findings.
+            </div>
+          )}
           {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
@@ -16379,7 +16838,7 @@ export function CompletionPanel({
               />{" "}
               <button
                 onClick={() => photoInputRef.current?.click()}
-                disabled={servicePhotos.length >= 5}
+                disabled={servicePhotos.length >= 5 || generating}
                 style={{
                   ...btnBase,
                   background: "transparent",
@@ -16387,7 +16846,7 @@ export function CompletionPanel({
                   border: `1px solid ${D.teal}44`,
                   height: 40,
                   fontSize: 13,
-                  opacity: servicePhotos.length >= 5 ? 0.5 : 1,
+                  opacity: servicePhotos.length >= 5 || generating ? 0.5 : 1,
                 }}
               >
                 {" "}
@@ -16422,6 +16881,7 @@ export function CompletionPanel({
                       />{" "}
                       <button
                         onClick={() => removePhoto(i)}
+                        disabled={generating}
                         style={{
                           position: "absolute",
                           top: -6,
@@ -16595,6 +17055,7 @@ export function CompletionPanel({
           {isTypedFindings && (
             <TypedFindingsSection
               variant="desktop"
+              frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
               schema={typedFindingsSchema}
               values={findingsValues}
@@ -16606,11 +17067,6 @@ export function CompletionPanel({
               onToggleChip={toggleTypedNextStepChip}
               recommendations={typedRecommendations}
               onRecommendationsChange={handleTypedRecommendationsChange}
-              aiDrafting={typedAiDrafting}
-              aiError={typedAiError}
-              includeComms={typedAiIncludeComms}
-              onIncludeCommsChange={setTypedAiIncludeComms}
-              onAiDraft={handleTypedAiDraft}
             />
           )}
           {/* Companion sections — one typed form per companion schema,
@@ -16622,6 +17078,7 @@ export function CompletionPanel({
               <TypedFindingsSection
                 key={schema.type}
                 variant="desktop"
+                frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
                 schema={schema}
                 values={entry.values}
@@ -16637,11 +17094,6 @@ export function CompletionPanel({
                 }
                 recommendations=""
                 onRecommendationsChange={null}
-                aiDrafting={false}
-                aiError=""
-                includeComms={false}
-                onIncludeCommsChange={() => {}}
-                onAiDraft={() => {}}
               />
             );
           })}

@@ -43,7 +43,11 @@ const COPY_MAP_VERSION = 3;
 // flea, and tree & shrub still keep template copy.
 // v4 added rodent trapping + setup-visit wording; v3 added the generic
 // non-gauge default composition.
-const SUMMARY_TEMPLATE_VERSION = 5;
+// v6 (#3420): story lanes consume reviewed technician bodies, mandated
+// lines append, and the contradiction rules choose between AI and
+// deterministic copy — snapshots frozen by this generator must be
+// distinguishable from v5's (codex r79).
+const SUMMARY_TEMPLATE_VERSION = 6;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -2905,7 +2909,10 @@ const LEVEL_CLAIM_BANDS = {
 // bait-station and mosquito scores). Anything else — "heavy rain",
 // "high ceiling", "light fixture", "heavy levels" — claims nothing.
 const LEVEL_WORD_SRC = '(very\\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)';
-const LEVEL_NOUN_SRC = '(?:activity|infestation|pressure|feeding|consumption)';
+// 'contamination' joined for the sanitation body screen (codex r40 #3420) —
+// "light contamination" beside a Severe finding is a level claim like any
+// other; the binding rules keep unrelated uses ("light fixture") out.
+const LEVEL_NOUN_SRC = '(?:activity|infestation|pressure|feeding|consumption|contamination)';
 const LEVEL_ATTR_MOD_SRC = '(?:(?:cockroach|roach|german|palmetto|termite|rodent|mosquito|flea|tick|ant|pest|bait|overall|general|visible|current|surface|interior|exterior|feeding)\\s+){0,3}';
 const LEVEL_CLAIM_ATTRIBUTIVE_RE = new RegExp(
   `\\b${LEVEL_WORD_SRC}\\b(?!-)\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
@@ -3010,13 +3017,68 @@ const LEVEL_CLAIM_CONDITIONAL_OPEN_RE = /^\s*(?:if|unless|in\s+case|should|when)
 // Directly negated claims assert ABSENCE, not the level (codex r6 on
 // #3358): "NO heavy activity was observed" / "heavy activity was NOT
 // observed" are truthful zero-findings and must not read as heavy claims.
-const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$/i;
+// Negated-verb context is a denial too (codex r68): "We did NOT FIND
+// heavy activity" asserts absence of the level, exactly like the passive
+// "Heavy activity was not observed" the round-6 freeze exempts.
+const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$|\b(?:did\s+not|didn['’]t|does\s+not|doesn['’]t|do\s+not|don['’]t|have\s+not|haven['’]t|has\s+not|hasn['’]t|never|could\s+not|couldn['’]t)\s+(?:find|observe|note|detect|see|show|reveal|record)\s+(?:any\s+)?$/i;
 const LEVEL_CLAIM_NEGATED_AFTER_RE = /^\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\b/i;
+// A zero/absence claim beside a clearly nonzero gauge contradicts even
+// though it carries no level word (codex r51): "No flea activity was
+// observed" never enters the banded claims above. Bound to the same noun
+// set; "new/additional" absences stay legal ("no new activity" can sit
+// truthfully beside persisting pressure). An explicit absence claim
+// contradicts EVERY nonzero gauge — unlike adjacent level words, "none"
+// vs "some" is not a judgment call a band tolerance should absorb
+// (codex r52).
+// Predicative/existential shapes only: a banded denial ("No HEAVY
+// activity was observed" — denies the level word, frozen legal in the
+// round-6 #3358 semantics) and compound-noun subsets ("stations had no
+// activity signs") must not read as whole-visit absence.
+const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
+  `\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  + `|(?<!${LEVEL_WORD_SRC}\\s)\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  + `|\\bthere\\s+(?:was|were|is|are)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b(?!\\s+(?:signs?|levels?))`
+  + `|\\bno\\s+(?:signs?|evidence|indications?)\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b(?:found|observed|noted|detected|saw|identified)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b(?:did\\s+not|didn['’]t)\\s+(?:find|observe|note|detect|see)\\b(?:(?!\\b(?:very\\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)\\b)[^.!?]){0,30}\\b${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}(?:evidence|signs?)\\b[^.!?]{0,20}\\b(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`,
+  'gi',
+);
+// A subset-location prepositional phrase directly after an absence match —
+// station/room/area-class nouns only; property-level nouns deliberately
+// absent so "no activity at the property" stays a whole-visit denial
+// (codex r79).
+// Generic sweep nouns (areas/zones/sections/perimeter) only narrow the
+// scope when a qualifier actually narrows them — "in areas inspected
+// today" and "around the perimeter" describe the whole visit and stay
+// whole-visit denials; "at the rear perimeter" is a genuine subset
+// (codex r87).
+const LEVEL_ABSENCE_SUBSET_SCOPE_RE = /^\s*(?:at|in|near|around|along|behind|under|beneath|inside|by)\s+(?:the\s+|a\s+|an\s+|any\s+of\s+the\s+)?(?:(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)+(?:areas?|zones?|sections?|perimeter)|(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)*(?:stations?|traps?|monitors?|bait\s+stations?|rooms?|corners?|walls?|closets?|attic|garage|kitchen|bathrooms?|bedrooms?|crawl\s?space|lanai|soffits?|baseboards?|units?))\b/i;
+// finalBand semantics: 1..3 = the recorded level band (adjacent claims
+// tolerated, 2-band gaps contradict); an EXPLICIT 0 = a zero-score gauge,
+// where ANY positive level claim contradicts (codex r60) and absence
+// claims are truthful. null/undefined = no gauge, screens nothing.
 function activityLevelContradictions(text, finalBand) {
-  if (!finalBand) return [];
+  if (finalBand !== 0 && !finalBand) return [];
   const found = [];
   for (const clause of clauses(String(text || ''))) {
     if (LEVEL_CLAIM_CONDITIONAL_OPEN_RE.test(clause)) continue;
+    if (finalBand >= 1) {
+      for (const match of clause.matchAll(new RegExp(LEVEL_ABSENCE_CLAIM_RE.source, 'gi'))) {
+        const before = clause.slice(0, match.index);
+        const afterClause = clause.slice(match.index + match[0].length);
+        const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
+        if (intentGovernsLevelClaim(before) || intentGovernsLevelClaimFromAfter(afterClause)) continue;
+        if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
+        // Absence explicitly scoped to a subset location is a subset
+        // report, not a whole-visit denial (codex r79): "no activity at
+        // the front stations, but moderate activity at station 7" agrees
+        // with a nonzero gauge. Property-level nouns (property/home/…)
+        // are NOT subsets and still deny the whole visit.
+        if (LEVEL_ABSENCE_SUBSET_SCOPE_RE.test(afterClause)) continue;
+        found.push('level_claim_mismatch:none');
+      }
+    }
     // Both bindings collect into one claim list; the exemption machinery
     // then runs per claim against its own before/after spans.
     const claims = [];
@@ -3028,7 +3090,10 @@ function activityLevelContradictions(text, finalBand) {
     for (const claim of claims) {
       const word = claim.word.toLowerCase().replace(/\s+/g, ' ');
       const claimBand = LEVEL_CLAIM_BANDS[word];
-      if (!claimBand || Math.abs(claimBand - finalBand) < 2) continue;
+      if (!claimBand) continue;
+      // beside an explicit zero, ANY positive claim contradicts; beside a
+      // recorded band, adjacent claims are tolerated (codex r60)
+      if (finalBand !== 0 && Math.abs(claimBand - finalBand) < 2) continue;
       const before = clause.slice(0, claim.index);
       const afterClause = clause.slice(claim.index + claim.length);
       const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
@@ -3039,6 +3104,53 @@ function activityLevelContradictions(text, finalBand) {
     }
   }
   return found;
+}
+
+// Story-lane body screens, hoisted to module scope so BOTH the story
+// branches and the gauge branch (trend visits land there) apply them
+// (codex r53 #3420).
+const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b|\b(?:repairs?|work|exclusion)\b[^.!?]{0,30}\b(?:could\s+not|couldn['’]t|cannot|can['’]t|will\s+not|won['’]t)\s+be\s+(?:completed|performed|done|made|finished)\b|\bunable\s+to\s+(?:complete|perform|finish|make|do)\b[^.!?]{0,30}\b(?:repairs?|exclusion|work)\b/i;
+const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
+const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
+const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b|\\bthere\\s+(?:was|were|is|are)\\s+(?:some\\s+|fresh\\s+|new\\s+|visible\\s+|clear\\s+)*(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bthere\\s+(?:was|were|is|are)\\s+(?:a\\s+|an\\s+|some\\s+)?${RODENT_NOUN_SRC}\\b`, 'i');
+// "Inspection only" is a valid exclusion_work_completed chip — those
+// visits recorded NO repairs, so the repair-denial screen must not reject
+// truthful copy, and the composition must not claim completed repairs
+// (codex r54). Chips are exclusive by validation, but derive from the
+// recorded values rather than trusting that.
+function exclusionInspectionOnly(values = {}) {
+  const chips = String(values.exclusion_work_completed || '')
+    .split(',').map((s) => s.trim()).filter(Boolean).filter((c) => c !== 'Other');
+  return chips.length > 0 && chips.every((c) => c === 'Inspection only');
+}
+// The reverse contradiction for inspection-only visits: a body claiming
+// repair work was performed.
+// The ordinary close/patch/block repair verbs claim the same completed
+// work as "sealed" (codex r74): "We closed two gaps at the soffit line",
+// "patched the garage opening", "blocked the rodent entry point".
+const REPAIRS_DONE_CLAIM_RE = /\brepairs?\s+(?:was|were)\s+(?:completed|performed|made|done|finished)\b|\bcompleted\s+(?:the\s+)?(?:permanent\s+)?(?:exclusion\s+)?repairs?\b|\b(?:sealed|closed|patched|blocked|covered|filled|plugged|screened(?:\s+off)?|caulked|boarded(?:\s+up)?|repaired)\s+(?:the\s+|an?\s+|two\s+|three\s+|several\s+|multiple\s+|some\s+)?(?:[a-z]+\s+){0,2}(?:entry\s+points?|entries|access\s+points?|gaps?|openings?|holes?|points?|voids?|penetrations?)\b|\binstalled\s+(?:hardware\s+cloth|mesh|sealant|door\s+sweeps?|screens?)\b|\breinforced\s+(?:the\s+|an?\s+)?openings?\b/i;
+// True when a reviewed body contradicts the recorded story facts of an
+// exclusion/inspection section — used by the first-visit story branches
+// AND the gauge branch their trend visits land in (codex r53).
+function rodentStoryBodyContradiction(projectType, values = {}, text = '') {
+  const body = String(text || '');
+  if (!body.trim()) return false;
+  if (projectType === 'rodent_exclusion') {
+    if (!values.exclusion_work_completed) return false;
+    // strip denial phrasing first so "no repairs were completed" never
+    // reads as a repairs-performed claim
+    return exclusionInspectionOnly(values)
+      ? REPAIRS_DONE_CLAIM_RE.test(body.replace(new RegExp(NO_REPAIRS_CLAIM_RE.source, 'gi'), ''))
+      : NO_REPAIRS_CLAIM_RE.test(body);
+  }
+  if (projectType === 'rodent_inspection') {
+    const recorded = String(values.activity_found || '');
+    if (!recorded) return false;
+    return recorded === 'Yes'
+      ? NO_ACTIVITY_CLAIM_RE.test(body)
+      : ACTIVITY_FOUND_CLAIM_RE.test(body.replace(new RegExp(NO_ACTIVITY_CLAIM_RE.source, 'gi'), ''));
+  }
+  return false;
 }
 
 /**
@@ -3185,10 +3297,97 @@ function buildTodaysResult({
             : ' No visible Ganoderma conks were observed on the palms today.';
         }
       }
+      // Reviewed Generate-AI copy replaces the scope/what-we-did portion
+      // (owner 2026-08-11 rule); the Ganoderma answer and next step are
+      // mandated and carry in EVERY body (codex r24 #3420). The body must
+      // agree with the recorded landscape CONDITION — a "landscape is
+      // healthy" draft beside a Poor/Declining finding (or the reverse)
+      // keeps the deterministic copy; reconcile override honored
+      // (codex r41).
+      // Every explicit condition claim is EXTRACTED and its family compared
+      // to the recorded value's family — the former positive/negative
+      // buckets missed cross-family middle values ("condition is fair"
+      // beside a recorded Poor matched neither bucket and shipped a Poor
+      // headline over a Fair body — codex r45). Four families: positive
+      // (Excellent/Good), middle (Fair), recovering, negative
+      // (Poor/Declining); any claim outside the recorded family
+      // contradicts. Reconcile override honored (codex r41).
+      // explicit negative adjectives included — "unhealthy" names the
+      // negative family directly, no negation needed (codex r55)
+      const TS_CONDITION_WORD_SRC = '(excellent|healthy|thriving|great|good|strong|fair|average|so[-\\s]?so|okay|ok|moderate|poor|declining|struggling|deteriorating|failing|rough|bad|unhealthy|unwell|sickly|dying|wilting|stressed|recovering|improving|rebounding)';
+      const TS_CLAIM_RES = [
+        // past-tense/copular forms included — "The plants appeared healthy"
+        // is the common paraphrase the present-tense alternation missed
+        // (codex r46)
+        new RegExp(`\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
+        new RegExp(`\\b${TS_CONDITION_WORD_SRC}\\s+(?:overall\\s+)?(?:landscape|plant|shrub|palm|turf)?\\s*(?:condition|health|shape)\\b`, 'gi'),
+        // rated/assessed constructions — "condition was rated excellent"
+        // puts a verb between the copular verb and the condition word, so
+        // neither shape above extracts it (codex r47)
+        new RegExp(`\\b(?:rated|assessed|graded|scored|evaluated|judged|deemed|considered)\\s+(?:as\\s+)?(?:very\\s+|quite\\s+|overall\\s+)*${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
+      ];
+      const TS_CLAIM_BANDS = {
+        excellent: 'positive', healthy: 'positive', thriving: 'positive', great: 'positive', good: 'positive', strong: 'positive',
+        fair: 'middle', average: 'middle', 'so-so': 'middle', okay: 'middle', ok: 'middle', moderate: 'middle',
+        poor: 'negative', declining: 'negative', struggling: 'negative', deteriorating: 'negative', failing: 'negative', rough: 'negative', bad: 'negative',
+        unhealthy: 'negative', unwell: 'negative', sickly: 'negative', dying: 'negative', wilting: 'negative', stressed: 'negative',
+        recovering: 'recovering', improving: 'recovering', rebounding: 'recovering',
+      };
+      const TS_RECORDED_BANDS = {
+        Excellent: 'positive', Good: 'positive', Fair: 'middle', Recovering: 'recovering', Poor: 'negative', Declining: 'negative',
+      };
+      const tsBodyText = String(technicianReportBody || '');
+      const tsRecordedBand = TS_RECORDED_BANDS[condition] || null;
+      const tsClaimedBands = TS_CLAIM_RES
+        .flatMap((re) => [...tsBodyText.matchAll(re)])
+        .map((m) => TS_CLAIM_BANDS[String(m[1] || '').toLowerCase().replace(/[\s-]+/g, '-')])
+        .filter(Boolean);
+      // Negated claims deny the named family — "the plants are not
+      // healthy" contradicts a recorded Good/Excellent even though it
+      // names no opposing word. The positive shapes cannot cross "not",
+      // so these never double-extract (codex r51).
+      const TS_NEGATED_CLAIM_RE = new RegExp(
+        `\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:not|no\\s+longer|anything\\s+but|far\\s+from|nowhere\\s+near|hardly|scarcely|barely|by\\s+no\\s+means|less\\s+than)|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|(?:do|does|did)\\s+not\\s+(?:look|seem|appear))\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`,
+        'gi',
+      );
+      const tsNegatedBands = [...tsBodyText.matchAll(TS_NEGATED_CLAIM_RE)]
+        .map((m) => TS_CLAIM_BANDS[String(m[1] || '').toLowerCase().replace(/[\s-]+/g, '-')])
+        .filter(Boolean);
+      const tsContradiction = Boolean(tsRecordedBand)
+        && (tsClaimedBands.some((band) => band !== tsRecordedBand)
+          // a negated word contradicts exactly when its family IS the
+          // recorded one ("not healthy" beside Good; "not declining"
+          // beside Declining)
+          || tsNegatedBands.some((band) => band === tsRecordedBand));
+      // The body must also agree with the recorded Ganoderma answer — the
+      // mandated palm sentence is appended either way, so a body claiming
+      // "no Ganoderma conks were observed" beside a recorded Yes (or the
+      // reverse) would contradict its own report one sentence later
+      // (codex r50).
+      const GANODERMA_ABSENT_RE = /\bno\s+(?:visible\s+|possible\s+|suspected\s+)*(?:ganoderma\s*)?conks?\b|\bno\s+ganoderma\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+not\s+(?:observed|found|seen|noted|detected|identified)\b|\b(?:did\s+not|didn['’]t)\s+(?:observe|find|see|note|detect|identify|locate)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b/i;
+      // presence-state phrasing ("was present", "the palm had a conk",
+      // "is showing a conk") claims presence like observed/found do
+      // (codex r51)
+      // ordinary discovery verbs included — "We detected a Ganoderma
+      // conk" (codex r55)
+      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|detected|identified|discovered|located|uncovered|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b|\bthere\s+(?:was|were|is|are|appeared?\s+to\s+be)\s+(?:a\s+|an\s+|one\s+|some\s+)?(?:possible\s+|suspected\s+)*(?:ganoderma|conks?)\b/i;
+      const gRecorded = String(values.ganoderma_conk_observed || '');
+      const gAbsentClaim = GANODERMA_ABSENT_RE.test(tsBodyText);
+      // strip absence phrasing first so "no conks were observed" never
+      // reads as a presence claim
+      const gPresentClaim = GANODERMA_PRESENT_RE
+        .test(tsBodyText.replace(new RegExp(GANODERMA_ABSENT_RE.source, 'gi'), ''));
+      const gContradiction = (gRecorded === 'Yes' && gAbsentClaim)
+        || (gRecorded === 'No' && gPresentClaim);
+      const tsReportBody = technicianReportBody
+        && (reconcileConfirmed || (!tsContradiction && !gContradiction))
+        ? technicianReportBody
+        : null;
       return {
         headline,
-        body: `${scopeSentence} ${whatWeDid}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        body: `${tsReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
         nextStep,
+        ...(tsReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
   }
@@ -3208,22 +3407,49 @@ function buildTodaysResult({
     const concerns = String(values.remaining_concerns || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
     const realConcerns = concerns.filter((c) => c !== 'No remaining concerns observed');
-    const sentences = [
-      areas.length
-        ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
-        : 'Completed rodent exclusion work today.',
-      points.length ? `Entry points addressed included the ${joinPhrases(points)}.` : null,
-      whatWeDid,
-      materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
+    // Reviewed Generate-AI copy replaces the repair-story sentences (owner
+    // 2026-08-11 rule); the remaining-concerns disclosure and next step are
+    // mandated and carry in EVERY body (codex r24 #3420). The body must not
+    // deny the recorded repairs — "no exclusion repairs were completed"
+    // beside the fixed repairs-completed headline keeps the deterministic
+    // copy; reconcile override honored (codex r43).
+    // modal and inability denials included — "repairs could not be
+    // completed" / "we were unable to complete the repairs" deny the
+    // recorded work just as plainly as "no repairs were completed"
+    // (codex r46; regex hoisted to module scope in r53)
+    // Inspection-only visits recorded NO repairs (codex r54): truthful
+    // no-repairs copy is legal there, a repairs-performed claim is the
+    // contradiction, and the composition must not claim completed repairs.
+    const inspectionOnlyVisit = exclusionInspectionOnly(values);
+    const exclusionReportBody = technicianReportBody
+      && (reconcileConfirmed || !rodentStoryBodyContradiction('rodent_exclusion', values, technicianReportBody))
+      ? technicianReportBody
+      : null;
+    const exclusionMandated = [
       realConcerns.length
         ? `Remaining concerns: ${joinPhrases(realConcerns.map((c) => c.toLowerCase()))}.`
         : 'No remaining concerns were observed today.',
       nextStep,
     ].filter(Boolean);
+    const exclusionDescriptive = exclusionReportBody
+      ? [exclusionReportBody]
+      : [
+        areas.length
+          ? `Completed ${inspectionOnlyVisit ? 'a rodent exclusion inspection' : 'rodent exclusion work'} today around the ${joinPhrases(areas)}.`
+          : `Completed ${inspectionOnlyVisit ? 'a rodent exclusion inspection' : 'rodent exclusion work'} today.`,
+        points.length
+          ? `${inspectionOnlyVisit ? 'Possible entry points noted' : 'Entry points addressed'} included the ${joinPhrases(points)}.`
+          : null,
+        whatWeDid,
+        materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
+      ].filter(Boolean);
     return {
-      headline: 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      headline: inspectionOnlyVisit
+        ? 'An exclusion inspection was completed to identify potential rodent access points.'
+        : 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
+      body: [...exclusionDescriptive, ...exclusionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(exclusionReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3240,13 +3466,21 @@ function buildTodaysResult({
       .split(',').map((s) => s.trim()).filter(Boolean)
       .filter((c) => c !== 'No limitations');
     const level = String(values.contamination_level).split('—')[0].trim().toLowerCase();
-    const sentences = [
-      areas.length
-        ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
-        : 'Completed your rodent sanitation service today.',
-      `Contamination level was ${level}.`,
-      evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
-      whatWeDid,
+    // The tech's reviewed "Generate AI report" copy replaces the descriptive
+    // portion (owner 2026-08-11 rule, same as knockdown/mosquito/flea) — the
+    // limitation disclosure, the severe-contamination follow-up line, and
+    // the next step are mandated and carry in EVERY body (codex r23 #3420).
+    // The body must agree with the recorded contamination LEVEL: a draft
+    // claiming "light contamination" beside a Severe finding keeps the
+    // deterministic copy (same level screen the flea/mosquito/knockdown
+    // branches run; reconcile override honored — codex r40).
+    const sanitationBand = LEVEL_CLAIM_BANDS[level] || null;
+    const sanitationReportBody = technicianReportBody
+      && (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, sanitationBand).length)
+      ? technicianReportBody
+      : null;
+    const mandated = [
       limitations.length
         ? `Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`
         : 'No limitations were encountered during the cleanup.',
@@ -3255,10 +3489,21 @@ function buildTodaysResult({
         : null,
       nextStep,
     ].filter(Boolean);
+    const descriptive = sanitationReportBody
+      ? [sanitationReportBody]
+      : [
+        areas.length
+          ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
+          : 'Completed your rodent sanitation service today.',
+        `Contamination level was ${level}.`,
+        evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
+        whatWeDid,
+      ].filter(Boolean);
     return {
       headline: `${level.charAt(0).toUpperCase()}${level.slice(1)} rodent contamination was cleaned and sanitized today.`,
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      body: [...descriptive, ...mandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(sanitationReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3273,24 +3518,45 @@ function buildTodaysResult({
     const found = String(values.activity_found) === 'Yes';
     const service = String(values.recommended_service || '');
     const urgency = String(values.urgency || '');
-    const sentences = [
-      areas.length
-        ? `We inspected the ${joinPhrases(areas)}.`
-        : 'We completed a rodent inspection of the property today.',
-      values.entry_points_found
-        ? `Possible entry points were noted: ${String(values.entry_points_found).trim().replace(/\.$/, '')}.`
-        : null,
+    // Reviewed Generate-AI copy replaces the inspection narrative (owner
+    // 2026-08-11 rule); the service recommendation and next step are
+    // mandated and carry in EVERY body (codex r24 #3420). The body must
+    // agree with the boolean finding — a draft claiming "no activity" on a
+    // found=Yes visit (or vice versa) keeps the deterministic copy, with
+    // the reconciliation override honored (codex r39).
+    // noun-first evidence denials included — "No visible rodent evidence
+    // was observed" is the natural form of "no evidence of rodents"
+    // (codex r46)
+    // rat/mouse species nouns claim (and deny) the same finding as
+    // "rodent" (codex r50; regexes hoisted to module scope in r53 and
+    // shared via rodentStoryBodyContradiction with the gauge branch)
+    const inspectionReportBody = technicianReportBody
+      && (reconcileConfirmed || !rodentStoryBodyContradiction('rodent_inspection', values, technicianReportBody))
+      ? technicianReportBody
+      : null;
+    const inspectionMandated = [
       service && service !== 'No service needed at this time'
         ? `Based on today's findings, we recommend ${service.charAt(0).toLowerCase()}${service.slice(1)}${urgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
         : 'No service is needed at this time based on today’s findings.',
       nextStep,
     ].filter(Boolean);
+    const inspectionDescriptive = inspectionReportBody
+      ? [inspectionReportBody]
+      : [
+        areas.length
+          ? `We inspected the ${joinPhrases(areas)}.`
+          : 'We completed a rodent inspection of the property today.',
+        values.entry_points_found
+          ? `Possible entry points were noted: ${String(values.entry_points_found).trim().replace(/\.$/, '')}.`
+          : null,
+      ].filter(Boolean);
     return {
       headline: found
         ? 'Rodent activity was found during today’s inspection.'
         : 'No current rodent activity was observed during today’s inspection.',
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      body: [...inspectionDescriptive, ...inspectionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(inspectionReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3328,10 +3594,25 @@ function buildTodaysResult({
     const intro = areas.length
       ? `Completed your flea service with attention to the ${joinPhrases(areas)}.`
       : 'Completed your flea service today.';
+    // The tech's reviewed "Generate AI report" copy replaces only the
+    // intro/what-we-did portion (same owner 2026-08-11 rule the knockdown
+    // and mosquito branches follow) — the owner-mandated cooperation line
+    // carries in EVERY body. A cleared state keeps the template, and a
+    // draft contradicting the FINAL level family is refused (reconcile
+    // override honored) — codex r21 on #3420.
+    const fleaBand = score != null
+      ? levelBandForScore(score)
+      : (LEVEL_CLAIM_BANDS[select.toLowerCase()] || null);
+    const fleaReportBody = !cleared
+      && (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, fleaBand).length)
+      ? technicianReportBody
+      : null;
     return {
       headline,
-      body: `${intro} ${whatWeDid} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
+      body: `${fleaReportBody || `${intro} ${whatWeDid}`} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(fleaReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3474,8 +3755,24 @@ function buildTodaysResult({
     // appended right after it. Falls back to the deterministic sentence,
     // which is always stage-correct because it is composed from the same
     // declaration.
-    const storyKeepsTemplate = projectType === 'rodent_exclusion' || projectType === 'rodent_inspection';
-    const rawGaugeBody = !storyKeepsTemplate && activity.score !== 0
+    // Story-lane TREND visits consume the reviewed body like every other
+    // gauge lane (owner 2026-08-11 collective rule; codex r53 — the old
+    // unconditional template kept Generate billing for prose completion
+    // silently discarded). The same story screens their first-visit
+    // branches run apply here, reconcile override honored downstream.
+    const storyScreened = !rodentStoryBodyContradiction(projectType, values, technicianReportBody)
+      || reconcileConfirmed;
+    // Story-lane visits consume screened copy even at score 0 (codex r65
+    // — their first-visit branches never score-gate, so the client keeps
+    // Generate enabled): the story screens verify the recorded facts and
+    // the band-0 level screen refuses any positive activity claim, so a
+    // zero-score trend body can only publish absence-consistent prose.
+    // Every other gauge lane keeps the fixed zero template.
+    const storyLane = projectType === 'rodent_exclusion' || projectType === 'rodent_inspection';
+    const rawGaugeBody = storyScreened
+      && (activity.score !== 0
+        || (storyLane
+          && activityLevelContradictions(String(technicianReportBody || ''), 0).length === 0))
       ? technicianReportBody
       : null;
     // Stage guard (setup only) AND count guard (both stages): the draft is
@@ -3514,6 +3811,26 @@ function buildTodaysResult({
     const setupLine = initialTrapSetup && !capturesRecorded
       ? ' We return to check them, record what they catch, and adjust placements from there.'
       : '';
+    // Story-lane trend visits keep their owner-mandated disclosures even
+    // though the generic gauge path composes them (codex r61): the
+    // exclusion remaining-concerns sentence and the inspection
+    // recommended-service sentence carry in EVERY body, same as their
+    // first-visit branches.
+    let storyMandatedLine = '';
+    if (projectType === 'rodent_exclusion') {
+      const trendConcerns = String(values.remaining_concerns || '')
+        .split(',').map((s) => s.trim()).filter(Boolean)
+        .filter((c) => c !== 'No remaining concerns observed');
+      storyMandatedLine = trendConcerns.length
+        ? ` Remaining concerns: ${joinPhrases(trendConcerns.map((c) => c.toLowerCase()))}.`
+        : ' No remaining concerns were observed today.';
+    } else if (projectType === 'rodent_inspection') {
+      const trendService = String(values.recommended_service || '');
+      const trendUrgency = String(values.urgency || '');
+      storyMandatedLine = trendService && trendService !== 'No service needed at this time'
+        ? ` Based on today's findings, we recommend ${trendService.charAt(0).toLowerCase()}${trendService.slice(1)}${trendUrgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
+        : ' No service is needed at this time based on today’s findings.';
+    }
     if (visitSequence > 1 && activity.trendWord) {
       // Stable needs its own sentence shape — "has about the same as the
       // last visit since our last visit" is not English (Codex P2).
@@ -3527,7 +3844,7 @@ function buildTodaysResult({
         // visitSequence > 1 with a resolved trendWord — and that is the
         // main case the selector exists for. Omitting the guidance here
         // dropped it from exactly the reports that needed it most.
-        body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
+        body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
         nextStep,
         ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -3535,14 +3852,14 @@ function buildTodaysResult({
     if (activity.score === 0) {
       return {
         headline: `No active signs of ${noun.toLowerCase()} activity observed today.`,
-        body: `${whatWeDid}${setupLine} Continue monitoring and contact us if activity returns.`,
+        body: `${whatWeDid}${setupLine}${storyMandatedLine} Continue monitoring and contact us if activity returns.`,
         nextStep,
       };
     }
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
+      body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
       nextStep,
       ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
     };
@@ -3589,6 +3906,68 @@ function buildTodaysResult({
  * Zero-state rule: only null/undefined/'' are skipped when building items.
  * 0, false, and "none"-class select values are results and are included.
  */
+// Screens a reviewed report body against ONE section's recorded findings
+// regardless of which snapshot carries the body (codex r52 #3420): a
+// primary-carried body must not contradict a customer-facing companion's
+// card. Runs the value-driven guards the branches apply when they consume
+// the body themselves — trap setup, trap/station counts, and the
+// level-band screen for a gauge score. Value-driven means sections
+// without those fields screen nothing.
+function typedBodyContradictions(projectType, values = {}, score = null, body = '') {
+  const text = String(body || '');
+  if (!text.trim()) return [];
+  const vals = values && typeof values === 'object' && !Array.isArray(values) ? values : {};
+  const found = [];
+  if (projectType === 'rodent_trapping' && isInitialRodentTrapSetup(projectType, 1, vals)) {
+    found.push(...setupContradictions(text));
+  }
+  found.push(...countContradictions(text, vals));
+  const numericScore = Number.isInteger(score) ? score : Number.parseInt(score, 10);
+  // an explicit zero screens positive level claims (codex r60) — a
+  // primary-carried body must not claim activity a zero-score companion's
+  // fixed card denies
+  const band = numericScore === 0
+    ? 0
+    : levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
+  if (band !== null && band !== undefined) found.push(...activityLevelContradictions(text, band));
+  // The story-specific guards run for the companion's type too (codex r79):
+  // a primary-carried whole-visit body must not publish a repairs-completed
+  // claim beside an inspection-only exclusion companion card — the same
+  // body is rejected when that snapshot carries it itself.
+  if (rodentStoryBodyContradiction(projectType, vals, text)) {
+    found.push('story_contradiction');
+  }
+  return found;
+}
+
+// True when the frozen snapshots in a parsed service_data ACCEPT the
+// reviewed body for customer surfaces (codex r65 #3420): mirrors
+// report-data's governing-snapshot rule so voice consumers refuse exactly
+// what the web report refuses. Customer viewers see auto_send companions
+// only; a zero-score snapshot's reconcile flag never means acceptance.
+// No governing snapshot (untyped visit) accepts by default — the
+// request-context rejection marker covers that path separately.
+function typedStoryAcceptsBody(serviceData = {}) {
+  const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
+  const typedSnapshot = sd.typedReportSnapshot && typeof sd.typedReportSnapshot === 'object'
+    && sd.typedReportSnapshot.type ? sd.typedReportSnapshot : null;
+  const companions = Array.isArray(sd.companionReportSnapshots) ? sd.companionReportSnapshots : [];
+  const governing = [
+    typedSnapshot,
+    ...(typedSnapshot ? [] : companions.filter((snap) => snap?.delivery === 'auto_send')),
+  ].filter((snap) => snap?.todaysResult);
+  if (!governing.length) return true;
+  return governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
+    || (snap.todaysResult?.reconcileConfirmed === true
+      && snap.activity?.score !== 0
+      // A cleared non-gauge severity/activity select is a zero state too
+      // (codex r80/r81) — mirror the web report's exclusion so voice
+      // consumers refuse exactly what report-data refuses.
+      && !['None observed', 'No activity'].includes(
+        String(snap.values?.severity || snap.values?.activity_level || ''),
+      )));
+}
+
 function buildTypedReportSnapshot({
   projectType,
   values = {},
@@ -3790,6 +4169,21 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // claim ("areas are clear", "clear of pests", "activity cleared") but the
 // imperative verb stays allowed — "please clear food debris" is legitimate
 // sanitation advice.
+// Fixed-timing figures for the compliance classes below: digits OR
+// spelled-out quantities, incl. "half an hour" / "a couple of hours"
+// forms (codex r48 #3420).
+const TIME_FIGURE_SRC = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
+const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
+// One entry-verb alternation shared by the duration and clock-time shapes
+// (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays
+// legal; "avoid" is scoped to treated-surface nouns so agronomic
+// aftercare ("avoid mowing for 48 hours") stays legal too.
+// Passive occupancy forms are anchored on be/been/being so completed-action
+// prose ("we entered through the side gate") never matches (codex r54).
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family)\\b|(?:allow(?:ing)?|permit(?:ting)?|bring(?:ing|s)?|tak(?:e|es|ing))\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family|people|guests?|anyone)\\b|(?:be|been|being|are|is|was|were)\\s+brought\\s+back\\b|go(?:es|ing)?\\s+outside|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)|remain(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|out(?:side)?)\\b|wait(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|outside)\\b|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|available\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|safe\\s+for\\s+(?:pets?|children|kids|families|play|foot\\s+traffic)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?(?:accessible|usable|walkable|open\\s+for\\s+(?:use|occupancy))|re-?open(?:s|ed|ing)?|open(?:s|ed|ing)?\\s+(?:back\\s+)?(?:up|again)\\b|dry(?:ing|s)?|dried)';
+// Clock times state the same fixed re-entry window as durations
+// (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
+const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
 const BANNED_CUSTOMER_COPY = [
   /\beliminated\b/i,
   /\beradicated\b/i,
@@ -3813,6 +4207,40 @@ const BANNED_CUSTOMER_COPY = [
   // shape. The tempered gaps refuse to cross "station(s)" so legitimately
   // scoped copy ("no feeding in the stations on your property") stays legal.
   /\bno\b(?:(?!\bstations?\b)[^.!?]){0,40}?\btermites?\b(?:(?!\bstations?\b)[^.!?]){0,80}?\b(?:on|at|in|around|across|throughout)\s+(?:the\s+|this\s+|your\s+)?(?:property|home|house|premises|structure)\b/i,
+  // Compliance-language classes (AGENTS.md customer-surface rule, codex r47
+  // #3420): "EPA-registered"/"EPA-exempt" are legal, "EPA-approved" never
+  // is; a fixed re-entry/drying minute-or-hour figure is never stated — the
+  // idiom is "safe once dry" with the technician confirming timing, and
+  // that idiom carries no number so it stays legal here.
+  // grant/give/issue constructions state the same approval claim with a
+  // verb between EPA and "approval" (codex r74): "The EPA granted approval
+  // for this treatment" — EPA-registered/-exempt wording is untouched
+  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b|\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?(?:grant(?:ed|s)?|gave|giv(?:es|en)|issu(?:ed|es)?|provid(?:ed|es)?|extend(?:ed|s)?|award(?:ed|s)?)\b[^.!?]{0,15}\bapproval\b|\bEPA['’]s\s+(?:(?:full|formal|official)\s+)?approval\b/i,
+  // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
+  // "a few minutes") state the same prohibited fixed timing as digits
+  // (codex r48)
+  // "return"/"go back"/"come back" state the same re-entry timing without
+  // the re-entry word (codex r50): "Return to the treated area after
+  // thirty minutes"
+  // direct enter/occupancy instructions state the same timing without a
+  // "re-" prefix ("Enter the treated area after thirty minutes") —
+  // codex r51
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  // clock-time forms (codex r53): forward takes any temporal preposition;
+  // the reverse direction takes DEADLINE prepositions only, so "We arrived
+  // at 2 PM and entered through the side gate" stays legal.
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b(?:at|by|until|till|before|after|around)\\s+${CLOCK_TIME_SRC}\\b`, 'i'),
+  new RegExp(`\\b(?:until|till|before|by)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  // reverse at-time INSTRUCTIONS (codex r56): "At 4 PM, you can enter the
+  // treated area" — gated on a modal/permission marker before the entry
+  // verb so arrival prose ("we arrived at 2 PM and entered…") stays legal
+  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b(?:can|may|could|free\\s+to|safe\\s+to|able\\s+to|allowed\\s+to)\\s+(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|use|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|sit\\s+on)\\b`, 'i'),
+  // ... and reverse IMPERATIVES (codex r57): "After 4 PM, enter the
+  // treated area" — the base-form verb must sit right after the clock
+  // phrase, so past-tense arrival narration ("at 2 PM and entered") still
+  // never matches
+  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\s*[,;—–-]?\\s*(?:and\\s+)?(?:then\\s+)?(?:please\\s+)?(?:feel\\s+free\\s+to\\s+)?(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|use|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|sit\\s+on)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {
@@ -3849,6 +4277,8 @@ module.exports = {
   trendDirection,
   buildTodaysResult,
   buildTypedReportSnapshot,
+  typedBodyContradictions,
+  typedStoryAcceptsBody,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,

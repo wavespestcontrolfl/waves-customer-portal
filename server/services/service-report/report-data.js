@@ -4260,8 +4260,51 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             captures: visibleTrapSnapshot.values?.captures,
           }).length === 0)
       );
+    // When a typed story GOVERNS the visit — the primary snapshot, or on
+    // companion-only profiles any customer-visible companion snapshot — the
+    // body may only drive the summary if that story ACCEPTED it (bodySource
+    // stamped). Zero-state branches deliberately refuse the drafted body in
+    // favor of fixed wording, and the summary must not resurrect what
+    // Today's Result refused (codex r26 on #3420).
+    const governingSnapshots = [
+      typedSnapshot,
+      // CUSTOMER-facing companions only, for staff too (codex r78):
+      // completion never offers the body to an internal_only companion, so
+      // treating one as a governing story for staff makes acceptance
+      // impossible and the admin preview would fall back to the legacy
+      // recap while the customer report promotes the reviewed body. The
+      // summary decision must match what the customer actually receives.
+      ...(typedSnapshot ? [] : companionSnapshots.filter(
+        (snap) => snap.delivery === 'auto_send',
+      )),
+    ].filter((snap) => snap?.todaysResult);
+    const typedStoryAcceptedBody = !governingSnapshots.length
+      || governingSnapshots.some(
+        (snap) => snap.todaysResult?.bodySource === 'technician_report'
+          // A frozen reconcile confirmation is a PERSON accepting the body
+          // over the matcher — honored here like trapSetupScreened above,
+          // EXCEPT on zero-state snapshots: their stories refuse the body
+          // for fixed wording regardless of the count reconciliation, so
+          // the flag never means body acceptance there (codex r42). A
+          // non-gauge cleared severity/activity select is a zero state too
+          // (codex r80) — buildTodaysResult keeps the fixed "No active
+          // signs" template for it, so the summary must not resurrect the
+          // body that result refused (the reconcile flag can originate
+          // from a trapping companion's count prompt).
+          || (snap.todaysResult?.reconcileConfirmed === true
+            && snap.activity?.score !== 0
+            && !['None observed', 'No activity'].includes(
+              String(snap.values?.severity || snap.values?.activity_level || ''),
+            )),
+      );
+    // A completion-time request-context rejection (trade name from the
+    // visit's own products, companion contradiction) is frozen into
+    // service_data — untyped visits have no governing snapshot, so
+    // without this the reparse would promote the rejected body
+    // (codex r58).
     const drivesSummary = technicianReport?.body && trapSetupScreened
-      && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
+      && typedStoryAcceptedBody
+      && !serviceData.technicianReportBodyRejected;
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';
@@ -4553,6 +4596,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // would keep serving stale cached PDFs across a gate flip (codex P2
     // #3004) — non-live renders keep the legacy layout unconditionally.
     rodentReportRefresh: (rodentReportRefresh && opts.mode === 'live') || undefined,
+    // Client-side switch for the termite bait-station pin animation (owner ask
+    // 2026-08-15): staggered pop-in + activity-pulse halo on the station map.
+    // Same contract as rodentReportRefresh — LIVE VIEWS ONLY (stored PDF keys
+    // don't carry this gate; non-live renders never mount the map anyway), and
+    // the gate dark keeps today's static pins bit-for-bit.
+    termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
     visitTimeline,
     serviceLocations,
@@ -4653,8 +4702,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   };
 }
 
+// Pure — the termite bait-station pin-animation payload flag
+// (GATE_TERMITE_BAIT_PINS, owner ask 2026-08-15). Live views only; gate dark
+// (or any non-termite / unavailable map) = undefined, keeping today's static
+// pins bit-for-bit. Exported for the contract test.
+function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE_TERMITE_BAIT_PINS }) {
+  return (stationMap?.available === true
+    && stationMap?.program === 'termite'
+    && gateValue === 'true'
+    && mode === 'live') || undefined;
+}
+
 module.exports = {
   buildReportV1Data,
+  termiteStationPinsFlag,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,

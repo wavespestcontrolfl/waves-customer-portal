@@ -2468,7 +2468,23 @@ router.get('/:date?', async (req, res, next) => {
         // completion must never block on a registry fetch.
         companionSchemas: completionProfile
           ? (completionProfile.companions || [])
-            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
+            .map((c) => {
+              const schema = ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true });
+              // delivery rides along (same contract as the schedule feed) so
+              // the client's generation gate can skip internal_only
+              // companions instead of arming a request the server 400s
+              // (codex r27 #3420). The global kill env coerces the
+              // advertised posture the same way completion freezes it
+              // (codex r74) — the client must not open Generate for a
+              // companion whose body completion will refuse to attach.
+              return schema
+                ? {
+                  ...schema,
+                  delivery: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
+                    ? 'internal_only' : (c.delivery || 'auto_send'),
+                }
+                : null;
+            })
             .filter(Boolean)
           : null,
         linkedProject: linkedProject ? {
@@ -6001,12 +6017,67 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // Request-context rejections (trade names from THIS visit's
+        // products, companion contradictions) must survive to the RENDER
+        // path: untyped completions have no governing snapshot, so
+        // report-data would otherwise reparse the persisted notes and
+        // promote the exact body rejected here (codex r58). Stamped into
+        // service_data below.
+        let technicianReportBodyRejection = null;
         if (!isIncompleteVisit) {
           const technicianReport = technicianReportCustomerCopy(technicianNotes);
           if (technicianReport?.violations?.length) {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          // The generate endpoint screens trade names per-request, but a
+          // post-generation inline edit reaches completion with only the
+          // static banned-word checks — rerun the visit-specific product
+          // guard before the body is stamped (codex r48 #3420). Fail
+          // closed: on a hit or a guard error the deterministic template
+          // remains and the completion is never blocked.
+          if (technicianReportBody) {
+            try {
+              // Typed product-record fields (e.g. termite_treatment
+              // products_used) can carry a trade name with no matching
+              // selected product — generation screens them via extraNames,
+              // so completion must too (codex r49). Same classification
+              // helper, all companions included: a recorded trade name is
+              // banned from customer copy regardless of the companion's
+              // delivery mode. Errors here propagate to the catch below
+              // and drop the body.
+              const { typedFindingsPromptSections } = require('./admin-schedule');
+              const typedGuardNames = [];
+              if (typedFindings?.type) {
+                typedGuardNames.push(...typedFindingsPromptSections(
+                  typedFindings.type, typedFindings.values || {},
+                ).productValues);
+              }
+              for (const entry of Array.isArray(companionFindings) ? companionFindings : []) {
+                const entryValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
+                  ? entry.values : null;
+                if (entry?.type && entryValues) {
+                  typedGuardNames.push(...typedFindingsPromptSections(
+                    entry.type, entryValues, { companion: true },
+                  ).productValues);
+                }
+              }
+              const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
+                products: Array.isArray(products) ? products : [],
+                extraNames: typedGuardNames,
+                db,
+              });
+              if (screenTradeNames(technicianReportBody)) {
+                logger.warn('[completion] technician AI report copy dropped (trade_name)');
+                technicianReportBody = null;
+                technicianReportBodyRejection = 'trade_name';
+              }
+            } catch (err) {
+              logger.warn(`[completion] technician AI report trade-name guard failed — dropping copy: ${err.message}`);
+              technicianReportBody = null;
+              technicianReportBodyRejection = 'trade_name_guard_error';
+            }
+          }
         }
 
         completionTimerEntriesSnapshot = null;
@@ -6432,6 +6503,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
           // from this snapshot forever — labels/copy are resolved HERE.
+          // The reviewed body describes the WHOLE visit, so it must not
+          // contradict a CUSTOMER-FACING companion's recorded findings just
+          // because the primary snapshot carries it (codex r52 #3420): a
+          // termite primary could otherwise publish "8 stations were
+          // checked" beside a bait companion recording 6. Same value-driven
+          // guards the companion applies when it carries the body itself;
+          // the confirmed reconciliation prompt overrides as usual. Applies
+          // to BOTH carrier paths below.
+          const companionBodyConflict = Boolean(technicianReportBody)
+            && reportReconcileConfirmed !== true
+            && validatedCompanions.some((companion) => (
+              (companionDeliveryByType.get(companion.type) || 'internal_only') === 'auto_send'
+              && ActivityIndicators.typedBodyContradictions(
+                companion.type,
+                companion.values,
+                companion.activityScore,
+                technicianReportBody,
+              ).length > 0
+            ));
+          const sectionScreenedReportBody = companionBodyConflict ? null : technicianReportBody;
+          if (companionBodyConflict) {
+            logger.warn('[completion] technician AI report copy dropped (companion_contradiction)');
+            technicianReportBodyRejection = technicianReportBodyRejection || 'companion_contradiction';
+          }
+          if (technicianReportBodyRejection) {
+            // Render-path consumers must not resurrect a body the
+            // completion's request-context screens rejected (codex r58).
+            serviceData.technicianReportBodyRejected = technicianReportBodyRejection;
+          }
           let typedActivity = null;
           let typedVisitSequence = 1;
           if (typedFindings) {
@@ -6482,7 +6582,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               photoSummary: photoSummaryText || null,
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
-              technicianReportBody,
+              technicianReportBody: sectionScreenedReportBody,
               // The tech confirmed the reconciliation prompt: the frozen
               // snapshot carries the decision so neither the snapshot's own
               // screens nor the render-time summary screen silently discard
@@ -6502,6 +6602,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const companionActivityInserts = [];
           if (validatedCompanions.length) {
             const companionSnapshots = [];
+            // Companion-only profiles (no typed primary) have no primary
+            // snapshot to carry the reviewed AI report — the first
+            // customer-facing companion whose story ACCEPTS the body (stamps
+            // bodySource) becomes the carrier; a fixed zero-state companion
+            // that refuses it passes the body along to the next auto_send
+            // companion (codex r30/r35 #3420). Exactly one carrier: embedding
+            // the same body in every companion section would duplicate it
+            // per card.
+            let companionBodyCarried = false;
             for (const companion of validatedCompanions) {
               const companionIndicator = ActivityIndicators.getActivityIndicator(companion.type);
               let companionActivity = null;
@@ -6532,6 +6641,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                technicianReportBody: !serviceData.typedReportSnapshot
+                  && !companionBodyCarried
+                  && (companionDeliveryByType.get(companion.type) || 'internal_only') === 'auto_send'
+                  ? sectionScreenedReportBody
+                  : null,
                 // A standard primary with a trapping COMPANION has no typed
                 // primary snapshot to carry the confirmed override — freeze
                 // it on the trapping companion so the render-time summary
@@ -6543,6 +6657,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 // The frozen per-section delivery rides the snapshot itself
                 // so report-data filters without re-reading the live profile.
                 companionSnapshot.delivery = companionDeliveryByType.get(companion.type) || 'internal_only';
+                if (companionSnapshot.todaysResult?.bodySource === 'technician_report') {
+                  companionBodyCarried = true;
+                }
                 companionSnapshots.push(companionSnapshot);
               }
               if (companionActivity) companionActivityInserts.push(companionActivity);
@@ -11584,76 +11701,13 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
 // =========================================================================
 // TYPED FINDINGS — AI RECOMMENDATIONS DRAFT
 // =========================================================================
-// POST /:serviceId/findings-recap/draft — AI-draft the OPTIONAL
-// customer-facing recommendations paragraph for a typed specialty
-// completion from the structured findings + next-step chips (and, when
-// asked, recent customer comms). Same auth surface + per-tech ownership
-// guard as the pest-recap draft above. This endpoint is polish only —
-// completion never waits on it, and any failure here is a non-blocking
-// 4xx/5xx the client surfaces inline and ignores.
+// The recommendations-only findings-recap draft route and its prompt
+// builder were retired 2026-08-15 (owner): typed completions use the single
+// full Generate AI report action (/admin/schedule/generate-report), whose
+// payload carries the structured findings. These requires stay for the
+// photo-analysis draft route below.
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-
-// F1 (universal one-time services, ratified Q13): the comms context comes
-// from the shared WINDOWED builder (recurring = since last completed visit
-// of the line, cap 120d; one-time = since job origin, cap 180d). The local
-// unbounded builder is retired.
-const { buildCompletionCommsContext } = require('../services/completion-comms-context');
-
-// Tech-chosen solutions for the typed-findings draft prompt — same contract
-// as completion-recap's safeProducts: context only, output rules keep
-// product names out of the customer copy (owner directive 2026-07-21).
-function findingsDraftProductLines(products) {
-  if (!Array.isArray(products)) return [];
-  return products
-    .map((p) => {
-      const name = String(p?.name || p?.product_name || '').trim().slice(0, 80);
-      if (!name) return null;
-      const method = String(p?.applicationMethod || p?.application_method || '').trim().slice(0, 40);
-      const targets = Array.isArray(p?.targets)
-        ? p.targets.map((t) => String(t || '').trim()).filter(Boolean).slice(0, 6)
-        : [];
-      const parts = [method, targets.length ? `targets: ${targets.join(', ')}` : ''].filter(Boolean);
-      return `- ${name}${parts.length ? ` (${parts.join('; ')})` : ''}`;
-    })
-    .filter(Boolean)
-    .slice(0, 10);
-}
-
-function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [], visitContext = '' }) {
-  // internal fields are tech-facing data (compliance entries, pricing
-  // calibration) that must never influence customer-facing copy — the same
-  // contract buildTypedReportSnapshot enforces on the persisted findings.
-  const fieldLines = (schema.fields || [])
-    .filter((field) => !field.internal)
-    .map((field) => {
-      const value = values?.[field.key];
-      if (value == null || String(value).trim() === '') return null;
-      return `${field.label}: ${String(value).trim()}`;
-    })
-    .filter(Boolean);
-  const productLines = findingsDraftProductLines(products);
-  return `Write a short customer-facing "recommendations" paragraph (2-4 sentences) for a Waves Pest Control & Lawn Care service report.
-
-Rules:
-- Plain, friendly, professional language. Plain text only — no markdown, headings, greeting, or sign-off.
-- Wording must be observation-scoped: describe only what was observed and done today (e.g. "No active signs observed today"). Never claim the problem is permanently fixed.
-- NEVER use any of these words/phrases: "clear", "cleared", "gone", "eliminated", "no infestation", "guaranteed", "resolved".
-- Never mention chemical product names, application rates, prices, or EPA details.
-- Base the recommendations on the findings and selected next steps below. Do not invent findings.
-
-Service type: ${serviceType || schema.label}
-Findings type: ${schema.label}
-Findings:
-${fieldLines.length ? fieldLines.join('\n') : '[none recorded]'}
-Solutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):
-${productLines.length ? productLines.join('\n') : '[none recorded]'}
-Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}${String(visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(visitContext).trim()}` : ''}
-Recent customer communications:
-${commsContext || '[not provided]'}
-
-Return only the paragraph text.`;
-}
 
 // POST /:serviceId/schedule-followup — book the suggested follow-up visit
 // for a typed specialty completion as a PENDING appointment (the normal
@@ -11919,127 +11973,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:serviceId/findings-recap/draft', async (req, res) => {
-  try {
-    if (!(await assertRecapOwnership(req, res))) return;
-    const { structuredFindings, nextStepChips, includeCustomerComms } = req.body || {};
-    const draftProducts = Array.isArray(req.body?.products) ? req.body.products : [];
-    const findingsType = structuredFindings?.type;
-    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
-      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
-    }
-    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
-    const svc = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .first('id', 'customer_id', 'service_type', 'service_id');
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // The appointment's PROFILE is authoritative for which findings type
-    // (if any) this service uses — never the client payload. Without this,
-    // any assigned tech could pull customer comms into an AI call for an
-    // arbitrary type on a non-typed job (pre-push Codex P1).
-    const draftProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (draftProfile?.findingsType !== findingsType) {
-      return res.status(409).json({
-        error: 'This service does not use that findings form.',
-        code: 'findings_type_mismatch',
-      });
-    }
-    // Chips are advisory inputs here — drop invalid ones instead of failing
-    // the draft (the complete endpoint enforces them strictly). Validate
-    // against THIS type's allowed chips, not the global list, so an off-type
-    // chip can't steer the customer-facing draft (Codex P2).
-    const chipsValidation = ActivityIndicators.validateNextStepChips(
-      nextStepChips, draftProfile.findingsType, structuredFindings?.values || {},
-    );
-    const chips = chipsValidation.ok ? chipsValidation.chips : [];
-    // Windowed comms context (F1): scoped by this scheduled service so the
-    // recurring/one-time window and service-line hint resolve correctly.
-    const commsContextResult = includeCustomerComms === true
-      ? await buildCompletionCommsContext({
-        customerId: svc.customer_id,
-        scheduledServiceId: svc.id,
-      }).catch(() => ({ text: '', promptHint: '' }))
-      : { text: '', promptHint: '' };
-    const commsContext = commsContextResult.text
-      ? `${commsContextResult.promptHint}\n${commsContextResult.text}`
-      : '';
-    // T&S derives its treatment chips from the recorded products at
-    // completion — the draft runs BEFORE completion, so derive here too or
-    // the AI writes recommendations blind to what was applied (owner
-    // directive 2026-07-21). Catalog rows are authoritative for the
-    // classification; client-sent names only feed the context lines.
-    const draftValues = { ...(structuredFindings?.values || {}) };
-    if (findingsType === 'tree_shrub' && draftProducts.length) {
-      try {
-        const ids = draftProducts.map((p) => p?.productId).filter(Boolean);
-        const rows = ids.length
-          ? await db('products_catalog').whereIn('id', ids)
-          : [];
-        const derived = deriveTreeShrubTreatments({
-          products: draftProducts.filter((p) => p?.productId),
-          productRows: rows,
-        });
-        if (derived) draftValues.treatments_completed = derived;
-      } catch { /* draft is polish — never block on derivation */ }
-    }
-    // Season/weather/expectations context (owner directive 2026-07-21).
-    let visitContext = '';
-    try {
-      visitContext = await buildRecapVisitContext({
-        serviceType: svc.service_type,
-        customerId: svc.customer_id,
-      });
-    } catch { /* context is polish — never block the draft */ }
-    const basePrompt = buildFindingsRecapPrompt({
-      schema,
-      values: draftValues,
-      chips,
-      serviceType: svc.service_type,
-      commsContext,
-      products: draftProducts,
-      visitContext,
-    });
-    // Sol first, Opus backup. The validator rejects empty or promissory copy,
-    // causing the shared dispatcher to cross providers before returning.
-    const generated = await dispatchWithFallback(
-      MODELS.TEXT_POLICIES.report,
-      { text: basePrompt, jsonMode: false, maxTokens: 400 },
-      {
-        validate: (result) => {
-          const draft = String(result.text || '').trim();
-          if (!draft) return 'empty';
-          // Product-name echoes fail validation so the dispatcher retries
-          // cross-provider before we give up (audit P2 2026-07-22) — same
-          // contract as the recap/narrative paths.
-          if (CompletionRecap.containsProductName(draft, draftProducts)) return 'trade_name';
-          const violations = ActivityIndicators.findBannedCustomerCopy(draft);
-          return violations.length ? `banned:${violations.join(',')}` : null;
-        },
-      },
-    );
-    const draft = generated.ok ? String(generated.text || '').trim() : '';
-    const violations = draft ? ActivityIndicators.findBannedCustomerCopy(draft) : [];
-    if (draft && CompletionRecap.containsProductName(draft, draftProducts)) {
-      logger.warn(`[dispatch] findings-recap draft echoed a product name for ${req.params.serviceId}`);
-      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
-    }
-    if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
-    if (violations.length) {
-      logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);
-      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
-    }
-    res.json({ draft });
-  } catch (err) {
-    logger.warn(`[dispatch] findings-recap draft failed for ${req.params.serviceId}: ${err.message}`);
-    res.status(502).json({ error: 'Draft generation failed' });
-  }
-});
-
 // POST /:serviceId/photo-analysis/draft — AI-describe the attached
 // completion photos for the customer report (owner spec 2026-06-12).
 // Photos arrive as data-URLs straight from the panel (they only reach S3
-// at submit), so the analysis needs no storage round-trip. Same trust
-// shape as findings-recap/draft: assigned tech only, typed profile
+// at submit), so the analysis needs no storage round-trip. Trust shape:
+// assigned tech only, typed profile
 // authoritative, output banned-copy validated with one retry, never in
 // the critical path — a 502 just means the tech writes (or skips) the
 // photo copy manually.
@@ -14102,5 +14040,4 @@ module.exports._test = {
   BACKFILL_RECORD_END_FIELDS,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
-  buildFindingsRecapPrompt,
 };

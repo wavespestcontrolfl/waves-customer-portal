@@ -187,3 +187,47 @@ describe('StationMapCard — setup counts stay consistent', () => {
     expect(container.textContent).toContain('2 traps set this visit');
   });
 });
+
+// Termite bait-station pin animation (GATE_TERMITE_BAIT_PINS): the numbered
+// circle pins pop in staggered and activity pins carry a pulsing halo — the
+// termite report's map treatment (owner 2026-08-15). Everything else keeps
+// the ratified static circles.
+const TERMITE_MAP = {
+  ...STATION_MAP,
+  program: 'termite',
+};
+
+describe('StationMapCard — termite station pin animation', () => {
+  it('animates circle pins and pulses activity stations when stationPins is on', () => {
+    const { container } = render(<StationMapCard stationMap={TERMITE_MAP} stationPins />);
+    const pins = container.querySelectorAll('.station-pin-pop');
+    expect(pins).toHaveLength(2);
+    // one activity station → exactly one pulse halo
+    expect(container.querySelectorAll('.station-pulse')).toHaveLength(1);
+    // still the numbered-circle rendering, not trap pins
+    expect(container.querySelectorAll('.trap-pin')).toHaveLength(0);
+    const texts = [...container.querySelectorAll('svg text')].map((node) => node.textContent);
+    expect(texts).toEqual(expect.arrayContaining(['1', '2']));
+    expect(container.querySelector('title').textContent).toContain('Station 1');
+    // r62 (#3420): a Print during the stagger must not freeze undelayed
+    // pins at scale(0) — the print override forces the final transform.
+    const styleText = container.querySelector('style')?.textContent || '';
+    expect(styleText).toContain('@media print');
+    expect(styleText).toMatch(/@media print[\s\S]*\.station-pin-pop\s*\{\s*animation:\s*none;\s*transform:\s*scale\(1\)/);
+  });
+
+  it('keeps static pins when stationPins is off', () => {
+    const { container } = render(<StationMapCard stationMap={TERMITE_MAP} />);
+    expect(container.querySelectorAll('.station-pin-pop')).toHaveLength(0);
+    expect(container.querySelectorAll('.station-pulse')).toHaveLength(0);
+  });
+
+  it('never animates the plan embed or non-termite programs', () => {
+    const plan = render(<StationMapCard stationMap={TERMITE_MAP} stationPins variant="plan" />);
+    expect(plan.container.querySelectorAll('.station-pin-pop')).toHaveLength(0);
+    cleanup();
+    const rodent = render(<StationMapCard stationMap={{ ...TERMITE_MAP, program: 'rodent' }} stationPins />);
+    expect(rodent.container.querySelectorAll('.station-pin-pop')).toHaveLength(0);
+    expect(rodent.container.querySelectorAll('.station-pulse')).toHaveLength(0);
+  });
+});

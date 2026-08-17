@@ -99,3 +99,29 @@ test('a reviewed WHAT WE DID / WHAT WE FOUND draft still reaches the summary slo
   expect(data.legacy.notes).toBeUndefined();
   expect(data.summary).toContain('We treated the exterior perimeter');
 });
+
+// r58 (#3420): a completion-time request-context rejection (trade name /
+// companion contradiction) is frozen into service_data — the render
+// reparse must not promote the rejected body on untyped visits.
+test('a frozen completion rejection keeps the reviewed draft out of the summary', async () => {
+  const reviewed = [
+    'WHAT WE DID',
+    '',
+    'We applied Talstar along the exterior perimeter today.',
+    '',
+    'WHAT WE FOUND',
+    '',
+    'Ant activity along the garage slab edge is fading after treatment.',
+  ].join('\n');
+  const data = await buildReportV1Data(
+    {
+      ...SERVICE,
+      technician_notes: reviewed,
+      service_data: '{"technicianReportBodyRejected":"trade_name"}',
+    },
+    'token-notes-rejected',
+    makeKnex(FIXTURES),
+  );
+
+  expect(String(data.summary || '')).not.toContain('Talstar');
+});

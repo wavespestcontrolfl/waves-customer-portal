@@ -221,14 +221,99 @@ async function aiRecap(input = {}) {
 // True when the generated copy mentions any recorded product by name —
 // matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
 // echoes ("we applied Talstar around...") are caught too.
-function containsProductName(text, products) {
+// Short formulation suffixes (SE/SC/EC/WDG …) are label codes, not brand
+// identity — they never gate copy on their own (codex r35 on #3420).
+const FORMULATION_SUFFIX_TOKENS = new Set([
+  'se', 'sc', 'ec', 'wp', 'wdg', 'wsp', 'me', 'ew', 'cs', 'sg', 'df', 'gr',
+  'xl', 'ii', 'iii', 'iv', 'lo', 'hi', 'g', 'l', 'd', 'f', 't', 'e',
+]);
+// Ordinary English words and functional/form vocabulary inside brand names
+// ("Drive XLR8 Post Emergent Liquid Herbicide") reject legitimate prose
+// ("help drive crabgrass pressure down") — they step aside ONLY when the
+// name still keeps at least one genuinely distinctive long token, so
+// protection never vanishes (codex r62 #3420).
+const COMMON_PRODUCT_NAME_WORDS = new Set([
+  'drive', 'post', 'emergent', 'liquid', 'herbicide', 'insecticide',
+  'fungicide', 'concentrate', 'granule', 'granular', 'spray', 'plus',
+  'turf', 'lawn', 'weed', 'grass', 'power', 'rapid', 'quick', 'control',
+  'brush', 'clean', 'clear', 'fresh', 'first', 'final', 'dual', 'triple',
+]);
+function containsProductName(text, products, { extraGenericTokens = null, wholeWord = false } = {}) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
-  return safeProducts(products).some((p) => String(p.name || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
-    .some((token) => hay.includes(token)));
+  // wholeWord: match tokens on word boundaries — 'drive' (Drive XLR8) must
+  // not match "driveway" (codex r31 on #3420). The recap path keeps its
+  // stricter substring contract by default.
+  const hayWords = wholeWord ? hay.split(/[^a-z0-9]+/).filter(Boolean) : null;
+  const wordSet = wholeWord ? new Set(hayWords) : null;
+  const normHay = wholeWord ? ` ${hayWords.join(' ')} ` : null;
+  return safeProducts(products).some((p) => {
+    const nameTokens = String(p.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const isGeneric = (token) => GENERIC_NAME_TOKENS.has(token)
+      // Callers may widen the generic set (e.g. the generate-report guard
+      // ignores pest-target nouns like "cockroach" that appear in catalog
+      // names but legitimately belong in report copy — codex r21 on #3420).
+      || (extraGenericTokens && extraGenericTokens.has(token));
+    const longCandidates = nameTokens.filter((token) => token.length >= 4 && !isGeneric(token));
+    const trulyDistinctive = longCandidates.filter((token) => !COMMON_PRODUCT_NAME_WORDS.has(token));
+    // common words step aside only while a genuinely distinctive token
+    // still protects the name (codex r62)
+    const longDistinctive = trulyDistinctive.length ? trulyDistinctive : longCandidates;
+    if (longDistinctive.some((token) => (wholeWord ? wordSet.has(token) : hay.includes(token)))) {
+      return true;
+    }
+    if (!wholeWord) return false;
+    // Abbreviated echoes gate too — even when the full name carries another
+    // distinctive token the copy omitted ("Green Flo" for "LESCO Green Flo",
+    // codex r38): adjacent token pairs with identity match as phrases below
+    // for EVERY name. Distinctive short acronyms (2-3 chars) additionally
+    // match as whole words, but only for names whose long tokens are all
+    // generic ("PGF Complete") — widening that to every name would let a
+    // lone formulation acronym reject ordinary copy (codex r35).
+    const shortDistinctive = (longDistinctive.length ? [] : nameTokens).filter((token) => token.length >= 2
+      && token.length <= 3
+      && !/^\d+$/.test(token)
+      && !FORMULATION_SUFFIX_TOKENS.has(token)
+      && !isGeneric(token));
+    if (shortDistinctive.some((token) => wordSet.has(token))) return true;
+    if (nameTokens.length >= 2) {
+      const phrase = ` ${nameTokens.join(' ')} `;
+      // Punctuation-collapsed echoes match as a single word too —
+      // "BoraCare" for "Bora-Care" (codex r82).
+      if (normHay.includes(phrase) || wordSet.has(nameTokens.join(''))) return true;
+      // Abbreviated echoes drop the formulation suffix ("T-Zone" for
+      // "T-Zone SE") — adjacent token pairs match as phrases too, when the
+      // pair carries at least one token that isn't generic vocabulary, a
+      // formulation suffix, or a pure number, so ordinary "zone" alone
+      // still passes (codex r36 #3420).
+      for (let i = 0; i < nameTokens.length - 1; i += 1) {
+        const pair = [nameTokens[i], nameTokens[i + 1]];
+        // A single-letter/suffix token still carries identity INSIDE a
+        // phrase ("t zone") — only fully-generic pairs are skipped.
+        const hasIdentity = pair.some((token) => !isGeneric(token)
+          && !/^\d+$/.test(token));
+        // ... and the pair collapses to one word the same way ("TZone"
+        // for "T-Zone SE", codex r82).
+        if (hasIdentity && (normHay.includes(` ${pair[0]} ${pair[1]} `)
+          || wordSet.has(`${pair[0]}${pair[1]}`))) return true;
+      }
+      // Brand-stem echoes for ALL-generic names ("Advance Termite Bait
+      // Station" → "Advance bait stations"): the leading name token acts as
+      // the stem and pairs with ANY other name token in the copy, so
+      // ordinary lone uses ("in advance of the visit") still pass
+      // (codex r43).
+      if (!longDistinctive.length && nameTokens.length >= 2) {
+        const stem = nameTokens[0];
+        if (stem.length >= 4 && !/^\d+$/.test(stem)) {
+          for (const other of nameTokens.slice(1)) {
+            if (/^\d+$/.test(other) || FORMULATION_SUFFIX_TOKENS.has(other)) continue;
+            if (normHay.includes(` ${stem} ${other} `) || normHay.includes(` ${stem} ${other}s `)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  });
 }
 const GENERIC_NAME_TOKENS = new Set([
   'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
@@ -268,8 +353,92 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
   ].filter(Boolean).join('\n\n');
 }
 
+// Request-specific trade-name screen shared by the generate-report output
+// gate and the COMPLETION-TIME acceptance of a technician report body
+// (codex r48 #3420): generation screens per-request, but a post-generation
+// inline edit reaches completion where only static banned-word checks ran —
+// the same visit-scoped guard must rerun there. Pest-target/formulation
+// nouns appear in catalog names ("Advion Cockroach Gel Bait") but
+// legitimately belong in report copy — only distinctive brand tokens may
+// reject (codex r21/r28/r32-r34 on #3420).
+const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
+  'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
+  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
+  'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
+  'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
+  'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
+  'indoor', 'yard', 'granular', 'granules',
+  'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
+  'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
+  'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
+  'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
+]);
+// Builds a screen(text) predicate for THIS visit's recorded products.
+// Generic tokens widen with the visit's own recorded treatment targets and
+// (via db) catalog actives/formulations — active ingredients are permitted
+// report wording even when the trade name IS the active. Products carrying
+// only a productId are name-hydrated from the catalog so they are screened
+// too. Chunked by 10 so safeProducts' cap never leaves an entry
+// unscreened. Catalog lookup failure keeps the guard strict.
+async function buildReportTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
+  const list = Array.isArray(products) ? products.filter(Boolean) : [];
+  let hydrated = list;
+  const genericTokens = new Set(REPORT_GENERIC_PRODUCT_TOKENS);
+  for (const prod of list) {
+    for (const target of Array.isArray(prod?.targets) ? prod.targets : []) {
+      String(target || '').toLowerCase().split(/[^a-z0-9]+/)
+        .filter((tok) => tok.length >= 4)
+        .forEach((tok) => genericTokens.add(tok));
+    }
+  }
+  if (db) {
+    let rows = [];
+    try {
+      const ids = list.map((p) => p?.productId).filter(Boolean);
+      rows = ids.length
+        ? await db('products_catalog')
+          .whereIn('id', ids)
+          .select('id', 'name', 'active_ingredient', 'formulation')
+        : [];
+    } catch (err) {
+      // A failed lookup loses two different things: exemption tokens
+      // (guard gets STRICTER — safe to continue) and hydrated names for
+      // id-only entries (guard gets WEAKER — their trade names would go
+      // unscreened). When any entry depends on hydration for its name the
+      // error must propagate so the caller drops the copy instead of
+      // approving it (codex r49); otherwise continue exemption-less.
+      if (list.some((p) => p && !p.name && !p.product_name && p.productId)) throw err;
+      rows = [];
+    }
+    const nameById = new Map((rows || []).map((r) => [String(r.id), r.name]));
+    hydrated = list.map((p) => (p && !p.name && !p.product_name && p.productId
+      ? { ...p, name: nameById.get(String(p.productId)) || null }
+      : p));
+    for (const row of rows || []) {
+      `${row.active_ingredient || ''} ${row.formulation || ''}`
+        .toLowerCase().split(/[^a-z0-9]+/)
+        .filter((tok) => tok.length >= 4)
+        .forEach((tok) => genericTokens.add(tok));
+    }
+  }
+  const seen = new Set();
+  const guarded = [
+    ...extraNames.map((name) => ({ name })),
+    ...hydrated,
+  ].filter((p) => {
+    const key = String(p?.name || '').toLowerCase().trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const chunks = [];
+  for (let i = 0; i < guarded.length; i += 10) chunks.push(guarded.slice(i, i + 10));
+  return (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+}
+
 module.exports = {
   buildPrompt,
+  buildReportTradeNameScreen,
   containsProductName,
   composeCompletionSmsPreview,
   deterministicRecap,

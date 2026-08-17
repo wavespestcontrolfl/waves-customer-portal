@@ -511,8 +511,12 @@ export function cleanVisitSummary(value) {
   return text;
 }
 
-function visitSummaryCopy(data = {}) {
-  const cleaned = cleanVisitSummary(data.summary);
+function visitSummaryCopy(data = {}, { skipPromotedBody = false } = {}) {
+  // When the Today's Result card above already renders the promoted
+  // technician-report prose (bodySource stamped on a rendered snapshot),
+  // the legacy section keeps its deterministic framing line instead of
+  // repeating the paragraph (codex r69 #3420).
+  const cleaned = skipPromotedBody ? '' : cleanVisitSummary(data.summary);
   if (cleaned) return cleaned;
   // V2 reports carry full diagnostics below — the summary line should frame
   // the professional record, not shrug (owner 2026-07-21). Treatment wording
@@ -523,6 +527,10 @@ function visitSummaryCopy(data = {}) {
       ? 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.'
       : 'Today’s inspection is complete. The diagnostics and findings below document the condition of your property and what we observed on this visit.';
   }
+  // The dedup path (Today's Result already carries the promoted technician
+  // body) can reach here for one-time specialty visits with no reportV2 —
+  // neutral framing, never the recurring-service line (codex r86 #3420).
+  if (skipPromotedBody) return 'Today’s service is complete.';
   return 'Your routine service is complete.';
 }
 
@@ -5426,6 +5434,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const typedNarrativeOwnsSummary = data.summarySource === 'typed_narrative'
     && data.typedReport?.type === 'bed_bug'
     && !data.pestReportV2 && !data.mosquitoReportV2;
+  // The tech-reviewed AI report copy can drive BOTH the promoted Visit
+  // Summary (summarySource 'technician_report') and a rendered snapshot's
+  // Today's Result body (bodySource stamped where the story consumed it).
+  // Pest/Mosquito V2 suppress the legacy section entirely; every other
+  // layout renders both surfaces, so the customer would read the same
+  // paragraph twice (codex r69). Today's Result owns the prose — the legacy
+  // Visit Summary falls back to its deterministic framing line. The section
+  // itself stays: it hosts the rodent photo grid and the lawn dashboard.
+  const todaysResultCarriesSummary = data.summarySource === 'technician_report'
+    && (data.typedReport?.todaysResult?.bodySource === 'technician_report'
+      || (data.companionReports || []).some(
+        (companion) => companion?.todaysResult?.bodySource === 'technician_report',
+      ));
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -8753,7 +8774,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {!data.pestReportV2 && !data.mosquitoReportV2 && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
-            <p>{visitSummaryCopy(data)}</p>
+            <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
                 gallery is skipped for these reports so the photos show once.
@@ -8953,6 +8974,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             stationMap={data.stationMap}
             trapPins={Boolean(data.rodentReportRefresh)}
             animate={Boolean(data.rodentReportRefresh)}
+            stationPins={Boolean(data.termiteStationPins)}
           />
         )}
 
