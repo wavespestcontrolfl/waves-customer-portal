@@ -38,6 +38,8 @@
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
+ *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
@@ -1498,6 +1500,24 @@ const gates = {
   // completion. Kill switch: unset or any non-'true' value — completions
   // behave byte-identically to today.
   completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
+
+  // Real-time reschedule/away-intent flag lane (flagger bell/push + the
+  // durable agent_decisions flag rows). Owner ruling 2026-08-15: the bells
+  // fired on consent-shaped replies ("I will not be there but okay") and
+  // tapbacks — silence the whole lane. Opt-in in EVERY environment; the
+  // daily watcher keeps its own RESCHEDULE_INTENT_WATCHER_DISABLED switch.
+  // Revert: GATE_RESCHEDULE_INTENT_FLAGS=true restores the lane unchanged.
+  rescheduleIntentFlags: process.env.GATE_RESCHEDULE_INTENT_FLAGS === 'true',
+
+  // Auto-apply customer-stated contact corrections (owner ruling
+  // 2026-08-15, the 08-13 SMS-correction incident): name/email/address ONLY, never
+  // phone; linked customers only; compare-and-set writes with an
+  // agent_decisions audit row per field and one owner FYI bell per batch.
+  // Sources: inbound SMS (FAST-tier extraction behind a regex prefilter)
+  // and processed call recordings (consumes the already-staged
+  // customer_field_candidates rows — no second extraction). Kill switch:
+  // unset or any non-'true' value — no record is ever touched.
+  contactCorrection: process.env.GATE_CONTACT_CORRECTION === 'true',
 
   // WaveGuard tier extension to existing services (owner decision
   // 2026-08-10, reversing the 2026-08-05 review-bell-only ruling): a

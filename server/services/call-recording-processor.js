@@ -5753,105 +5753,127 @@ const CallRecordingProcessor = {
     // detached estimator's block/quarantine writes) compares generations
     // instead (PR #3304 — replaces the token-NULL predicates).
     let procGeneration = null;
-    if (!opts.force) {
-      // Reclaim stale 'processing' rows older than 10 min — server crash or
-      // Gemini hang between claim (this UPDATE) and terminal status write
-      // would otherwise wedge the row forever, since both the claim guard
-      // below and processAllPending's filter exclude 'processing'.
-      // IS DISTINCT FROM (not !=): rows with processing_status IS NULL —
-      // the state of every fresh, never-claimed row — must pass these
-      // predicates. PostgreSQL's `<>` returns NULL when either side is NULL,
-      // and WHERE treats NULL as falsy, so a plain `!=` filter would silently
-      // exclude NULL rows and leave them stuck forever.
-      const claimed = await db('call_log')
-        .where({ twilio_call_sid: callSid })
-        .whereRaw("processing_status IS DISTINCT FROM 'processed'")
-        .where(function () {
-          this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-            .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
-        })
-        // Retryable-failure guard: the sweep's cap/backoff filter only
-        // protects sweep-originated runs — direct callers (the
-        // recording-status webhook's setTimeout, duplicate Twilio callbacks)
-        // land here too. Without this clause a burst of timers could re-claim
-        // a just-failed row back-to-back and burn the whole retry budget in
-        // seconds instead of the intended 10-minute spacing, or keep poking a
-        // row already at the cap. Enforce both atomically at claim time.
-        // Admin Reprocess (force=true) takes the other branch and is exempt.
-        .where(function () {
-          this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
-            .orWhere(function () {
-              this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-                .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
-            });
-        })
-        .update({
-          processing_status: 'processing',
-          processing_token: procToken,
-          processing_generation: db.raw('processing_generation + 1'),
-          // DURABLE — finalization must NOT clear this (pre-push audit P1,
-          // ambiguity-record r9). It records when the LAST processing pass
-          // started, and the bridge-ambiguity phone snapshot bounds its
-          // lead capture on it: every pass that can link a lead — the
-          // age-unlimited force-reprocess included — claims here first.
-          // In-flight state is carried by processing_token/status alone;
-          // every reader COALESCEs behind a status guard.
-          processing_started_at: new Date(),
-          updated_at: new Date(),
-        }, ['processing_generation']);
-      // PG returns the updated rows ([] = claim lost); count-shaped results
-      // (0/1) come from environments without RETURNING — accept both.
-      const claimedRows = Array.isArray(claimed) ? claimed : null;
-      if (claimedRows ? !claimedRows.length : !claimed) {
-        logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
-        return { success: true, skipped: true, reason: 'already_processing' };
+    let claimBlocked = false;
+    // Claim + contact CAS baseline in ONE transaction (codex #3413 r27):
+    // a separate post-claim read left a window where an admin edit landing
+    // between the claim commit and the snapshot read became the baseline —
+    // the older transcript would then pass the CAS and overwrite it. The
+    // customer row is locked FIRST (matching the correction lane's
+    // customers→call_log lock order, so the two never deadlock): an edit
+    // in flight either commits before the lock (pre-claim, correctly the
+    // baseline) or waits and lands post-claim, where the CAS stales it.
+    let contactCasBaselineAtClaim = null;
+    await db.transaction(async (trx) => {
+      if (call.customer_id) {
+        contactCasBaselineAtClaim = await trx('customers')
+          .where({ id: call.customer_id })
+          .whereNull('deleted_at')
+          .forUpdate()
+          .first('first_name', 'last_name', 'phone', 'updated_at') || null;
       }
-      procGeneration = claimedRows?.[0]?.processing_generation != null
-        ? Number(claimedRows[0].processing_generation) : null;
-    } else {
-      // force=true bypasses the early-exit on 'processed' rows so admin
-      // Reprocess can re-run extraction. It must NOT bypass an actively-
-      // processing peer — CallRecordingsPanel.jsx always sends force:true,
-      // so without this guard a force click on a row mid-flight would
-      // overwrite the peer's processing_token, breaking the peer's
-      // catch-block fence and wedging the row at 'processing' forever
-      // (the very bug processing_token was added to prevent).
-      //
-      // Use the same atomic claim as the non-force path, minus the
-      // exclude-'processed' filter: in-flight peers (and not-yet-stale
-      // 'processing' rows) still block; everything else flows through.
-      // Same IS DISTINCT FROM rationale as the non-force claim above: NULL
-      // processing_status must pass so a force-reprocess on a never-claimed
-      // row can take the lock.
-      const claimed = await db('call_log')
-        .where({ twilio_call_sid: callSid })
-        .where(function () {
-          this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-            .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
-        })
-        .update({
-          processing_status: 'processing',
-          processing_token: procToken,
-          processing_generation: db.raw('processing_generation + 1'),
-          // DURABLE — finalization must NOT clear this (pre-push audit P1,
-          // ambiguity-record r9). It records when the LAST processing pass
-          // started, and the bridge-ambiguity phone snapshot bounds its
-          // lead capture on it: every pass that can link a lead — the
-          // age-unlimited force-reprocess included — claims here first.
-          // In-flight state is carried by processing_token/status alone;
-          // every reader COALESCEs behind a status guard.
-          processing_started_at: new Date(),
-          updated_at: new Date(),
-        }, ['processing_generation']);
-      // Same both-shapes tolerance as the non-force claim above.
-      const claimedRows = Array.isArray(claimed) ? claimed : null;
-      if (claimedRows ? !claimedRows.length : !claimed) {
-        logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
-        return { success: true, skipped: true, reason: 'already_processing' };
+      if (!opts.force) {
+        // Reclaim stale 'processing' rows older than 10 min — server crash or
+        // Gemini hang between claim (this UPDATE) and terminal status write
+        // would otherwise wedge the row forever, since both the claim guard
+        // below and processAllPending's filter exclude 'processing'.
+        // IS DISTINCT FROM (not !=): rows with processing_status IS NULL —
+        // the state of every fresh, never-claimed row — must pass these
+        // predicates. PostgreSQL's `<>` returns NULL when either side is NULL,
+        // and WHERE treats NULL as falsy, so a plain `!=` filter would silently
+        // exclude NULL rows and leave them stuck forever.
+        const claimed = await trx('call_log')
+          .where({ twilio_call_sid: callSid })
+          .whereRaw("processing_status IS DISTINCT FROM 'processed'")
+          .where(function () {
+            this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
+              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+          })
+          // Retryable-failure guard: the sweep's cap/backoff filter only
+          // protects sweep-originated runs — direct callers (the
+          // recording-status webhook's setTimeout, duplicate Twilio callbacks)
+          // land here too. Without this clause a burst of timers could re-claim
+          // a just-failed row back-to-back and burn the whole retry budget in
+          // seconds instead of the intended 10-minute spacing, or keep poking a
+          // row already at the cap. Enforce both atomically at claim time.
+          // Admin Reprocess (force=true) takes the other branch and is exempt.
+          .where(function () {
+            this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+              .orWhere(function () {
+                this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                  .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+              });
+          })
+          .update({
+            processing_status: 'processing',
+            processing_token: procToken,
+            processing_generation: db.raw('processing_generation + 1'),
+            // DURABLE — finalization must NOT clear this (pre-push audit P1,
+            // ambiguity-record r9). It records when the LAST processing pass
+            // started, and the bridge-ambiguity phone snapshot bounds its
+            // lead capture on it: every pass that can link a lead — the
+            // age-unlimited force-reprocess included — claims here first.
+            // In-flight state is carried by processing_token/status alone;
+            // every reader COALESCEs behind a status guard.
+            processing_started_at: new Date(),
+            updated_at: new Date(),
+          }, ['processing_generation']);
+        // PG returns the updated rows ([] = claim lost); count-shaped results
+        // (0/1) come from environments without RETURNING — accept both.
+        const claimedRows = Array.isArray(claimed) ? claimed : null;
+        if (claimedRows ? !claimedRows.length : !claimed) {
+          logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
+          claimBlocked = true;
+          return;
+        }
+        procGeneration = claimedRows?.[0]?.processing_generation != null
+          ? Number(claimedRows[0].processing_generation) : null;
+      } else {
+        // force=true bypasses the early-exit on 'processed' rows so admin
+        // Reprocess can re-run extraction. It must NOT bypass an actively-
+        // processing peer — CallRecordingsPanel.jsx always sends force:true,
+        // so without this guard a force click on a row mid-flight would
+        // overwrite the peer's processing_token, breaking the peer's
+        // catch-block fence and wedging the row at 'processing' forever
+        // (the very bug processing_token was added to prevent).
+        //
+        // Use the same atomic claim as the non-force path, minus the
+        // exclude-'processed' filter: in-flight peers (and not-yet-stale
+        // 'processing' rows) still block; everything else flows through.
+        // Same IS DISTINCT FROM rationale as the non-force claim above: NULL
+        // processing_status must pass so a force-reprocess on a never-claimed
+        // row can take the lock.
+        const claimed = await trx('call_log')
+          .where({ twilio_call_sid: callSid })
+          .where(function () {
+            this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
+              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+          })
+          .update({
+            processing_status: 'processing',
+            processing_token: procToken,
+            processing_generation: db.raw('processing_generation + 1'),
+            // DURABLE — finalization must NOT clear this (pre-push audit P1,
+            // ambiguity-record r9). It records when the LAST processing pass
+            // started, and the bridge-ambiguity phone snapshot bounds its
+            // lead capture on it: every pass that can link a lead — the
+            // age-unlimited force-reprocess included — claims here first.
+            // In-flight state is carried by processing_token/status alone;
+            // every reader COALESCEs behind a status guard.
+            processing_started_at: new Date(),
+            updated_at: new Date(),
+          }, ['processing_generation']);
+        // Same both-shapes tolerance as the non-force claim above.
+        const claimedRows = Array.isArray(claimed) ? claimed : null;
+        if (claimedRows ? !claimedRows.length : !claimed) {
+          logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
+          claimBlocked = true;
+          return;
+        }
+        procGeneration = claimedRows?.[0]?.processing_generation != null
+          ? Number(claimedRows[0].processing_generation) : null;
       }
-      procGeneration = claimedRows?.[0]?.processing_generation != null
-        ? Number(claimedRows[0].processing_generation) : null;
-    }
+    });
+    if (claimBlocked) return { success: true, skipped: true, reason: 'already_processing' };
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
@@ -8654,13 +8676,82 @@ const CallRecordingProcessor = {
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
       : null;
-    await stageCustomerFieldCandidates({
+    // Claim-time snapshot valid only when the customer being corrected IS
+    // the one linked at claim (r19/r26): a target resolved during this
+    // pass has no source-time baseline.
+    const claimSnapshotForTarget = (contactCasBaselineAtClaim
+      && String(customerId || call.customer_id) === String(call.customer_id))
+      ? contactCasBaselineAtClaim
+      : null;
+    const candidateStaging = await stageCustomerFieldCandidates({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
       extraction: extracted,
       v2Extraction: v2ExtractionForAudit,
+      // Token-fences the value-keyed dedupe's relink of pending rows: a
+      // stale pass that lost its claim must not rewrite a candidate's
+      // linkage after the owning pass relinked it (codex #3413 r18).
+      procToken,
     }).catch((err) => {
       logger.warn(`[call-proc] Customer field candidate staging skipped for ${maskSid(callSid)}: ${err.message}`);
+      return null;
+    });
+
+    // Auto-apply contact corrections the caller stated on this call
+    // (GATE_CONTACT_CORRECTION, linked customers only) — consumes the
+    // candidates staged above; evidence-pinned high-confidence fields only,
+    // never phone. Fail-soft: a correction failure never affects the call
+    // pipeline.
+    await require('./contact-correction').runCallContactCorrection({
+      callId: call.id,
+      customerId: customerId || call.customer_id || null,
+      // Processing-pass fence: a stale worker whose claim was reclaimed by
+      // a peer must not apply its older extraction — the correction verifies
+      // this token against call_log.processing_token (again inside its
+      // apply transaction) and aborts when the claim is gone.
+      procToken,
+      // Provenance fence (round-14): consume ONLY the candidate rows THIS
+      // pass staged (or matched via the value-keyed dedupe) — rows a stale
+      // worker inserted after losing its claim must not ride this pass's
+      // valid token into auto-apply. Fails CLOSED when staging produced no
+      // provenance list (round-15): a pass whose extraction staged nothing
+      // — or whose staging errored — passes [] and applies nothing, rather
+      // than opening the scope to older pending rows a previous pass
+      // deliberately left behind.
+      candidateIds: candidateStaging?.stagedIds || [],
+      // Claim-time CAS baseline — valid only when the customer being
+      // corrected IS the one linked at claim; a customer linked or
+      // created during this pass falls back to the lane's own read.
+      expectedValuesSnapshot: claimSnapshotForTarget,
+      // Historical/forced/RETRY passes never auto-apply names (codex
+      // #3413 r22, tightened r25): the claim-time baseline of any pass
+      // that is not the call's FIRST processing reflects post-call values,
+      // so an admin edit made between a failed first pass and its retry
+      // would be adopted as the baseline and overwritten by the older
+      // transcript. processing_generation === 1 identifies the first
+      // claim (recovery reclaims and force passes increment it); a
+      // missing generation (no-RETURNING environments) fails closed. The
+      // 24h bound additionally covers a first claim arriving late off a
+      // backlog.
+      // …and (r26) a claim-time snapshot FOR THIS TARGET: a customer
+      // linked, created, or reassigned during processing has no source-
+      // time baseline, so the lane's fallback read would adopt any admin
+      // edit made during transcription as the CAS baseline and let the
+      // older transcript overwrite it. No snapshot ⇒ proposal-only.
+      // …and the customer row untouched since the CALL (r42): a delayed
+      // first claim would otherwise adopt an admin edit made after the
+      // call as the baseline, letting the older transcript overwrite it —
+      // updated_at past the call start means someone changed something
+      // and the source-time baseline cannot be proven, so names stay in
+      // the review lane.
+      allowNameAutoApply: !opts.force
+        && procGeneration === 1
+        && Boolean(claimSnapshotForTarget)
+        && Boolean(call.created_at)
+        && new Date(claimSnapshotForTarget?.updated_at || 0).getTime() <= new Date(call.created_at).getTime()
+        && (Date.now() - new Date(call.created_at).getTime()) < 24 * 60 * 60 * 1000,
+    }).catch((err) => {
+      logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });
 
     // Step 4b: Create lead in leads table for pipeline tracking

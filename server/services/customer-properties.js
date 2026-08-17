@@ -412,7 +412,7 @@ async function completePrimaryCore(customerId, call, conn) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
-async function syncPrimaryAddress(customerOrId, conn = db) {
+async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
     : customerOrId;
@@ -423,7 +423,15 @@ async function syncPrimaryAddress(customerOrId, conn = db) {
 
   const next = {
     address_line1: customer.address_line1 || null,
-    address_line2: customer.address_line2 ?? primary.address_line2 ?? null,
+    // A null customer line2 is ambiguous: legacy callers pass rows where
+    // null means "not stated" (keep the primary's unit), but a caller that
+    // DELIBERATELY wrote the clear (explicit unit removal, whole-street
+    // move) passes explicitLine2 so the null propagates — otherwise the
+    // property's address_key keeps a unit the customer record no longer
+    // has and exact-unit matching diverges.
+    address_line2: explicitLine2
+      ? (customer.address_line2 ?? null)
+      : (customer.address_line2 ?? primary.address_line2 ?? null),
     city: customer.city || null,
     state: customer.state || primary.state || 'FL',
     zip: customer.zip || null,
@@ -439,8 +447,13 @@ async function syncPrimaryAddress(customerOrId, conn = db) {
   // them (better NULL than wrong). The route re-geocodes the customer after this and
   // calls syncPrimaryCoordsFromCustomer to re-mirror the fresh coords onto the
   // primary, so the row regains a location rather than staying permanently null.
-  next.latitude = null;
-  next.longitude = null;
+  // preserveCoords (r43): a unit-only edit does not move the building — the
+  // caller keeps the still-valid coordinates instead of gambling on the
+  // best-effort re-geocode.
+  if (!preserveCoords) {
+    next.latitude = null;
+    next.longitude = null;
+  }
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

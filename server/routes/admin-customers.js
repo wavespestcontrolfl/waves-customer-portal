@@ -8,7 +8,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
-const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
+const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
@@ -24,11 +24,9 @@ const {
   normalizeContactName,
   normalizeContactPhone,
   normalizeContactEmail,
-  normalizeContactStreet,
-  normalizeContactCity,
-  normalizeContactZip,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
+  normalizeAdminAddressInput,
 } = require('../utils/intake-normalize');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1454,33 +1452,13 @@ function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
   return { dbUpdates };
 }
 
-function cleanState(value) {
-  const cleaned = cleanText(value).toUpperCase();
-  return cleaned ? cleaned.slice(0, 2) : 'FL';
-}
-
 function cleanOptionalState(value) {
   const cleaned = cleanText(value).toUpperCase();
   return cleaned ? cleaned.slice(0, 2) : null;
 }
 
-function normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip } = {}) {
-  const normalized = normalizeLeadAddress({
-    line1: cleanText(addressLine1 || address),
-    line2: cleanText(addressLine2),
-    city: cleanText(city),
-    state: cleanText(state),
-    zip: cleanText(zip),
-  });
-  return {
-    addressLine1: normalizeContactStreet(normalized.line1),
-    addressLine2: normalized.line2 || null,
-    city: normalizeContactCity(normalized.city),
-    state: cleanState(normalized.state),
-    zip: normalizeContactZip(normalized.zip),
-    unitConflict: normalized.unitConflict,
-  };
-}
+// normalizeAdminAddressInput moved to utils/intake-normalize (shared with
+// the contact-correction lane) — imported above; _private still exposes it.
 
 async function createDefaultCustomerRows(trx, customerId) {
   await trx('property_preferences')

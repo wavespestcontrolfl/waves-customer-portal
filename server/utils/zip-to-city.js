@@ -130,4 +130,34 @@ function zipToCity(zip) {
   return ZIP_TO_CITY[match[0]] || '';
 }
 
-module.exports = { zipToCity, ZIP_TO_CITY };
+// Community names accepted ALONGSIDE the USPS primary city for a ZIP —
+// the alias knowledge the map above only carried in comments (codex #3413
+// r57; mirrors the postal-city aliasing customer-address-fanout.js relies
+// on). Every alias a customer might state as their "city" belongs here.
+const ZIP_CITY_ALIASES = {
+  '34202': ['lakewood ranch'],
+  '34211': ['lakewood ranch'],
+  '34212': ['lakewood ranch'],
+  '34243': ['sarasota'], // USPS labels this Sarasota; map says University Park
+  '34242': ['siesta key'],
+  '33955': ['burnt store'],
+  '33980': ['charlotte harbor'],
+  '33981': ['gulf cove', 'el jobean'],
+  '33983': ['deep creek'],
+};
+
+// True when `city` is an acceptable name for `zip`: the USPS primary from
+// ZIP_TO_CITY or a documented community alias. Unknown ZIPs accept any
+// city (we never guess outside the known service area).
+function cityAcceptedForZip(zip, city) {
+  const primary = zipToCity(zip);
+  if (!primary) return true;
+  const norm = String(city || '').trim().toLowerCase();
+  if (!norm) return true;
+  if (norm === primary.toLowerCase()) return true;
+  // Same five-digit key zipToCity uses — ZIP+4 must not defeat the alias.
+  const key = (String(zip || '').match(/\d{5}/) || [])[0] || '';
+  return (ZIP_CITY_ALIASES[key] || []).includes(norm);
+}
+
+module.exports = { zipToCity, ZIP_TO_CITY, ZIP_CITY_ALIASES, cityAcceptedForZip };

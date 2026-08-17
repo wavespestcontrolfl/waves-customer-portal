@@ -78,3 +78,27 @@ describe('twilio inbound SMS contact name extraction', () => {
     expect(extractContactNameFromSms('This is for pest control at my house.')).toBeNull();
   });
 });
+
+describe('correction-job reservation respects the feature gate (r55)', () => {
+  const { shouldReserveCorrectionJob } = require('../routes/twilio-webhook')._internals;
+  const gates = require('../config/feature-gates');
+
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  test('gate OFF: an intent-looking SMS reserves NOTHING on the webhook path', () => {
+    jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    expect(shouldReserveCorrectionJob('My last name is spelled wrong, it is Rivers', false)).toBe(false);
+  });
+
+  test('gate ON: the same message reserves', () => {
+    jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    expect(shouldReserveCorrectionJob('My last name is spelled wrong, it is Rivers', false)).toBe(true);
+  });
+
+  test('gate ON: reactions and non-intent bodies still do not reserve', () => {
+    jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    expect(shouldReserveCorrectionJob('My last name is spelled wrong, it is Rivers', true)).toBe(false);
+    expect(shouldReserveCorrectionJob('See you Friday!', false)).toBe(false);
+    expect(shouldReserveCorrectionJob('', false)).toBe(false);
+  });
+});

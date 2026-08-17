@@ -96,6 +96,61 @@ async function ensureCustomerGeocoded(customerId) {
 }
 
 /**
+ * Address-guarded re-geocode for correction/edit paths that changed the
+ * address and cleared coords in-transaction. Reads the customer's CURRENT
+ * address, geocodes it, then writes coordinates ONLY if the address and the
+ * coordinate pair it read are still unchanged — the same guard the sweep
+ * below uses. Without it, two corrections geocoding concurrently can
+ * interleave (B's coords commit, then A's slow provider response overwrites
+ * them with coordinates for the obsolete address). A raced write is a no-op;
+ * the sweep re-geocodes the survivor address later. The customer write and
+ * the primary-property coord mirror share one transaction (repo convention
+ * for every re-geocode path).
+ */
+async function regeocodeCustomerAddressGuarded(customerId) {
+  const c = await db('customers').where({ id: customerId }).first();
+  if (!c) return null;
+  // Locality-only rows never geocode (round-10): with no street the
+  // provider returns a city/ZIP centroid and route optimization would
+  // treat it as the customer's location — the same nonblank-street
+  // eligibility the backstop sweep below enforces.
+  if (!String(c.address_line1 || '').trim()) return null;
+  const address = buildAddress(c);
+  const result = await geocodeAddress(address);
+  if (!result) return null;
+  const written = await db.transaction(async (trx) => {
+    const count = await guardedCoordWrite(trx, customerId, c, result);
+    if (count) {
+      await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
+    }
+    return count;
+  });
+  return written ? result : null;
+}
+
+// Shared coordinate-write guard (guarded re-geocode + backstop sweep): write
+// ONLY while both coordinates and the FULL address identity — unit included
+// — still match the snapshot that was geocoded. buildAddress() ignores
+// line 2, so two unit-only corrections geocode identically, but the loser
+// of that race must still no-op rather than stamp the row on behalf of an
+// address snapshot that no longer exists. Returns the update count
+// (0 = raced; caller treats as no-op/unresolved).
+async function guardedCoordWrite(trx, customerId, snapshot, location) {
+  let guarded = trx('customers').where({ id: customerId });
+  for (const [col, val] of [['latitude', snapshot.latitude], ['longitude', snapshot.longitude]]) {
+    guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+  }
+  for (const col of ['address_line1', 'address_line2', 'city', 'state', 'zip']) {
+    guarded = snapshot[col] == null ? guarded.whereNull(col) : guarded.where(col, snapshot[col]);
+  }
+  return guarded.update({
+    latitude: location.lat,
+    longitude: location.lng,
+    updated_at: new Date(),
+  });
+}
+
+/**
  * Backstop sweep: geocode customers whose create path left latitude/longitude
  * NULL. Several booking/webhook create paths never call ensureCustomerGeocoded,
  * and the paths that do fire-and-forget it, so a transient Google failure
@@ -178,18 +233,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
         // path) share one transaction so a sync failure rolls both back
         // and the customer stays sweep-eligible.
         const written = await db.transaction(async (trx) => {
-          let guarded = trx('customers').where({ id: row.id });
-          for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
-            guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
-          }
-          for (const col of ['address_line1', 'city', 'state', 'zip']) {
-            guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
-          }
-          const count = await guarded.update({
-            latitude: location.lat,
-            longitude: location.lng,
-            updated_at: new Date(),
-          });
+          const count = await guardedCoordWrite(trx, row.id, c, location);
           if (count) {
             await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id, trx);
           }
@@ -223,6 +267,7 @@ module.exports = {
   geocodeAddress,
   geocodeAddressWithStatus,
   ensureCustomerGeocoded,
+  regeocodeCustomerAddressGuarded,
   buildAddress,
   sweepUngeocodedCustomers,
 };

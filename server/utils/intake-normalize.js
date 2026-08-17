@@ -391,6 +391,40 @@ function applyContactNormalization(fields = {}) {
   return { ...fields, ...normalizeContactRecord(fields) };
 }
 
+// Canonical whole-address normalization — the Customer-360 admin edit path's
+// address shape (moved here from routes/admin-customers so non-route writers
+// like the contact-correction lane share the SAME parser instead of
+// normalizing fields independently): normalizeLeadAddress parses the group
+// as one address (unit canonicalization "4b" → "Unit 4B", inline-unit vs
+// line2 conflict detection), then each part takes the contact normalizer.
+// State defaults to FL when absent — consumers correcting a partial field
+// set must only adopt the keys they supplied.
+function normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip } = {}) {
+  const { normalizeLeadAddress } = require('./address-normalizer');
+  // Numeric scalars survive (codex #3413 r24): the route-local helper this
+  // replaced used String(value).trim(), so admin JSON like zip: 34201
+  // normalized fine — the stricter cleanText empties non-strings, which
+  // would silently null a valid ZIP. Coerce numbers only; objects/arrays
+  // still fail closed.
+  const text = (v) => cleanText(typeof v === 'number' ? String(v) : v);
+  const normalized = normalizeLeadAddress({
+    line1: text(addressLine1 || address),
+    line2: text(addressLine2),
+    city: text(city),
+    state: text(state),
+    zip: text(zip),
+  });
+  const cleanedState = cleanText(normalized.state).toUpperCase();
+  return {
+    addressLine1: normalizeContactStreet(normalized.line1),
+    addressLine2: normalized.line2 || null,
+    city: normalizeContactCity(normalized.city),
+    state: cleanedState ? cleanedState.slice(0, 2) : 'FL',
+    zip: normalizeContactZip(normalized.zip),
+    unitConflict: normalized.unitConflict,
+  };
+}
+
 module.exports = {
   EMAIL_RE,
   cleanText,
@@ -406,6 +440,7 @@ module.exports = {
   normalizeSecondaryContact,
   normalizeContactRecord,
   applyContactNormalization,
+  normalizeAdminAddressInput,
   clearLineTypeOnPhoneChange,
   CONTACT_FIELD_NORMALIZERS,
   normalizeContactName,

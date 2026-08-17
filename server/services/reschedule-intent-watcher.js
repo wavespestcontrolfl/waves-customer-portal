@@ -119,6 +119,27 @@ async function resolveActionedFlags() {
 // after 10 minutes get their urgent notification here.
 async function replayPendingBells() {
   try {
+    // Owner ruling 2026-08-15: the flagger lane gated off silences its
+    // bells — leftover bell_pending flags from before the flip must not
+    // keep replaying them here. RETIRE the markers while disabled
+    // (codex #3413 r22): the 24h replay horizon alone still bursts after
+    // a gate-off period SHORTER than the horizon (flags an hour old
+    // survive a two-hour mute), so a mute actively clears pending bell
+    // markers — the flags themselves stay pending_review for the queue,
+    // only the un-rung bell marker is dropped.
+    if (!require('../config/feature-gates').isEnabled('rescheduleIntentFlags')) {
+      await db('agent_decisions')
+        .where('workflow', 'comms_guards')
+        .where('detected_intent', 'reschedule_or_away_needs_review')
+        .where('status', 'pending_review')
+        .whereRaw("input_snapshot->>'bell_pending' = 'true'")
+        .update({
+          input_snapshot: db.raw("jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{bell_pending}', 'false'::jsonb)"),
+          updated_at: new Date(),
+        })
+        .catch((err) => logger.warn(`[reschedule-intent-watcher] mute-retire failed: ${err.message}`));
+      return;
+    }
     const stale = await db('agent_decisions as ad')
       .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
       .where('ad.workflow', 'comms_guards')
@@ -126,6 +147,15 @@ async function replayPendingBells() {
       .where('ad.status', 'pending_review')
       .whereRaw("ad.input_snapshot->>'bell_pending' = 'true'")
       .where('ad.created_at', '<', db.raw("now() - interval '10 minutes'"))
+      // Replay horizon (#3413 round-16): this pass exists to recover bells
+      // whose post-ack fire crashed MINUTES ago — not to resurrect old
+      // flags when the lane is re-enabled after an operational mute
+      // (visit completion is deliberately not an auto-resolution, so
+      // bell_pending markers from before a gate-off period survive
+      // indefinitely, and an unmute used to replay them all as a burst of
+      // obsolete urgent bells). Flags past the horizon keep their pending
+      // marker for the review queue but never re-ring.
+      .where('ad.created_at', '>', db.raw("now() - interval '24 hours'"))
       // Newest-first (codex r19): persistently-failing replays must not
       // starve fresh flags out of the capped batch.
       .orderBy('ad.created_at', 'desc')

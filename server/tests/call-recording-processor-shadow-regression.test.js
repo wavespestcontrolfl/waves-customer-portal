@@ -34,6 +34,7 @@ function mockDb(firstResults) {
       select: () => builder,
       orderBy: () => builder,
       limit: () => builder,
+      forUpdate: () => builder,
       first: () => Promise.resolve(firstQueue.shift() ?? null),
       update: () => Promise.resolve(1),
       then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
@@ -43,6 +44,8 @@ function mockDb(firstResults) {
   // The claim write uses db.raw for the processing_generation bump; the
   // count-shaped update above exercises the no-RETURNING tolerance path.
   db.raw = jest.fn((sql) => sql);
+  // The claim + contact baseline run in one transaction (#3413 r27).
+  db.transaction = jest.fn(async (fn) => fn(db));
 }
 
 describe('processRecording isOutboundCall shadowing (TDZ) regression', () => {

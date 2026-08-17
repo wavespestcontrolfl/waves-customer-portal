@@ -1057,6 +1057,33 @@ httpServer.listen(PORT, () => {
       setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
+    // Contact-correction jobs (codex #3413 r17): the durable queue behind
+    // GATE_CONTACT_CORRECTION. The webhook enqueues before its ack and
+    // kicks an immediate pass; this interval is the recovery guarantee —
+    // it drains jobs an exiting deploy left queued/running and replays
+    // reservations a crash left un-run. With the gate off the runner
+    // resolves each job as gate_off, so the sweep stays cheap while dark.
+    {
+      const runContactCorrectionQueue = async () => {
+        try {
+          const { processDueContactCorrectionJobs } = require('./services/contact-correction-queue');
+          const summary = await processDueContactCorrectionJobs({ limit: 3 });
+          if (summary.claimed || summary.recovered || summary.promoted) {
+            logger.info(`[contact-correction-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.failed} failed, ${summary.recovered} recovered, ${summary.promoted} promoted`);
+          }
+        } catch (err) {
+          logger.error(`[contact-correction-queue] processor failed: ${err.message}`);
+        }
+      };
+      // Immediate boot pass (codex #3413 r32): warms the queue's table-
+      // readiness cache before real webhook traffic and drains anything an
+      // exiting deploy left behind, so the reserve path's ordering insert
+      // never waits on a first-request schema check.
+      void runContactCorrectionQueue();
+      setTimeout(runContactCorrectionQueue, 30 * 1000).unref();
+      setInterval(runContactCorrectionQueue, 60 * 1000).unref();
+    }
+
     // WDO report payment-hold release sweep — delivers held reports once
     // their invoice settles. The interval is the guarantee (every settlement
     // path converges on invoices.status); payment paths also nudge it via

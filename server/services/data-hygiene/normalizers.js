@@ -33,9 +33,14 @@ const ZIP3_RANGES = {
   CA: [[900, 961]],
   CO: [[800, 816]],
   CT: [[60, 69]],
-  DC: [[200, 205]],
+  // 201 is VA (not DC) — USPS exception carved out (codex #3413 r24) so
+  // stateForZip and zipMatchesState agree on the exceptional prefixes.
+  // 569 (Parcel Return Service) is DC — USPS exception (codex #3413 r25).
+  DC: [[200, 200], [202, 205], [569, 569]],
   DE: [[197, 199]],
-  FL: [[320, 349]],
+  // 340 is military AA (APO/FPO), not Florida — carved out (codex #3413
+  // r25) so an omitted-state correction never writes FL for it.
+  FL: [[320, 339], [341, 349]],
   GA: [[300, 319], [398, 399]],
   HI: [[967, 968]],
   IA: [[500, 528]],
@@ -45,7 +50,8 @@ const ZIP3_RANGES = {
   KS: [[660, 679]],
   KY: [[400, 427]],
   LA: [[700, 714]],
-  MA: [[10, 27]],
+  // 055 (Andover IRS) is MA — USPS exception (codex #3413 r25).
+  MA: [[10, 27], [55, 55]],
   MD: [[206, 219]],
   ME: [[39, 49]],
   MI: [[480, 499]],
@@ -62,17 +68,20 @@ const ZIP3_RANGES = {
   NV: [[889, 898]],
   NY: [[5, 5], [100, 149]],
   OH: [[430, 459]],
-  OK: [[730, 749]],
+  // 733 (Austin) is TX — USPS exception (codex #3413 r24).
+  OK: [[730, 732], [734, 749]],
   OR: [[970, 979]],
   PA: [[150, 196]],
   RI: [[28, 29]],
   SC: [[290, 299]],
   SD: [[570, 577]],
   TN: [[370, 385]],
-  TX: [[750, 799]],
+  // 733 (Austin) and 885 (El Paso overflow) are TX — USPS exceptions
+  // (codex #3413 r24).
+  TX: [[733, 733], [750, 799], [885, 885]],
   UT: [[840, 847]],
-  VA: [[220, 246]],
-  VT: [[50, 59]],
+  VA: [[201, 201], [220, 246]],
+  VT: [[50, 54], [56, 59]],
   WA: [[980, 994]],
   WI: [[530, 549]],
   WV: [[247, 268]],
@@ -312,10 +321,36 @@ function normalizeUsState(value) {
 
 function zipMatchesState(zip, state) {
   if (!/^\d{5}$/.test(zip)) return false;
+  if (ZIP5_EXCEPTIONS[zip]) return ZIP5_EXCEPTIONS[zip] === state;
   const ranges = ZIP3_RANGES[state];
   if (!ranges) return false;
   const zip3 = Number(zip.slice(0, 3));
   return ranges.some(([min, max]) => zip3 >= min && zip3 <= max);
+}
+
+// Full-ZIP exceptions that cross a 3-digit range boundary (codex #3413
+// r27): individually allocated ZIPs whose prefix belongs to another
+// state. Consulted before the prefix ranges by BOTH directions so
+// derivation and validation always agree.
+const ZIP5_EXCEPTIONS = {
+  '06390': 'NY', // Fishers Island, NY inside CT's 060–069
+  '83414': 'WY', // Alta, WY inside ID's 832–838
+};
+
+// Inverse lookup over the SAME allocation table (codex #3413 r23 — one
+// shared ZIP/state authority; the contact-correction lane derives a
+// new-address group's state from its ZIP through this). Returns null for
+// prefixes the table does not allocate — callers fail closed.
+function stateForZip(zip) {
+  const digits = String(zip || '').replace(/\D/g, '');
+  if (digits.length < 5) return null;
+  const exact = ZIP5_EXCEPTIONS[digits.slice(0, 5)];
+  if (exact) return exact;
+  const zip3 = Number(digits.slice(0, 3));
+  for (const [state, ranges] of Object.entries(ZIP3_RANGES)) {
+    if (ranges.some(([min, max]) => zip3 >= min && zip3 <= max)) return state;
+  }
+  return null;
 }
 
 function normalizationCandidatesForCustomer(row) {
@@ -364,6 +399,7 @@ module.exports = {
   RULE_VERSION,
   normalizeUsState,
   zipMatchesState,
+  stateForZip,
   normalizationCandidatesForCustomer,
   normalizationCandidatesForCustomerAccount,
   _private: {

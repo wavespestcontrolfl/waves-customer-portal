@@ -1,5 +1,19 @@
+// Delegating db mock — staging tests install a per-test stub; the pure
+// builder tests never touch it.
+let mockDbStub = null;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockDbStub(...args);
+  proxy.fn = { now: () => 'NOW' };
+  proxy.schema = { hasTable: async () => true };
+  proxy.transaction = async (fn) => fn(proxy);
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
 const {
   buildCustomerFieldCandidates,
+  stageCustomerFieldCandidates,
+  __resetForTests,
 } = require('../services/call-field-candidates');
 
 function validV2Extraction(overrides = {}) {
@@ -73,6 +87,47 @@ function merge(target, source) {
   return out;
 }
 
+// Minimal chainable stub over an in-memory candidates table.
+function installDbStub(rows = [], { callLog = [] } = {}) {
+  const tables = {
+    customer_field_candidates: rows.map((r) => ({ ...r })),
+    call_log: callLog.map((r) => ({ ...r })),
+  };
+  let nextId = 100;
+  mockDbStub = (table) => {
+    const data = tables[table];
+    if (!data) throw new Error(`unexpected table ${table}`);
+    const preds = [];
+    const chain = {
+      where(a, b) {
+        if (typeof a === 'object') for (const [k, v] of Object.entries(a)) preds.push((r) => r[k] === v);
+        else preds.push((r) => r[a] === b);
+        return chain;
+      },
+      forUpdate() { return chain; },
+      first(...cols) {
+        const row = data.find((r) => preds.every((p) => p(r)));
+        if (!row) return Promise.resolve(undefined);
+        return Promise.resolve(Object.fromEntries(cols.map((c) => [c, row[c]])));
+      },
+      update(vals) {
+        const matched = data.filter((r) => preds.every((p) => p(r)));
+        for (const r of matched) Object.assign(r, vals);
+        return Promise.resolve(matched.length);
+      },
+      insert(row) {
+        const stored = { id: `cand-${++nextId}`, ...row };
+        data.push(stored);
+        const result = Promise.resolve([{ id: stored.id }]);
+        result.returning = () => Promise.resolve([{ id: stored.id }]);
+        return result;
+      },
+    };
+    return chain;
+  };
+  return tables.customer_field_candidates;
+}
+
 describe('call field candidates', () => {
   test('builds v2 candidates with evidence, confidence, and mapped service values', () => {
     const rows = buildCustomerFieldCandidates({
@@ -131,5 +186,173 @@ describe('call field candidates', () => {
         source: 'legacy_gemini',
       }),
     ]));
+  });
+});
+
+describe('staging dedupe linkage (codex #3413 r17)', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+  const OTHER_CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+  const existingRow = (over = {}) => ({
+    id: 'cand-1',
+    call_log_id: CALL_ID,
+    customer_id: null,
+    field_name: 'last_name',
+    final_recommended_value: 'Rodriguez',
+    source: 'gemini_v2',
+    status: 'pending',
+    ...over,
+  });
+
+  const stageArgs = () => ({
+    callId: CALL_ID,
+    customerId: CUSTOMER_ID,
+    extraction: {},
+    v2Extraction: validV2Extraction({
+      caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+      property: { service_address: null },
+      service_request: { primary_service_category: null },
+      confidence: {},
+    }),
+  });
+
+  beforeEach(() => { __resetForTests(); });
+  afterEach(() => { mockDbStub = null; });
+
+  test('relinks a still-pending same-value row to the newly linked customer', async () => {
+    // A force-reprocessed call that was unlinked at first staging: the
+    // dedupe row carries customer_id NULL, and without the relink the
+    // runner's customer scope silently drops the correction.
+    const data = installDbStub([existingRow({ customer_id: null })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
+  });
+
+  test('reuses a same-value row already carrying the current linkage untouched', async () => {
+    const data = installDbStub([existingRow({ customer_id: CUSTOMER_ID })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(res.staged).toBe(0);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
+  });
+
+  test('a row already resolved under the OLD linkage is history — a fresh row is staged', async () => {
+    const data = installDbStub([existingRow({ customer_id: OTHER_CUSTOMER_ID, status: 'auto_applied' })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.staged).toBe(1);
+    expect(res.stagedIds).toHaveLength(1);
+    expect(res.stagedIds[0]).not.toBe('cand-1');
+    // The resolved row keeps its original linkage and status.
+    expect(data[0].customer_id).toBe(OTHER_CUSTOMER_ID);
+    expect(data[0].status).toBe('auto_applied');
+    expect(data[1].customer_id).toBe(CUSTOMER_ID);
+  });
+});
+
+describe('round-18 hardening', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+  const OTHER_CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+  test('unit-specific evidence beats an earlier generic address item for address_line2', () => {
+    const rows = buildCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      v2Extraction: validV2Extraction({
+        property: { service_address: { street_line_1: '8224 Abalone Loop', street_line_2: 'Unit 4B', city: 'Parrish', state: 'FL', postal_code: '34219' } },
+        evidence: [
+          { field_path: '/property/service_address', quote: "I'm at 8224 Abalone Loop in Parrish.", speaker: 'caller' },
+          { field_path: '/property/service_address/unit', quote: 'it is unit 4B, not 4', speaker: 'caller' },
+        ],
+      }),
+    });
+    const line2 = rows.find((r) => r.field_name === 'address_line2');
+    expect(line2.evidence_quote).toBe('it is unit 4B, not 4');
+    // The street candidate still prefers its own component path when one
+    // exists, and otherwise keeps the aggregate quote.
+    const line1 = rows.find((r) => r.field_name === 'address_line1');
+    expect(line1.evidence_quote).toBe("I'm at 8224 Abalone Loop in Parrish.");
+  });
+
+  test('relink is skipped (and the id withheld) when the pass no longer holds the processing token', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: OTHER_CUSTOMER_ID, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'stale-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+      }),
+    });
+    expect(res.stagedIds).toEqual([]);
+    expect(data[0].customer_id).toBe(OTHER_CUSTOMER_ID); // untouched
+  });
+
+  test('relink proceeds while the pass still holds the processing token', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: null, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'owner-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+      }),
+    });
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
+  });
+});
+
+describe('round-21 evidence binding', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+
+  test('a same-value pending row with DIFFERENT evidence is refreshed to this pass', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+        evidence_quote: 'this is maria rodriguez calling about my lawn', confidence: '0.6',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'owner-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+        evidence: [{ field_path: '/caller/last_name', quote: 'you spelled my last name wrong, it is Rodriguez', speaker: 'caller' }],
+      }),
+    });
+    expect(res.stagedIds).toEqual(['cand-1']);
+    // The row now carries THIS pass's evidence — the runner authorizes on
+    // the quote, and a stale routine quote must not suppress a genuine
+    // correction.
+    expect(data[0].evidence_quote).toBe('you spelled my last name wrong, it is Rodriguez');
   });
 });
