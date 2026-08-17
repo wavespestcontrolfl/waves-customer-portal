@@ -1179,14 +1179,15 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     return;
   }
 
+  let combinedSettleOutcome = null;
   try {
-    const outcome = await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+    combinedSettleOutcome = await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
       paymentMethod: details.paymentMethod,
       cardBrand: details.cardBrand,
       cardLastFour: details.cardLastFour,
       receiptUrl: details.receiptUrl,
     }, { eventCreated });
-    logger.info(`[stripe-webhook] Combined PI ${piId} settled ${outcome.settled}/${allocation.length} invoices (${outcome.paymentStatus})`);
+    logger.info(`[stripe-webhook] Combined PI ${piId} settled ${combinedSettleOutcome.settled}/${allocation.length} invoices (${combinedSettleOutcome.paymentStatus})`);
   } catch (err) {
     if (err.code === 'COMBINED_ALLOCATION_MISMATCH') {
       logger.error(`[stripe-webhook] ${err.message} — quarantining`);
@@ -1201,6 +1202,16 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // that the anchor invoice + a paid ledger row exist (single-path
   // parity).
   await resolveOrphanSucceededPaymentIntentIfSettled(piId);
+
+  // Review outreach per settled invoice (codex r4 P2): the shared
+  // enrollment is idempotent and honors the completion's requestReview
+  // intent — the combined early-return must not cost customers their
+  // review invitation.
+  if (combinedSettleOutcome?.paymentStatus === 'paid') {
+    for (const settledId of combinedSettleOutcome.invoiceIds || []) {
+      await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+    }
+  }
 
   // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
   // contract as the single path): a combined ACH debit clearing from a
@@ -2135,10 +2146,13 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
   }
 }
 
-async function scheduleReviewAfterPaidInvoice(piId) {
+async function scheduleReviewAfterPaidInvoice(piId, { invoiceId = null } = {}) {
   try {
+    // A combined PI settles several invoices at once — callers pass each
+    // settled invoiceId explicitly; the PI-keyed .first() remains for the
+    // single-invoice path.
     const paidInvoice = await db('invoices')
-      .where({ stripe_payment_intent_id: piId })
+      .where(invoiceId ? { id: invoiceId } : { stripe_payment_intent_id: piId })
       .select('id', 'customer_id', 'service_record_id', 'invoice_number')
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
@@ -3168,10 +3182,20 @@ async function handleChargeRefunded(charge) {
   try {
     const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
     if (isFullRefund && payment) {
-      try {
-        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(payment);
-      } catch (err) {
-        logger.warn(`[stripe-webhook] annual prepay refund sync skipped for charge ${chargeId}: ${err.message}`);
+      // A combined charge refunds N per-invoice rows — the annual-prepay
+      // sync must see EVERY refunded share, not the arbitrary first row
+      // (codex r4 P1: a prepay invoice elsewhere in the allocation would
+      // keep active coverage on refunded money). Single-invoice charges
+      // have exactly one row, preserving the original behavior.
+      const refundSyncRows = await db('payments')
+        .where({ stripe_charge_id: chargeId, status: 'refunded' });
+      const rowsToSync = refundSyncRows.length ? refundSyncRows : [payment];
+      for (const refundedRow of rowsToSync) {
+        try {
+          await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
+        } catch (err) {
+          logger.warn(`[stripe-webhook] annual prepay refund sync skipped for charge ${chargeId} row ${refundedRow.id}: ${err.message}`);
+        }
       }
     }
     if (payment?.customer_id) {
@@ -5431,6 +5455,16 @@ async function handleDisputeCreated(dispute) {
         const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
         if (rowInvoice && ['paid', 'processing'].includes(rowInvoice.status)
           && invoicePi && disputedPiId && invoicePi === disputedPiId) {
+          // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
+          // prepaid coverage must not ride on provisionally clawed-back
+          // money — SUSPEND any live term this invoice paid for; the
+          // closure branches re-activate (won) or cancel (lost) it.
+          try {
+            await require('../services/annual-prepay-renewals')
+              .suspendActiveTermsForDisputedInvoice(rowInvoice.id, db);
+          } catch (termErr) {
+            logger.warn(`[stripe-webhook] combined dispute term suspend failed for invoice ${rowInvoice.id}: ${termErr.message}`);
+          }
           await db('invoices').where({ id: rowInvoice.id }).update({
             status: 'overdue',
             paid_at: null,
@@ -5652,6 +5686,14 @@ async function handleDisputeClosed(dispute) {
                 stripe_charge_id: row.stripe_charge_id || null,
               });
               restoredCount += 1;
+              // Recovery sync on the restored money (codex r4 P1): a paid
+              // prepay invoice re-activates its dispute-suspended term.
+              try {
+                const freshWon = await db('invoices').where({ id: invoice.id }).first();
+                if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
+              } catch (termErr) {
+                logger.warn(`[stripe-webhook] combined dispute-won term sync failed for invoice ${invoice.id}: ${termErr.message}`);
+              }
             }
           }
         } else if (status === 'lost') {
@@ -5665,6 +5707,15 @@ async function handleDisputeClosed(dispute) {
               .where({ id: invId })
               .whereIn('status', ['paid', 'processing'])
               .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+            // Refund-shaped term sync (codex r4 P1): lost money cancels the
+            // prepaid coverage this invoice funded, exactly like the
+            // single-invoice lost path.
+            try {
+              await require('../services/annual-prepay-renewals')
+                .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
+            } catch (termErr) {
+              logger.warn(`[stripe-webhook] combined dispute-lost term sync failed for invoice ${invId}: ${termErr.message}`);
+            }
           }
         } else {
           await db('payments').where({ id: row.id }).update({ metadata: finalRowMeta });

@@ -193,6 +193,28 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
+    // LIVE payer re-resolution for siblings (codex r4 P1): a payer assigned
+    // after mint lives on scheduled_services (or as the customer's default
+    // payer) while invoices.payer_id stays null — the same reason the
+    // initial selection resolves live. Fail CLOSED: a resolve failure or a
+    // resolved payer both refuse (payer-billed debt is never the
+    // homeowner's to pay). The ANCHOR is exempt — its own /pay surface
+    // already refuses payer-billed anchors at every seam.
+    if (String(row.id) !== String(anchorInvoiceId)) {
+      const PayerService = require('./payer');
+      try {
+        const resolved = await PayerService.resolveForInvoice({
+          customerId: String(row.customer_id),
+          ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
+          throwOnError: true,
+        });
+        if (resolved?.payerId) throw staleErr(`invoice ${row.invoice_number} is payer-billed`);
+      } catch (err) {
+        if (err.staleBalance) throw err;
+        logger.warn(`[pay-combined] payer resolve failed for invoice ${row.invoice_number} during locked verification: ${err.message}`);
+        throw staleErr(`payer resolution unavailable for invoice ${row.invoice_number}`);
+      }
+    }
     if (amountDueCents(row) !== entry.cents) throw staleErr(`invoice ${row.invoice_number} remainder changed`);
     const bound = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
     const isAnchor = String(row.id) === String(anchorInvoiceId);

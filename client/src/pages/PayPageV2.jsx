@@ -1776,8 +1776,13 @@ export default function PayPageV2() {
         // is re-derived from the GET on any reload, so a transient mint
         // failure can never permanently bypass the required capture).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
+          // Credit fully covered THE ANCHOR — no combined PI exists and no
+          // money moves here, so the GET-time sibling preview must clear
+          // (codex r4 P1): leaving it would show a combined "Total due
+          // today" with no payment form behind it. The siblings keep their
+          // own pay links + dunning exactly as before.
           setData((prev) => (prev
-            ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
+            ? { ...prev, previousBalance: null, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
             : prev));
           setPaymentState('idle');
           return;

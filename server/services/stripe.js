@@ -3998,14 +3998,38 @@ const StripeService = {
       if (setupFutureUsage) piParams.setup_future_usage = setupFutureUsage;
     }
 
+    // A replacement PI inherits the combined allocation via ctx.metadata —
+    // re-verify it against LOCKED rows before minting (codex r4 P1): the
+    // locked /update-amount attempt that routed here rolled back, so a
+    // sibling can have gone stopped/terminal/payer-billed or changed its
+    // remainder in the gap, and blindly repointing would carry a stale
+    // allocation onto a confirmable PI.
+    const PayCombined = require('./pay-combined');
+    let replacementAllocation = null;
+    if (metadata?.combined_allocation) {
+      replacementAllocation = PayCombined.parseCombinedAllocation(metadata);
+    }
+
     let newIntent;
     await db.transaction(async (trx) => {
+      if (replacementAllocation && invoice.customer_id) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['pay.combined.customer', String(invoice.customer_id)],
+        );
+      }
       const lockedInvoice = await trx('invoices')
         .where({ id: invoiceId })
         .forUpdate()
         .first();
       if (!lockedInvoice) throw new Error('Invoice not found');
       assertInvoiceCollectible(lockedInvoice.status);
+      if (replacementAllocation) {
+        await PayCombined.verifyAllocationLocked(trx, replacementAllocation, {
+          anchorInvoiceId: invoiceId,
+          expectPaymentIntentId: oldPaymentIntentId,
+        });
+      }
       // Guard against a racing setup/replace having already repointed the PI.
       if (String(lockedInvoice.stripe_payment_intent_id || '') !== String(oldPaymentIntentId)) {
         const err = new Error('Payment session changed. Please refresh the invoice and try again.');
@@ -4040,12 +4064,23 @@ const StripeService = {
       if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
       // A combined PI's siblings ride the same stamp — repoint them to the
       // replacement so the allocation in the new PI's metadata and the DB
-      // bindings never disagree (settle keys off both).
-      await trx('invoices')
+      // bindings never disagree (settle keys off both). The exact-count
+      // assertion is the fail-closed leg (codex r4 P1): every allocated
+      // sibling was just verified above, so anything short of a full
+      // repoint means a row changed under us — abort (the trx rollback
+      // leaves the old binding; the customer's page reloads to live
+      // amounts).
+      const repointed = await trx('invoices')
         .where({ stripe_payment_intent_id: oldPaymentIntentId })
         .whereNotIn('id', [invoiceId])
         .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
         .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id, updated_at: new Date() });
+      if (replacementAllocation && repointed !== replacementAllocation.length - 1) {
+        const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
+        err.statusCode = 409;
+        err.staleBalance = true;
+        throw err;
+      }
     });
 
     logger.info(
