@@ -473,7 +473,7 @@ function addressGroupComplete(byField) {
 // (codex #3413 r21): sentence-start or a first-person/definite determiner
 // DIRECTLY before it — "my accountant's new address" has a third-party
 // possessive in between and licenses nothing.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
 // The only words allowed to introduce a move's adjacent address fragment
 // (codex #3413 r20): pure connective/address-introduction vocabulary. Any
 // other residual token — "rental", "tenant", "service" — marks the
@@ -525,7 +525,7 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
   // to / moved to 99 Pine Ave" — a possessed subject moving is not the
   // customer moving. Self-ish household subjects stay licensed.
-  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will\\s+be|has|have|had|just|recently)\\s+){0,2}mov(?:ing|ed|es)\\s+(?:to|into)\\b`
+  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will|will\\s+be|has|have|had|just|recently)\\s+){0,2}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
   + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );
