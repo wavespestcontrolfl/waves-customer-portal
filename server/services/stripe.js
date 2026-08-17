@@ -3505,15 +3505,21 @@ const StripeService = {
               throw err;
             }
           } else if (activeIntent.status === 'requires_payment_method'
-            && String(activeIntent.metadata?.combined_allocation || '') === String(piParams.metadata.combined_allocation || '')
-            && Number(activeIntent.amount) === baseCents) {
-            // Reuse-in-place ONLY when the allocation and amount are
-            // unchanged (codex r28 P1): updating a live PI to a DIFFERENT
-            // allocation/total leaves every stale tab's client secret able
-            // to confirm numbers its session never displayed (Express
-            // Checkout and the ACH submit confirm straight after the last
-            // server seam). A changed shape takes the cancel-and-replace
-            // branch below instead, which invalidates the old secret.
+            && (
+              // Single-invoice ↔ single-invoice reuse keeps the original
+              // in-place update contract (amount refresh included) — the
+              // stale-tab hazard is COMBINED-specific: an itemized sibling
+              // set the first tab never displayed.
+              (String(activeIntent.metadata?.combined_allocation || '') === ''
+                && String(piParams.metadata.combined_allocation || '') === '')
+              // Combined shapes reuse in place ONLY when the allocation and
+              // amount are byte-identical (codex r28 P1); any change takes
+              // the cancel-and-replace branch below, invalidating every
+              // stale tab's client secret (Express Checkout and the ACH
+              // submit confirm straight after the last server seam).
+              || (String(activeIntent.metadata?.combined_allocation || '') === String(piParams.metadata.combined_allocation || '')
+                && Number(activeIntent.amount) === baseCents)
+            )) {
             const updateParams = { ...piParams };
             delete updateParams.currency;
             if (!stripeCustomerId) {
