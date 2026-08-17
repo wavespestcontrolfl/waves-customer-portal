@@ -247,6 +247,17 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       ? chargeDetails.amount / 100
       : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
+    // Combined pay-page session release BEFORE marking paid (codex #3427
+    // r30 P0): a stamped invoice may ride a combined PI a browser can still
+    // confirm — reconciling it now and letting that capture land later
+    // double-charges the share. Unconfirmed → cancel + unstamp; in flight →
+    // refuse with a retryable 409.
+    try {
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(db, invoice, { context: 'reconciling this payment' });
+    } catch (releaseErr) {
+      return res.status(releaseErr.statusCode || 409).json({ error: releaseErr.message });
+    }
+
     // Conditional update closes the TOCTOU window: if the invoice became
     // uncollectible (paid/processing/void/refunded/canceled) between our read
     // and this write, the UPDATE matches 0 rows and we bail instead of

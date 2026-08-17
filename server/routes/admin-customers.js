@@ -3331,8 +3331,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // confirm a combined ACH PI with no later server seam. Fail-closed
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
-            await require('../services/pay-combined')
+            const payerRelease = await require('../services/pay-combined')
               .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id);
+            // In-flight combined money DEFERS the payer edit (codex r30
+            // P1, same contract as the merge fence): the eventual combined
+            // settlement never re-resolves ownership, so committing now
+            // would settle the homeowner's authorized debit against debt
+            // this edit says belongs to third-party AP.
+            if (payerRelease.inFlight > 0) {
+              throw new Error('A combined bank payment for this customer is still in flight — retry the payer change after it settles or fails');
+            }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // Only an ACTUAL rate change invalidates the attribution (codex

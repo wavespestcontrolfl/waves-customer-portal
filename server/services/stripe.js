@@ -3165,10 +3165,29 @@ const StripeService = {
         // byte-identical to the pre-gate behavior.
         if (opts.includeOpenBalance && require('../config/feature-gates').isEnabled('payIncludeBalance')
           && invoice.customer_id && !invoice.payer_id) {
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['pay.combined.customer', String(invoice.customer_id)],
-          );
+          // Ownership revalidated AFTER each lock (codex r30 P1, same
+          // contract as stopSequence): the pre-transaction snapshot can
+          // carry a merge-retired customer id — locking that would
+          // serialize against the wrong customer while a payer edit on the
+          // current owner proceeds under a different lock. Re-read and
+          // re-lock under the live owner (xact locks accumulate; bounded).
+          let ownerId = String(invoice.customer_id);
+          for (let attempt = 0; ; attempt++) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['pay.combined.customer', ownerId],
+            );
+            const freshOwner = await trx('invoices').where({ id: invoiceId }).first('customer_id');
+            const freshId = freshOwner?.customer_id ? String(freshOwner.customer_id) : null;
+            if (!freshId || freshId === ownerId) break;
+            if (attempt >= 4) {
+              const ownerErr = new Error('The account changed while preparing this payment — refreshing.');
+              ownerErr.statusCode = 409;
+              ownerErr.staleBalance = true;
+              throw ownerErr;
+            }
+            ownerId = freshId;
+          }
         }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })

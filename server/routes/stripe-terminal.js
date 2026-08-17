@@ -743,6 +743,16 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       }
       return res.status(409).json(terminalChargeFenceResponse(fenceErr));
     }
+    // Combined pay-page session release BEFORE minting the card-present PI
+    // (codex #3427 r30 P0): overwriting the stamp while a browser still
+    // holds the combined client secret would let it confirm the full
+    // combined amount after Terminal collects this share. Unconfirmed →
+    // cancel + unstamp; in flight → refuse.
+    try {
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(db, invoice, { context: 'collecting at the terminal' });
+    } catch (releaseErr) {
+      return res.status(releaseErr.statusCode || 409).json({ error: releaseErr.message, code: 'combined_session_release_failed' });
+    }
 
     const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
     if (!tech || tech.active === false) {

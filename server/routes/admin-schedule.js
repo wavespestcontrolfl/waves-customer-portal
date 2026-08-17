@@ -5794,8 +5794,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
             fencedVisitIds.push(...childIds);
           } catch { /* no children / column absent */ }
-          await require('../services/pay-combined')
+          const visitRelease = await require('../services/pay-combined')
             .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+          // In-flight combined money DEFERS the payer edit (codex r30 P1,
+          // same contract as the merge fence) — settlement never
+          // re-resolves ownership.
+          if (visitRelease.inFlight > 0) {
+            throw Object.assign(
+              new Error('A combined bank payment on this visit is still in flight — retry the payer change after it settles or fails'),
+              { isValidation: true },
+            );
+          }
         }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk

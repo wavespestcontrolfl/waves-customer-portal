@@ -505,6 +505,57 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
 }
 
 /**
+ * Combined-session reservation for EVERY off-page collection rail (codex
+ * r29/r30 P0): before a rail marks a stamped invoice paid (manual
+ * record-payment, admin reconcile, Terminal card-present), any combined
+ * session riding it must be released — a browser holding the original
+ * client secret could otherwise still confirm the full combined amount
+ * and double-charge the share. Unconfirmed → cancel + unstamp;
+ * already-canceled → finish the stamp cleanup; money in flight → throw a
+ * 409 (the rail must wait for the debit to settle or fail). Fail-closed
+ * on unreadable/unavailable Stripe. Non-combined PIs return untouched —
+ * each rail keeps its existing single-PI contract.
+ */
+async function releaseCombinedSessionBeforeCollection(database, invoice, { context = 'recording this payment' } = {}) {
+  if (!invoice?.stripe_payment_intent_id) return { released: false };
+  const StripeService = require('./stripe');
+  let pi;
+  try {
+    pi = await StripeService.retrievePaymentIntent(invoice.stripe_payment_intent_id);
+  } catch (err) {
+    const e = new Error(`Could not verify the invoice's open payment session (${err.message}) — try again`);
+    e.statusCode = 409;
+    throw e;
+  }
+  if (!pi) {
+    const e = new Error("Could not verify the invoice's open payment session (payment service unavailable) — try again");
+    e.statusCode = 409;
+    throw e;
+  }
+  if (!isCombinedPiMetadata(pi.metadata)) return { released: false };
+  if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
+    try {
+      await StripeService.cancelPaymentIntent(pi.id);
+    } catch (err) {
+      const e = new Error(`Could not release the open combined payment session (${err.message}) — try again`);
+      e.statusCode = 409;
+      throw e;
+    }
+    await clearPaymentIntentStamps(database, pi.id);
+    logger.info(`[pay-combined] released combined PI ${pi.id} before ${context} on invoice ${invoice.invoice_number || invoice.id}`);
+    return { released: true };
+  }
+  if (pi.status === 'canceled') {
+    await clearPaymentIntentStamps(database, pi.id);
+    return { released: true };
+  }
+  const e = new Error(`A combined bank payment is in flight on this invoice — wait for it to settle or fail before ${context}`);
+  e.statusCode = 409;
+  e.inFlightCombined = true;
+  throw e;
+}
+
+/**
  * Kill-switch enforcement sweep (codex #3427 r22 P1): after /update-amount
  * (the last server seam) a combined ACH PI is confirmable directly from the
  * browser with no further gate check — so DISABLING the gate must also
@@ -937,6 +988,7 @@ module.exports = {
   lockCombinedCustomers,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
+  releaseCombinedSessionBeforeCollection,
   revokeOutstandingCombinedSessionsOnGateOff,
   settleCombinedPaymentIntent,
 };
