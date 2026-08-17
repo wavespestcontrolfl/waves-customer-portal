@@ -336,7 +336,7 @@ async function completePrimaryFromCall(customerId, call = {}) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
-async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false } = {}) {
+async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
     : customerOrId;
@@ -371,8 +371,13 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
   // them (better NULL than wrong). The route re-geocodes the customer after this and
   // calls syncPrimaryCoordsFromCustomer to re-mirror the fresh coords onto the
   // primary, so the row regains a location rather than staying permanently null.
-  next.latitude = null;
-  next.longitude = null;
+  // preserveCoords (r43): a unit-only edit does not move the building — the
+  // caller keeps the still-valid coordinates instead of gambling on the
+  // best-effort re-geocode.
+  if (!preserveCoords) {
+    next.latitude = null;
+    next.longitude = null;
+  }
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

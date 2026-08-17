@@ -1319,7 +1319,7 @@ describe('round-9 hardening', () => {
     expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
       expect.objectContaining({ address_line2: null }),
       expect.anything(),
-      { explicitLine2: true },
+      expect.objectContaining({ explicitLine2: true }),
     );
   });
 
@@ -1335,7 +1335,7 @@ describe('round-9 hardening', () => {
     expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      { explicitLine2: false },
+      expect.objectContaining({ explicitLine2: false }),
     );
   });
 });
@@ -3438,5 +3438,51 @@ describe('round-42 hardening', () => {
     expect(res.applied.map((a) => a.field)).toEqual(['address_line2']);
     expect(knex._data.customers[0].latitude).toBe(27.1);
     expect(knex._data.customers[0].longitude).toBe(-82.4);
+  });
+});
+
+describe('round-43 hardening', () => {
+  it('an interrupted negation still vetoes the old-value direction', async () => {
+    for (const body of [
+      "Please don't ever use my old email old@example.com",
+      "I don't want you to use my old email old@example.com",
+    ]) {
+      mockCallAnthropic.mockResolvedValue({
+        ok: true,
+        json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
+      });
+      expect(await extractSmsContactCorrections({ body })).toEqual([]);
+    }
+  });
+
+  it("'the address on my invoices should be …' never rewrites the service address", async () => {
+    const body = 'The address on my invoices should be 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'the address on my invoices should be 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'the address on my invoices should be 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'the address on my invoices should be 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'the address on my invoices should be 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a unit-only correction preserves the PRIMARY PROPERTY coordinates', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: '4B', quote: 'my unit is wrong, it is 4B', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My unit is wrong, it is 4B', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['address_line2']);
+    // The mocked syncPrimaryAddress must receive preserveCoords: true.
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      expect.objectContaining({ preserveCoords: true }),
+    );
   });
 });

@@ -596,7 +596,7 @@ const THIRD_PARTY_CONTACT_RE = new RegExp(
 // delivery address is not the SERVICE address this lane maintains —
 // "The new address for invoices is …" must never rewrite the property
 // the techs route to.
-const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\bfor\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
+const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|in)\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
 
 // A value marked as OLD contact data with no replacement direction is the
 // value being RETIRED, not the correction (r41): "for reference, my old
@@ -604,7 +604,7 @@ const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\bfor\s+(?:the\
 const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.
-const NEGATED_DIRECTION_RE = /\b(?:do\s+not|don'?t|no\s+longer|stop|never|cannot|can'?t|won'?t)\s+(?:us(?:e|ing)|send|reply|email|contact|write)\b/i;
+const NEGATED_DIRECTION_RE = /\b(?:do\s+not|don'?t|no\s+longer|stop|never|cannot|can'?t|won'?t)\b[^.;!?\n]{0,25}\b(?:us(?:e|ing)|send|reply|email|contact|write)\b/i;
 const REPLACEMENT_DIRECTION_RE = /\b(?:wrong|incorrect|misspell\w*|should\s+be|is\s+now|now\s+is|use|chang\w*\s+(?:it\s+)?to|updat\w*\s+(?:it\s+)?to|instead|new|correct)\b/i;
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
@@ -1084,6 +1084,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
           // a null must CLEAR the primary property's unit, not fall back to it.
           await require('./customer-properties').syncPrimaryAddress(after, trx, {
             explicitLine2: updates.address_line2 !== undefined,
+            // Unit-only edits keep the property's still-valid coordinates
+            // (r43) — the building did not move, and a failed best-effort
+            // re-geocode must not leave property-linked flows copying
+            // nulls.
+            preserveCoords: !['address_line1', 'city', 'state', 'zip'].some((f) => updates[f] !== undefined),
           });
         }
         await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
