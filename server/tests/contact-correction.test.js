@@ -3486,3 +3486,53 @@ describe('round-43 hardening', () => {
     );
   });
 });
+
+describe('round-44 hardening', () => {
+  it('an identity disclaimer invalidates every correction in the message', async () => {
+    const body = "I'm not John anymore. My email is newholder@example.com — your email is wrong";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("'I'm not sure' never trips the identity disclaimer", async () => {
+    const body = "I'm not sure you have it right — my email is wrong, it is me@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, it is me@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('modal negations veto the old-value direction', async () => {
+    for (const body of [
+      'You must not use my old email old@example.com',
+      "You shouldn't use my old email old@example.com",
+    ]) {
+      mockCallAnthropic.mockResolvedValue({
+        ok: true,
+        json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
+      });
+      expect(await extractSmsContactCorrections({ body })).toEqual([]);
+    }
+  });
+
+  it('a purpose phrase PRECEDING the address is still rejected', async () => {
+    const body = 'Please send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});

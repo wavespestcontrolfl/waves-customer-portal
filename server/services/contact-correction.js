@@ -284,6 +284,13 @@ async function extractSmsContactCorrections({ body }) {
   try {
     const text = normValue(body);
     if (!text || !detectContactCorrectionIntent(text)) return [];
+    // A sender disclaiming the linked customer's IDENTITY invalidates the
+    // sender-to-customer binding for the whole message (codex #3413 r44):
+    // "I'm not John anymore — my email is …" is the number's NEW holder,
+    // and none of their corrections belong on the former owner's record.
+    // The name form requires a capitalized token so "I'm not sure …"
+    // stays harmless.
+    if (WRONG_PERSON_RE.test(String(body || ''))) return [];
     const res = await callAnthropic({
       model: MODELS.FAST,
       system: EXTRACT_SYSTEM,
@@ -596,15 +603,22 @@ const THIRD_PARTY_CONTACT_RE = new RegExp(
 // delivery address is not the SERVICE address this lane maintains —
 // "The new address for invoices is …" must never rewrite the property
 // the techs route to.
-const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|in)\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
+const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|in)\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:invoices?|invoicing|billing|bills?|receipts?|correspondence|statements?|paperwork|payments?)\b[^.;!?\n]{0,30}\b(?:to|at)\s+(?:this\s+|the\s+|my\s+|our\s+|a\s+)?(?:new\s+)?address\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
 
 // A value marked as OLD contact data with no replacement direction is the
 // value being RETIRED, not the correction (r41): "for reference, my old
 // email is old@example.com" must never overwrite the current mailbox.
 const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
+// Sender identity disclaimers (r44): the texter says they are NOT the
+// person this number links to — every correction in the message belongs
+// to the number's new holder, not the linked customer. The bare "I'm not
+// <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
+// "I am not happy" never trip it.
+const WRONG_PERSON_RE = /\b(?:I'?m|I\s+am|[Tt]his\s+is)\s+not\s+[A-Z][a-z]+\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
+
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.
-const NEGATED_DIRECTION_RE = /\b(?:do\s+not|don'?t|no\s+longer|stop|never|cannot|can'?t|won'?t)\b[^.;!?\n]{0,25}\b(?:us(?:e|ing)|send|reply|email|contact|write)\b/i;
+const NEGATED_DIRECTION_RE = /\b(?:do\s+not|don'?t|no\s+longer|stop|never|cannot|can'?t|won'?t|must\s+not|mustn'?t|should\s+not|shouldn'?t|may\s+not|will\s+not)\b[^.;!?\n]{0,25}\b(?:us(?:e|ing)|send|reply|email|contact|write)\b/i;
 const REPLACEMENT_DIRECTION_RE = /\b(?:wrong|incorrect|misspell\w*|should\s+be|is\s+now|now\s+is|use|chang\w*\s+(?:it\s+)?to|updat\w*\s+(?:it\s+)?to|instead|new|correct)\b/i;
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
