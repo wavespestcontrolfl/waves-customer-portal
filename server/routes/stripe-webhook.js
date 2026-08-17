@@ -3044,11 +3044,36 @@ async function handleChargeRefunded(charge) {
     // be attributed to a share from the charge alone — record it for the
     // operator and touch nothing.
     {
-      const combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+      let combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
       const rowMeta = (row) => {
         try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
       };
       if (combinedRows.some((r) => rowMeta(r).combined_payment)) {
+        // Serialize with refund.failed's combined unwind (codex r12 P1):
+        // both combined-row paths take this per-charge lock, rows are
+        // RE-READ under it, and the bounce fences are re-checked — a
+        // refund.failed that committed its fence while this event was in
+        // flight means Stripe KEPT the money, so nothing may be stamped
+        // refunded or reopened.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['combined.refund.fence', String(chargeId)],
+        );
+        combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+        if (refundId) {
+          const rowFenced = combinedRows.some((r) => {
+            const m = rowMeta(r);
+            return Array.isArray(m.failed_refund_ids) && m.failed_refund_ids.includes(refundId);
+          });
+          let tableFenced = false;
+          if (!rowFenced && await db.schema.hasTable('stripe_failed_refunds')) {
+            tableFenced = !!(await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id'));
+          }
+          if (rowFenced || tableFenced) {
+            logger.warn(`[stripe-webhook] combined refund ${refundId} on charge ${chargeId} was already fenced as FAILED — skipping the refund stamp (Stripe kept the money)`);
+            return combinedRows[0] || null;
+          }
+        }
         if (!isFullRefund) {
           logger.error(`[stripe-webhook] PARTIAL refund on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
           await trx('stripe_orphan_charges')
@@ -3462,6 +3487,15 @@ async function handleRefundFailed(refund) {
       const rowPiId = piId || payment.stripe_payment_intent_id || null;
       let resettleFencedPiId = null;
       await db.transaction(async (trx) => {
+        // Same per-charge lock as charge.refunded's combined branch (codex
+        // r12 P1) — the two unwinds are strictly ordered, so the refunded
+        // stamp and the bounce fence can never interleave.
+        if (rowChargeId) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(rowChargeId)],
+          );
+        }
         const rows = rowChargeId
           ? await trx('payments').where({ stripe_charge_id: rowChargeId }).forUpdate()
           : await trx('payments').where({ stripe_payment_intent_id: rowPiId }).forUpdate();
@@ -5780,47 +5814,78 @@ async function handleDisputeCreated(dispute) {
         } catch (err) { logger.error(`[stripe-webhook] Combined partial-dispute notification failed: ${err.message}`); }
         return;
       }
-      for (const row of combinedRows) {
-        const meta = parseMeta(row);
-        // A neutralized pre-settlement marker is superseded — never
-        // resurrect it (codex r8 P1); the live per-invoice rows carry the
-        // dispute state.
-        if (row.status === 'canceled' && meta.superseded_reason) continue;
-        // Same late-replay guard as the single path: a dispute already
-        // CLOSED owns its row — never flip a won charge back to disputed.
-        if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
-        await db('payments').where({ id: row.id }).update({
-          status: 'disputed',
-          failure_reason: `Dispute: ${reason}`,
-          metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
-        });
-        const rowInvoice = await findInvoiceForPayment(row);
-        const invoicePi = rowInvoice?.stripe_payment_intent_id ? String(rowInvoice.stripe_payment_intent_id) : null;
-        const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
-        if (rowInvoice && ['paid', 'processing'].includes(rowInvoice.status)
-          && invoicePi && disputedPiId && invoicePi === disputedPiId) {
-          // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
-          // prepaid coverage must not ride on provisionally clawed-back
-          // money — SUSPEND any live term this invoice paid for; the
-          // closure branches re-activate (won) or cancel (lost) it.
-          // ATOMIC with the reopen and UNCAUGHT (codex r5 P1, mirroring
-          // the single-invoice created path): a swallowed suspend would
-          // mark the event processed with coverage still riding on
-          // clawed-back money; a rollback fails the event and Stripe
-          // retries it, and the world only ever sees suspended-term +
-          // reopened-invoice together.
-          await db.transaction(async (trx) => {
-            await require('../services/annual-prepay-renewals')
-              .suspendActiveTermsForDisputedInvoice(rowInvoice.id, trx);
-            await trx('invoices').where({ id: rowInvoice.id }).update({
-              status: 'overdue',
-              paid_at: null,
-              stripe_payment_intent_id: null,
-              stripe_charge_id: null,
-              updated_at: trx.fn.now(),
-            });
+      // Row stamps run under the shared per-PI serialization lock with a
+      // FRESH in-lock re-read (codex r12 P1): a concurrent closed(won) can
+      // otherwise stamp dispute_final + restore a row while this loop holds
+      // a stale metadata snapshot — overwriting the final stamp and
+      // reopening an invoice the won charge backs. Which invoices to reopen
+      // is decided in-lock too; the reopen transactions themselves run
+      // after commit (they only fire for rows this handler stamped).
+      const disputeLockKey = String(dispute.payment_intent
+        || combinedRows.find((r) => r.stripe_payment_intent_id)?.stripe_payment_intent_id
+        || chargeId);
+      const reopenPlan = [];
+      await db.transaction(async (lockTrx) => {
+        await lockTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', disputeLockKey],
+        );
+        const freshRows = await lockTrx('payments').where({ stripe_charge_id: chargeId });
+        for (const row of freshRows) {
+          const meta = parseMeta(row);
+          // A neutralized pre-settlement marker is superseded — never
+          // resurrect it (codex r8 P1); the live per-invoice rows carry the
+          // dispute state.
+          if (row.status === 'canceled' && meta.superseded_reason) continue;
+          // Same late-replay guard as the single path: a dispute already
+          // CLOSED owns its row — never flip a won charge back to disputed.
+          // The in-lock re-read makes this authoritative against a racing
+          // closure.
+          if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
+          await lockTrx('payments').where({ id: row.id }).update({
+            status: 'disputed',
+            failure_reason: `Dispute: ${reason}`,
+            metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
           });
+          const rowInvoice = await findInvoiceForPayment(row);
+          const invoicePi = rowInvoice?.stripe_payment_intent_id ? String(rowInvoice.stripe_payment_intent_id) : null;
+          const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+          if (rowInvoice && ['paid', 'processing'].includes(rowInvoice.status)
+            && invoicePi && disputedPiId && invoicePi === disputedPiId) {
+            reopenPlan.push({ invoiceId: rowInvoice.id, rowId: row.id });
+          }
         }
+      });
+      for (const { invoiceId: reopenInvoiceId, rowId: reopenRowId } of reopenPlan) {
+        // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
+        // prepaid coverage must not ride on provisionally clawed-back
+        // money — SUSPEND any live term this invoice paid for; the
+        // closure branches re-activate (won) or cancel (lost) it.
+        // ATOMIC with the reopen and UNCAUGHT (codex r5 P1): a rollback
+        // fails the event and Stripe retries it, and the world only ever
+        // sees suspended-term + reopened-invoice together. The row's
+        // CURRENT dispute state is re-read in this transaction: a closure
+        // that finalized between the lock release and this reopen owns the
+        // outcome — a won restore must not be reopened behind its back.
+        await db.transaction(async (trx) => {
+          const rowNow = await trx('payments').where({ id: reopenRowId }).first('status', 'metadata');
+          let rowNowMeta = {};
+          try { rowNowMeta = rowNow?.metadata ? (typeof rowNow.metadata === 'string' ? JSON.parse(rowNow.metadata) : rowNow.metadata) : {}; } catch { rowNowMeta = {}; }
+          if (!rowNow || rowNow.status !== 'disputed'
+            || (rowNowMeta.dispute_final && rowNowMeta.dispute_id === dispute.id)) {
+            logger.warn(`[stripe-webhook] combined dispute ${dispute.id}: row ${reopenRowId} was finalized while the reopen was queued — closure owns invoice ${reopenInvoiceId}`);
+            return;
+          }
+          await require('../services/annual-prepay-renewals')
+            .suspendActiveTermsForDisputedInvoice(reopenInvoiceId, trx);
+          await trx('invoices').where({ id: reopenInvoiceId }).update({
+            status: 'overdue',
+            paid_at: null,
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+            updated_at: trx.fn.now(),
+          });
+        });
       }
       try {
         await NotificationService.notifyAdmin(
@@ -6126,53 +6191,103 @@ async function handleDisputeClosed(dispute) {
         return;
       }
       let restoredCount = 0;
-      for (const row of combinedClosedRows) {
-        const meta = rowMetaOf(row);
-        // Skip already-superseded markers (codex r8 P1) — but NOT the live
-        // pre-settlement marker this closure is here to resolve.
-        if (row.status === 'canceled' && meta.superseded_reason) continue;
-        const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
-        const invId = meta.invoice_id || meta.dispute_invoice_id || null;
-        if (status === 'won' || status === 'warning_closed') {
-          // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
-          // settle (which recorded an orphan), so flipping it to 'paid'
-          // would strand every allocated invoice unsettled — and if won
-          // arrived BEFORE succeeded, a full-amount 'paid' marker would
-          // double-count once settlement adds the per-invoice rows.
-          // Neutralize the marker (canceled, final outcome recorded) and,
-          // when the PI actually succeeded, run the allocation-aware
-          // settle now (idempotent; throws → Stripe redelivers) and
-          // resolve the fenced orphan. A not-yet-succeeded PI just loses
-          // its fence — the eventual succeeded settles normally.
-          if (meta.pre_settlement === true && !invId) {
-            const markerStripe = getStripe();
-            if (!markerStripe) throw new Error(`Combined pre-settlement dispute ${dispute.id} won but Stripe is unavailable to resettle PI ${row.stripe_payment_intent_id}; retry`);
-            const markerPi = await markerStripe.paymentIntents.retrieve(row.stripe_payment_intent_id);
-            await db('payments').where({ id: row.id }).update({
-              status: 'canceled',
-              // Amount zeroed (codex r8 P1): same-charge sums and payout
-              // recon must not count the superseded full-amount marker
-              // beside the real per-invoice rows settlement adds.
-              amount: 0,
-              metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved', superseded_marker_amount: Number(row.amount) || 0 }),
-            });
-            if (markerPi.status === 'succeeded') {
-              // FULL succeeded lifecycle, not a bare settle (codex r7 P1):
-              // the recovered PI also owes review enrollment, the ACH
-              // failure-state reset, the saved-method consent mirror, the
-              // billing-pause clear, and the success notification — a
-              // consented combined ACH signup must not clear with its bank
-              // method unenrolled. The handler resolves the fenced orphan
-              // itself; throws propagate for Stripe redelivery.
-              await handleCombinedPaymentIntentSucceeded(markerPi, null);
-              logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won — PI ${row.stripe_payment_intent_id} re-ran the full succeeded lifecycle`);
-            } else {
-              logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won before settlement — fence lifted, PI ${row.stripe_payment_intent_id} is ${markerPi.status}`);
+      // Phase 1 — row stamps under the shared per-PI serialization lock
+      // with a FRESH in-lock re-read (codex r12 P1): a concurrent
+      // dispute.created holding a stale snapshot can otherwise overwrite
+      // the final stamp this closure writes and reopen a won invoice.
+      // Invoice restores/reopens, term syncs, and marker resettles run
+      // AFTER the lock releases (phase 2): the resettle re-enters
+      // handleCombinedPaymentIntentSucceeded, whose settle takes this same
+      // advisory lock in its own transaction — running it in-lock would
+      // self-deadlock — and each phase-2 action re-checks its own guards.
+      const closedLockKey = String(dispute.payment_intent
+        || combinedClosedRows.find((r) => r.stripe_payment_intent_id)?.stripe_payment_intent_id
+        || chargeId);
+      const closurePlan = [];
+      await db.transaction(async (lockTrx) => {
+        await lockTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', closedLockKey],
+        );
+        const freshClosedRows = await lockTrx('payments').where({ stripe_charge_id: chargeId });
+        for (const row of freshClosedRows) {
+          const meta = rowMetaOf(row);
+          // Skip already-superseded markers (codex r8 P1) — but a
+          // RESOLVED-marker replay must still re-arm the resettle (a prior
+          // delivery may have crashed between neutralization and the
+          // succeeded lifecycle; the re-run is idempotent).
+          if (row.status === 'canceled' && meta.superseded_reason) {
+            if ((status === 'won' || status === 'warning_closed')
+              && meta.superseded_reason === 'pre_settlement_marker_resolved'
+              && row.stripe_payment_intent_id) {
+              closurePlan.push({ type: 'resettle', piId: String(row.stripe_payment_intent_id) });
             }
             continue;
           }
-          await db('payments').where({ id: row.id }).update({ status: 'paid', metadata: finalRowMeta });
-          if (invId) {
+          const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
+          const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+          if (status === 'won' || status === 'warning_closed') {
+            // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
+            // settle (which recorded an orphan), so flipping it to 'paid'
+            // would strand every allocated invoice unsettled — and if won
+            // arrived BEFORE succeeded, a full-amount 'paid' marker would
+            // double-count once settlement adds the per-invoice rows.
+            // Neutralize the marker (canceled, final outcome recorded) and
+            // queue the succeeded-lifecycle re-run for phase 2.
+            if (meta.pre_settlement === true && !invId) {
+              await lockTrx('payments').where({ id: row.id }).update({
+                status: 'canceled',
+                // Amount zeroed (codex r8 P1): same-charge sums and payout
+                // recon must not count the superseded full-amount marker
+                // beside the real per-invoice rows settlement adds.
+                amount: 0,
+                metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved', superseded_marker_amount: Number(row.amount) || 0 }),
+              });
+              if (row.stripe_payment_intent_id) {
+                closurePlan.push({ type: 'resettle', piId: String(row.stripe_payment_intent_id) });
+              }
+              continue;
+            }
+            await lockTrx('payments').where({ id: row.id }).update({ status: 'paid', metadata: finalRowMeta });
+            if (invId) closurePlan.push({ type: 'won', invId, row });
+          } else if (status === 'lost') {
+            await lockTrx('payments').where({ id: row.id }).update({
+              status: 'disputed',
+              failure_reason: `Dispute lost — $${amount} returned to customer`,
+              metadata: finalRowMeta,
+            });
+            if (invId) closurePlan.push({ type: 'lost', invId, row });
+          } else {
+            await lockTrx('payments').where({ id: row.id }).update({ metadata: finalRowMeta });
+          }
+        }
+      });
+      // Phase 2 — invoice-side outcomes and marker resettles, each behind
+      // its own fresh-read guards.
+      for (const step of closurePlan) {
+        const row = step.row;
+        if (step.type === 'resettle') {
+          const markerStripe = getStripe();
+          if (!markerStripe) throw new Error(`Combined pre-settlement dispute ${dispute.id} won but Stripe is unavailable to resettle PI ${step.piId}; retry`);
+          const markerPi = await markerStripe.paymentIntents.retrieve(step.piId);
+          if (markerPi.status === 'succeeded') {
+            // FULL succeeded lifecycle, not a bare settle (codex r7 P1):
+            // the recovered PI also owes review enrollment, the ACH
+            // failure-state reset, the saved-method consent mirror, the
+            // billing-pause clear, and the success notification — a
+            // consented combined ACH signup must not clear with its bank
+            // method unenrolled. The handler resolves the fenced orphan
+            // itself; throws propagate for Stripe redelivery.
+            await handleCombinedPaymentIntentSucceeded(markerPi, null);
+            logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won — PI ${step.piId} re-ran the full succeeded lifecycle`);
+          } else {
+            logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won before settlement — fence lifted, PI ${step.piId} is ${markerPi.status}`);
+          }
+          continue;
+        }
+        if (step.type === 'won') {
+          const invId = step.invId;
+          {
             const invoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
             const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
             const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
@@ -6209,13 +6324,11 @@ async function handleDisputeClosed(dispute) {
               if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
             }
           }
-        } else if (status === 'lost') {
-          await db('payments').where({ id: row.id }).update({
-            status: 'disputed',
-            failure_reason: `Dispute lost — $${amount} returned to customer`,
-            metadata: finalRowMeta,
-          });
-          if (invId) {
+          continue;
+        }
+        if (step.type === 'lost') {
+          const invId = step.invId;
+          {
             // Replacement-payment guard (codex r5 P1, exactly the single
             // path's): if dispute.created reopened this invoice and the
             // customer already re-paid it (a DIFFERENT live PI now backs
@@ -6248,8 +6361,6 @@ async function handleDisputeClosed(dispute) {
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
             }
           }
-        } else {
-          await db('payments').where({ id: row.id }).update({ metadata: finalRowMeta });
         }
       }
       try {

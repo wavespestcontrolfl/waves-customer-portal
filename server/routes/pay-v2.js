@@ -581,7 +581,9 @@ router.post('/:token/setup', async (req, res, next) => {
       // A stale-render refusal from the in-txn version recheck is the same
       // benign reload-and-retry as the unlocked pre-check above — no
       // operator alert, the page just refreshes to the updated invoice.
-      if (!err.inProgress && !err.staleInvoice) {
+      // staleBalance (a sibling changed under the combined verification) is
+      // the same benign self-recovering race (codex r12 P2).
+      if (!err.inProgress && !err.staleInvoice && !err.staleBalance) {
         // Never log the raw pay-link token — it is the bearer credential for
         // this invoice and errors.log is broadly readable. When the invoice id
         // is unavailable, fall back to a masked suffix that still aids
