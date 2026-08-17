@@ -56,7 +56,7 @@ function mockDb(call, { attemptsAfterFailure, throwOnUpdateKey = null }) {
       args.forEach((a) => { if (typeof a === 'function') a.call(builder, builder); });
       return builder;
     };
-    ['where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin'].forEach((m) => { builder[m] = chain; });
+    ['where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate'].forEach((m) => { builder[m] = chain; });
     builder.whereRaw = (sql, bindings) => { if (table === 'call_log') state.whereRawCalls.push({ sql, bindings }); return builder; };
     builder.orWhereRaw = builder.whereRaw;
     builder.first = () => Promise.resolve(table === 'call_log' ? call : null);
@@ -85,6 +85,8 @@ function mockDb(call, { attemptsAfterFailure, throwOnUpdateKey = null }) {
     return builder;
   });
   db.raw = (sql) => sql;
+  // The claim + contact baseline run in one transaction (#3413 r27).
+  db.transaction = async (fn) => fn(db);
   return state;
 }
 
