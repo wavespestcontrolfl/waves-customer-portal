@@ -165,21 +165,8 @@ router.post('/sms', async (req, res) => {
 
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
-    // Contact-correction queue reservation at TRUE entry (round-14): keyed
-    // on the sender's phone — available synchronously, BEFORE the media
-    // upload and customer lookup awaits whose variable latency could
-    // reorder reservations between rapid messages. A DURABLE row
-    // (round-17): its bigserial id records arrival order across overlapping
-    // deploy instances, and a row left 'reserved' by a crash is replayed by
-    // the queue worker — the recovery for a message whose MessageSid claim
-    // is durable but whose detached run died (Twilio's retry is ignored).
-    // Whether the sender maps to a linked customer is decided at fire time;
-    // unlinked/unused reservations are cancelled.
     const contactCorrection = require('../services/contact-correction');
     const correctionQueue = require('../services/contact-correction-queue');
-    correctionJobId = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
-      ? await correctionQueue.reserveContactCorrectionJob({ senderPhone: From, messageSid: MessageSid, body: Body })
-      : null;
     const schedulingIntent = hasSchedulingIntent(Body);
     // NOT a subset of schedulingIntent (codex #3232 r10): away phrases
     // ("I won't be home") carry no scheduling keyword — the AI auto-reply
@@ -213,6 +200,22 @@ router.post('/sms', async (req, res) => {
       logger.info(`Inbound SMS to unmanaged number ${To} — ignoring`);
       return res.type('text/xml').send('<Response></Response>');
     }
+
+    // Contact-correction queue reservation — AFTER the eligibility gates
+    // (codex #3413 r27: duplicate claim, spam block, managed-number check
+    // all stop routing and must not leave message bodies in the jobs
+    // table), but BEFORE the media upload and customer lookup, the
+    // variable-latency awaits whose reordering the reservation exists to
+    // beat (round-14). A DURABLE row (round-17): its bigserial id records
+    // arrival order across overlapping deploy instances, and a row left
+    // 'reserved' by a crash is replayed by the queue worker — the recovery
+    // for a message whose MessageSid claim is durable but whose detached
+    // run died (Twilio's retry is ignored). Whether the sender maps to a
+    // linked customer is decided at fire time; unlinked/unused
+    // reservations are cancelled (body scrubbed).
+    correctionJobId = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
+      ? await correctionQueue.reserveContactCorrectionJob({ senderPhone: From, messageSid: MessageSid, body: Body })
+      : null;
 
     const inboundMedia = await uploadTwilioMedia(req.body);
 

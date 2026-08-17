@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -81,7 +81,7 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // mandate. Clauses split on sentence boundaries (dot only when followed by
 // whitespace, so emails and street abbreviations survive).
 const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|remov\\w*|drop\\w*|delet\\w*|no\\s+longer|should\\s+be|\\bnot\\b|\\bnew\\b|\\bold\\b)';
-const ADDR_TOPIC_SRC = '(?:address|street|city|state|zip|unit|apt|apartment|suite|lot)';
+const ADDR_TOPIC_SRC = '(?:address|street|city|state|zip(?: ?code)?|zipcode|postal ?code|unit|apt|apartment|suite|lot)';
 const CW_RE = new RegExp(CW_SRC, 'gi');
 const TOPIC_RES = [
   ['name', /\b(?:name|surname)\b/gi],
@@ -476,10 +476,10 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:
 // Every supported address topic, not just the literal word "address"
 // (codex #3413 r26): "My tenant's city is wrong" and "My accountant's
 // ZIP is wrong" are third-party statements too.
-const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|unit|apt|apartment|suite)";
+const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|zipcode|postal ?code|unit|apt|apartment|suite)";
 const THIRD_PARTY_ADDRESS_RE = new RegExp(
-  `\\b(?:his|her|their)\\s+(?:\\w+\\s+)?${TP_ADDR_TOPIC_SRC}\\b`
-  + `|\\b(?!(?:previous|prior)\\b)[a-z]+(?:'s|s')\\s+(?:\\w+\\s+)?${TP_ADDR_TOPIC_SRC}\\b`
+  `\\b(?:his|her|their)\\s+(?:\\w+\\s+){0,3}${TP_ADDR_TOPIC_SRC}\\b`
+  + `|\\b(?!(?:previous|prior)\\b)[a-z]+(?:'s|s')\\s+(?:\\w+\\s+){0,3}${TP_ADDR_TOPIC_SRC}\\b`
   + '|\\b(?!(?:previous|prior|business)\\b)[a-z]{4,}s\\s+new\\s+address\\b',
   'i',
 );
@@ -489,7 +489,7 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
 // and auto-replacing the CUSTOMER's email (plus its fan-out) with it is
 // the exact poisoning the lane exists to prevent. Spouse/child name
 // statements likewise never rename the account holder.
-const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b/i;
+const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+){0,3}(?:e-?mail|name|surname)\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+){0,3}(?:e-?mail|name|surname)\b/i;
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
 // the extractor-controlled fragment (codex #3413 r24): a model can narrow
@@ -509,14 +509,21 @@ function sourceClauseFor(text, quote) {
   if (qs < 0) return String(quote || '');
   const qe = qs + nq.length;
   const delims = /[;!?\n]|\.(?=\s|$)/g;
+  // Include the immediately PRECEDING clause too (codex #3413 r27): "My
+  // accountant's email is wrong. The email should be …" grounds its quote
+  // in the second sentence, and the possessive antecedent lives in the
+  // first — an ownership probe over the quote's own clause alone would
+  // shed it. A preceding clause about unrelated business can only make
+  // the probe MORE conservative (fail closed), never less.
+  let prevLeft = 0;
   let left = 0;
   let right = hay.length;
   let m;
   while ((m = delims.exec(hay))) {
-    if (m.index < qs) left = m.index + 1;
+    if (m.index < qs) { prevLeft = left; left = m.index + 1; }
     if (m.index >= qe) { right = m.index; break; }
   }
-  return hay.slice(left, right);
+  return hay.slice(prevLeft, right);
 }
 
 function thirdPartyOwnedStatement(field, sourceClause) {

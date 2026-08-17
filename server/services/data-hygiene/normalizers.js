@@ -321,11 +321,21 @@ function normalizeUsState(value) {
 
 function zipMatchesState(zip, state) {
   if (!/^\d{5}$/.test(zip)) return false;
+  if (ZIP5_EXCEPTIONS[zip]) return ZIP5_EXCEPTIONS[zip] === state;
   const ranges = ZIP3_RANGES[state];
   if (!ranges) return false;
   const zip3 = Number(zip.slice(0, 3));
   return ranges.some(([min, max]) => zip3 >= min && zip3 <= max);
 }
+
+// Full-ZIP exceptions that cross a 3-digit range boundary (codex #3413
+// r27): individually allocated ZIPs whose prefix belongs to another
+// state. Consulted before the prefix ranges by BOTH directions so
+// derivation and validation always agree.
+const ZIP5_EXCEPTIONS = {
+  '06390': 'NY', // Fishers Island, NY inside CT's 060–069
+  '83414': 'WY', // Alta, WY inside ID's 832–838
+};
 
 // Inverse lookup over the SAME allocation table (codex #3413 r23 — one
 // shared ZIP/state authority; the contact-correction lane derives a
@@ -334,6 +344,8 @@ function zipMatchesState(zip, state) {
 function stateForZip(zip) {
   const digits = String(zip || '').replace(/\D/g, '');
   if (digits.length < 5) return null;
+  const exact = ZIP5_EXCEPTIONS[digits.slice(0, 5)];
+  if (exact) return exact;
   const zip3 = Number(digits.slice(0, 3));
   for (const [state, ranges] of Object.entries(ZIP3_RANGES)) {
     if (ranges.some(([min, max]) => zip3 >= min && zip3 <= max)) return state;

@@ -2684,3 +2684,38 @@ describe('round-26 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-27 hardening', () => {
+  it('ownership context carries across the sentence boundary', async () => {
+    const body = "My accountant's email is wrong. The email should be bookkeeper@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email should be bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('multiword modifiers cannot dodge the ownership predicate', async () => {
+    const body = "My wife's new work email is wrong; it should be spouse@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: "my wife's new work email is wrong; it should be spouse@example.com", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('postal-code phrasing passes the entry prefilter and field intent', async () => {
+    expect(detectContactCorrectionIntent('My postal code is wrong; it should be 33602')).toBe(true);
+    expect(detectContactCorrectionIntent('My zipcode is wrong, it is 33602')).toBe(true);
+  });
+
+  it('the ZIP5 exceptions resolve and validate consistently', () => {
+    const { stateForZip, zipMatchesState } = require('../services/data-hygiene/normalizers');
+    expect(stateForZip('06390')).toBe('NY');
+    expect(stateForZip('06032')).toBe('CT');
+    expect(stateForZip('83414')).toBe('WY');
+    expect(stateForZip('83301')).toBe('ID');
+    expect(zipMatchesState('06390', 'NY')).toBe(true);
+    expect(zipMatchesState('06390', 'CT')).toBe(false);
+  });
+});

@@ -32,4 +32,13 @@ exports.down = async function down(knex) {
       t.dropColumn('rebase_floor_id');
     });
   }
+  // Recreate the legacy column this migration dropped (codex #3413 r27):
+  // an environment that ran the ORIGINAL 000006 shape keeps that file in
+  // its ledger, so a rollback of only this migration must hand back the
+  // schema the prior application version expects.
+  if (!(await knex.schema.hasColumn('contact_correction_jobs', 'context_attached_at'))) {
+    await knex.schema.alterTable('contact_correction_jobs', (t) => {
+      t.timestamp('context_attached_at');
+    });
+  }
 };

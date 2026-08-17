@@ -68,8 +68,11 @@ function makeStubKnex(rowsByTable = {}) {
   function resolveVal(v) {
     if (v && v.__now) return Date.now();
     if (v && v.__raw) {
-      const m = /now\(\)\s*([+-])\s*interval\s*'(\d+)\s*minutes?'/i.exec(v.__raw);
-      if (m) return Date.now() + (m[1] === '-' ? -1 : 1) * Number(m[2]) * MIN;
+      const m = /now\(\)\s*([+-])\s*interval\s*'(\d+)\s*(minutes?|days?)'/i.exec(v.__raw);
+      if (m) {
+        const unit = /day/i.test(m[3]) ? 24 * 60 * MIN : MIN;
+        return Date.now() + (m[1] === '-' ? -1 : 1) * Number(m[2]) * unit;
+      }
       return v.__raw;
     }
     return v;
@@ -132,6 +135,13 @@ function makeStubKnex(rowsByTable = {}) {
         const result = Promise.resolve(matched.length);
         result.returning = () => Promise.resolve(matched.map((r) => ({ ...r })));
         return result;
+      },
+      del() {
+        const keep = data[table].filter((r) => !preds.every((p) => p(r)));
+        const removed = data[table].length - keep.length;
+        data[table].length = 0;
+        data[table].push(...keep);
+        return Promise.resolve(removed);
       },
       insert(row) {
         const stored = {
@@ -739,5 +749,21 @@ describe('round-26 hardening', () => {
     expect(summary.promoted).toBe(0);
     expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
     expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_wrong_number');
+  });
+});
+
+describe('round-27 hardening', () => {
+  it('cancel scrubs the message body and old cancelled rows are purged', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1 }),
+        jobRow({ id: 2, status: 'cancelled', body: null, updated_at: Date.now() - 8 * 86_400_000 }),
+      ],
+    });
+    await queue.cancelContactCorrectionJob(1, 'route_exit', { knex });
+    expect(knex._data.contact_correction_jobs[0].body).toBeNull();
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    // The 8-day-old cancelled row is purged; the fresh one survives.
+    expect(knex._data.contact_correction_jobs.map((r) => r.id)).toEqual([1]);
   });
 });

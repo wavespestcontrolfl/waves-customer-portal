@@ -201,6 +201,11 @@ async function cancelContactCorrectionJob(jobId, reason = 'cancelled', { knex = 
       .update({
         status: 'cancelled',
         cancel_reason: String(reason || 'cancelled').slice(0, 60),
+        // Scrub the message body (codex #3413 r27): a cancelled
+        // reservation will never run, and the text has no reason to
+        // persist beyond the decision not to process it.
+        body: null,
+        expected_values: null,
         completed_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
@@ -562,6 +567,22 @@ async function processDueContactCorrectionJobs({ limit = 3, knex = db } = {}) {
     summary.promoted = await promoteStaleReservations(knex);
   } catch (err) {
     logger.warn(`[contact-correction-queue] stale-reservation sweep failed: ${err.message}`);
+  }
+  try {
+    // Retention (codex #3413 r27): cancelled rows are scrubbed at cancel
+    // and purged after 7 days so blocked traffic never grows the table
+    // indefinitely; done/failed rows keep their applied chains for the
+    // rebase and age out after 30 days (far above any live floor).
+    await knex('contact_correction_jobs')
+      .where('status', 'cancelled')
+      .where('updated_at', '<', knex.raw("now() - interval '7 days'"))
+      .del();
+    await knex('contact_correction_jobs')
+      .whereIn('status', ['done', 'failed'])
+      .where('updated_at', '<', knex.raw("now() - interval '30 days'"))
+      .del();
+  } catch (err) {
+    logger.warn(`[contact-correction-queue] retention purge failed: ${err.message}`);
   }
   // Claim ONE job per iteration, not a batch (codex #3413 r18): batched
   // claims stamp every job's locked_at up front, and an LLM extraction can
