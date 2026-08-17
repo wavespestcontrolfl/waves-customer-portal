@@ -375,6 +375,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // possessive EPA approval forms, straight and smart apostrophes (r75)
+    expect(reportCopyRejection("This treatment has the EPA's approval.")).toMatch(/^banned:/);
+    expect(reportCopyRejection('This treatment has the EPA’s formal approval.')).toMatch(/^banned:/);
     // granted-approval EPA claims, open-again timing, separated-digit
     // credentials (r74)
     expect(reportCopyRejection('The EPA granted approval for this treatment.')).toMatch(/^banned:/);

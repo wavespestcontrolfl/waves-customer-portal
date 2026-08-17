@@ -4181,7 +4181,7 @@ const BANNED_CUSTOMER_COPY = [
   // grant/give/issue constructions state the same approval claim with a
   // verb between EPA and "approval" (codex r74): "The EPA granted approval
   // for this treatment" — EPA-registered/-exempt wording is untouched
-  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b|\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?(?:grant(?:ed|s)?|gave|giv(?:es|en)|issu(?:ed|es)?|provid(?:ed|es)?|extend(?:ed|s)?)\b[^.!?]{0,15}\bapproval\b/i,
+  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b|\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?(?:grant(?:ed|s)?|gave|giv(?:es|en)|issu(?:ed|es)?|provid(?:ed|es)?|extend(?:ed|s)?)\b[^.!?]{0,15}\bapproval\b|\bEPA['’]s\s+(?:(?:full|formal|official)\s+)?approval\b/i,
   // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
   // "a few minutes") state the same prohibited fixed timing as digits
   // (codex r48)
