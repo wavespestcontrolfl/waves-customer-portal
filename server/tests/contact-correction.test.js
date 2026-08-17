@@ -3310,3 +3310,91 @@ describe('round-40 hardening', () => {
     expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
   });
 });
+
+describe('round-41 hardening', () => {
+  it("'John moved to a new address' never rewrites the customer's address", async () => {
+    const body = 'John moved to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'john moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'john moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'john moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'john moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("'we have just moved to' still passes the bare-verb guard", async () => {
+    const body = 'We have just moved to 99 Pine Ave, Sarasota. Zip is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we have just moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we have just moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
+  });
+
+  it("'Jane changed to a new email' never replaces the customer's email", async () => {
+    const body = 'Jane changed to a new email: jane@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'jane changed to a new email: jane@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("'I changed to a new email' still passes the contact-change guard", async () => {
+    const body = 'I changed to a new email: me@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'i changed to a new email: me@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('an explicitly OLD value with no replacement direction never applies', async () => {
+    const body = 'For reference, my old email is retired@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'retired@example.com', quote: 'my old email is retired@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a replacement-directed OLD mention still corrects', async () => {
+    const body = 'My old email is dead — use fresh@example.com instead';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'fresh@example.com', quote: 'my old email is dead — use fresh@example.com instead', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.newValue)).toEqual(['fresh@example.com']);
+  });
+
+  it('a purpose-scoped address never rewrites the service address', async () => {
+    const body = 'The new address for invoices is 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'the new address for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'the new address for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'the new address for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'the new address for invoices is 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});

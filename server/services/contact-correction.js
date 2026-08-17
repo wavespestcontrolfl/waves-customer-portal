@@ -335,7 +335,15 @@ async function extractSmsContactCorrections({ body }) {
       // source clause so a narrowed quote can't shed the possessive; r28
       // against EVERY occurrence of the quote, since co-location may
       // ground the value at any of them).
-      && !sourceClausesFor(text, c.quote).some((p) => thirdPartyOwnedStatement(c.field, p)));
+      && !sourceClausesFor(text, c.quote).some((p) => thirdPartyOwnedStatement(c.field, p))
+      // A purpose-scoped address (billing/mailing/invoice/delivery) never
+      // rewrites the SERVICE address (r41).
+      && !(ADDRESS_FIELDS.includes(c.field)
+        && sourceClausesFor(text, c.quote).some((p) => PURPOSE_ADDRESS_RE.test(p)))
+      // A value marked OLD with no replacement direction is the value
+      // being retired, not the correction (r41).
+      && !(OLD_VALUE_RE.test(String(c.quote || ''))
+        && !REPLACEMENT_DIRECTION_RE.test(String(c.quote || ''))));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -520,6 +528,11 @@ const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|zipcode|p
 // Unicode-aware owner/modifier classes (codex #3413 r28): "My fiancé's
 // email" is a third-party statement too — ASCII [a-z]/\w missed accented
 // owners entirely.
+// Words that can precede a verb WITHOUT naming a third-party subject
+// (r41): first person, auxiliaries, adverbs, and household terms. Shared
+// by the named-subject guards so "we have just moved to" and "I'm going
+// to move" stay first-person while "John moved to" rejects.
+const TP_NON_SUBJECT_SRC = "(?:i|we|m|re|s|ve|ll|d|am|is|are|was|were|will|be|been|being|has|have|had|do|does|did|going|about|to|just|recently|finally|officially|now|currently|also|and|all|both|plans?|planning|wants?|intends?|hopes?|family|household|everyone|everybody)";
 const TP_OWNER_SRC = "[\\p{L}\\p{M}]+";
 const TP_MODIFIER_SRC = "(?:[\\p{L}\\p{M}\\p{N}]+\\s+){0,3}";
 // Inverse ownership forms (codex #3413 r29): "the email FOR my accountant"
@@ -553,7 +566,7 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   // third-party (r40): "John is moving to …" names the mover, and the
   // named mover is not the customer. First-person forms and household
   // continuations stay licensed.
-  + `|(?<![\\p{L}\\p{M}'])(?!(?:i|we|m|re|s|ve|ll|d|am|family|household|everyone|everybody|and|also|all|both|now|currently)\\b)[\\p{L}\\p{M}][\\p{L}\\p{M}']*\\s+(?:(?:is|are|was|were|will|has|have|had|plans?|planning|wants?|intends?|hopes?|going|about)\\s+(?:to\\s+)?){1,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
+  + `|(?<![\\p{L}\\p{M}'])(?!${TP_NON_SUBJECT_SRC}\\b)[\\p{L}\\p{M}][\\p{L}\\p{M}']*\\s+(?:(?:is|are|was|were|will|has|have|had|plans?|planning|wants?|intends?|hopes?|going|about)\\s+(?:to\\s+)?){0,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
   // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
   // to / moved to 99 Pine Ave" — a possessed subject moving is not the
   // customer moving. Self-ish household subjects stay licensed.
@@ -570,9 +583,25 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
 const THIRD_PARTY_CONTACT_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`
   + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`
+  // Named subject performing a contact CHANGE (r41): "Jane changed to a
+  // new email: …" names the changer, and the changer is not the
+  // customer. First-person and auxiliary-led forms stay licensed.
+  + `|(?<![\\p{L}\\p{M}'])(?!${TP_NON_SUBJECT_SRC}\\b)[\\p{L}\\p{M}][\\p{L}\\p{M}']*\\s+(?:(?:has|have|had|is|are|was|were|will|just|recently)\\s+){0,2}(?:chang\\w*|switch\\w*|updat\\w*|got|created)\\s+(?:to\\s+)?(?:[\\p{L}\\p{M}\\p{N}]+\\s+){0,3}(?:e-?mail|name|surname)\\b`
   + tpInverseForms('(?:e-?mail|name|surname)'),
   'iu',
 );
+
+// Purpose-scoped address statements (r41): a billing/mailing/invoice/
+// delivery address is not the SERVICE address this lane maintains —
+// "The new address for invoices is …" must never rewrite the property
+// the techs route to.
+const PURPOSE_ADDRESS_RE = /\b(?:address|street)\s+(?:is\s+)?for\s+(?:the\s+|my\s+|our\s+)?(?:invoices?|invoicing|billing|bills?|receipts?|mail(?:ing)?|delivery|deliveries|shipping|correspondence|statements?|paperwork|payments?)\b|\b(?:billing|mailing|shipping|delivery|invoice|correspondence|postal)\s+address\b/i;
+
+// A value marked as OLD contact data with no replacement direction is the
+// value being RETIRED, not the correction (r41): "for reference, my old
+// email is old@example.com" must never overwrite the current mailbox.
+const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
+const REPLACEMENT_DIRECTION_RE = /\b(?:wrong|incorrect|misspell\w*|should\s+be|is\s+now|now\s+is|use|chang\w*\s+(?:it\s+)?to|updat\w*\s+(?:it\s+)?to|instead|new|correct)\b/i;
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
 // the extractor-controlled fragment (codex #3413 r24): a model can narrow

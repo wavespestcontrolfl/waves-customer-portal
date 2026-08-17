@@ -11,4 +11,13 @@
 
 exports.up = async function up() {};
 
-exports.down = async function down() {};
+// Rolling back BOTH 000007 and 000006 must land before-000006 schema:
+// 000007.down() recreates context_attached_at (the state right after the
+// original 000006), so this down() drops it again (codex #3413 r41).
+exports.down = async function down(knex) {
+  if (await knex.schema.hasColumn('contact_correction_jobs', 'context_attached_at')) {
+    await knex.schema.alterTable('contact_correction_jobs', (t) => {
+      t.dropColumn('context_attached_at');
+    });
+  }
+};
