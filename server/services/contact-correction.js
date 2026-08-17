@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|chang(?:e|ed|ing) (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,30}\bshould be\b|\b(?:update|chang\w*)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,20}\b(?:has\s+)?chang\w*\s+to\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|chang(?:e|ed|ing) (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+)?(?:moved|(?:will|going\s+to|about\s+to|plan(?:s|ning)?\s+to|intend\s+to)\s+move|moving)\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,30}\bshould be\b|\b(?:update|chang\w*)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:name|surname|email|e-?mail|address|street|city|state|zip|zipcode|postal ?code|unit|apt|apartment|suite)\b[\s\S]{0,20}\b(?:has\s+)?chang\w*\s+to\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -463,8 +463,10 @@ async function extractSmsContactCorrections({ body }) {
           // probes, not just the model-selected fragment (codex #3413
           // r34): "The account isn't mine. You have my name wrong; …"
           // can quote only the second sentence — the probes carry the
-          // preceding disclaimer.
-          && !sourceClausesFor(text, c.quote).some((p) => NAME_OWNERSHIP_DISCLAIMER_RE.test(p))))
+          // preceding disclaimer. Negated-name statements (r46) ride the
+          // same probes.
+          && !sourceClausesFor(text, c.quote).some((p) => NAME_OWNERSHIP_DISCLAIMER_RE.test(p)
+            || NEGATED_NAME_RE.test(p))))
       // (round-14) An UNQUALIFIED whole-name quote ("you have my name
       // wrong; it is Jane Smith") corrects BOTH components — a model that
       // emits only first_name would graft Jane onto the record's old
@@ -609,12 +611,17 @@ const PURPOSE_ADDRESS_RE = /\b(?:address|street)\b[^.;!?\n]{0,30}\b(?:for|on|of|
 // value being RETIRED, not the correction (r41): "for reference, my old
 // email is old@example.com" must never overwrite the current mailbox.
 const OLD_VALUE_RE = /\b(?:old|former|previous|prior)\s+(?:[\p{L}\p{M}\p{N}]+\s+){0,2}(?:e-?mail|name|surname|address|street|city|state|zip|zipcode|number)\b/iu;
+// A NEGATED name statement is not a correction (r46): "my name is not
+// Jane Smith anymore" states the OLD name — staging its components would
+// rename the customer to the very value being rejected.
+const NEGATED_NAME_RE = /\b(?:name|surname)\s+(?:is\s+not|isn'?t|was|used\s+to\s+be)\b|\bnot\s+my\s+name\b|\b(?:name|surname)\b[^.;!?\n]{0,40}\banymore\b/i;
+
 // Sender identity disclaimers (r44): the texter says they are NOT the
 // person this number links to — every correction in the message belongs
 // to the number's new holder, not the linked customer. The bare "I'm not
 // <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
 // "I am not happy" never trip it.
-const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+[A-Z][a-z]+\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
+const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
 
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.
@@ -1591,11 +1598,13 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
         .map((l) => l.replace(/[‘’]/g, "'"));
       const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;
       if (tpProbes.some((p) => thirdPartyOwnedStatement(tpField, p))) return false;
-      // Ownership DISCLAIMERS ride the same adjacent-line probes for name
-      // candidates (r34): "the account is not in my name" one caller turn
-      // before the correction must still stand down the rename.
+      // Ownership DISCLAIMERS and NEGATED-name statements ride the same
+      // adjacent-line probes for name candidates (r34/r46): "the account
+      // is not in my name" or "my name is not Jane Smith anymore" one
+      // caller turn away must still stand down the rename.
       if (CALL_AUTO_FIELDS[c.field_name]
-        && tpProbes.some((p) => NAME_OWNERSHIP_DISCLAIMER_RE.test(p))) return false;
+        && tpProbes.some((p) => NAME_OWNERSHIP_DISCLAIMER_RE.test(p)
+          || NEGATED_NAME_RE.test(p))) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);

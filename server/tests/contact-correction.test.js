@@ -3596,3 +3596,62 @@ describe('round-45 hardening', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 });
+
+describe('round-46 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('an ALL-CAPS disclaimer name still trips the identity veto', async () => {
+    const body = "This isn't JOHN anymore. My email is newholder@example.com — your email is wrong";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a NEGATED name statement never renames on a call', async () => {
+    const quote = 'my name is not Jane Smith anymore';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: quote }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+
+  it('a NEGATED name statement never renames over SMS', async () => {
+    const body = 'My name is not Jane Smith anymore';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'first_name', new_value: 'Jane', quote: 'my name is not Jane Smith anymore', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'my name is not Jane Smith anymore', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('future/progressive first-person moves pass the prefilter', () => {
+    expect(detectContactCorrectionIntent('I will move to 99 Pine Ave, Sarasota, FL 34231')).toBe(true);
+    expect(detectContactCorrectionIntent("I'm moving to 99 Pine Ave, Sarasota")).toBe(true);
+    expect(detectContactCorrectionIntent('We plan to move to 99 Pine Ave')).toBe(true);
+  });
+});
