@@ -3083,6 +3083,84 @@ async function handleChargeRefunded(charge) {
         logger.info(`[stripe-webhook] Combined charge ${chargeId} fully refunded — ${combinedRows.length} rows refunded at their shares, invoices reopened as refunded`);
         return combinedRows[0] || null;
       }
+      // PRE-SETTLEMENT combined refund (codex r6 P0): charge.refunded can
+      // arrive before payment_intent.succeeded wrote any allocation rows —
+      // the generic missing-row branch below would refund only the anchor
+      // and the later combined settle would mark every sibling paid on
+      // money Stripe already returned. Detect the combined allocation from
+      // the charge/PI metadata (charge.metadata mirrors the PI's; confirm
+      // against the PI itself when it's absent, failing CLOSED on an
+      // unreadable read). A FULL refund persists a refunded fence marker
+      // the combined settle honors (it records the orphan instead of
+      // settling); a PARTIAL refund parks for the operator exactly like
+      // the post-settlement partial (the eventual settle is real money —
+      // only the partial needs manual attribution).
+      if (!combinedRows.length && charge.payment_intent) {
+        const PayCombined = require('../services/pay-combined');
+        let combinedPiMeta = PayCombined.isCombinedPiMetadata(charge.metadata) ? charge.metadata : null;
+        if (!combinedPiMeta) {
+          const preStripe = getStripe();
+          if (preStripe) {
+            const refundedPi = await preStripe.paymentIntents.retrieve(charge.payment_intent);
+            if (PayCombined.isCombinedPiMetadata(refundedPi?.metadata)) combinedPiMeta = refundedPi.metadata;
+          }
+        }
+        if (combinedPiMeta) {
+          if (!isFullRefund) {
+            logger.error(`[stripe-webhook] PARTIAL refund on unsettled combined charge ${chargeId} — parked for operator`);
+            await trx('stripe_orphan_charges')
+              .insert({
+                stripe_payment_intent_id: `${charge.payment_intent}:partial-refund`,
+                stripe_charge_id: chargeId,
+                customer_id: null,
+                invoice_id: null,
+                amount: refundAmountDollars,
+                source: 'combined_pay_webhook',
+                original_db_error: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge BEFORE settlement — attribute and reconcile manually`,
+              })
+              .onConflict('stripe_payment_intent_id')
+              .ignore();
+            try {
+              await NotificationService.notifyAdmin(
+                'refund',
+                `Partial refund on combined payment: $${refundAmountDollars}`,
+                `Charge ${chargeId} backs multiple invoices (not yet settled); a partial refund can't be auto-attributed. Reconcile in /admin/revenue.`,
+                { icon: '⚠️', link: '/admin/revenue' },
+              );
+            } catch { /* non-critical */ }
+            return null;
+          }
+          const [refundFence] = await trx('payments').insert({
+            customer_id: null,
+            processor: 'stripe',
+            stripe_payment_intent_id: charge.payment_intent,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: (charge.amount || refundAmountCents) / 100,
+            status: 'refunded',
+            refund_amount: cumulativeRefundAmountDollars,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            description: 'Combined balance charge fully refunded before settlement (marker)',
+            metadata: JSON.stringify({
+              combined_payment: true,
+              pre_settlement: true,
+              source: 'combined_pay_webhook',
+              combined_anchor_invoice_id: combinedPiMeta.waves_invoice_id || null,
+              ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
+            }),
+          }).returning('*');
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Combined payment refunded pre-settlement: $${refundAmountDollars}`,
+              `Charge ${chargeId} (combined PI ${charge.payment_intent}) was fully refunded before settlement — settlement is fenced; no invoice was marked paid.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return refundFence;
+        }
+      }
     }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
@@ -5833,6 +5911,40 @@ async function handleDisputeClosed(dispute) {
         const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
         const invId = meta.invoice_id || meta.dispute_invoice_id || null;
         if (status === 'won' || status === 'warning_closed') {
+          // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
+          // settle (which recorded an orphan), so flipping it to 'paid'
+          // would strand every allocated invoice unsettled — and if won
+          // arrived BEFORE succeeded, a full-amount 'paid' marker would
+          // double-count once settlement adds the per-invoice rows.
+          // Neutralize the marker (canceled, final outcome recorded) and,
+          // when the PI actually succeeded, run the allocation-aware
+          // settle now (idempotent; throws → Stripe redelivers) and
+          // resolve the fenced orphan. A not-yet-succeeded PI just loses
+          // its fence — the eventual succeeded settles normally.
+          if (meta.pre_settlement === true && !invId) {
+            const markerStripe = getStripe();
+            if (!markerStripe) throw new Error(`Combined pre-settlement dispute ${dispute.id} won but Stripe is unavailable to resettle PI ${row.stripe_payment_intent_id}; retry`);
+            const markerPi = await markerStripe.paymentIntents.retrieve(row.stripe_payment_intent_id);
+            await db('payments').where({ id: row.id }).update({
+              status: 'canceled',
+              metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved' }),
+            });
+            if (markerPi.status === 'succeeded') {
+              const markerDetails = await paymentDetailsFromIntent(markerPi);
+              const resettle = await require('../services/pay-combined').settleCombinedPaymentIntent(markerPi, {
+                paymentMethod: markerDetails.paymentMethod,
+                cardBrand: markerDetails.cardBrand,
+                cardLastFour: markerDetails.cardLastFour,
+                receiptUrl: markerDetails.receiptUrl,
+              }, {});
+              restoredCount += resettle.settled;
+              await resolveOrphanSucceededPaymentIntentIfSettled(String(row.stripe_payment_intent_id));
+              logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won — PI ${row.stripe_payment_intent_id} resettled ${resettle.settled} invoices`);
+            } else {
+              logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won before settlement — fence lifted, PI ${row.stripe_payment_intent_id} is ${markerPi.status}`);
+            }
+            continue;
+          }
           await db('payments').where({ id: row.id }).update({ status: 'paid', metadata: finalRowMeta });
           if (invId) {
             const invoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');

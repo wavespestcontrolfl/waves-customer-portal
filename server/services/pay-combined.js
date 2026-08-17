@@ -62,6 +62,26 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // A payer-billed or statement-accrued anchor is the third party's money —
     // never fan the homeowner's balance into it.
     if (anchorInvoice.payer_id || anchorInvoice.payer_statement_id) return null;
+    // LIVE anchor payer resolution (codex r6 P1): a payer assigned via the
+    // scheduled service or customer default AFTER invoice creation leaves
+    // invoices.payer_id null — the raw-column check above would let
+    // GET /pay/:token serialize the homeowner's sibling invoices to the
+    // third party holding the anchor link. Fail CLOSED: a resolved payer
+    // or a resolve failure both disable the combined flow (single-invoice
+    // behavior), same contract verifyAllocationLocked enforces at the
+    // money seams.
+    {
+      const PayerService = require('./payer');
+      const resolved = await PayerService.resolveForInvoice({
+        customerId: String(anchorInvoice.customer_id),
+        ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
+        throwOnError: true,
+      });
+      if (resolved?.payerId) {
+        logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
+        return null;
+      }
+    }
 
     let incomplete = null;
     const candidates = await openBalanceInvoices(anchorInvoice.customer_id, {
@@ -345,15 +365,25 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
     const byId = new Map(rows.map((r) => [String(r.id), r]));
 
     // 'disputed' is terminal for this PI (mirrors the single-invoice
-    // confirm guard): the money already went back via the chargeback.
-    const disputedRow = await trx('payments')
-      .where({ stripe_payment_intent_id: piId, status: 'disputed' })
-      .first('id');
-    if (disputedRow) {
+    // confirm guard): the money already went back via the chargeback. A
+    // pre-settlement REFUND fence (charge.refunded before succeeded —
+    // codex r6 P0) is terminal the same way: the whole charge was
+    // returned, so nothing may settle as paid. Post-settlement refunded
+    // rows never fence (no pre_settlement flag) — redelivery idempotency
+    // is unchanged for them.
+    const fenceRows = await trx('payments')
+      .where({ stripe_payment_intent_id: piId })
+      .whereIn('status', ['disputed', 'refunded']);
+    const fenced = fenceRows.some((r) => {
+      if (r.status === 'disputed') return true;
+      const meta = typeof r.metadata === 'string' ? safeJson(r.metadata) : r.metadata;
+      return meta?.pre_settlement === true;
+    });
+    if (fenced) {
       // Coded so the webhook records the orphan for the operator instead of
       // retrying a permanently-fenced settle forever (a pre-settlement
-      // dispute marker also raises this — codex r5 P1).
-      const disputedErr = new Error('This payment was disputed after it succeeded — the invoices cannot be re-marked paid from the old payment session');
+      // dispute or refund marker also raises this — codex r5/r6).
+      const disputedErr = new Error('This payment was disputed or refunded before settlement — the invoices cannot be marked paid from the old payment session');
       disputedErr.code = 'COMBINED_PI_DISPUTED';
       throw disputedErr;
     }

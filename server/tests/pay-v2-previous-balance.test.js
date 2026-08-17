@@ -30,7 +30,11 @@ jest.mock('../services/pdf/invoice-pdf', () => ({ generateInvoicePDF: jest.fn() 
 jest.mock('../services/payment-method-consents', () => ({}));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/bill-payment-error-alerts', () => ({ alertBillPaymentError: jest.fn(async () => {}) }));
-jest.mock('../services/payer', () => ({ attachToInvoice: jest.fn(async () => null) }));
+jest.mock('../services/payer', () => ({
+  attachToInvoice: jest.fn(async () => null),
+  // Live anchor payer resolution (codex #3427 r6 P1): no payer by default.
+  resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+}));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gates: { autoApplyAccountCredit: false },
@@ -159,6 +163,27 @@ describe('GET /pay/:token previous-balance itemization', () => {
     isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
     openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
     const { body } = await getPayPage(invoiceData({ payer_id: 'payer-1' }));
+    expect(body).not.toHaveProperty('previousBalance');
+  });
+
+  test('gate ON, anchor LIVE-resolves to a payer (invoices.payer_id null): never itemizes', async () => {
+    // A payer assigned via scheduled service / customer default after
+    // invoice creation leaves the raw column null — the live resolve must
+    // still refuse to serialize the homeowner's siblings to the payer.
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+    const PayerService = require('../services/payer');
+    PayerService.resolveForInvoice.mockImplementationOnce(async () => ({ payerId: 'payer-late' }));
+    const { body } = await getPayPage(invoiceData());
+    expect(body).not.toHaveProperty('previousBalance');
+  });
+
+  test('gate ON, anchor payer resolution FAILS: declines to itemize (fail closed)', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+    const PayerService = require('../services/payer');
+    PayerService.resolveForInvoice.mockImplementationOnce(async () => { throw new Error('payer service down'); });
+    const { body } = await getPayPage(invoiceData());
     expect(body).not.toHaveProperty('previousBalance');
   });
 
