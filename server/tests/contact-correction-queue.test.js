@@ -106,6 +106,21 @@ function makeStubKnex(rowsByTable = {}) {
       whereNotIn(col, vals) { preds.push((r) => !vals.includes(r[col])); return chain; },
       whereNot(col, val) { preds.push((r) => r[col] !== val); return chain; },
       whereNull(col) { preds.push((r) => r[col] == null); return chain; },
+      whereRaw(sql, params) {
+        if (/RIGHT\(regexp_replace/.test(sql)) {
+          preds.push((r) => String(r.phone || '').replace(/\D/g, '').slice(-10) === String(params[0]));
+          return chain;
+        }
+        throw new Error(`queue stub: unsupported whereRaw ${sql}`);
+      },
+      select(...cols) {
+        const flat = cols.flat();
+        return Promise.resolve(chain._select().map((r) => {
+          const out = {};
+          for (const c of flat) out[c] = r[c];
+          return out;
+        }));
+      },
       orderBy(col, dir = 'asc') { order = { col, dir }; return chain; },
       groupBy(col) { chain._groupCol = col; return chain; },
       min(spec) {
@@ -220,7 +235,7 @@ describe('reservation lifecycle', () => {
   });
 
   it('enqueue attaches the payload and never resurrects a cancelled row', async () => {
-    const knex = makeStubKnex({ contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'cancelled' })] });
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ customer_id: CUSTOMER_ID }), jobRow({ id: 2, status: 'cancelled' })] });
     const ok = await queue.enqueueContactCorrectionJob(1, {
       customerId: CUSTOMER_ID, smsLogId: 'sms-1', expectedValues: { last_name: 'Riverz' }, knex,
     });
@@ -498,15 +513,16 @@ describe('round-18 hardening', () => {
 
 describe('round-19 hardening', () => {
   it('context attach stamps linkage + baseline on a reservation without changing status', async () => {
-    const knex = makeStubKnex({ contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'queued' })] });
-    const ok = await queue.attachContactCorrectionContext(1, {
-      customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex,
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'queued' })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
     });
+    const ok = await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex });
     expect(ok).toBe(true);
     expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
     expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
     // Only reserved rows accept context — a fired job's payload is settled.
-    expect(await queue.attachContactCorrectionContext(2, { customerId: CUSTOMER_ID, knex })).toBe(false);
+    expect(await queue.attachContactCorrectionContext(2, { senderPhone: '+15550001111', knex })).toBe(false);
   });
 
   it('each processing pass claims under a distinct lock owner', async () => {
@@ -674,11 +690,13 @@ describe('round-22 hardening', () => {
   });
 
   it('enqueue still stamps context for callers with no prior attach', async () => {
-    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ id: 1 })] });
-    await queue.enqueueContactCorrectionJob(1, {
-      customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex,
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1 })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
     });
+    await queue.enqueueContactCorrectionJob(1, { customerId: CUSTOMER_ID, knex });
     const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('queued');
     expect(typeof job.expected_values).toBe('string');
   });
 });
@@ -714,20 +732,18 @@ describe('round-25 hardening', () => {
         jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
         jobRow({ id: 7, status: 'reserved' }),
       ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
     });
-    await queue.attachContactCorrectionContext(7, { customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex });
+    await queue.attachContactCorrectionContext(7, { senderPhone: '+15550001111', knex });
     expect(knex._data.contact_correction_jobs[1].rebase_floor_id).toBe(3);
   });
 });
 
 describe('round-26 hardening', () => {
-  it('attach stores the MATCH-TIME snapshot with a lock-consistent floor', async () => {
-    // (Contract updated in r31.) The route's match-time read said Riverz;
-    // a write landed before the attach. The match-time values are the
-    // baseline of record — a locked reread would adopt a post-match admin
-    // edit and let the older SMS overwrite it — so any intervening write
-    // (queue or admin) reads as a concurrent change at the CAS and fails
-    // closed.
+  it('attach matches, snapshots, and floors under ONE customer lock (r33)', async () => {
+    // The match happens INSIDE the locked transaction, so the locked-row
+    // value IS the match-time baseline by construction — an earlier queue
+    // write is in both the snapshot and the floor, or in neither.
     const knex = makeStubKnex({
       contact_correction_jobs: [
         jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
@@ -735,14 +751,23 @@ describe('round-26 hardening', () => {
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverson', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
     });
-    await queue.attachContactCorrectionContext(7, {
-      customerId: CUSTOMER_ID,
-      expectedValues: { last_name: 'Riverz' }, // match-time read — the baseline of record
-      knex,
-    });
+    await queue.attachContactCorrectionContext(7, { senderPhone: '+15550001111', knex });
     const job = knex._data.contact_correction_jobs[1];
     expect(job.rebase_floor_id).toBe(3);
-    expect(JSON.parse(job.expected_values).last_name).toBe('Riverz');
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
+    expect(job.customer_id).toBe(CUSTOMER_ID);
+  });
+
+  it('attach refuses a number shared by two active customers', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 7, status: 'reserved' })],
+      customers: [
+        { id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null },
+        { id: '00000000-0000-4000-8000-0000000000c2', deleted_at: null, phone: '+15550001111' },
+      ],
+    });
+    expect(await queue.attachContactCorrectionContext(7, { senderPhone: '+15550001111', knex })).toBe(false);
+    expect(knex._data.contact_correction_jobs[0].customer_id).toBeNull();
   });
 
   it('the stale sweep independently rejects wrong-number bodies', async () => {
@@ -793,14 +818,15 @@ describe('round-28 hardening', () => {
     });
     const ok = await queue.enqueueContactCorrectionJob(7, {
       customerId: CUSTOMER_ID, smsLogId: 'sms-1',
-      expectedValues: { last_name: 'Riverz' }, // match-time read — the baseline of record (r31)
       knex,
     });
     expect(ok).toBe(true);
     const job = knex._data.contact_correction_jobs[1];
     expect(job.status).toBe('queued');
     expect(job.rebase_floor_id).toBe(3);
-    expect(JSON.parse(job.expected_values).last_name).toBe('Riverz');
+    // r33: the in-enqueue attach matches + snapshots under the lock — the
+    // locked-row value IS the match-time baseline.
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
   });
 });
 
@@ -835,6 +861,7 @@ describe('round-31 hardening', () => {
       return c;
     };
     Object.assign(wrapped, orig);
+    wrapped.transaction = async (fn) => fn(wrapped);
     wrapped._data = orig._data;
     const id = await queue.reserveContactCorrectionJob({ senderPhone: '+15550001111', messageSid: 'SM-test-1', knex: wrapped });
     expect(id).toBe(1); // the concurrent sibling's reservation is adopted

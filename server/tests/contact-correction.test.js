@@ -2917,3 +2917,54 @@ describe('round-32 ownership', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-33 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('call ownership carries across adjacent caller lines', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          "Caller: My wife's name is wrong.",
+          'Caller: The name should be Janet Smith.',
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Janet', evidence_quote: 'the name should be Janet Smith' }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: 'the name should be Janet Smith' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+
+  it('a state/ZIP mismatch rejects EVERY staged address field in the batch', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'city', newValue: 'Atlanta', quote: 'my city and state should be Atlanta, GA' },
+        { field: 'state', newValue: 'GA', quote: 'my city and state should be Atlanta, GA' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped.map((s) => s.reason)).toContain('state_zip_mismatch');
+    expect(knex._data.customers[0].city).toBe('Testville');
+    expect(knex._data.customers[0].state).toBe('FL');
+  });
+});

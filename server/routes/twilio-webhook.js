@@ -259,10 +259,10 @@ router.post('/sms', async (req, res) => {
     // cancelled instead of promoted. Awaited: an unstamped crash window
     // fails closed, a stamped one replays faithfully.
     if (correctionJobId && customer?.id) {
-      await correctionQueue.attachContactCorrectionContext(correctionJobId, {
-        customerId: customer.id,
-        expectedValues: contactCorrection.snapshotContactCasFields(customer),
-      });
+      // The attach performs its OWN single-customer match, snapshot, and
+      // floor capture under one customer lock (r33) — the route's earlier
+      // read is for routing only.
+      await correctionQueue.attachContactCorrectionContext(correctionJobId, { senderPhone: From });
     }
     const fireContactCorrection = async (smsLogId) => {
       if (!correctionJobId || !customer?.id) return;
@@ -280,9 +280,9 @@ router.post('/sms', async (req, res) => {
       const enqueued = await correctionQueue.enqueueContactCorrectionJob(correctionJobId, {
         customerId: customer.id,
         smsLogId: smsLogId || null,
-        expectedValues: contactCorrection.snapshotContactCasFields(customer),
         // Body rides the queued transition too (r32) — a transiently
-        // failed earlier attach must not queue a body-less job.
+        // failed earlier attach must not queue a body-less job. The CAS
+        // baseline lives on the row from the r33 single-lock attach.
         body: Body,
       });
       if (enqueued) correctionQueue.kickContactCorrectionQueue();

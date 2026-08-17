@@ -852,9 +852,12 @@ async function applyContactCorrections({ customerId, corrections, source, source
           const { stateForZip } = require('./data-hygiene/normalizers');
           const derived = stateForZip(effZip);
           if (!derived || derived !== effState) {
-            for (const f of ['state', 'zip']) {
-              if (byField.has(f)) { skipped.push({ field: f, reason: 'state_zip_mismatch' }); byField.delete(f); }
-            }
+            // The WHOLE staged address batch falls with the mismatch
+            // (r33): "my city and state should be Atlanta, GA" against a
+            // stored FL ZIP must not write the city alone — the surviving
+            // component would commit a hybrid locality the customer never
+            // stated.
+            rejectAddressGroup('state_zip_mismatch');
           }
         }
       }
@@ -1425,10 +1428,17 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // accept the replacement from a LATER matching line — ownership
       // must hold on all of them.
       const tpNeedle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
-      const tpMatches = tpNeedle.length >= 4
-        ? callerLines.filter((line) => line.includes(tpNeedle))
+      // Each probe includes the immediately PRECEDING caller line (r33):
+      // "Caller: My wife's name is wrong." / "Caller: The name should be
+      // Janet Smith." grounds on the second line while the possessive
+      // lives in the first — same adjacency the SMS lane's clause probes
+      // carry.
+      const tpMatchIdx = tpNeedle.length >= 4
+        ? callerLines.map((line, i) => (line.includes(tpNeedle) ? i : -1)).filter((i) => i >= 0)
         : [];
-      const tpProbes = (tpMatches.length ? tpMatches : [String(c.evidence_quote || '')])
+      const tpProbes = (tpMatchIdx.length
+        ? tpMatchIdx.map((i) => `${i > 0 ? `${callerLines[i - 1]} ; ` : ''}${callerLines[i]}`)
+        : [String(c.evidence_quote || '')])
         .map((l) => l.replace(/[‘’]/g, "'"));
       const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;
       if (tpProbes.some((p) => thirdPartyOwnedStatement(tpField, p))) return false;

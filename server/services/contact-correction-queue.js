@@ -86,15 +86,23 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
   if (!senderKey) return null;
   try {
     if (!(await tableReady(knex))) return null;
-    const inserted = await knex('contact_correction_jobs')
-      .insert({
-        sender_key: senderKey,
-        sender_phone: String(senderPhone || '').slice(0, 30),
-        message_sid: messageSid || null,
-        body,
-        status: 'reserved',
-      })
-      .returning('id');
+    // Per-sender advisory lock around the ordering insert (codex #3413
+    // r33): id allocation is serialized at the DATABASE per sender, so two
+    // rapid same-sender messages routed to different pods take ids in the
+    // order their requests reach Postgres — the closest available
+    // authority to arrival order (Twilio supplies no source sequence).
+    const inserted = await knex.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`cc-reserve:${senderKey}`]);
+      return trx('contact_correction_jobs')
+        .insert({
+          sender_key: senderKey,
+          sender_phone: String(senderPhone || '').slice(0, 30),
+          message_sid: messageSid || null,
+          body,
+          status: 'reserved',
+        })
+        .returning('id');
+    });
     return inserted?.[0]?.id ?? inserted?.[0] ?? null;
   } catch (err) {
     // 23505 on the live-sid partial unique index (migration
@@ -129,7 +137,7 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
  * never resurrected); returns whether the job is now queued. Fail-soft:
  * on error the row stays 'reserved' and the stale sweep replays it.
  */
-async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, expectedValues = null, body = null, knex = db } = {}) {
+async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, body = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
     // Keep the ORIGINAL context when it was already attached (codex #3413
@@ -146,10 +154,10 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
     // context-free rows (fail closed).
     const existing = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
-      .first('customer_id');
+      .first('customer_id', 'sender_phone');
     if (!existing) return false;
     if (!existing.customer_id) {
-      const attached = await attachContactCorrectionContext(jobId, { customerId, expectedValues, knex });
+      const attached = await attachContactCorrectionContext(jobId, { senderPhone: existing.sender_phone, knex });
       if (!attached) return false;
     }
     const updated = await knex('contact_correction_jobs')
@@ -207,44 +215,45 @@ async function attachReservationBody(jobId, body, { knex = db } = {}) {
  * untouched; the row remains 'reserved' until a branch fires (enqueue)
  * or the route releases it (cancel).
  */
-async function attachContactCorrectionContext(jobId, { customerId, expectedValues = null, knex = db } = {}) {
-  if (!jobId || !customerId) return false;
+async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } = {}) {
+  if (!jobId || !senderPhone) return false;
   try {
-    // Snapshot and rebase floor are captured together, SERIALIZED against
-    // the queue's customer writes (codex #3413 r26): the route's earlier
-    // customer read could pre-date an apply commit whose job then turns
-    // 'done' before the floor lookup — the floor would cover a write the
-    // snapshot never saw, excluding it from rebase and staling the newer
-    // correction. Locking the customer row here makes the pair atomic:
-    // any in-flight apply either committed before this read (write in the
-    // snapshot AND its job under the floor) or commits after (write above
-    // the floor, rebase overlays it). The caller's expectedValues remain
-    // only as a fallback when the row cannot be re-read.
+    // The MATCH, the CAS snapshot, and the rebase floor are all taken in
+    // ONE customer-locked transaction (codex #3413 r26/r31/r33): with the
+    // match performed here — not seconds earlier in the route — the
+    // "match-time" snapshot IS the locked-row value, so there is no gap
+    // for either failure mode: an earlier queue job's apply holds the
+    // customer lock, and after we acquire it the job is done (in the
+    // floor) AND its write is in the snapshot — consistent; an admin edit
+    // either precedes the lock (correctly the baseline) or lands after
+    // and reads as a concurrent change at the CAS. Same single-active-
+    // customer doctrine as the route's own matcher; a shared number
+    // attaches nothing and the reservation fails closed at the sweep.
+    const senderKey = tail10(senderPhone);
+    if (!senderKey) return false;
     return await knex.transaction(async (trx) => {
       const contactCorrection = require('./contact-correction');
+      const matches = await trx('customers')
+        .whereNull('deleted_at')
+        .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+        .limit(2)
+        .select('id');
+      if (matches.length !== 1) return false;
       const row = await trx('customers')
-        .where({ id: customerId })
+        .where({ id: matches[0].id })
         .whereNull('deleted_at')
         .forUpdate()
         .first();
-      // The MATCH-TIME snapshot is the baseline of record (codex #3413
-      // r31): a locked reread here would adopt an admin edit made between
-      // the webhook match and this transaction as the expected baseline —
-      // and the older SMS would then overwrite it. With the match-time
-      // values stored, any intervening non-queue write reads as a
-      // concurrent change at the CAS (admin wins); an intervening QUEUE
-      // write lands at/below the floor computed under this lock and
-      // stales conservatively too — fail closed in both directions. The
-      // locked reread remains only for callers with no match-time row.
-      const snapshot = expectedValues || (row && contactCorrection.snapshotContactCasFields(row)) || null;
+      if (!row) return false;
+      const snapshot = contactCorrection.snapshotContactCasFields(row);
       const floorRow = await trx('contact_correction_jobs')
-        .where({ customer_id: customerId, status: 'done' })
+        .where({ customer_id: row.id, status: 'done' })
         .orderBy('id', 'desc')
         .first('id');
       const updated = await trx('contact_correction_jobs')
         .where({ id: jobId, status: 'reserved' })
         .update({
-          customer_id: customerId,
+          customer_id: row.id,
           expected_values: snapshot ? JSON.stringify(snapshot) : null,
           rebase_floor_id: floorRow?.id ?? null,
           updated_at: trx.fn.now(),
@@ -412,10 +421,14 @@ async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex 
       .where('next_attempt_at', '<=', trx.fn.now())
       .groupBy('sender_key')
       .min({ id: 'id' });
+    // The cap sits AFTER per-sender reduction (r33): heads are one row
+    // per sender, so blocked senders each consume exactly one slot and a
+    // 1000-sender bound is a pure runaway backstop, not a starvation
+    // window.
     const headIds = headRows
       .map((r) => Number(r.id))
       .sort((a, b) => a - b)
-      .slice(0, Math.max(limit * 5, 50));
+      .slice(0, 1000);
     if (!headIds.length) return [];
     const candidates = await trx('contact_correction_jobs')
       .whereIn('id', headIds)
