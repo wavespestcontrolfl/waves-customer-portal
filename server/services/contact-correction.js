@@ -640,7 +640,7 @@ function valueNegatedInQuote(quote, value) {
 // "Starting next month, my email will change to …" must wait for the
 // customer's present-tense confirmation, not switch fan-outs weeks
 // early.
-const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
+const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\b(?:will\s+move|will\s+be\s+moving|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move)\s+(?:to|into)\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
 
 // A CONDITION-scoped change is not a present correction (r50): "if I
 // accept the offer, my new email is …" must not switch anything before
@@ -984,10 +984,22 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // would commit an internally inconsistent address and re-key the
       // property on it. Full new-address groups were validated pre-
       // transaction; this covers the partial case using the stored row.
-      if ((byField.has('state') || byField.has('zip')) && !(hadNewStreet || moveContext)) {
+      if ((byField.has('state') || byField.has('zip') || byField.has('city')) && !(hadNewStreet || moveContext)) {
         const effState = byField.has('state') ? byField.get('state').newValue : normValue(before.state);
         const effZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
-        if (effZip && effState) {
+        const effCity = byField.has('city') ? byField.get('city').newValue : normValue(before.city);
+        // City/ZIP coherence via the service-area authority (r54): a
+        // ZIP-only fix must not commit "Bradenton, FL 34231" — when the
+        // effective ZIP is a KNOWN service-area ZIP, its USPS city must
+        // match the effective city; unknown ZIPs stay state-checked only.
+        if ((byField.has('zip') || byField.has('city')) && effZip && effCity) {
+          const { zipToCity } = require('../utils/zip-to-city');
+          const knownCity = zipToCity(effZip);
+          if (knownCity && knownCity.toLowerCase() !== effCity.toLowerCase()) {
+            rejectAddressGroup('city_zip_mismatch');
+          }
+        }
+        if (byField.size && effZip && effState) {
           const { stateForZip } = require('./data-hygiene/normalizers');
           const derived = stateForZip(effZip);
           if (!derived || derived !== effState) {

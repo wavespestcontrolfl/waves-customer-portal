@@ -3116,7 +3116,7 @@ describe('round-37 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 
-  it("the customer's own future move carries move context (unit clears)", async () => {
+  it("the customer's own future move HOLDS until it takes effect (contract updated r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     mockCallAnthropic.mockResolvedValue({
       ok: true,
@@ -3129,9 +3129,9 @@ describe('round-37 hardening', () => {
       },
     });
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'I will move to 99 Pine Ave, Sarasota. Zip is 34231', knex });
-    expect(res.applied.map((a) => a.field)).toContain('address_line2');
-    expect(knex._data.customers[0].address_line2).toBeNull();
-    expect(knex._data.customers[0].address_line1).toBe('99 Pine Ave');
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
   });
 });
 
@@ -3169,7 +3169,7 @@ describe('round-38 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 
-  it("the customer's own 'going to move' carries move context (unit clears)", async () => {
+  it("the customer's own 'going to move' HOLDS until it takes effect (r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     mockCallAnthropic.mockResolvedValue({
       ok: true,
@@ -3182,8 +3182,8 @@ describe('round-38 hardening', () => {
       },
     });
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "I'm going to move to 99 Pine Ave, Sarasota. Zip is 34231", knex });
-    expect(res.applied.map((a) => a.field)).toContain('address_line2');
-    expect(knex._data.customers[0].address_line2).toBeNull();
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
   });
 });
 
@@ -3239,7 +3239,7 @@ describe('round-39 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 
-  it("the customer's own 'plan to move' carries move context", async () => {
+  it("the customer's own 'plan to move' HOLDS until it takes effect (r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     mockCallAnthropic.mockResolvedValue({
       ok: true,
@@ -3252,8 +3252,8 @@ describe('round-39 hardening', () => {
       },
     });
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'I plan to move to 99 Pine Ave, Sarasota. Zip is 34231', knex });
-    expect(res.applied.map((a) => a.field)).toContain('address_line2');
-    expect(knex._data.customers[0].address_line2).toBeNull();
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
   });
 });
 
@@ -3832,5 +3832,64 @@ describe('round-53 hardening', () => {
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
     expect(res.applied || []).toEqual([]);
     expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+});
+
+describe('round-54 hardening', () => {
+  it('a ZIP-only correction contradicting the service-area city fails closed', async () => {
+    // Stored Bradenton; 34231 is a Sarasota ZIP in the service-area map.
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), city: 'Bradenton', zip: '34205' }], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'zip', new_value: '34231', quote: 'my zip is wrong; it should be 34231', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My zip is wrong; it should be 34231', knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].zip).toBe('34205');
+  });
+
+  it('a coherent city+zip pair from the service area still applies', async () => {
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), city: 'Bradenton', zip: '34205' }], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'city', new_value: 'Sarasota', quote: 'my city is wrong; it should be Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is wrong, it is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My city is wrong; it should be Sarasota. My zip is wrong, it is 34231', knex });
+    expect(res.applied.map((a) => a.field).sort()).toEqual(['city', 'zip']);
+  });
+
+  it('a future move holds while a completed move still applies', async () => {
+    const knexHold = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'i will move to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'i will move to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const held = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'I will move to 99 Pine Ave, Sarasota. Zip is 34231', knex: knexHold });
+    expect(held.applied).toEqual([]);
+
+    const knexNow = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const applied = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We moved to 99 Pine Ave, Sarasota. Zip is 34231', knex: knexNow });
+    expect(applied.applied.map((a) => a.field)).toContain('address_line1');
   });
 });
