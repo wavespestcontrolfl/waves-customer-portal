@@ -3134,3 +3134,73 @@ describe('round-37 hardening', () => {
     expect(knex._data.customers[0].address_line1).toBe('99 Pine Ave');
   });
 });
+
+describe('round-38 hardening', () => {
+  it('a same-message retraction applies the FINAL stated value', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const body = 'My email is wrong, use first@example.com, sorry actually use final@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'first@example.com', quote: 'my email is wrong, use first@example.com', confidence: 'high' },
+          { field: 'email', new_value: 'final@example.com', quote: 'sorry actually use final@example.com', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied.map((a) => a.newValue)).toEqual(['final@example.com']);
+    expect(knex._data.customers[0].email).toBe('final@example.com');
+  });
+
+  it("a third party 'going to move' subject never rewrites the address", async () => {
+    const body = 'My tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'my tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("the customer's own 'going to move' carries move context (unit clears)", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: "i'm going to move to 99 Pine Ave", confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: "i'm going to move to 99 Pine Ave, Sarasota", confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "I'm going to move to 99 Pine Ave, Sarasota. Zip is 34231", knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBeNull();
+  });
+});
+
+describe('round-38 retraction license boundary', () => {
+  it('a bare same-field mention without retraction language licenses nothing', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const body = 'My email is wrong; please fix it. For receipts, send to billing@vendor.example';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'billing@vendor.example', quote: 'send to billing@vendor.example', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+  });
+});

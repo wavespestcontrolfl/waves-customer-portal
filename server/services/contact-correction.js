@@ -405,10 +405,20 @@ async function extractSmsContactCorrections({ body }) {
       const idx = sentenceIdxOf(c.quote);
       return idx >= 0 && licensedSentences.has(idx);
     };
+    // A RETRACTION clause ("sorry actually use final@example.com") carries
+    // no field topic of its own — it supersedes a same-field correction
+    // stated moments earlier. It is licensed ONLY when (a) another
+    // candidate of the SAME field carries explicit intent and (b) its own
+    // quote carries retraction vocabulary — a bare same-field mention
+    // ("for receipts, send to billing@vendor.com") licenses nothing
+    // (codex #3413 r38; the r16 co-location attack stays closed).
+    const RETRACTION_RE = /\b(?:actually|sorry|instead|i meant|make that|scratch that|correction|rather|no wait|oops)\b/i;
+    const retractionLicensed = (c, arr) => RETRACTION_RE.test(String(c.quote || ''))
+      && arr.some((o) => o !== c && o.field === c.field && quoteCarriesFieldIntent(o.field, o.quote));
     return base
-      .filter((c) => (ADDRESS_FIELDS.includes(c.field)
+      .filter((c, _i, arr) => (ADDRESS_FIELDS.includes(c.field)
         ? addressLicensed(c)
-        : quoteCarriesFieldIntent(c.field, c.quote)))
+        : (quoteCarriesFieldIntent(c.field, c.quote) || retractionLicensed(c, arr))))
       // Component binding for name fields, same rule as the call lane: a
       // grounded quote naming only the LAST name ("my last name is Rivers,
       // not Riverz") is not evidence for a first_name entry the model
@@ -473,7 +483,7 @@ function addressGroupComplete(byField) {
 // (codex #3413 r21): sentence-start or a first-person/definite determiner
 // DIRECTLY before it — "my accountant's new address" has a third-party
 // possessive in between and licenses nothing.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|going\s+to\s+move|about\s+to\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
 // The only words allowed to introduce a move's adjacent address fragment
 // (codex #3413 r20): pure connective/address-introduction vocabulary. Any
 // other residual token — "rental", "tenant", "service" — marks the
@@ -525,7 +535,7 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
   // to / moved to 99 Pine Ave" — a possessed subject moving is not the
   // customer moving. Self-ish household subjects stay licensed.
-  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will|will\\s+be|has|have|had|just|recently)\\s+){0,2}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
+  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will|will\\s+be|has|have|had|just|recently|going\\s+to|about\\s+to)\\s+){0,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
   + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );
@@ -1173,9 +1183,35 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
     // instead of marking the job done (codex #3413 r19).
     if (corrections === null) return { applied: [], skipped: [], reason: 'error' };
     if (!corrections.length) return { applied: [], skipped: [], reason: 'none_detected' };
+    // Same-field retraction resolution (codex #3413 r38): "use
+    // first@example.com, sorry actually use final@example.com" yields two
+    // grounded candidates for one field, and a first-wins dedupe would
+    // apply the RETRACTED value. The later statement in the MESSAGE wins —
+    // ordered by each quote's grounded position in the body, never by
+    // model-array order. Conflicting values whose positions cannot be
+    // distinguished fail the field closed.
+    const normBody = normValue(body).replace(/\s+/g, ' ').toLowerCase();
+    const quotePos = (c) => {
+      const nq = normValue(c.quote).replace(/\s+/g, ' ').toLowerCase();
+      return nq ? normBody.lastIndexOf(nq) : -1;
+    };
+    const byFieldLast = new Map();
+    const conflicted = new Set();
+    for (const c of corrections) {
+      const cur = byFieldLast.get(c.field);
+      if (!cur) { byFieldLast.set(c.field, c); continue; }
+      if (sameValue(c.field, cur.newValue, c.newValue)) continue;
+      const curPos = quotePos(cur);
+      const newPos = quotePos(c);
+      if (newPos > curPos) byFieldLast.set(c.field, c);
+      else if (newPos === curPos) conflicted.add(c.field);
+    }
+    for (const f of conflicted) byFieldLast.delete(f);
+    const resolved = [...byFieldLast.values()];
+    if (!resolved.length) return { applied: [], skipped: [...conflicted].map((f) => ({ field: f, reason: 'conflicting_values' })), reason: 'nothing_valid' };
     return await applyContactCorrections({
       customerId: customer.id,
-      corrections,
+      corrections: resolved,
       source: 'sms',
       sourceId: smsLogId,
       knex,
