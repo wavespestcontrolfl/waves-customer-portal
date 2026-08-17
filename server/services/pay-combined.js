@@ -695,8 +695,20 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
           await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
           continue;
         }
+        // Idempotence requires a SETTLED combined ledger row (codex r29
+        // P0): "same PI + paid invoice" alone also matches an out-of-band
+        // manual payment (cash/check recorded while the invoice still rode
+        // this PI) — in that shape the captured share is a DOUBLE
+        // collection with no Stripe ledger row, and passing silently would
+        // hide it. Quarantine the share instead.
         const existing = rowForInvoice(invoice.id);
-        if (existing && isAnchor) anchorPaymentRow = existing;
+        const existingSettled = existing && ['paid', 'processing'].includes(existing.status);
+        if (!existingSettled) {
+          logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} is ${status} under this PI but has no settled combined ledger row — out-of-band payment raced the capture; recording residual`);
+          await recordResidual(trx, paymentIntent, entry, `invoice ${invoice.invoice_number} was paid out-of-band while riding this combined PI — the captured share needs refund/credit`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
+          continue;
+        }
+        if (isAnchor) anchorPaymentRow = existing;
         settledInvoiceIds.push(invoice.id);
         continue;
       }

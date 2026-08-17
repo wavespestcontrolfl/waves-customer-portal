@@ -3688,27 +3688,42 @@ async function handleRefundFailed(refund) {
             continue;
           }
           anyUnwound = true;
+          // Rows refunded while the ACH debit was still PROCESSING restore
+          // to 'processing', not 'paid' (codex r29 P1): the refund landed
+          // before settlement, so the eventual debit outcome — not this
+          // bounce — is authoritative. Flipping them 'paid' would leave
+          // every invoice paid and coverage active even if the debit later
+          // fails (the failure path preserves paid rows).
+          const wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
             stripe_refund_id: null,
-            ...(row.status === 'refunded' ? { status: 'paid' } : {}),
+            ...(row.status === 'refunded' ? { status: wasStillProcessing ? 'processing' : 'paid' } : {}),
             metadata: JSON.stringify(nextMeta),
           });
           const invId = meta.invoice_id || null;
           if (invId) {
             const flipped = await trx('invoices')
               .where({ id: invId, status: 'refunded' })
-              .update({
-                status: 'paid',
-                // The refund cleared paid_at, and AR/overdue queries treat
-                // paid_at IS NULL as an outstanding balance (codex r11 P1)
-                // — restore the settlement timestamp with the status, from
-                // the ledger row's recorded settle time when available.
-                paid_at: meta.settled_event_at || new Date().toISOString(),
-                updated_at: new Date(),
-              });
-            if (flipped > 0) restored.push(invId);
+              .update(wasStillProcessing
+                ? {
+                  // Back to the in-flight state — the debit's own
+                  // succeeded/failed event decides the final outcome.
+                  status: 'processing',
+                  paid_at: null,
+                  updated_at: new Date(),
+                }
+                : {
+                  status: 'paid',
+                  // The refund cleared paid_at, and AR/overdue queries treat
+                  // paid_at IS NULL as an outstanding balance (codex r11 P1)
+                  // — restore the settlement timestamp with the status, from
+                  // the ledger row's recorded settle time when available.
+                  paid_at: meta.settled_event_at || new Date().toISOString(),
+                  updated_at: new Date(),
+                });
+            if (flipped > 0 && !wasStillProcessing) restored.push(invId);
           }
         }
         if (alreadyRecorded && !restored.length && !neutralizedMarker) return; // replay
@@ -6657,6 +6672,35 @@ async function handleDisputeClosed(dispute) {
                 } catch { /* non-critical */ }
               }
             }
+            // TERMINAL states stay terminal (codex r29 P2): an admin who
+            // voided the invoice after the created-reopen made a deliberate
+            // decision — the won closure must not overwrite it with 'paid'
+            // and re-run coverage sync. Park the reinstated share instead.
+            const invStatusNow = String(invoice?.status || '').toLowerCase();
+            const terminalNow = ['void', 'refunded', 'canceled', 'cancelled'].includes(invStatusNow);
+            if (invoice && terminalNow) {
+              await db('stripe_orphan_charges')
+                .insert({
+                  stripe_payment_intent_id: `${disputedPiId || chargeId}:dispute-won:${dispute.id}:${invId}`,
+                  stripe_charge_id: row.stripe_charge_id || chargeId,
+                  customer_id: row.customer_id || null,
+                  invoice_id: invId,
+                  amount: Number(row.amount) || 0,
+                  source: 'combined_pay_webhook',
+                  original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but the invoice is ${invStatusNow} (deliberate terminal state) — credit or refund the reinstated share manually`,
+                })
+                .onConflict('stripe_payment_intent_id')
+                .ignore();
+              try {
+                await NotificationService.notifyAdmin(
+                  'dispute',
+                  `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                  `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but the invoice is ${invStatusNow} — credit or refund the reinstated share in /admin/revenue.`,
+                  { icon: '⚠️', link: '/admin/revenue' },
+                );
+              } catch { /* non-critical */ }
+              continue;
+            }
             const invoicePiNow = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
             const restoreNow = invoice && invoice.status !== 'paid'
               && (!invoicePiNow || (disputedPiId && invoicePiNow === disputedPiId));
@@ -6746,6 +6790,22 @@ async function handleDisputeClosed(dispute) {
           });
         if (lostResiduals > 0) {
           logger.info(`[stripe-webhook] combined dispute ${dispute.id} lost — resolved ${lostResiduals} residual reconciliation case(s) for charge ${chargeId}`);
+        }
+        // Whole-charge quarantines resolve too (codex r29 P2): a combined
+        // succeeded event quarantined before settlement wrote an
+        // invoice_payment_webhook orphan keyed by the PLAIN PI id — the
+        // lost chargeback returned that cash as well, and leaving the row
+        // open keeps assertNoInvoiceChargeReconciliationPending fencing
+        // the anchor from collection.
+        const lostQuarantines = await db('stripe_orphan_charges')
+          .where({ resolved: false, source: 'invoice_payment_webhook', stripe_payment_intent_id: closedLockKey })
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: dispute ${dispute.id} was LOST — the quarantined charge's cash was returned to the customer via chargeback`,
+          });
+        if (lostQuarantines > 0) {
+          logger.info(`[stripe-webhook] combined dispute ${dispute.id} lost — resolved ${lostQuarantines} whole-charge quarantine(s) for PI ${closedLockKey}`);
         }
       }
       try {

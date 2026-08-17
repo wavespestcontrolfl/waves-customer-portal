@@ -1511,6 +1511,41 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
     }
 
+    // Combined pay-page session release BEFORE accepting a manual payment
+    // (codex #3427 r29 P0): this invoice may ride a combined PI a browser
+    // can still confirm directly — recording cash/check now and letting
+    // that capture land later double-charges the customer. Unconfirmed →
+    // cancel + unstamp (fail closed); already canceled → finish the stamp
+    // cleanup; anything in flight refuses (the collectible guard above
+    // already blocks 'processing' invoices, this covers seam races).
+    if (invoice.stripe_payment_intent_id) {
+      const StripeService = require('../services/stripe');
+      const PayCombined = require('../services/pay-combined');
+      let openPi;
+      try {
+        openPi = await StripeService.retrievePaymentIntent(invoice.stripe_payment_intent_id);
+      } catch (piErr) {
+        return res.status(409).json({ error: `Could not verify the invoice's open payment session (${piErr.message}) — try again` });
+      }
+      if (!openPi) {
+        return res.status(409).json({ error: "Could not verify the invoice's open payment session (payment service unavailable) — try again" });
+      }
+      if (PayCombined.isCombinedPiMetadata(openPi.metadata)) {
+        if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(openPi.status)) {
+          try {
+            await StripeService.cancelPaymentIntent(openPi.id);
+          } catch (cancelErr) {
+            return res.status(409).json({ error: `Could not release the open combined payment session (${cancelErr.message}) — try again` });
+          }
+          await PayCombined.clearPaymentIntentStamps(db, openPi.id);
+        } else if (openPi.status === 'canceled') {
+          await PayCombined.clearPaymentIntentStamps(db, openPi.id);
+        } else {
+          return res.status(409).json({ error: 'A combined bank payment is in flight on this invoice — wait for it to settle or fail before recording a manual payment' });
+        }
+      }
+    }
+
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
 
     // Append operator note to invoice notes (don't clobber existing notes).
