@@ -1210,7 +1210,22 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       // A dispute (possibly pre-settlement — codex r5 P1) already clawed
       // this money back: settling would mark invoices paid on funds that
       // are gone. Terminal for this event — record the orphan for the
-      // operator instead of retrying forever.
+      // operator instead of retrying forever. EXCEPT when the fence is a
+      // FINALIZED-LOST marker (codex r32 P2, the closed-before-succeeded
+      // ordering): the chargeback already returned the cash and the lost
+      // closure already ran its cleanup — a fresh quarantine here would be
+      // unresolvable and would fence the anchor forever.
+      const fenceMarkerRows = await db('payments').where({ stripe_payment_intent_id: piId, status: 'disputed' });
+      const finalizedLost = fenceMarkerRows.some((r) => {
+        try {
+          const m = r.metadata ? (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) : {};
+          return m.dispute_final === 'lost';
+        } catch { return false; }
+      });
+      if (finalizedLost) {
+        logger.warn(`[stripe-webhook] Combined PI ${piId} succeeded after a FINALIZED-LOST dispute — the chargeback already returned the cash; no quarantine recorded`);
+        return;
+      }
       logger.error(`[stripe-webhook] Refusing to settle disputed combined PI ${piId}: ${err.message}`);
       await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
       return;

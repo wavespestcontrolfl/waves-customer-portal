@@ -523,12 +523,26 @@ async function releaseCombinedSessionBeforeCollection(database, invoice, { conte
   // predate a setup that stamps a confirmable combined PI between this
   // check and the rail's own write. Holding the lock through the rail's
   // commit closes that window.
-  if (invoice?.customer_id) {
-    await lockCombinedCustomers(database, [String(invoice.customer_id)]);
+  // Re-lock until ownership is STABLE (codex r32 P1, same bounded loop as
+  // setup and stop-dunning): the snapshot's customer id can be a
+  // merge-retired owner — locking only that would let /setup lock the new
+  // owner and stamp a confirmable combined PI after our read.
+  let freshInvoice = null;
+  if (invoice?.id) {
+    let ownerId = invoice.customer_id ? String(invoice.customer_id) : null;
+    for (let attempt = 0; ; attempt++) {
+      if (ownerId) await lockCombinedCustomers(database, [ownerId]);
+      freshInvoice = await database('invoices').where({ id: invoice.id }).first('id', 'invoice_number', 'customer_id', 'stripe_payment_intent_id');
+      const freshId = freshInvoice?.customer_id ? String(freshInvoice.customer_id) : null;
+      if (!freshId || freshId === ownerId) break;
+      if (attempt >= 4) {
+        const ownerErr = new Error('The invoice ownership kept changing — try again');
+        ownerErr.statusCode = 409;
+        throw ownerErr;
+      }
+      ownerId = freshId;
+    }
   }
-  const freshInvoice = invoice?.id
-    ? await database('invoices').where({ id: invoice.id }).first('id', 'invoice_number', 'customer_id', 'stripe_payment_intent_id')
-    : null;
   const live = freshInvoice || invoice;
   if (!live?.stripe_payment_intent_id) return { released: false };
   const StripeService = require('./stripe');

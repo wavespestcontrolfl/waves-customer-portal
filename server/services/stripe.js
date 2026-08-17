@@ -4002,12 +4002,33 @@ const StripeService = {
       // P1): when this update DROPPED a previously-combined allocation
       // (gate flipped off, sibling paid/stopped elsewhere), the dropped
       // siblings' stamps must clear too, or their own pay links stay stuck
-      // behind a PI whose metadata no longer names them.
-      await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId, {
-        keepInvoiceIds: combinedCtx
-          ? combinedCtx.allocation.map((a) => String(a.invoiceId))
-          : [String(invoiceId)],
-      });
+      // behind a PI whose metadata no longer names them. If the cleanup
+      // FAILS after Stripe already committed the new shape (codex r32 P2),
+      // cancel the mutated PI — a stranded sibling stamped on a PI whose
+      // metadata no longer owns it would refuse its own pay link
+      // indefinitely (and, gate-off, the boot revoker can't even see it
+      // once isCombinedPiMetadata is false).
+      try {
+        await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId, {
+          keepInvoiceIds: combinedCtx
+            ? combinedCtx.allocation.map((a) => String(a.invoiceId))
+            : [String(invoiceId)],
+        });
+      } catch (cleanupErr) {
+        logger.error(`[stripe] update-amount stamp cleanup failed for PI ${effectivePaymentIntentId}: ${cleanupErr.message} — canceling the mutated PI`);
+        try {
+          await stripe.paymentIntents.cancel(effectivePaymentIntentId);
+        } catch (cancelErr) {
+          logger.error(`[stripe] could not cancel PI ${effectivePaymentIntentId} after failed cleanup: ${cancelErr.message} — manual review needed`);
+        }
+        try {
+          await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId);
+        } catch { /* the 409 below reloads the page, which re-mints and repairs */ }
+        const cleanupRefusal = new Error('Could not update the payment session — refreshing to the latest amounts.');
+        cleanupRefusal.statusCode = 409;
+        cleanupRefusal.staleBalance = true;
+        throw cleanupRefusal;
+      }
       if (retargeted) {
         // A newer tender switch can repoint the invoice between the lineage
         // vetting above and this update settling. Re-read before handing the
