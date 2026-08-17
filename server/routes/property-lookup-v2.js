@@ -2080,6 +2080,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       parcelId: rc._parcel.parcelId,
       county: rc._parcel.county,
       areaSqft: rc._parcel.polygonAreaSqft || rc._parcel.lotSqft || null,
+      // County-attested unit count. The top-level unitCount only promotes
+      // the parcel figure on association aggregates (changing it globally
+      // would move commercial per-unit pricing), but the public-quote
+      // unit-suffix guard needs the attested count for the 2–4-unit parcels
+      // detectCategory now classifies residential — without it a "Unit B"
+      // lead at a duplex would price off the whole building's sqft.
+      residentialUnits: Number(rc._parcel.residentialUnits) || null,
       source: 'fdor_cadastral',
     } : null,
 
@@ -2685,12 +2692,54 @@ function commercialSignalRecord(rc) {
   };
 }
 
+// Owner ruling (2026-08-11): fewer than five units is RESIDENTIAL. Florida
+// PAOs file duplex/triplex/guest-house parcels under DOR 08xx and the parcel
+// parsers map every 08xx string to "Multifamily", so the bare multifamily
+// TEXT vote in detectCategory must not commercial-classify a parcel the
+// county itself counts at ≤4 units. Only county-attested counts may suppress
+// the vote: _parcel.residentialUnits is county GIS by construction
+// (attachParcelMeta), and rc.unitCount only when the record is authoritative
+// (county/cadastral merge, or authoritative unitCount field evidence).
+// Synthetic defaults keep the text vote: shapeAsPropertyRecord seeds
+// unitCount: 1 on EVERY record (ai-property-lookup.js), so a record-level
+// count may only vote here on authoritative unitCount FIELD evidence — a
+// bare `_source: county` proves nothing about where the 1 came from (codex
+// P1: a county multifamily parcel whose GIS omitted unit data must keep the
+// conservative COMMERCIAL verdict). hasCommercialSignalText's shaped
+// { unitCount: 1 } caller default stays non-attested the same way, and
+// web-sourced counts keep the vote too — suppressing on those would reopen
+// the Gateway Ave hole in the other direction. When BOTH counts exist the
+// larger wins — the association aggregate shape carries unitCount 1 beside
+// _parcel.residentialUnits 30–48.
+function countyAttestedSmallResidential(rc) {
+  if (!rc) return false;
+  const counts = [];
+  const parcelUnits = Number(rc._parcel?.residentialUnits);
+  if (Number.isFinite(parcelUnits) && parcelUnits > 0) counts.push(parcelUnits);
+  const evidence = rc._fieldEvidence?.unitCount;
+  const evidenceSource = String(evidence?.sourceType || '').toLowerCase();
+  const recordUnits = Number(rc.unitCount);
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource)
+    && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
+  return counts.length > 0 && Math.max(...counts) <= 4;
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
   const signalRc = commercialSignalRecord(rc);
   const text = commercialSignalText(signalRc, ai);
   if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
-  if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
+  // Common-area parcels are association-owned regardless of unit count; the
+  // multifamily-flavored strings alone defer to a county-attested small
+  // residential count (≥5-unit ruling — duplex/guest house = residential).
+  // The reclassification rides the unit-scope guardrails gate: a residential
+  // verdict hands a unit-suffixed estimator draft the whole building's
+  // county sqft, and the protections that catch that
+  // (applyUnitScopeToPropertyFacts + the review marker) only run gate-on —
+  // until then the conservative COMMERCIAL verdict stands (codex P1).
+  if (/(hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
+  if (/(apartment|apartments|multi\s*family|multifamily)/.test(text)
+    && !(unitScopeGuardrailsEnabled() && countyAttestedSmallResidential(signalRc))) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
   if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';

@@ -151,7 +151,17 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
 // bare unit line (no enrichment) or a multi-unit parcel with no unit
 // (a genuine whole-building/association request, #2721) prices normally.
 function unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress = {}, enrichedProps = {}) {
-  if (!(Number(enrichedProps.unitCount) > 1)) return false;
+  // The top-level unitCount keeps the shaped 1 on non-aggregated parcels
+  // (promotion would move commercial per-unit pricing), so the county's own
+  // count rides in parcel.residentialUnits — a unit-suffixed lead at a
+  // residential-classified duplex still describes ONE door on a
+  // whole-building enrichment and must site-quote. Older cached profiles
+  // without the field keep the unitCount-only behavior.
+  const attestedUnits = Math.max(
+    Number(enrichedProps.unitCount) || 0,
+    Number(enrichedProps.parcel?.residentialUnits) || 0,
+  );
+  if (!(attestedUnits > 1)) return false;
   if (String(normalizedAddress.line2 || '').trim()) return true;
   // Free-form submissions keep the unit INLINE in line1 when no dedicated
   // unit field was supplied ("123 Main St Apt 4" normalizes with an empty

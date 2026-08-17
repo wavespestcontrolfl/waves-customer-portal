@@ -213,6 +213,9 @@ describe('enriched parcel block', () => {
       parcelId: '402217351013',
       county: 'Charlotte',
       areaSqft: 10085,
+      // County-attested unit count for the public-quote unit-suffix guard;
+      // null when the GIS layer carried no residentialUnits.
+      residentialUnits: null,
       source: 'fdor_cadastral',
     });
   });
