@@ -7160,8 +7160,10 @@ function ServicePrefsSection() {
         // plan component): render the row disabled with the office-reprice
         // explanation instead of an optimistic flip that bounces off the PUT.
         const locked = editable ? editable[r.key] === false : false;
+        // The lock only applies to a commercial exterior-only plan (the
+        // toggle would re-enable interior work the plan doesn't price).
         const desc = locked
-          ? 'Part of your priced commercial plan — contact our office to change your service scope.'
+          ? 'Interior service is not part of your current commercial plan — contact our office to add it, priced from your building.'
           : r.desc;
         return (
           <div key={r.key} style={{

@@ -63,26 +63,33 @@ async function readPrefs(customerId) {
   return normalize(raw);
 }
 
-// Commercial plans price interior service as a plan component (owner
-// 2026-08-17): the interior_spray preference is not customer-editable there
-// — it doubles as the tech surfaces' sold-scope signal, and flipping it
-// would change work scope without the reprice. Shared by GET (so the portal
-// can render the row locked with an explanation) and PUT (the trust
-// boundary).
-async function commercialInteriorLocked(customerId) {
+// Commercial exterior-only plans price interior service OUT of the plan
+// (owner 2026-08-17), and interior_spray doubles as the tech surfaces'
+// sold-scope signal. The lock is deliberately NARROW (codex #3432 r10 P2):
+// only a commercial customer whose preference currently reads exterior-only
+// (the accept-time sold-scope stamp) is blocked from RE-ENABLING interior —
+// that transition would restore routine interior work without the priced
+// component. Every other commercial account (lawn-only, pre-split pest
+// plans, interior-included plans) keeps the preference exactly as before,
+// including turning interior off. Shared by GET (portal renders the locked
+// row with an explanation) and PUT (the trust boundary).
+async function commercialInteriorReEnableLocked(customerId) {
   const cust = await db('customers')
     .select('waveguard_tier', 'property_type')
     .where({ id: customerId })
     .first();
-  return String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
+  const isCommercial = String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
     || String(cust?.property_type || '').toLowerCase() === 'commercial';
+  if (!isCommercial) return false;
+  const prefs = await readPrefs(customerId);
+  return prefs.interior_spray === false;
 }
 
 // GET /api/service-preferences
 router.get('/', async (req, res, next) => {
   try {
     const prefs = await readPrefs(req.customerId);
-    const interiorLocked = await commercialInteriorLocked(req.customerId);
+    const interiorLocked = await commercialInteriorReEnableLocked(req.customerId);
     res.json({
       preferences: prefs,
       // Per-key editability for the portal UI (codex #3432 r6 P2): a locked
@@ -106,15 +113,15 @@ router.put('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Service preferences not yet available' });
     }
 
-    // Commercial plans price interior service as a plan component (owner
-    // 2026-08-17), and interior_spray doubles as the sold-scope signal the
-    // tech surfaces read (EXTERIOR ONLY warnings). Letting a commercial
-    // customer flip it here would re-enable routine interior work without
-    // restoring the priced component — scope changes go through the office
-    // and a reprice (codex #3432 r3 P1). exterior_sweep stays editable.
-    if ('interior_spray' in patch && await commercialInteriorLocked(req.customerId)) {
+    // A commercial customer whose sold scope is exterior-only cannot
+    // RE-ENABLE interior here — that would restore routine interior work
+    // without the priced component; scope changes go through the office and
+    // a reprice (codex #3432 r3 P1, narrowed r10 P2). Disabling stays
+    // available to everyone, and commercial accounts without the
+    // exterior-only stamp keep the preference exactly as before.
+    if (patch.interior_spray === true && await commercialInteriorReEnableLocked(req.customerId)) {
       return res.status(400).json({
-        error: 'Interior service on a commercial plan is part of your priced program — contact our office to change it.',
+        error: 'Interior service on your commercial plan is priced by scope — contact our office to add it to your program.',
       });
     }
 
