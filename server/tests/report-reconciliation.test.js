@@ -349,6 +349,25 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBe('technician_report');
   });
 
+  // r79 (#3420): non-"not" denial governors negate the condition family.
+  test('tree_shrub refuses anything-but/far-from/hardly denials beside a recorded Good', () => {
+    for (const body of [
+      'The plants are anything but healthy.',
+      'The landscape is far from healthy.',
+      'The plants are hardly healthy.',
+    ]) {
+      const r = buildTodaysResult({
+        projectType: 'tree_shrub',
+        values: { landscape_condition: 'Good', plant_groups: 'Shrubs' },
+        visitSequence: 1,
+        whatWeDid: 'x',
+        nextStep: 'n.',
+        technicianReportBody: body,
+      });
+      expect(r.bodySource).toBeUndefined();
+    }
+  });
+
   test('tree_shrub refuses a recovering-family claim beside a recorded Good', () => {
     const r = buildTodaysResult({
       projectType: 'tree_shrub',
@@ -658,6 +677,23 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
       { stations_checked: 6 },
       2,
       'We checked 6 bait stations today.',
+    )).toEqual([]);
+  });
+
+  // r79 (#3420): the companion's STORY guard runs on a primary-carried body.
+  test('typedBodyContradictions flags a repairs claim beside an inspection-only exclusion companion', () => {
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    expect(typedBodyContradictions(
+      'rodent_exclusion',
+      { exclusion_work_completed: 'Inspection only' },
+      null,
+      'We patched the garage opening.',
+    )).toContain('story_contradiction');
+    expect(typedBodyContradictions(
+      'rodent_exclusion',
+      { exclusion_work_completed: 'Inspection only' },
+      null,
+      'We inspected all accessible entry areas; no exclusion repairs were completed today.',
     )).toEqual([]);
   });
 

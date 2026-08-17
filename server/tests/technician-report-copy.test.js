@@ -233,7 +233,7 @@ describe('typed snapshot — technician report body in the generic tail composit
     // branches joined the technician-report lane (owner 2026-08-11 — the
     // cockroach report dropped the generated copy). v4 added rodent
     // trapping + the declared setup/re-check composition (#3159).
-    expect(snapshot.summaryTemplateVersion).toBe(5);
+    expect(snapshot.summaryTemplateVersion).toBe(6);
   });
 
   test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {
@@ -635,6 +635,20 @@ describe('typed snapshot — technician report body in the generic tail composit
       .not.toEqual([]);
     expect(activityLevelContradictions('We found heavy feeding at the back stations.', 1))
       .not.toEqual([]);
+  });
+
+  // r79 (#3420): absence scoped to a subset location is a subset report,
+  // not a whole-visit denial — property-level nouns still deny.
+  test('location-scoped absence beside a nonzero gauge stays legal; whole-visit denials refuse', () => {
+    const { activityLevelContradictions } = require('../services/service-report/activity-indicators');
+    expect(activityLevelContradictions(
+      'We found no activity at the front stations, but moderate activity at station 7.', 2,
+    )).toEqual([]);
+    expect(activityLevelContradictions('There was no activity in the attic.', 2)).toEqual([]);
+    expect(activityLevelContradictions('We found no activity at the property.', 2))
+      .toContain('level_claim_mismatch:none');
+    expect(activityLevelContradictions('No activity was observed today.', 2))
+      .toContain('level_claim_mismatch:none');
   });
 
   test('roster totals require an explicit assertion — a location phrase never claims (codex #3358 r4)', () => {

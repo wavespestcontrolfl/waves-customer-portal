@@ -43,7 +43,11 @@ const COPY_MAP_VERSION = 3;
 // flea, and tree & shrub still keep template copy.
 // v4 added rodent trapping + setup-visit wording; v3 added the generic
 // non-gauge default composition.
-const SUMMARY_TEMPLATE_VERSION = 5;
+// v6 (#3420): story lanes consume reviewed technician bodies, mandated
+// lines append, and the contradiction rules choose between AI and
+// deterministic copy — snapshots frozen by this generator must be
+// distinguishable from v5's (codex r79).
+const SUMMARY_TEMPLATE_VERSION = 6;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -3040,6 +3044,11 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
   + `|\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}(?:evidence|signs?)\\b[^.!?]{0,20}\\b(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`,
   'gi',
 );
+// A subset-location prepositional phrase directly after an absence match —
+// station/room/area-class nouns only; property-level nouns deliberately
+// absent so "no activity at the property" stays a whole-visit denial
+// (codex r79).
+const LEVEL_ABSENCE_SUBSET_SCOPE_RE = /^\s*(?:at|in|near|around|along|behind|under|beneath|inside|by)\s+(?:the\s+|a\s+|an\s+|any\s+of\s+the\s+)?(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)*(?:stations?|traps?|monitors?|bait\s+stations?|areas?|rooms?|zones?|sections?|corners?|walls?|closets?|attic|garage|kitchen|bathrooms?|bedrooms?|crawl\s?space|lanai|soffits?|baseboards?|units?|perimeter)\b/i;
 // finalBand semantics: 1..3 = the recorded level band (adjacent claims
 // tolerated, 2-band gaps contradict); an EXPLICIT 0 = a zero-score gauge,
 // where ANY positive level claim contradicts (codex r60) and absence
@@ -3056,6 +3065,12 @@ function activityLevelContradictions(text, finalBand) {
         const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
         if (intentGovernsLevelClaim(before) || intentGovernsLevelClaimFromAfter(afterClause)) continue;
         if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
+        // Absence explicitly scoped to a subset location is a subset
+        // report, not a whole-visit denial (codex r79): "no activity at
+        // the front stations, but moderate activity at station 7" agrees
+        // with a nonzero gauge. Property-level nouns (property/home/…)
+        // are NOT subsets and still deny the whole visit.
+        if (LEVEL_ABSENCE_SUBSET_SCOPE_RE.test(afterClause)) continue;
         found.push('level_claim_mismatch:none');
       }
     }
@@ -3327,7 +3342,7 @@ function buildTodaysResult({
       // names no opposing word. The positive shapes cannot cross "not",
       // so these never double-extract (codex r51).
       const TS_NEGATED_CLAIM_RE = new RegExp(
-        `\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:not|no\\s+longer)|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|(?:do|does|did)\\s+not\\s+(?:look|seem|appear))\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`,
+        `\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:not|no\\s+longer|anything\\s+but|far\\s+from|nowhere\\s+near|hardly|scarcely|barely|by\\s+no\\s+means|less\\s+than)|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|(?:do|does|did)\\s+not\\s+(?:look|seem|appear))\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`,
         'gi',
       );
       const tsNegatedBands = [...tsBodyText.matchAll(TS_NEGATED_CLAIM_RE)]
@@ -3910,6 +3925,13 @@ function typedBodyContradictions(projectType, values = {}, score = null, body = 
     ? 0
     : levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
   if (band !== null && band !== undefined) found.push(...activityLevelContradictions(text, band));
+  // The story-specific guards run for the companion's type too (codex r79):
+  // a primary-carried whole-visit body must not publish a repairs-completed
+  // claim beside an inspection-only exclusion companion card — the same
+  // body is rejected when that snapshot carries it itself.
+  if (rodentStoryBodyContradiction(projectType, vals, text)) {
+    found.push('story_contradiction');
+  }
   return found;
 }
 

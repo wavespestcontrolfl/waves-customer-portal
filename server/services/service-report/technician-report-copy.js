@@ -196,7 +196,10 @@ function technicianReportCustomerCopy(notes) {
   // The exemption requires the COMPLETE idiom: the timing-confirmation
   // clause must be present too, or a bare "safe once dry" would publish
   // without the required technician confirmation (codex r66).
-  const SAFE_IDIOM_RE = /\bsafe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
+  // STANDALONE "safe" only (codex r79): "pet-safe once dry" must keep its
+  // compound intact so the vocabulary screens still see the banned claim —
+  // stripping from the hyphen onward would hide the only "safe" token.
+  const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
   // AFFIRMATIVE technician confirmation only (codex r66/r67): the subject
   // must be the technician and the tempered gaps refuse to cross a
   // negation, so "the technician did not confirm timing" (and a homeowner
