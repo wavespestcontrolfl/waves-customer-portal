@@ -2719,3 +2719,55 @@ describe('round-27 hardening', () => {
     expect(zipMatchesState('06390', 'CT')).toBe(false);
   });
 });
+
+describe('round-28 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('ownership holds at EVERY occurrence of a repeated SMS quote', async () => {
+    const body = "My email is wrong. My accountant's email is wrong; use bookkeeper@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'email is wrong', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('ownership holds on every caller line matching a repeated call quote', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Caller: my name is wrong',
+          "Caller: my wife's name is wrong, it is Janet Smith",
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Janet', evidence_quote: 'name is wrong' }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: 'name is wrong' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+
+  it('non-ASCII possessive owners trip the ownership guard', async () => {
+    const body = "My fiancé's email is wrong; use spouse@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: "my fiancé's email is wrong; use spouse@example.com", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});

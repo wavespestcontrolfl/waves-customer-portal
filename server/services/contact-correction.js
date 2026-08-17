@@ -326,8 +326,10 @@ async function extractSmsContactCorrections({ body }) {
       // A third party's contact info is never the customer's correction,
       // no matter how much correction vocabulary surrounds it (r21
       // addresses; r22 email/name; r24 judged against the CONTAINING
-      // source clause so a narrowed quote can't shed the possessive).
-      && !thirdPartyOwnedStatement(c.field, sourceClauseFor(text, c.quote)));
+      // source clause so a narrowed quote can't shed the possessive; r28
+      // against EVERY occurrence of the quote, since co-location may
+      // ground the value at any of them).
+      && !sourceClausesFor(text, c.quote).some((p) => thirdPartyOwnedStatement(c.field, p)));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -477,11 +479,16 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:
 // (codex #3413 r26): "My tenant's city is wrong" and "My accountant's
 // ZIP is wrong" are third-party statements too.
 const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|zipcode|postal ?code|unit|apt|apartment|suite)";
+// Unicode-aware owner/modifier classes (codex #3413 r28): "My fiancé's
+// email" is a third-party statement too — ASCII [a-z]/\w missed accented
+// owners entirely.
+const TP_OWNER_SRC = "[\\p{L}\\p{M}]+";
+const TP_MODIFIER_SRC = "(?:[\\p{L}\\p{M}\\p{N}]+\\s+){0,3}";
 const THIRD_PARTY_ADDRESS_RE = new RegExp(
-  `\\b(?:his|her|their)\\s+(?:\\w+\\s+){0,3}${TP_ADDR_TOPIC_SRC}\\b`
-  + `|\\b(?!(?:previous|prior)\\b)[a-z]+(?:'s|s')\\s+(?:\\w+\\s+){0,3}${TP_ADDR_TOPIC_SRC}\\b`
-  + '|\\b(?!(?:previous|prior|business)\\b)[a-z]{4,}s\\s+new\\s+address\\b',
-  'i',
+  `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
+  + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
+  + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`,
+  'iu',
 );
 // Same ownership doctrine for email and name (codex #3413 r22): "my
 // accountant's email is wrong; change it to …" is grounded, co-located,
@@ -489,7 +496,11 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
 // and auto-replacing the CUSTOMER's email (plus its fan-out) with it is
 // the exact poisoning the lane exists to prevent. Spouse/child name
 // statements likewise never rename the account holder.
-const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+){0,3}(?:e-?mail|name|surname)\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+){0,3}(?:e-?mail|name|surname)\b/i;
+const THIRD_PARTY_CONTACT_RE = new RegExp(
+  `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`
+  + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}(?:e-?mail|name|surname)\\b`,
+  'iu',
+);
 
 // Ownership is judged against the SOURCE CLAUSE containing the quote, not
 // the extractor-controlled fragment (codex #3413 r24): a model can narrow
@@ -498,32 +509,41 @@ const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+){0,3}(?:e-?mail|
 // accepts any substring, so the containing clause span of the original
 // text is the authority. Falls back to the quote itself when it cannot be
 // located (grounding rejects unlocatable quotes anyway).
-function sourceClauseFor(text, quote) {
+function sourceClausesFor(text, quote) {
   // Typographic apostrophes normalize to ASCII (codex #3413 r25): the
   // ownership predicates match 's-possessives, and "My wife’s email" with
   // a curly quote must not slip past them.
   const deQuote = (s) => String(s).replace(/[‘’]/g, "'");
   const hay = deQuote(normValue(text).replace(/\s+/g, ' ').toLowerCase());
   const nq = deQuote(normValue(quote).replace(/\s+/g, ' ').toLowerCase());
-  const qs = nq ? hay.indexOf(nq) : -1;
-  if (qs < 0) return String(quote || '');
-  const qe = qs + nq.length;
-  const delims = /[;!?\n]|\.(?=\s|$)/g;
-  // Include the immediately PRECEDING clause too (codex #3413 r27): "My
-  // accountant's email is wrong. The email should be …" grounds its quote
-  // in the second sentence, and the possessive antecedent lives in the
-  // first — an ownership probe over the quote's own clause alone would
-  // shed it. A preceding clause about unrelated business can only make
-  // the probe MORE conservative (fail closed), never less.
-  let prevLeft = 0;
-  let left = 0;
-  let right = hay.length;
-  let m;
-  while ((m = delims.exec(hay))) {
-    if (m.index < qs) { prevLeft = left; left = m.index + 1; }
-    if (m.index >= qe) { right = m.index; break; }
+  // EVERY occurrence of the quote yields a probe (codex #3413 r28): a
+  // short quote like "email is wrong" can appear in both a first-person
+  // sentence and a third-party one, and value co-location may ground at
+  // the later occurrence — ownership must hold at all of them, since the
+  // extractor's fragment doesn't say which statement it came from.
+  // Each probe includes the immediately PRECEDING clause too (r27): the
+  // possessive antecedent may live one sentence earlier. A clause about
+  // unrelated business can only make a probe MORE conservative.
+  const probes = [];
+  let from = 0;
+  while (nq) {
+    const qs = hay.indexOf(nq, from);
+    if (qs < 0) break;
+    const qe = qs + nq.length;
+    const delims = /[;!?\n]|\.(?=\s|$)/g;
+    let prevLeft = 0;
+    let left = 0;
+    let right = hay.length;
+    let m;
+    while ((m = delims.exec(hay))) {
+      if (m.index < qs) { prevLeft = left; left = m.index + 1; }
+      if (m.index >= qe) { right = m.index; break; }
+    }
+    probes.push(hay.slice(prevLeft, right));
+    from = qs + 1;
   }
-  return hay.slice(prevLeft, right);
+  if (!probes.length) probes.push(deQuote(String(quote || '').toLowerCase()));
+  return probes;
 }
 
 function thirdPartyOwnedStatement(field, sourceClause) {
@@ -1345,11 +1365,18 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // customer nor ring a proposal bell. Judged against the FULL caller
       // line that grounds the quote (r24): a narrowed evidence quote must
       // not shed the possessive that marks the statement third-party.
+      // EVERY caller line matching the quote is probed (codex #3413 r28):
+      // with repeated evidence text across turns, value grounding may
+      // accept the replacement from a LATER matching line — ownership
+      // must hold on all of them.
       const tpNeedle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
-      const tpLine = (callerLines.find((line) => tpNeedle.length >= 4 && line.includes(tpNeedle))
-        || String(c.evidence_quote || '')).replace(/[‘’]/g, "'");
+      const tpMatches = tpNeedle.length >= 4
+        ? callerLines.filter((line) => line.includes(tpNeedle))
+        : [];
+      const tpProbes = (tpMatches.length ? tpMatches : [String(c.evidence_quote || '')])
+        .map((l) => l.replace(/[‘’]/g, "'"));
       const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;
-      if (thirdPartyOwnedStatement(tpField, tpLine)) return false;
+      if (tpProbes.some((p) => thirdPartyOwnedStatement(tpField, p))) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);

@@ -106,23 +106,21 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
     // r22): the expectedValues passed here come from the SAME customer
     // row the route captured at webhook matching — re-deriving the rebase
     // floor at fire time would advance it past queue writes that landed
-    // between the match and this enqueue, excluding exactly the writes
-    // the baseline predates. The attached customer_id is the marker
-    // (attach always sets it).
+    // between the match and this enqueue. An UNATTACHED reservation
+    // (transient attach failure) goes through the serialized attach here
+    // (r28): pairing the route's earlier snapshot with a floor queried
+    // outside the customer lock could place a just-committed job under
+    // the floor while its write is absent from the snapshot — the exact
+    // race the serialized capture exists to close. Attach still failing ⇒
+    // no enqueue; the reservation stays for the sweep, which cancels
+    // context-free rows (fail closed).
     const existing = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
-      .first('customer_id', 'expected_values');
+      .first('customer_id');
     if (!existing) return false;
-    let contextFields = {};
     if (!existing.customer_id) {
-      const floorRow = await knex('contact_correction_jobs')
-        .where({ customer_id: customerId, status: 'done' })
-        .orderBy('id', 'desc')
-        .first('id');
-      contextFields = {
-        expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
-        rebase_floor_id: floorRow?.id ?? null,
-      };
+      const attached = await attachContactCorrectionContext(jobId, { customerId, expectedValues, knex });
+      if (!attached) return false;
     }
     const updated = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
@@ -130,7 +128,6 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
         status: 'queued',
         customer_id: customerId,
         sms_log_id: smsLogId || null,
-        ...contextFields,
         next_attempt_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });

@@ -767,3 +767,25 @@ describe('round-27 hardening', () => {
     expect(knex._data.contact_correction_jobs.map((r) => r.id)).toEqual([1]);
   });
 });
+
+describe('round-28 hardening', () => {
+  it('enqueue from an unattached reservation goes through the serialized attach', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 7 }), // never attached
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverson', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
+    });
+    const ok = await queue.enqueueContactCorrectionJob(7, {
+      customerId: CUSTOMER_ID, smsLogId: 'sms-1',
+      expectedValues: { last_name: 'Riverz' }, // stale route read — live row must win
+      knex,
+    });
+    expect(ok).toBe(true);
+    const job = knex._data.contact_correction_jobs[1];
+    expect(job.status).toBe('queued');
+    expect(job.rebase_floor_id).toBe(3);
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
+  });
+});
