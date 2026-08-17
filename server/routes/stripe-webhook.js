@@ -6587,6 +6587,27 @@ async function handleDisputeClosed(dispute) {
           }
         }
       }
+      // A LOST full-charge dispute returns the residual shares' cash too
+      // (codex r24 P2): resolve this charge's parked residual cases (same
+      // matcher as the full-refund cleanup — partial-dispute/refund parks
+      // stay open, and a WON dispute preserves everything).
+      if (status === 'lost') {
+        const lostResiduals = await db('stripe_orphan_charges')
+          .where({ resolved: false, source: 'combined_pay_webhook' })
+          .where(function lostResidualKeys() {
+            this.where('stripe_charge_id', chargeId);
+            this.orWhere('stripe_payment_intent_id', 'like', `${closedLockKey}:%`);
+          })
+          .whereNot('stripe_payment_intent_id', 'like', '%:partial-%')
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: dispute ${dispute.id} was LOST — the unmatched cash was returned to the customer via chargeback`,
+          });
+        if (lostResiduals > 0) {
+          logger.info(`[stripe-webhook] combined dispute ${dispute.id} lost — resolved ${lostResiduals} residual reconciliation case(s) for charge ${chargeId}`);
+        }
+      }
       try {
         await NotificationService.notifyAdmin(
           'dispute',

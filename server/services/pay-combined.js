@@ -400,7 +400,7 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
  */
 async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds) {
   const ids = (scheduledServiceIds || []).filter(Boolean);
-  if (!ids.length) return 0;
+  if (!ids.length) return { released: 0, inFlight: 0 };
   // Serialize with combined /setup (codex r9 P1): the same per-customer
   // advisory lock createInvoicePaymentIntent holds — otherwise this scan
   // can complete before setup stamps the invoices, the payer change
@@ -422,7 +422,7 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
  * writer creates the identical late-assignment gap). */
 async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
-  if (!customerId) return 0;
+  if (!customerId) return { released: 0, inFlight: 0 };
   // Same setup-serialization lock as the scheduled-service variant.
   await lockCombinedCustomers(database, [String(customerId)]);
   const rows = await database('invoices')
@@ -449,6 +449,7 @@ async function lockCombinedCustomers(database, customerIds) {
 async function releaseUnconfirmedCombinedSessions(database, rows) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
   let released = 0;
+  let inFlight = 0;
   for (const piId of piIds) {
     const StripeService = require('./stripe');
     let pi;
@@ -465,16 +466,25 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
     if (!isCombinedPiMetadata(pi.metadata)) continue;
+    // Already canceled (codex r24 P2): a prior release's cancel succeeded
+    // but the stamp cleanup failed — retry the cleanup instead of skipping.
+    if (pi.status === 'canceled') {
+      await clearPaymentIntentStamps(database, piId);
+      released += 1;
+      continue;
+    }
     // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
     // a pending bank verification is still an UNCAPTURED session, and the
     // customer completing it later would charge debt that now belongs to
     // the payer — ownership correctness outranks the verification UX, so
     // the session is canceled like any other unconfirmed PI. Only money
     // actually moving (processing/succeeded) is left to the settle-path
-    // ownership guards.
+    // ownership guards — reported to the caller (codex r24 P1: a merge
+    // must DEFER on a loser-side in-flight session, not proceed past it).
     const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
     if (!unconfirmed) {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
+      inFlight += 1;
       continue;
     }
     try {
@@ -486,7 +496,7 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     released += 1;
     logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
   }
-  return released;
+  return { released, inFlight };
 }
 
 /**
@@ -527,6 +537,15 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
     // keeps trying rather than silently leaving a confirmable PI live.
     if (!pi) { failed += 1; continue; }
     if (!isCombinedPiMetadata(pi.metadata)) continue;
+    // ALREADY canceled (codex r24 P2): a prior pass's cancel succeeded but
+    // its stamp cleanup failed — the retry must still clean the stamps, or
+    // the successful Stripe transition itself suppresses the retried DB
+    // cleanup and every invoice stays bound to the dead PI.
+    if (pi.status === 'canceled') {
+      await clearPaymentIntentStamps(db, piId);
+      revoked += 1;
+      continue;
+    }
     if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
       logger.warn(`[pay-combined] gate-off revoke: combined PI ${piId} is ${pi.status} — money may be in flight, left to the settle paths`);
       continue;

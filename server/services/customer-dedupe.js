@@ -1528,20 +1528,24 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
     }
-    // Payer activation fence (codex #3427 r13/r14 P1): after the merge,
-    // EVERY invoice on the merged account — the winner's and the loser's
-    // repointed ones — resolves to the EFFECTIVE winner payer, whether it
-    // was transferred from the loser (backfills.payer_id) or the winner
-    // already had one (a self-pay loser merged into a payer-billed
-    // winner). Any unconfirmed combined pay-page session on EITHER side
-    // must be released FIRST — same fail-closed cancel+unstamp (and
-    // pay.combined.customer serialization) as the customer-editor payer
-    // write. An unreleasable session aborts the merge; the admin retries.
-    const effectiveWinnerPayerId = backfills.payer_id || winner.payer_id || null;
-    if (effectiveWinnerPayerId) {
+    // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
+    // widened r24 P1): the payer case is the sharpest hazard (every
+    // invoice starts resolving to the effective winner payer), but a
+    // SELF-PAY merge is unsafe too — the loser's prepared combined PI
+    // carries the loser's waves_customer_id, and after the retire the
+    // post-settlement mirror would persist consent/autopay against the
+    // archived record (or churn Stripe profiles). Release BOTH sides'
+    // unconfirmed sessions; a loser-side session with money actually IN
+    // FLIGHT defers the merge entirely (merges are retryable, ACH windows
+    // are days — settling first keeps the settlement identity coherent).
+    // An unreleasable session aborts the merge; the admin retries.
+    {
       const PayCombined = require('./pay-combined');
       await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
-      await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
+      if (loserRelease.inFlight > 0) {
+        throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
+      }
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
