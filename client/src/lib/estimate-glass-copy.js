@@ -551,19 +551,33 @@ const GLASS_SERVICE_INCLUSIONS = {
 // every other service gets its glass rewrite; unknown keys fall back to
 // null so PriceCard keeps the baseline SERVICE_INCLUSIONS list (fail-safe:
 // no glass list means no new claims).
-export function glassRowInclusions(rowServiceKey, visitsPerYear, includeSetupBullet = false, opts = {}) {
+export function glassRowInclusions(rowServiceKey, visitsPerYear, includeSetupBullet = false) {
   if (rowServiceKey === 'pest_control') {
     return glassPestInclusions(visitsPerYear, includeSetupBullet);
   }
-  const stack = GLASS_SERVICE_INCLUSIONS[rowServiceKey] || null;
-  // Scope-aware commercial interior bullet: only an EXPLICIT exterior-only
-  // selection (false) swaps it — true/undefined/null keep the included copy.
-  if (rowServiceKey === 'commercial_pest' && stack && opts.interiorSelected === false) {
-    return stack.map((line) => (line === COMMERCIAL_PEST_INTERIOR_BULLET
-      ? COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET
-      : line));
+  return GLASS_SERVICE_INCLUSIONS[rowServiceKey] || null;
+}
+
+// Scope-aware commercial inclusions (codex #3432 r8 + r9): on an explicit
+// exterior-only selection, ANY interior-claiming bullet must give way to the
+// office-reprice line — applied by PriceCard AFTER stack selection so it
+// covers every gate combination (commercial glass stack, the residential
+// pest stack the slug falls to while GATE_ESTIMATE_COMMERCIAL_GLASS is off,
+// and the baseline non-glass list). Only interiorSelected === false on a
+// commercial pest row transforms; anything else returns the stack untouched.
+export function applyCommercialExteriorScope(items, isCommercialPestRow, interiorSelected) {
+  if (!isCommercialPestRow || interiorSelected !== false || !Array.isArray(items)) return items;
+  const out = [];
+  let swapped = false;
+  for (const line of items) {
+    if (/interior/i.test(String(line))) {
+      if (!swapped) { out.push(COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET); swapped = true; }
+      // Additional interior-claiming lines collapse into the single swap.
+    } else {
+      out.push(line);
+    }
   }
-  return stack;
+  return out;
 }
 
 // ── Per-day value line ──────────────────────────────────────────────────────

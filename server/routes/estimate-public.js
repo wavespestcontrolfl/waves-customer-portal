@@ -17964,6 +17964,13 @@ function attachCommercialInteriorSelector(services = [], estData = {}) {
   // holder mint two conflicting prices on one formal proposal (codex #3432
   // r2 P1). The mutation route enforces the same rule.
   if (estData?.proposal?.enabled === true) return services;
+  // SOLD-state scope rides the section UNGATED (bond posture: a kill-switch
+  // flip never changes what was sold): the client's scope-aware inclusion
+  // bullets need the exterior-only fact even when the selector itself is
+  // gated off (codex #3432 r9).
+  if (commercialInteriorExcludedFromEstimateData(estData)) {
+    section.interiorScopeExcluded = true;
+  }
   const option = commercialInteriorOptionFromEstimateData(estData);
   // Selector (unsold state) requires BOTH a persisted snapshot and the live
   // gate — sold state keeps pricing from the rewritten rows regardless.

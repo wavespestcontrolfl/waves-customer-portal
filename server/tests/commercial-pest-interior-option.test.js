@@ -377,6 +377,22 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     }
   });
 
+  test('sold exterior-only scope rides the section UNGATED (bullets stay honest after a gate flip)', () => {
+    // codex #3432 r9: the selector is gated, but the sold-state fact is not
+    // — the client's scope-aware inclusion bullets need it either way.
+    delete process.env.GATE_COMMERCIAL_INTERIOR_OPTION;
+    const parsed = interiorEstimateData();
+    applySelectedCommercialInteriorToEstimateData(parsed, false);
+    const services = [{ key: 'commercial_pest', frequencies: [] }];
+    attachCommercialInteriorSelector(services, parsed);
+    expect(services[0].interiorOption).toBeUndefined(); // selector gated off
+    expect(services[0].interiorScopeExcluded).toBe(true); // sold state visible
+    // Included plans carry no flag.
+    const services2 = [{ key: 'commercial_pest', frequencies: [] }];
+    attachCommercialInteriorSelector(services2, interiorEstimateData());
+    expect(services2[0].interiorScopeExcluded).toBeUndefined();
+  });
+
   test('authored proposals never expose the selector — proposal itemization is the quote', () => {
     // codex #3432 r2 P1: a promoted estimate retains its engine rows (and
     // their interiorOption), but the authored proposal is the billed price.
