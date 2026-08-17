@@ -95,6 +95,25 @@ describe('previsitCardInviteEligible', () => {
     expect(sweep.match(/whereNotIn\('rec\.status', TERMINAL_STATUSES\)/g)).toHaveLength(2);
     expect(sweep).not.toContain("whereIn('rec.status', LIVE_VISIT_STATUSES)");
   });
+
+  test('the sweep transaction joins the customer-comms lock namespace — conversions serialize with the send (codex #3426 r2)', () => {
+    const sweep = require('fs').readFileSync(
+      require.resolve('../services/previsit-card-request-sweep'), 'utf8',
+    );
+    // Plan-conversion writers hold `customer-comms:<id>` around their
+    // scheduled_services inserts (customer-comms-lock.js contract). The
+    // sweep's private invite key can't fence them; only sharing THEIR key
+    // closes the recheck→send window. The lock must be granted before the
+    // in-lock recheck, and the funnel call (send included) must run inside
+    // the same transaction so the lock holds through dispatch.
+    expect(sweep).toContain("require('../utils/customer-comms-lock')");
+    const lockIdx = sweep.indexOf('await lockCustomerComms(trx, visit.customer_id);');
+    const recheckIdx = sweep.indexOf('if (reqRow || stampRow || !liveCustomer || recurringRow)');
+    const funnelIdx = sweep.indexOf('const result = await requestCardForAppointment({');
+    expect(lockIdx).toBeGreaterThan(-1);
+    expect(recheckIdx).toBeGreaterThan(lockIdx);
+    expect(funnelIdx).toBeGreaterThan(recheckIdx);
+  });
 });
 
 describe('sweep gating', () => {

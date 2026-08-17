@@ -64,6 +64,7 @@ const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('
 // on_site) recurring visit is still an active plan — not just the sweep's
 // own pending/confirmed candidate statuses.
 const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const BATCH_CAP = 25;
 
 function sweepGateEnabled() {
@@ -273,6 +274,19 @@ async function runSweep(dbh = db) {
     attempts += 1;
     try {
       await dbh.transaction(async (trx) => {
+        // Rung 6 (customer-comms) closes the conversion race END TO END
+        // (codex #3426 r2): every plan-conversion writer holds
+        // `customer-comms:<id>` around its scheduled_services inserts
+        // (customer-comms-lock.js contract; estimate-converter takes it on
+        // both its own-transaction and caller-trx seeding paths), and this
+        // transaction stays open through the funnel call BELOW — send
+        // included. So a conversion either commits before this lock is
+        // granted (the recheck sees the recurring row and skips) or waits
+        // until after this commit (the customer was genuinely not recurring
+        // at send time). The private invite key alone couldn't do this —
+        // conversion writers never take it. Order vs the invite key is
+        // free of cycles: this sweep is that key's only taker.
+        await lockCustomerComms(trx, visit.customer_id);
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['previsit-card-invite', String(visit.customer_id)]);
         const [reqRow, stampRow, liveCustomer, recurringRow] = await Promise.all([
           trx('appointment_card_requests as r')

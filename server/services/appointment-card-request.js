@@ -650,12 +650,17 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     };
 
     // Existing recurring customers never get the BACKSTOP ask (owner ruling
-    // 2026-08-15, codex #3426 r1 P2). The sweep excludes them up front and
-    // rechecks under its advisory lock, but plan-conversion writers don't
-    // take that lock — a booking converted to a plan between the sweep's
-    // recheck and this send would still text. The one-text-ever claim above
-    // is the last boundary this funnel owns, so the prohibition is
-    // re-verified AFTER the claim and the claim released on evidence.
+    // 2026-08-15, codex #3426 r1 P2). The race with an in-flight plan
+    // conversion is closed by the CALLER: the sweep's transaction holds the
+    // rung-6 `customer-comms:<id>` advisory lock — the one every
+    // plan-conversion writer takes around its scheduled_services inserts —
+    // through this entire call, send included (codex #3426 r2). A
+    // conversion therefore commits either before that lock was granted
+    // (visible to this read) or after the send has already dispatched.
+    // This in-funnel recheck stays as defense in depth for the claim
+    // boundary: the one-text-ever claim above is the last boundary this
+    // funnel owns, so the prohibition is re-verified AFTER the claim and
+    // the claim released on evidence.
     // Scoped to the backstop trigger only: booking-time triggers fire for a
     // brand-new plan's own recurring rows by design. Status vocabulary is
     // shared with waveguard-existing-services (an in-progress en_route/
