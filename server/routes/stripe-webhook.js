@@ -1132,8 +1132,13 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     try {
       await assertNoInvoiceChargeReconciliationPending(entry.invoiceId);
     } catch (fenceErr) {
+      // Composite residual keys (`<pi>:<invoiceId>`) belong to THIS PI too
+      // (codex r28 P1): a provisional residual parked by the processing-
+      // stage settle must not make the successful event quarantine itself —
+      // the allocation-aware settle below reconciles/upgrades that share.
+      const fencePiId = String(fenceErr.stripePaymentIntentId || '');
       const retryingQuarantinedIntent = fenceErr.code === 'STRIPE_CHARGED_DB_FAILED'
-        && String(fenceErr.stripePaymentIntentId || '') === String(piId);
+        && (fencePiId === String(piId) || fencePiId.startsWith(`${piId}:`));
       if (retryingQuarantinedIntent) {
         logger.info(`[stripe-webhook] Retrying quarantined combined PI ${piId} on invoice ${entry.invoiceId} after saved-card claim resolved`);
         continue;
@@ -6598,25 +6603,33 @@ async function handleDisputeClosed(dispute) {
             // payment) instead PARKS the reinstated amount for the
             // operator. Fail closed on an unreadable replacement.
             let replacementNeutralized = false;
-            if (invoice && invoice.status !== 'paid' && invoicePi && disputedPiId && invoicePi !== disputedPiId) {
-              const wonStripe = getStripe();
-              if (!wonStripe) throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unverifiable (Stripe unavailable); retry`);
-              let replPi;
-              try {
-                replPi = await wonStripe.paymentIntents.retrieve(invoicePi);
-              } catch (replErr) {
-                throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unreadable (${replErr.message}); retry`);
-              }
-              if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+            if (invoice && invoicePi && disputedPiId && invoicePi !== disputedPiId) {
+              // The replacement may ALREADY have paid the invoice (codex
+              // r28 P1) — the reconciliation runs regardless of invoice
+              // status: only a still-collectible invoice with an
+              // UNCONFIRMED replacement gets the cancel-and-take-back;
+              // paid/processing (money moved) parks the reinstated share.
+              const replacementAlreadySettled = ['paid', 'processing'].includes(String(invoice.status || '').toLowerCase());
+              if (!replacementAlreadySettled) {
+                const wonStripe = getStripe();
+                if (!wonStripe) throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unverifiable (Stripe unavailable); retry`);
+                let replPi;
                 try {
-                  await wonStripe.paymentIntents.cancel(replPi.id);
-                  await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
-                  await db('invoices').where({ id: invId }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
-                  invoice.stripe_payment_intent_id = null;
-                  replacementNeutralized = true;
-                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
-                } catch (cancelErr) {
-                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
+                  replPi = await wonStripe.paymentIntents.retrieve(invoicePi);
+                } catch (replErr) {
+                  throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unreadable (${replErr.message}); retry`);
+                }
+                if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+                  try {
+                    await wonStripe.paymentIntents.cancel(replPi.id);
+                    await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
+                    await db('invoices').where({ id: invId }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                    invoice.stripe_payment_intent_id = null;
+                    replacementNeutralized = true;
+                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
+                  } catch (cancelErr) {
+                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
+                  }
                 }
               }
               if (!replacementNeutralized) {

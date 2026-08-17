@@ -3504,19 +3504,26 @@ const StripeService = {
               err.statusCode = 409;
               throw err;
             }
-          } else if (activeIntent.status === 'requires_payment_method') {
+          } else if (activeIntent.status === 'requires_payment_method'
+            && String(activeIntent.metadata?.combined_allocation || '') === String(piParams.metadata.combined_allocation || '')
+            && Number(activeIntent.amount) === baseCents) {
+            // Reuse-in-place ONLY when the allocation and amount are
+            // unchanged (codex r28 P1): updating a live PI to a DIFFERENT
+            // allocation/total leaves every stale tab's client secret able
+            // to confirm numbers its session never displayed (Express
+            // Checkout and the ACH submit confirm straight after the last
+            // server seam). A changed shape takes the cancel-and-replace
+            // branch below instead, which invalidates the old secret.
             const updateParams = { ...piParams };
             delete updateParams.currency;
             if (!stripeCustomerId) {
               updateParams.setup_future_usage = '';
             }
             paymentIntent = await stripe.paymentIntents.update(activeIntent.id, updateParams);
-            // Stripe now holds the NEW amount/allocation while the DB writes
+            // Stripe now holds the refreshed metadata while the DB writes
             // below can still roll back — flag the mutation so the catch can
-            // cancel the PI if they do (codex r5 P1): a previously opened
-            // tab retains this PI's client secret and could confirm the
-            // inflated combined total its session never displayed. Cleared
-            // after the transaction commits.
+            // cancel the PI if they do (codex r5 P1). Cleared after the
+            // transaction commits.
             mutatedReusedPiId = paymentIntent.id;
             const invoiceUpdated = await trx('invoices')
               .where({ id: invoiceId })
@@ -3533,6 +3540,24 @@ const StripeService = {
             if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
             await stampCombinedSiblings(paymentIntent.id);
             return;
+          } else if (activeIntent.status === 'requires_payment_method') {
+            // Allocation or amount CHANGED on an unconfirmed PI (codex r28
+            // P1): cancel and mint FRESH so every stale tab's client secret
+            // is invalidated — an in-place update would leave the old
+            // secret able to confirm a sibling set/total the first tab
+            // never itemized.
+            try {
+              await stripe.paymentIntents.cancel(activeIntent.id);
+              await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
+              await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
+              lockedInvoice.stripe_payment_intent_id = null;
+              logger.info(`[stripe] combined allocation/amount changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
+            } catch (e) {
+              logger.warn(`[stripe] could not replace changed-allocation PI ${activeIntent.id} for invoice ${invoiceId}: ${e.message}`);
+              const err = new Error('Could not prepare your payment — please try again in a moment');
+              err.statusCode = 409;
+              throw err;
+            }
           }
 
           // (lockedInvoice.stripe_payment_intent_id goes null when the
