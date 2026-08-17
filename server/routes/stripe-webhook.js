@@ -3306,11 +3306,35 @@ async function handleChargeRefunded(charge) {
           });
           const invId = meta.invoice_id || null;
           if (invId) {
-            await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
-            await trx('invoices')
-              .where({ id: invId })
-              .whereIn('status', ['paid', 'processing'])
-              .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+            // Ownership check before reopening (codex r36 P1): after a
+            // dispute-created reopen, a REPLACEMENT payment may have paid
+            // this invoice — refunding the ORIGINAL charge must not flip a
+            // replacement-paid invoice to refunded or return credit the
+            // replacement still consumes. The invoice reopens only when
+            // the refunded PI still owns it; otherwise only the ledger row
+            // was stamped (above) and the parked dispute-won reinstatement
+            // case resolves — the refund just returned that reinstated
+            // cash.
+            const refInvoice = await trx('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const refInvPi = refInvoice?.stripe_payment_intent_id ? String(refInvoice.stripe_payment_intent_id) : null;
+            const rowPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            if (refInvoice && refInvPi && rowPi && refInvPi === rowPi) {
+              await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+              await trx('invoices')
+                .where({ id: invId })
+                .whereIn('status', ['paid', 'processing'])
+                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+            } else {
+              const resolvedReinstated = await trx('stripe_orphan_charges')
+                .where({ resolved: false, source: 'combined_pay_webhook' })
+                .where('stripe_payment_intent_id', 'like', `%:dispute-won:%:${invId}`)
+                .update({
+                  resolved: true,
+                  resolved_at: new Date(),
+                  resolution_notes: `Automatically resolved: the original combined charge was fully refunded (${refundId || 'refund id unknown'}) — the reinstated share was returned to the customer`,
+                });
+              logger.warn(`[stripe-webhook] combined full refund: invoice ${invId} is owned by ${refInvPi || 'no PI / another rail'} — left untouched${resolvedReinstated ? `; ${resolvedReinstated} parked reinstatement case(s) resolved` : ''}`);
+            }
           }
         }
         // Residual reconciliation cases for this charge resolve WITH the
@@ -3774,7 +3798,12 @@ async function handleRefundFailed(refund) {
             // allocation non-collectible forever. The LIVE intent decides;
             // fail closed on an unreadable read.
             const bounceStripeCheck = getStripe();
-            if (bounceStripeCheck && (row.stripe_payment_intent_id || rowPiId)) {
+            // Fail CLOSED (codex r36 P1): restoring 'processing' without
+            // the live read could strand the allocation forever.
+            if (!bounceStripeCheck) {
+              throw new Error(`Refund bounce for combined PI ${row.stripe_payment_intent_id || rowPiId} cannot verify the live debit (Stripe client unavailable); retry`);
+            }
+            if (row.stripe_payment_intent_id || rowPiId) {
               const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(row.stripe_payment_intent_id || rowPiId);
               if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
                 debitAlreadyTerminal = true;
@@ -6165,7 +6194,12 @@ async function handleDisputeCreated(dispute) {
       // CLOSED on an unreadable charge (retry) rather than guess.
       {
         const disputeStripe = getStripe();
-        if (disputeStripe) {
+        // Fail CLOSED (codex r36 P2): the residual-reduced row sum must
+        // never classify the dispute on its own.
+        if (!disputeStripe) {
+          throw new Error(`Dispute ${dispute.id}: charge ${chargeId} cannot be classified full-vs-partial (Stripe client unavailable); retry`);
+        }
+        {
           let liveCharge;
           try {
             liveCharge = await disputeStripe.charges.retrieve(chargeId);
@@ -6320,7 +6354,13 @@ async function handleDisputeCreated(dispute) {
   // statement and appointment-fee pre-settlement mechanisms.
   if (!payment && dispute.payment_intent) {
     const preStripe = getStripe();
-    if (preStripe) {
+    // Fail CLOSED (codex r36 P1): a null client must not acknowledge a
+    // pre-settlement dispute without fencing — the delayed succeeded
+    // would settle a disputed charge.
+    if (!preStripe) {
+      throw new Error(`Dispute ${dispute.id} pre-settlement check cannot run (Stripe client unavailable); retry`);
+    }
+    {
       let disputedPi = null;
       try {
         disputedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
@@ -6588,7 +6628,11 @@ async function handleDisputeClosed(dispute) {
       // on an unreadable charge.
       {
         const closedDisputeStripe = getStripe();
-        if (closedDisputeStripe) {
+        // Fail CLOSED (codex r36 P2), same reasoning as the created path.
+        if (!closedDisputeStripe) {
+          throw new Error(`Dispute ${dispute.id} closure: charge ${chargeId} cannot be classified full-vs-partial (Stripe client unavailable); retry`);
+        }
+        {
           let liveClosedCharge;
           try {
             liveClosedCharge = await closedDisputeStripe.charges.retrieve(chargeId);
@@ -6763,14 +6807,34 @@ async function handleDisputeClosed(dispute) {
                 } catch (replErr) {
                   throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unreadable (${replErr.message}); retry`);
                 }
-                if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+                if (replPi.status === 'canceled') {
+                  // A prior delivery canceled the replacement but crashed
+                  // before the stamp cleanup (codex r36 P2) — finish the
+                  // neutralization instead of parking money that never
+                  // moved.
+                  await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
+                  const unboundCanceled = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                  if (unboundCanceled > 0) invoice.stripe_payment_intent_id = null;
+                  replacementNeutralized = true;
+                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} was already canceled; stamps cleaned, the reinstated charge settles invoice ${invId}`);
+                } else if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
                   try {
                     await wonStripe.paymentIntents.cancel(replPi.id);
                     await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
-                    await db('invoices').where({ id: invId }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
-                    invoice.stripe_payment_intent_id = null;
-                    replacementNeutralized = true;
-                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
+                    // CONDITIONAL unbind (codex r36 P1): only clear the
+                    // binding if it is still the replacement we canceled —
+                    // a /setup racing this window can commit a FRESH
+                    // replacement whose client secret the customer holds,
+                    // and clearing that would let the restore below stamp
+                    // the reinstated charge over a live session.
+                    const unbound = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                    if (unbound > 0) {
+                      invoice.stripe_payment_intent_id = null;
+                      replacementNeutralized = true;
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
+                    } else {
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — a fresh replacement bound invoice ${invId} while neutralizing ${replPi.id}; parking the reinstated amount`);
+                    }
                   } catch (cancelErr) {
                     logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
                   }
@@ -7002,7 +7066,12 @@ async function handleDisputeClosed(dispute) {
   // fence marker (the clawed-back charge must never settle).
   if (!payment && dispute.payment_intent) {
     const preStripe = getStripe();
-    if (preStripe) {
+    // Fail CLOSED (codex r36 P1): losing an early LOST outcome to a null
+    // client would let the delayed settle mark clawed-back money paid.
+    if (!preStripe) {
+      throw new Error(`Dispute ${dispute.id} closure pre-settlement check cannot run (Stripe client unavailable); retry`);
+    }
+    {
       let closedPi = null;
       try {
         closedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
