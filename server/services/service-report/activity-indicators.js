@@ -3048,7 +3048,12 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
 // station/room/area-class nouns only; property-level nouns deliberately
 // absent so "no activity at the property" stays a whole-visit denial
 // (codex r79).
-const LEVEL_ABSENCE_SUBSET_SCOPE_RE = /^\s*(?:at|in|near|around|along|behind|under|beneath|inside|by)\s+(?:the\s+|a\s+|an\s+|any\s+of\s+the\s+)?(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)*(?:stations?|traps?|monitors?|bait\s+stations?|areas?|rooms?|zones?|sections?|corners?|walls?|closets?|attic|garage|kitchen|bathrooms?|bedrooms?|crawl\s?space|lanai|soffits?|baseboards?|units?|perimeter)\b/i;
+// Generic sweep nouns (areas/zones/sections/perimeter) only narrow the
+// scope when a qualifier actually narrows them — "in areas inspected
+// today" and "around the perimeter" describe the whole visit and stay
+// whole-visit denials; "at the rear perimeter" is a genuine subset
+// (codex r87).
+const LEVEL_ABSENCE_SUBSET_SCOPE_RE = /^\s*(?:at|in|near|around|along|behind|under|beneath|inside|by)\s+(?:the\s+|a\s+|an\s+|any\s+of\s+the\s+)?(?:(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)+(?:areas?|zones?|sections?|perimeter)|(?:(?:front|rear|back|side|north|south|east|west|interior|exterior|remaining|other|first|second|third|upper|lower)\s+)*(?:stations?|traps?|monitors?|bait\s+stations?|rooms?|corners?|walls?|closets?|attic|garage|kitchen|bathrooms?|bedrooms?|crawl\s?space|lanai|soffits?|baseboards?|units?))\b/i;
 // finalBand semantics: 1..3 = the recorded level band (adjacent claims
 // tolerated, 2-band gaps contradict); an EXPLICIT 0 = a zero-score gauge,
 // where ANY positive level claim contradicts (codex r60) and absence
@@ -4167,7 +4172,7 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // Fixed-timing figures for the compliance classes below: digits OR
 // spelled-out quantities, incl. "half an hour" / "a couple of hours"
 // forms (codex r48 #3420).
-const TIME_FIGURE_SRC = '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
+const TIME_FIGURE_SRC = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
 const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // One entry-verb alternation shared by the duration and clock-time shapes
 // (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays

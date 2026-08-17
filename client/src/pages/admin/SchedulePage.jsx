@@ -14116,6 +14116,14 @@ export function CompletionPanel({
                   <button
                     type="button"
                     onClick={restoreDraft}
+                    // A lawn draft carrying an installed report must not
+                    // restore while the assessment is still loading —
+                    // lawnAssessmentId is null then, so the r82 identity
+                    // check (and the r58 watcher after baseline adoption)
+                    // would invalidate a matching saved report (codex r87).
+                    disabled={isLawn
+                      && lawnAssessmentReady === false
+                      && !!savedDraft?.generatedReportText}
                     style={{ ...primaryPill, height: 40, fontSize: 12 }}
                   >
                     Restore
@@ -16380,6 +16388,11 @@ export function CompletionPanel({
                 {" "}
                 <button
                   onClick={restoreDraft}
+                  // Same lawn-assessment loading hold as the V2 Restore
+                  // button (codex r87).
+                  disabled={isLawn
+                    && lawnAssessmentReady === false
+                    && !!savedDraft?.generatedReportText}
                   style={{
                     ...btnBase,
                     width: "auto",

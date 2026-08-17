@@ -649,6 +649,14 @@ describe('typed snapshot — technician report body in the generic tail composit
       .toContain('level_claim_mismatch:none');
     expect(activityLevelContradictions('No activity was observed today.', 2))
       .toContain('level_claim_mismatch:none');
+    // r87: generic sweep nouns only narrow scope when actually qualified —
+    // "areas inspected" and the bare perimeter describe the whole visit
+    expect(activityLevelContradictions('No activity was observed in areas inspected today.', 2))
+      .toContain('level_claim_mismatch:none');
+    expect(activityLevelContradictions('No activity was observed around the perimeter.', 2))
+      .toContain('level_claim_mismatch:none');
+    expect(activityLevelContradictions('No activity was observed at the rear perimeter.', 2))
+      .toEqual([]);
   });
 
   test('roster totals require an explicit assertion — a location phrase never claims (codex #3358 r4)', () => {

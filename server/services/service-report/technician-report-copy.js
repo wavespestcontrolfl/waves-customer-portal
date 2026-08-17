@@ -67,6 +67,11 @@ const REPORT_ACCESS_CODE_RES = [
   // ≥3 digits so counts ("2 doors") never trip
   /\b\d{3,8}\b[^\n.!?]{0,20}\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|lock)\b/i,
   /\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?|enter(?:s|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}\b/i,
+  // digits directly before a positional prep + device noun are the same
+  // credential without any action verb ("Use 4417 at the side gate",
+  // codex r87) — mirrors the canonical redactor's digit-to-location form;
+  // ≥3 digits keeps counts ("12 at the gate") out
+  /\b\d{3,8}\b\s+(?:at|for|to|on|in|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
   // a device followed by its own action and digits is the same credential
   // ("The gate opens with 4417", codex r85) — the trailing measurement-unit
   // lookahead keeps dimensional prose legal ("opens onto 400 square feet")
