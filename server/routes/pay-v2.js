@@ -327,7 +327,10 @@ router.get('/:token', async (req, res, next) => {
         previousBalance = {
           invoices: siblings.map((inv) => ({
             invoiceNumber: inv.invoice_number,
-            serviceType: inv.service_type,
+            // NO serviceType (codex r14 P1): /pay/:token is an
+            // unauthenticated forwarded bearer surface — the owner-approved
+            // exception covers sibling numbers, dates, and amounts only,
+            // never the customer's service history.
             serviceDate: inv.service_date,
             dueDate: inv.due_date,
             amountDue: PayCombined.amountDueCents(inv) / 100,

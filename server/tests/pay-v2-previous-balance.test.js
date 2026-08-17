@@ -144,7 +144,9 @@ describe('GET /pay/:token previous-balance itemization', () => {
     expect(body.previousBalance).toEqual({
       invoices: [{
         invoiceNumber: 'INV-OLD',
-        serviceType: 'Lawn Care',
+        // NO serviceType (codex #3427 r14 P1): the unauthenticated bearer
+        // surface exposes numbers, dates, and amounts only — never the
+        // customer's service history.
         serviceDate: '2026-08-01',
         dueDate: '2026-08-15',
         amountDue: 44.55,
@@ -152,6 +154,7 @@ describe('GET /pay/:token previous-balance itemization', () => {
       total: 44.55,
       combinedTotal: 194.55,
     });
+    expect(JSON.stringify(body.previousBalance)).not.toContain('Lawn Care');
     // The hard line that survived the ruling: sibling bearer tokens never
     // ride this payload.
     expect(JSON.stringify(body)).not.toContain(SIBLING_TOKEN);

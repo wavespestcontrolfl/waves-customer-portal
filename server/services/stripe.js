@@ -4234,6 +4234,11 @@ const StripeService = {
       invoiceId,
       paymentMethodId,
       invoiceTotal: baseAmount,
+      // The exact allocation the customer's page displayed when quoting
+      // (codex r14 P1): finalize refuses on ANY allocation change, not
+      // just a total change — an equal-dollar sibling swap (A+B → A+C)
+      // must never confirm a set the customer didn't approve.
+      allocation: quoteCombinedCtx ? require('./pay-combined').encodeAllocation(quoteCombinedCtx.allocation) : null,
       quotedAt: Date.now(),
     });
     const signature = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('base64url');
@@ -4302,6 +4307,20 @@ const StripeService = {
 
     if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
       throw new Error('Invoice total changed since quote was created. Please request a new quote.');
+    }
+    // Allocation binding (codex r14 P1): a total-only check accepts an
+    // equal-dollar sibling swap (quote for A+B, live session now A+C) and
+    // would confirm a set the submitting page never displayed. The signed
+    // quote carries the exact encoded allocation; any difference — order,
+    // membership, per-share cents, combined↔single — refuses to a fresh
+    // quote.
+    {
+      const liveAllocation = finalizeCombinedCtx
+        ? PayCombined.encodeAllocation(finalizeCombinedCtx.allocation)
+        : null;
+      if ((quote.allocation ?? null) !== liveAllocation) {
+        throw new Error('The combined balance changed since this quote was created. Please request a new quote.');
+      }
     }
 
     const chargeInfo = computeChargeAmount(baseAmount, pm.type || 'card', { funding });

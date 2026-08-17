@@ -631,6 +631,10 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
             updated_at: new Date(),
             payment_date: etDateString(eventCreated ? new Date(eventCreated * 1000) : undefined),
             receipt_url: details.receiptUrl || existing.receipt_url || null,
+            // The ACH-processing insert stamped "(bank payment pending)" —
+            // strip it on settle like the single-invoice path (codex r14
+            // P2); REPLACE is a no-op for rows without the marker.
+            description: trx.raw("REPLACE(description, ' (bank payment pending)', '')"),
             stripe_charge_id: invoiceUpdates.stripe_charge_id || existing.stripe_charge_id || null,
             amount: shareCents / 100,
             base_amount_cents: entry.cents,

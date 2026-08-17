@@ -1519,17 +1519,22 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
     }
+    // Payer activation fence (codex #3427 r13/r14 P1): after the merge,
+    // EVERY invoice on the merged account — the winner's and the loser's
+    // repointed ones — resolves to the EFFECTIVE winner payer, whether it
+    // was transferred from the loser (backfills.payer_id) or the winner
+    // already had one (a self-pay loser merged into a payer-billed
+    // winner). Any unconfirmed combined pay-page session on EITHER side
+    // must be released FIRST — same fail-closed cancel+unstamp (and
+    // pay.combined.customer serialization) as the customer-editor payer
+    // write. An unreleasable session aborts the merge; the admin retries.
+    const effectiveWinnerPayerId = backfills.payer_id || winner.payer_id || null;
+    if (effectiveWinnerPayerId) {
+      const PayCombined = require('./pay-combined');
+      await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
+      await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
+    }
     if (Object.keys(backfills).length) {
-      // Payer transfer = payer ACTIVATION for the winner (codex #3427 r13
-      // P1): every invoice starts resolving to the transferred payer, so
-      // any unconfirmed combined pay-page session on the winner must be
-      // released FIRST — same fail-closed fence (and pay.combined.customer
-      // serialization) as the customer-editor payer write. An unreleasable
-      // session aborts the merge; the admin retries.
-      if (backfills.payer_id) {
-        await require('./pay-combined')
-          .releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
-      }
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
     }
 
