@@ -525,6 +525,15 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     });
     expect(claiming.bodySource).toBeUndefined();
     expect(claiming.headline).toBe('An exclusion inspection was completed to identify potential rodent access points.');
+    // r74: the ordinary close/patch/block repair verbs claim the same work
+    for (const body of [
+      'We closed two gaps at the soffit line.',
+      'We patched the garage opening.',
+      'We blocked the rodent entry point.',
+    ]) {
+      const alt = buildTodaysResult({ ...base, technicianReportBody: body });
+      expect(alt.bodySource).toBeUndefined();
+    }
   });
 
   // r53 (#3420): story-lane TREND visits consume the reviewed body.

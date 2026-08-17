@@ -54,6 +54,11 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 const REPORT_ACCESS_CODE_RES = [
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b/i,
   /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  // individually separated digits ("PIN is 1 2 3 4", "1-2-3-4") are the
+  // same credential the contiguous shapes catch (codex r74) — three or
+  // more single digits joined by spaces/hyphens beside a code noun
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b\d(?:[\s-]+\d){2,7}\b/i,
+  /\b\d(?:[\s-]+\d){2,7}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // quote classes accept Unicode smart quotes — mobile keyboards curl them
   // (codex r40)
   // quoted credentials may span up to four tokens ("blue waves",

@@ -2473,8 +2473,17 @@ router.get('/:date?', async (req, res, next) => {
               // delivery rides along (same contract as the schedule feed) so
               // the client's generation gate can skip internal_only
               // companions instead of arming a request the server 400s
-              // (codex r27 #3420).
-              return schema ? { ...schema, delivery: c.delivery || 'auto_send' } : null;
+              // (codex r27 #3420). The global kill env coerces the
+              // advertised posture the same way completion freezes it
+              // (codex r74) — the client must not open Generate for a
+              // companion whose body completion will refuse to attach.
+              return schema
+                ? {
+                  ...schema,
+                  delivery: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
+                    ? 'internal_only' : (c.delivery || 'auto_send'),
+                }
+                : null;
             })
             .filter(Boolean)
           : null,

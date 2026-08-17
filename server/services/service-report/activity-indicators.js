@@ -3105,7 +3105,10 @@ function exclusionInspectionOnly(values = {}) {
 }
 // The reverse contradiction for inspection-only visits: a body claiming
 // repair work was performed.
-const REPAIRS_DONE_CLAIM_RE = /\brepairs?\s+(?:was|were)\s+(?:completed|performed|made|done|finished)\b|\bcompleted\s+(?:the\s+)?(?:permanent\s+)?(?:exclusion\s+)?repairs?\b|\bsealed\s+(?:the\s+|an?\s+|two\s+|three\s+|several\s+)?(?:entry|gaps?|openings?|holes?|points?)\b|\binstalled\s+(?:hardware\s+cloth|mesh|sealant|door\s+sweeps?|screens?)\b|\breinforced\s+(?:the\s+|an?\s+)?openings?\b/i;
+// The ordinary close/patch/block repair verbs claim the same completed
+// work as "sealed" (codex r74): "We closed two gaps at the soffit line",
+// "patched the garage opening", "blocked the rodent entry point".
+const REPAIRS_DONE_CLAIM_RE = /\brepairs?\s+(?:was|were)\s+(?:completed|performed|made|done|finished)\b|\bcompleted\s+(?:the\s+)?(?:permanent\s+)?(?:exclusion\s+)?repairs?\b|\b(?:sealed|closed|patched|blocked|covered|filled|plugged|screened(?:\s+off)?|caulked|boarded(?:\s+up)?|repaired)\s+(?:the\s+|an?\s+|two\s+|three\s+|several\s+|multiple\s+|some\s+)?(?:[a-z]+\s+){0,2}(?:entry\s+points?|entries|access\s+points?|gaps?|openings?|holes?|points?|voids?|penetrations?)\b|\binstalled\s+(?:hardware\s+cloth|mesh|sealant|door\s+sweeps?|screens?)\b|\breinforced\s+(?:the\s+|an?\s+)?openings?\b/i;
 // True when a reviewed body contradicts the recorded story facts of an
 // exclusion/inspection section — used by the first-visit story branches
 // AND the gauge branch their trend visits land in (codex r53).
@@ -4143,7 +4146,7 @@ const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // aftercare ("avoid mowing for 48 hours") stays legal too.
 // Passive occupancy forms are anchored on be/been/being so completed-action
 // prose ("we entered through the side gate") never matches (codex r54).
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy)|available\\s+for\\s+(?:use|occupancy)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?(?:accessible|usable|walkable|open\\s+for\\s+(?:use|occupancy))|re-?open(?:s|ed|ing)?|dry(?:ing|s)?|dried)';
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy)|available\\s+for\\s+(?:use|occupancy)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?(?:accessible|usable|walkable|open\\s+for\\s+(?:use|occupancy))|re-?open(?:s|ed|ing)?|open(?:s|ed|ing)?\\s+(?:back\\s+)?(?:up|again)\\b|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
@@ -4175,7 +4178,10 @@ const BANNED_CUSTOMER_COPY = [
   // is; a fixed re-entry/drying minute-or-hour figure is never stated — the
   // idiom is "safe once dry" with the technician confirming timing, and
   // that idiom carries no number so it stays legal here.
-  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b/i,
+  // grant/give/issue constructions state the same approval claim with a
+  // verb between EPA and "approval" (codex r74): "The EPA granted approval
+  // for this treatment" — EPA-registered/-exempt wording is untouched
+  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b|\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?(?:grant(?:ed|s)?|gave|giv(?:es|en)|issu(?:ed|es)?|provid(?:ed|es)?|extend(?:ed|s)?)\b[^.!?]{0,15}\bapproval\b/i,
   // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
   // "a few minutes") state the same prohibited fixed timing as digits
   // (codex r48)

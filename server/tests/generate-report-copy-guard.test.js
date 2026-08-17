@@ -37,6 +37,20 @@ describe('generate-report output guard (reportCopyRejection)', () => {
   });
 });
 
+describe('global delivery kill switch and generation authorization (r74)', () => {
+  test('SPECIALTY_REPORT_DELIVERY_DISABLED empties customer-facing companion types', () => {
+    const { customerFacingCompanionTypes } = require('../routes/admin-schedule')._test;
+    const companions = [{ type: 'termite_bait_station', delivery: 'auto_send' }];
+    expect(customerFacingCompanionTypes(companions)).toEqual(['termite_bait_station']);
+    process.env.SPECIALTY_REPORT_DELIVERY_DISABLED = 'true';
+    try {
+      expect(customerFacingCompanionTypes(companions)).toEqual([]);
+    } finally {
+      delete process.env.SPECIALTY_REPORT_DELIVERY_DISABLED;
+    }
+  });
+});
+
 describe('deterministic fallback parser approval (r16)', () => {
   test('echoed typed free text with parser-only terms degrades to the generic template', () => {
     const report = buildDeterministicReportCopy({
@@ -361,6 +375,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // granted-approval EPA claims, open-again timing, separated-digit
+    // credentials (r74)
+    expect(reportCopyRejection('The EPA granted approval for this treatment.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The EPA has already issued approval for this product.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The treated lawn will be open again after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The lawn should open back up in 30 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate PIN is 1 2 3 4.')).toBe('access_code');
+    expect(reportCopyRejection('The gate code is 1-2-3-4.')).toBe('access_code');
+    expect(reportCopyRejection('Stations 1 2 3 were checked along the fence line.')).toBeNull();
     // reopening timing forms + continuing-state lowercase credentials (r72)
     expect(reportCopyRejection('The treated lawn will reopen after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The area reopens in 2 hours.')).toMatch(/^banned:/);

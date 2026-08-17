@@ -1791,8 +1791,15 @@ async function loadProjectCompletionContextByServiceId(services) {
             // delivery rides along so the client's generation gate can
             // mirror the server's customer-facing filter — an internal_only
             // companion renders and submits but never opens Generate
-            // (codex r11).
-            return schema ? { ...schema, delivery: c.delivery || 'auto_send' } : null;
+            // (codex r11). The global kill env coerces the advertised
+            // posture like completion does (codex r74).
+            return schema
+              ? {
+                ...schema,
+                delivery: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
+                  ? 'internal_only' : (c.delivery || 'auto_send'),
+              }
+              : null;
           })
           .filter(Boolean)
         : null,
@@ -11465,6 +11472,11 @@ function typedActivityLine(findingsType, score, { words = false } = {}) {
 // (docs/design/combined-service-completions.md), so their findings must
 // never steer the customer narrative (codex r2 P1).
 function customerFacingCompanionTypes(companions) {
+  // The global delivery kill env means NO companion is customer-deliverable
+  // — completion coerces every frozen posture to internal_only, so
+  // generation authorization must match or a companion-only request spends
+  // a provider call on a body completion then refuses to attach (codex r74).
+  if (process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true') return [];
   return (Array.isArray(companions) ? companions : [])
     .filter((c) => c && c.type && String(c.delivery || 'auto_send') === 'auto_send')
     .map((c) => c.type);
