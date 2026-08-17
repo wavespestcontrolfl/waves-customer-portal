@@ -2140,6 +2140,9 @@ const StripeService = {
             }
             if (stalePaymentIntentToCancel) {
               await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+              // A combined PI is stamped on its siblings — unbind them from
+              // the canceled intent (codex #3427 r19 P2).
+              await require('./pay-combined').clearPaymentIntentStamps(trx, stalePaymentIntentToCancel.id);
             }
             // Fully covered by account credit. COMMIT the credit draw-down +
             // prepaid transition (return, don't throw — a throw would roll back
@@ -2179,6 +2182,11 @@ const StripeService = {
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+          // Unbind combined siblings from the canceled intent (codex #3427
+          // r19 P2) — the saved-card charge replaces only THIS invoice's
+          // session; the other allocation rows must not stay bound to a
+          // dead PI.
+          await require('./pay-combined').clearPaymentIntentStamps(trx, stalePaymentIntentToCancel.id);
         }
 
         const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);

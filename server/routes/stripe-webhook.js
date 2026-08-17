@@ -3533,6 +3533,7 @@ async function handleRefundFailed(refund) {
       const rowChargeId = chargeId || payment.stripe_charge_id || null;
       const rowPiId = piId || payment.stripe_payment_intent_id || null;
       let resettleFencedPiId = null;
+      const restored = [];
       await db.transaction(async (trx) => {
         // Same per-charge lock as charge.refunded's combined branch (codex
         // r12 P1) — the two unwinds are strictly ordered, so the refunded
@@ -3546,7 +3547,6 @@ async function handleRefundFailed(refund) {
         const rows = rowChargeId
           ? await trx('payments').where({ stripe_charge_id: rowChargeId }).forUpdate()
           : await trx('payments').where({ stripe_payment_intent_id: rowPiId }).forUpdate();
-        const restored = [];
         let alreadyRecorded = false;
         let neutralizedMarker = false;
         let anyUnwound = false;
@@ -3639,8 +3639,22 @@ async function handleRefundFailed(refund) {
           await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: a PARKED partial-refund attempt (${refundId || 'unknown id'}) failed at the bank — no rows were ever stamped and no credit was returned; the reconciliation case in /admin/revenue stands, minus this bounced refund.`);
           return;
         }
-        await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).`);
+        await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).${restored.length ? ' Any annual-prepay coverage the refund CANCELLED is not auto-revived (revival is dispute-marker-gated) — the paid-sync re-runs post-commit, but if coverage stays cancelled on a restored invoice, reactivate it manually.' : ''}`);
       });
+      // Post-commit paid sync per restored invoice (codex r19 P1, single-
+      // payment-branch parity): the refund already ran
+      // syncTermForRefundedPayment and cancelled any prepay coverage; no
+      // payment_intent.succeeded will ever fire for a bounce, so this is
+      // the only re-sync. payment_pending terms reactivate through the
+      // sanctioned state machine; refund-cancelled terms stay cancelled by
+      // design (the notification above names the manual remediation).
+      for (const restoredId of restored) {
+        try {
+          await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredId);
+        } catch (syncErr) {
+          logger.error(`[stripe-webhook] annual-prepay resync after combined refund bounce failed for invoice ${restoredId}: ${syncErr.message}`);
+        }
+      }
       // Bounced pre-settlement refund → the money never left after all. If
       // the PI actually succeeded (its settle was fenced into an orphan),
       // run the FULL succeeded lifecycle now — guard chain, allocation
@@ -5854,9 +5868,26 @@ async function handleDisputeCreated(dispute) {
       // Canceled rows (neutralized pre-settlement markers) are excluded —
       // their amounts are zeroed, but the filter keeps the sum honest even
       // against legacy rows (codex r8 P1).
-      const combinedFullCents = combinedRows
+      let combinedFullCents = combinedRows
         .filter((r) => r.status !== 'canceled')
         .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // The row sum UNDERCOUNTS when a share settled as a residual (no
+      // payments row) — a partial dispute >= that reduced sum would then
+      // misclassify as full-charge and wrongly reopen every recorded
+      // invoice (codex r19 P1). The Stripe charge is the authority; fail
+      // CLOSED on an unreadable charge (retry) rather than guess.
+      {
+        const disputeStripe = getStripe();
+        if (disputeStripe) {
+          let liveCharge;
+          try {
+            liveCharge = await disputeStripe.charges.retrieve(chargeId);
+          } catch (chargeErr) {
+            throw new Error(`Dispute ${dispute.id}: charge ${chargeId} unreadable for full-vs-partial classification (${chargeErr.message}); retry`);
+          }
+          if (Number(liveCharge?.amount) > 0) combinedFullCents = Number(liveCharge.amount);
+        }
+      }
       if (Number(dispute.amount) < combinedFullCents) {
         logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} ($${amount} of $${(combinedFullCents / 100).toFixed(2)}) on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
         await db('stripe_orphan_charges')
@@ -6244,9 +6275,24 @@ async function handleDisputeClosed(dispute) {
       // attributed to a share — the closure must not apply the full-charge
       // transition either. Stamp nothing, notify, leave for the operator.
       // Same canceled-marker exclusion as the created handler (codex r8 P1).
-      const combinedClosedFullCents = combinedClosedRows
+      let combinedClosedFullCents = combinedClosedRows
         .filter((r) => r.status !== 'canceled')
         .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // Stripe charge = the classification authority (codex r19 P1, same
+      // residual-undercount reasoning as the created handler); fail CLOSED
+      // on an unreadable charge.
+      {
+        const closedDisputeStripe = getStripe();
+        if (closedDisputeStripe) {
+          let liveClosedCharge;
+          try {
+            liveClosedCharge = await closedDisputeStripe.charges.retrieve(chargeId);
+          } catch (chargeErr) {
+            throw new Error(`Dispute ${dispute.id} closure: charge ${chargeId} unreadable for full-vs-partial classification (${chargeErr.message}); retry`);
+          }
+          if (Number(liveClosedCharge?.amount) > 0) combinedClosedFullCents = Number(liveClosedCharge.amount);
+        }
+      }
       if (Number(dispute.amount) < combinedClosedFullCents) {
         logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — parked at created, still needs manual reconcile`);
         try {
