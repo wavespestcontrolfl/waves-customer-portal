@@ -353,7 +353,10 @@ async function extractSmsContactCorrections({ body }) {
         && (!REPLACEMENT_DIRECTION_RE.test(String(c.quote || ''))
           || NEGATED_DIRECTION_RE.test(String(c.quote || ''))))
       // A directly negated value never applies (r47).
-      && !valueNegatedInQuote(c.quote, c.new_value));
+      && !valueNegatedInQuote(c.quote, c.new_value)
+      // A future-effective change waits for present-tense confirmation
+      // (r48).
+      && !sourceClausesFor(text, c.quote).some((p) => FUTURE_CHANGE_RE.test(p)));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -625,11 +628,18 @@ function valueNegatedInQuote(quote, value) {
   while (true) {
     const i = q.indexOf(v, from);
     if (i < 0) return false;
-    const before = q.slice(Math.max(0, i - 14), i);
-    if (/(?:\bis\s+not|\bisn'?t|\bnot|\bnever|\bwas)\s*$/.test(before)) return true;
+    const before = q.slice(Math.max(0, i - 34), i);
+    // Up to two intervening adverbs/modifiers (r48): "not actually jane@…".
+    if (/(?:\bis\s+not|\bisn'?t|\bnot|\bnever|\bwas)\s+(?:[a-z]+\s+){0,2}$/.test(before)) return true;
     from = i + 1;
   }
 }
+
+// A FUTURE-effective change is not a present correction (r48):
+// "Starting next month, my email will change to …" must wait for the
+// customer's present-tense confirmation, not switch fan-outs weeks
+// early.
+const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
 
 // A NEGATED name statement is not a correction (r46): "my name is not
 // Jane Smith anymore" states the OLD name — staging its components would
@@ -641,7 +651,7 @@ const NEGATED_NAME_RE = /\b(?:name|surname)\s+(?:is\s+not|isn'?t|was|used\s+to\s
 // to the number's new holder, not the linked customer. The bare "I'm not
 // <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
 // "I am not happy" never trip it.
-const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b/;
+const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b|\b(?:[A-Z][a-z]+|[A-Z]{2,})\s+(?:no\s+longer\s+has|doesn'?t\s+have|does\s+not\s+have|used\s+to\s+have)\s+this\s+(?:number|phone)\b/;
 
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.

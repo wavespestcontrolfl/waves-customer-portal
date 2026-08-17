@@ -3685,3 +3685,42 @@ describe('round-47 hardening', () => {
     expect(res.map((c) => c.newValue)).toEqual(['joan@example.com']);
   });
 });
+
+describe('round-48 hardening', () => {
+  it('a future-effective change never applies immediately', async () => {
+    const body = 'Starting next month, my email will change to future@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'starting next month, my email will change to future@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a present-tense changed-to still corrects', async () => {
+    const body = 'My email changed to now@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my email changed to now@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.newValue)).toEqual(['now@example.com']);
+  });
+
+  it('a named former-holder declaration invalidates the message', async () => {
+    const body = 'John no longer has this number. My email is wrong; use newholder@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('an intervening adverb cannot dodge the negated-value guard', async () => {
+    const body = 'My email is not actually jane@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'my email is not actually jane@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});
