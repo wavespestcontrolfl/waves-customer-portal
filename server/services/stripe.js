@@ -3134,7 +3134,7 @@ const StripeService = {
     // contact, not invoice.customer_id — opting them into "save card" would
     // attach their card to the homeowner for future off-session charges.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
-    const stripeCustomerId = saveCard && invoice.customer_id
+    let stripeCustomerId = saveCard && invoice.customer_id
       ? await this.ensureStripeCustomer(invoice.customer_id)
       : null;
 
@@ -3187,6 +3187,15 @@ const StripeService = {
               throw ownerErr;
             }
             ownerId = freshId;
+          }
+          // Recompute the Stripe customer when ownership moved (codex r31
+          // P1): the pre-transaction ensureStripeCustomer ran for the
+          // retired loser — minting the PI against that profile would
+          // attach the saved method to the archived customer while the
+          // metadata names the winner, and the succeeded mirror would then
+          // refuse the cross-customer method forever.
+          if (saveCard && ownerId !== String(invoice.customer_id)) {
+            stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
         }
         const lockedInvoice = await trx('invoices')

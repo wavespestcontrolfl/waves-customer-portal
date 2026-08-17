@@ -247,17 +247,6 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       ? chargeDetails.amount / 100
       : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
-    // Combined pay-page session release BEFORE marking paid (codex #3427
-    // r30 P0): a stamped invoice may ride a combined PI a browser can still
-    // confirm — reconciling it now and letting that capture land later
-    // double-charges the share. Unconfirmed → cancel + unstamp; in flight →
-    // refuse with a retryable 409.
-    try {
-      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(db, invoice, { context: 'reconciling this payment' });
-    } catch (releaseErr) {
-      return res.status(releaseErr.statusCode || 409).json({ error: releaseErr.message });
-    }
-
     // Conditional update closes the TOCTOU window: if the invoice became
     // uncollectible (paid/processing/void/refunded/canceled) between our read
     // and this write, the UPDATE matches 0 rows and we bail instead of
@@ -269,7 +258,14 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     // the flip left collected money permanently missing on a transient DB
     // failure. Either both commit or the operator gets a retryable error and
     // nothing changed.
-    const txResult = await db.transaction(async (trx) => {
+    let txResult;
+    try {
+      txResult = await db.transaction(async (trx) => {
+      // Combined-session reservation INSIDE the collection transaction
+      // (codex #3427 r30 P0, serialized r31 P0): per-customer combined
+      // lock + fresh in-lock re-read + release, held through this commit
+      // so /setup cannot stamp a confirmable combined PI in the gap.
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
       if (stripeChargeId) {
         // Charge-scoped, transaction-scoped advisory lock. Two admins
         // reconciling the SAME charge against different same-value invoices
@@ -361,6 +357,14 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
       return { updated: rows };
     });
+    } catch (releaseErr) {
+      // 409-shaped combined-session refusals from the in-transaction
+      // reservation surface as retryable conflicts.
+      if (releaseErr.statusCode === 409) {
+        return res.status(409).json({ error: releaseErr.message });
+      }
+      throw releaseErr;
+    }
     if (txResult.conflict) {
       return res.status(409).json({ error: txResult.conflict });
     }

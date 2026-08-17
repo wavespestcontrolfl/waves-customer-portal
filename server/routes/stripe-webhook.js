@@ -2414,8 +2414,14 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     const freshFailStripe = getStripe();
     if (freshFailStripe) {
       const currentFailIntent = await freshFailStripe.paymentIntents.retrieve(piId);
-      if (['processing', 'succeeded', 'requires_capture'].includes(currentFailIntent.status)) {
-        logger.warn(`[stripe-webhook] stale combined payment_failed for PI ${piId} — current status is ${currentFailIntent.status}; skipping ledger revert`);
+      if (['processing', 'succeeded', 'requires_capture'].includes(currentFailIntent.status)
+        // A NEWER attempt awaiting microdeposit verification is also live
+        // (codex r31 P2): the customer switched to ACH after the old
+        // failure — running the stale failure would ledger-fail rows and
+        // notify the customer while their bank verification stands.
+        || (currentFailIntent.status === 'requires_action'
+          && currentFailIntent.next_action?.type === 'verify_with_microdeposits')) {
+        logger.warn(`[stripe-webhook] stale combined payment_failed for PI ${piId} — current status is ${currentFailIntent.status}${currentFailIntent.next_action?.type ? ` (${currentFailIntent.next_action.type})` : ''}; skipping ledger revert`);
         return;
       }
     }
@@ -2459,12 +2465,25 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     if (gateOffStripe) {
       try {
         await gateOffStripe.paymentIntents.cancel(piId);
+        gateOffRevokedPi = true;
       } catch (cancelErr) {
-        const alreadyTerminal = /canceled|succeeded/i.test(cancelErr.message || '');
-        if (!alreadyTerminal) throw new Error(`Gate-off revoke of failed combined PI ${piId} could not cancel (${cancelErr.message}); retry`);
+        // Re-read instead of trusting the error text (codex r31 P1): a
+        // customer retry can race the PI to succeeded/processing between
+        // the freshness guard and this cancel — treating that as
+        // "revoked" would reopen and unstamp invoices whose cash was
+        // captured, exposing them to double collection until the
+        // succeeded webhook repairs them.
+        const recheck = await gateOffStripe.paymentIntents.retrieve(piId);
+        if (recheck.status === 'canceled') {
+          gateOffRevokedPi = true;
+        } else if (['succeeded', 'processing', 'requires_capture'].includes(recheck.status)) {
+          logger.warn(`[stripe-webhook] gate-off revoke skipped — combined PI ${piId} raced to ${recheck.status}; its own events own the ledger`);
+          return;
+        } else {
+          throw new Error(`Gate-off revoke of failed combined PI ${piId} could not cancel (${cancelErr.message}); retry`);
+        }
       }
-      gateOffRevokedPi = true;
-      logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId}; stamps clear after the reopen below`);
+      if (gateOffRevokedPi) logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId}; stamps clear after the reopen below`);
     }
   }
 
@@ -6101,12 +6120,29 @@ async function handleDisputeCreated(dispute) {
         || combinedRows.find((r) => r.stripe_payment_intent_id)?.stripe_payment_intent_id
         || chargeId);
       const reopenPlan = [];
+      let disputeAlreadyFinalized = false;
       await db.transaction(async (lockTrx) => {
         await lockTrx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['stripe.pi.payment', disputeLockKey],
         );
         const freshRows = await lockTrx('payments').where({ stripe_charge_id: chargeId });
+        // GLOBAL late-created suppression (codex r31 P1): if ANY row for
+        // this charge — including a canceled/superseded closure marker —
+        // records this dispute as FINAL, the closure already owns the
+        // outcome. The per-row guard below misses the shape where a
+        // won-before-created marker was neutralized and settlement then
+        // added fresh rows carrying no dispute stamps; disputing those
+        // would reopen invoices Stripe already restored, with no later
+        // closure event to repair them.
+        disputeAlreadyFinalized = freshRows.some((r) => {
+          const m = parseMeta(r);
+          return m.dispute_final && m.dispute_id === dispute.id;
+        });
+        if (disputeAlreadyFinalized) {
+          logger.warn(`[stripe-webhook] dispute ${dispute.id} already finalized on charge ${chargeId} — late created event suppressed globally`);
+          return;
+        }
         for (const row of freshRows) {
           const meta = parseMeta(row);
           // A neutralized pre-settlement marker is superseded — never
@@ -6132,6 +6168,7 @@ async function handleDisputeCreated(dispute) {
           }
         }
       });
+      if (disputeAlreadyFinalized) return; // closure owns the outcome — no reopens, no notification
       for (const { invoiceId: reopenInvoiceId, rowId: reopenRowId } of reopenPlan) {
         // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
         // prepaid coverage must not ride on provisionally clawed-back

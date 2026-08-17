@@ -517,11 +517,24 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
  * each rail keeps its existing single-PI contract.
  */
 async function releaseCombinedSessionBeforeCollection(database, invoice, { context = 'recording this payment' } = {}) {
-  if (!invoice?.stripe_payment_intent_id) return { released: false };
+  // MUST be called with a TRANSACTION, inside the rail's collection commit
+  // (codex r31 P0): the per-customer advisory lock below serializes with
+  // /setup, and the invoice is RE-READ under it — an unlocked snapshot can
+  // predate a setup that stamps a confirmable combined PI between this
+  // check and the rail's own write. Holding the lock through the rail's
+  // commit closes that window.
+  if (invoice?.customer_id) {
+    await lockCombinedCustomers(database, [String(invoice.customer_id)]);
+  }
+  const freshInvoice = invoice?.id
+    ? await database('invoices').where({ id: invoice.id }).first('id', 'invoice_number', 'customer_id', 'stripe_payment_intent_id')
+    : null;
+  const live = freshInvoice || invoice;
+  if (!live?.stripe_payment_intent_id) return { released: false };
   const StripeService = require('./stripe');
   let pi;
   try {
-    pi = await StripeService.retrievePaymentIntent(invoice.stripe_payment_intent_id);
+    pi = await StripeService.retrievePaymentIntent(live.stripe_payment_intent_id);
   } catch (err) {
     const e = new Error(`Could not verify the invoice's open payment session (${err.message}) — try again`);
     e.statusCode = 409;

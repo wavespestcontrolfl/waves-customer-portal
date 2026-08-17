@@ -1518,11 +1518,6 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // cancel + unstamp (fail closed); already canceled → finish the stamp
     // cleanup; anything in flight refuses (the collectible guard above
     // already blocks 'processing' invoices, this covers seam races).
-    try {
-      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(db, invoice, { context: 'recording a manual payment' });
-    } catch (releaseErr) {
-      return res.status(releaseErr.statusCode || 409).json({ error: releaseErr.message });
-    }
 
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
 
@@ -1547,6 +1542,14 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
     // commit or the operator gets a retryable error and nothing changed.
     const updatedInvoice = await db.transaction(async (trx) => {
+      // Combined-session reservation INSIDE the collection transaction
+      // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
+      // per-customer combined lock, re-reads the invoice under it, and
+      // releases any combined session — the lock holds through this
+      // commit, so /setup cannot stamp a confirmable combined PI between
+      // the check and the paid flip. Throws are 409-shaped; the route
+      // catch surfaces them.
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
       const [row] = await trx('invoices')
         .where({ id })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -1709,6 +1712,12 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       receipt: sendReceipt ? { email: emailResult, sms: smsResult } : null,
     });
   } catch (err) {
+    // The combined-session reservation throws 409-shaped refusals from
+    // inside the collection transaction — surface them as retryable
+    // conflicts, not 500s.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message });
+    }
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
     next(err);
   }

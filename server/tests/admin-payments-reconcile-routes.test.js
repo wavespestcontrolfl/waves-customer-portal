@@ -140,7 +140,7 @@ jest.mock('../models/db', () => {
     const trx = (table) => makeBuilder(staged, table);
     trx.raw = async (sql, bindings) => {
       state.rawCalls.push({ sql, bindings });
-      if (state.onLock) state.onLock(staged);
+      if (state.onLock) state.onLock(staged, { sql, bindings });
       return {};
     };
     const result = await cb(trx);
@@ -397,17 +397,22 @@ describe('concurrent reconcile race — advisory-lock serialized dedupe', () => 
       invoiceId: 'inv-1', collectedVia: 'tap_to_pay', stripeChargeId: 'ch_race',
     });
     expect(status).toBe(200);
-    const lock = db.__state.rawCalls.find((c) => /pg_advisory_xact_lock/.test(c.sql));
+    // The combined-session reservation lock (pay.combined.customer) now
+    // precedes it (codex #3427 r30/r31) — find the charge lock explicitly.
+    const lock = db.__state.rawCalls.find((c) => /pg_advisory_xact_lock/.test(c.sql) && c.bindings?.[0] === 'reconcile.stripe_charge');
     expect(lock).toBeDefined();
     expect(lock.bindings).toEqual(['reconcile.stripe_charge', 'ch_race']);
   });
 
-  test('manual (non-Stripe) reconcile takes no advisory lock', async () => {
+  test('manual (non-Stripe) reconcile takes no CHARGE lock (combined reservation lock only)', async () => {
     const { status } = await post('/api/admin/payments-reconcile/reconcile', {
       invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
     });
     expect(status).toBe(200);
-    expect(db.__state.rawCalls).toHaveLength(0);
+    expect(db.__state.rawCalls.filter((c) => c.bindings?.[0] === 'reconcile.stripe_charge')).toHaveLength(0);
+    // The combined-session reservation serializes EVERY collection rail
+    // with /setup (codex #3427 r30/r31).
+    expect(db.__state.rawCalls.filter((c) => c.bindings?.[0] === 'pay.combined.customer')).toHaveLength(1);
   });
 
   test('loser sees the winner\'s ledger row after the lock and gets 409 with zero writes', async () => {
@@ -417,7 +422,10 @@ describe('concurrent reconcile race — advisory-lock serialized dedupe', () => 
     // the hook fires at OUR lock acquisition, i.e. after the winner's
     // commit released the lock — exactly what the in-transaction re-check
     // must now observe.
-    db.__state.onLock = (staged) => {
+    db.__state.onLock = (staged, lockInfo) => {
+      // The winner serializes on the CHARGE lock — the earlier combined
+      // reservation lock must not double-fire the simulation.
+      if (lockInfo?.bindings?.[0] !== 'reconcile.stripe_charge') return;
       staged.payments.push({ id: 'pay-winner', stripe_charge_id: 'ch_race', amount: 100, status: 'paid' });
     };
     const { status, body } = await post('/api/admin/payments-reconcile/reconcile', {
