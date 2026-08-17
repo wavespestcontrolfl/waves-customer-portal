@@ -500,7 +500,7 @@ function addressGroupComplete(byField) {
 // (codex #3413 r21): sentence-start or a first-person/definite determiner
 // DIRECTLY before it — "my accountant's new address" has a third-party
 // possessive in between and licenses nothing.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\b(?:i|we)\b[^.;!?\n]{0,30}\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
 // The only words allowed to introduce a move's adjacent address fragment
 // (codex #3413 r20): pure connective/address-introduction vocabulary. Any
 // other residual token — "rental", "tenant", "service" — marks the
@@ -549,6 +549,11 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`
+  // ANY non-first-person subject before an auxiliary + move verb is
+  // third-party (r40): "John is moving to …" names the mover, and the
+  // named mover is not the customer. First-person forms and household
+  // continuations stay licensed.
+  + `|(?<![\\p{L}\\p{M}'])(?!(?:i|we|m|re|s|ve|ll|d|am|family|household|everyone|everybody|and|also|all|both|now|currently)\\b)[\\p{L}\\p{M}][\\p{L}\\p{M}']*\\s+(?:(?:is|are|was|were|will|has|have|had|plans?|planning|wants?|intends?|hopes?|going|about)\\s+(?:to\\s+)?){1,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
   // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
   // to / moved to 99 Pine Ave" — a possessed subject moving is not the
   // customer moving. Self-ish household subjects stay licensed.
@@ -1217,9 +1222,16 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
     for (const c of corrections) {
       const cur = byFieldLast.get(c.field);
       if (!cur) { byFieldLast.set(c.field, c); continue; }
-      if (sameValue(c.field, cur.newValue, c.newValue)) continue;
       const curPos = quotePos(cur);
       const newPos = quotePos(c);
+      if (sameValue(c.field, cur.newValue, c.newValue)) {
+        // Equal values keep the LATER-positioned statement (r40): its
+        // licensing context (move vs spelling fix) is the operative one —
+        // a historical move mention must not ride an equal-value dedupe
+        // into clearing the unit of a later spelling correction.
+        if (newPos > curPos) byFieldLast.set(c.field, c);
+        continue;
+      }
       if (newPos > curPos) byFieldLast.set(c.field, c);
       else if (newPos === curPos) conflicted.add(c.field);
     }
@@ -1237,12 +1249,11 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
       // to the original sender even if the customer's phone is reassigned
       // between the webhook match and the snapshot read above.
       senderPhone,
-      // Move evidence scoped to the corrected statement (codex #3413 r24):
-      // the extractor marks address candidates that actually rode the move
-      // license — a historical move phrase elsewhere in the SMS beside a
-      // spelling-fix group must not clear the unit or tighten the group
-      // requirement as though this were a current whole-property move.
-      moveContext: corrections.some((c) => c.moveLicensed === true),
+      // Move evidence scoped to the corrected statement (codex #3413 r24)
+      // and derived from the SURVIVING candidates after duplicate
+      // resolution (r40): a historical move mention whose components lost
+      // the dedupe must not make the final batch a move.
+      moveContext: resolved.some((c) => c.moveLicensed === true),
       // Queue lock-owner fence (codex #3413 r20): runs INSIDE the apply
       // transaction, so a worker whose job was reclaimed after the
       // stale-lock threshold rolls its customer write back instead of

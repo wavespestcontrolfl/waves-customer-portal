@@ -3256,3 +3256,57 @@ describe('round-39 hardening', () => {
     expect(knex._data.customers[0].address_line2).toBeNull();
   });
 });
+
+describe('round-40 hardening', () => {
+  it("a NAMED third party moving never rewrites the customer's address", async () => {
+    const body = 'John is moving to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'john is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'john is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'john is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'john is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a historical move beside a later spelling fix keeps the unit (post-dedupe context)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const body = 'I moved to 99 Pine Ave last year. Your street spelling is wrong; it should be 99 Pine Ave. My city is wrong, it is Sarasota. My zip is wrong, it is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'i moved to 99 Pine Ave last year', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'your street spelling is wrong; it should be 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my city is wrong, it is Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my zip is wrong, it is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied.map((a) => a.field)).not.toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
+    expect(knex._data.customers[0].address_line1).toBe('99 Pine Ave');
+  });
+
+  it("the customer's own 'we are moving' still passes the named-subject guard", async () => {
+    const body = 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we are moving to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we are moving to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
+  });
+});
