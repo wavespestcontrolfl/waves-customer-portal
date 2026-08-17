@@ -13385,6 +13385,12 @@ export function CompletionPanel({
       // (codex r58)
       lawnAssessmentId,
       lawnAssessmentRevision,
+      // the payload sends includeCustomerComms — unchecking it after
+      // generation means the installed draft was built from communications
+      // the visible setting now excludes (codex r72); the mid-request hold
+      // below invalidates an in-flight response on settle like any other
+      // input
+      aiReportIncludeComms,
     ]);
     if (generationInputsRef.current === null) {
       generationInputsRef.current = snapshot;
@@ -13401,7 +13407,8 @@ export function CompletionPanel({
     }
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
-    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision]);
+    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision,
+    aiReportIncludeComms]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose

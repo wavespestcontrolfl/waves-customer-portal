@@ -11924,6 +11924,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
     let authorizedCompanionTypes = [];
+    // Primary typed input may hold the final input gate open only once the
+    // caller's authorization and the profile confirmed it will actually
+    // reach the prompt — an unauthorized caller's typed-only request must
+    // 400, not spend a provider call on a generic report with none of the
+    // submitted findings (codex r72; analogous to companionCustomerInput).
+    let primaryTypedConfirmed = false;
     const typedProductNameGuards = [];
     let typedFallbackObservations = [];
     let typedFallbackActions = [];
@@ -12027,6 +12033,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           authorizedCompanionTypes = allowedCompanionTypes;
           const confirmedPrimaryType = typedValuesRaw && structuredFindings.type
             ? structuredFindings.type : null;
+          primaryTypedConfirmed = Boolean(confirmedPrimaryType) && primaryTypedInput;
           // Primary tree_shrub derives treatments_completed from the
           // authoritative catalog rows (autoFilled field the client hides) —
           // the retired findings draft ran this same derivation before
@@ -12120,7 +12127,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
       || ratingNum !== null
-      || primaryTypedInput
+      // Profile-confirmed only (codex r72): bare primaryTypedInput held the
+      // gate open for callers the ownership branch refused, generating a
+      // generic report with none of the submitted findings.
+      || primaryTypedConfirmed
       || hasValidLawnAssessment;
     if (!baseHasReportInput && !companionCustomerInput) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
@@ -12168,8 +12178,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       && ratingNum === null
       // Only PROFILE-AUTHORIZED customer-facing typed input counts here —
       // internal_only companion facts never reach the prompt, so they must
-      // not defeat the assessment-only retryable 503 (codex r30).
-      && !(primaryTypedInput || companionCustomerInput);
+      // not defeat the assessment-only retryable 503 (codex r30; the
+      // primary term is the confirmed flag for the same reason, r72).
+      && !(primaryTypedConfirmed || companionCustomerInput);
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',

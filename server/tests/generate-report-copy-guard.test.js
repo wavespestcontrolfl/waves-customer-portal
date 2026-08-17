@@ -352,6 +352,14 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // reopening timing forms + continuing-state lowercase credentials (r72)
+    expect(reportCopyRejection('The treated lawn will reopen after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The area reopens in 2 hours.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code remains blue-waves.')).toBe('access_code');
+    expect(reportCopyRejection('The keypad code was changed to blue-waves today.')).toBe('access_code');
+    // ordinary status prose about a code stays legal — participle guard
+    expect(reportCopyRejection('The gate code remains unchanged this season.')).toBeNull();
+    expect(reportCopyRejection('The billing code was updated to reflect the new plan.')).toBeNull();
     // failed/unable confirmation predicates never unlock the safe-once-dry
     // exemption + unquoted lowercase positional creds (r71)
     expect(reportCopyRejection('Use blue-waves as the gate code.')).toBe('access_code');

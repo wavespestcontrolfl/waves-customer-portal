@@ -71,6 +71,14 @@ const REPORT_ACCESS_CODE_RES = [
   // count like the space-linked forms — bounded segments, so ordinary
   // hyphenated prose never chains past four tokens (codex r70)
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}(?:-[a-z0-9#*]{1,11}){0,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
+  // continuing-state linkers (was/remains/stays/became/continue-to-be/
+  // has-been/modal-be/going-to-be/changed-to) bind lowercase tokens too
+  // (codex r72) — but ONLY hyphenated ones: after "was"/"remains" a plain
+  // lowercase word is overwhelmingly a participle or descriptor ("the
+  // keypad was scheduled", "the code remains unchanged"), so the hyphen is
+  // the distinctive signal here, and participle-shaped hyphenated words
+  // ("was re-keyed", "double-checked") are excluded by their -ed/-ing tail
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?!(?:up-to-date|state-of-the-art|day-to-day|one-time)\b)(?!(?:[a-z0-9#*]+-)+[a-z0-9#*]*(?:ed|ing)\b)["'‘’“”]?[a-z][a-z0-9#*]{0,11}(?:-[a-z0-9#*]{1,11}){1,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
   // device nouns join the reverse shape ("WAVES is the lockbox") and
