@@ -1223,7 +1223,31 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
         } catch { return false; }
       });
       if (finalizedLost) {
-        logger.warn(`[stripe-webhook] Combined PI ${piId} succeeded after a FINALIZED-LOST dispute — the chargeback already returned the cash; no quarantine recorded`);
+        // Release the allocation too (codex r33 P1): the invoices are
+        // still stamped with a now-succeeded PI — pay setup and every
+        // off-page rail would retrieve it and refuse collection forever,
+        // even though the chargeback already returned the cash. Reopen
+        // any 'processing' rows (mirroring the canceled-PI revert) and
+        // unbind the rest, all under the settlement lock.
+        await db.transaction(async (lostTrx) => {
+          await lostTrx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['stripe.pi.payment', String(piId)],
+          );
+          const lostStamped = await lostTrx('invoices').where({ stripe_payment_intent_id: piId, status: 'processing' });
+          for (const stampedRow of lostStamped) {
+            await lostTrx('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
+              status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+              paid_at: null,
+              stripe_payment_intent_id: null,
+              stripe_charge_id: null,
+              ach_processing_notified_at: null,
+              updated_at: lostTrx.fn.now(),
+            });
+          }
+          await require('../services/pay-combined').clearPaymentIntentStamps(lostTrx, piId);
+        });
+        logger.warn(`[stripe-webhook] Combined PI ${piId} succeeded after a FINALIZED-LOST dispute — the chargeback already returned the cash; allocation released, no quarantine recorded`);
         return;
       }
       logger.error(`[stripe-webhook] Refusing to settle disputed combined PI ${piId}: ${err.message}`);

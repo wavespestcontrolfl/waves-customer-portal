@@ -4016,14 +4016,32 @@ const StripeService = {
         });
       } catch (cleanupErr) {
         logger.error(`[stripe] update-amount stamp cleanup failed for PI ${effectivePaymentIntentId}: ${cleanupErr.message} — canceling the mutated PI`);
+        // Stamps are cleared ONLY once the PI is confirmed canceled (codex
+        // r33 P1): a stale tab can confirm between the cleanup failure and
+        // this cancel — unstamping a succeeded/processing PI would leave
+        // its invoices locally collectible while the money moves, open to
+        // double collection until the webhook lands.
+        let safeToUnstamp = false;
         try {
           await stripe.paymentIntents.cancel(effectivePaymentIntentId);
+          safeToUnstamp = true;
         } catch (cancelErr) {
-          logger.error(`[stripe] could not cancel PI ${effectivePaymentIntentId} after failed cleanup: ${cancelErr.message} — manual review needed`);
+          try {
+            const raced = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
+            if (raced.status === 'canceled') {
+              safeToUnstamp = true;
+            } else {
+              logger.error(`[stripe] PI ${effectivePaymentIntentId} raced to ${raced.status} after failed cleanup — stamps preserved for its webhooks (${cancelErr.message})`);
+            }
+          } catch (recheckErr) {
+            logger.error(`[stripe] could not verify PI ${effectivePaymentIntentId} after failed cleanup: ${recheckErr.message} — stamps preserved, manual review needed`);
+          }
         }
-        try {
-          await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId);
-        } catch { /* the 409 below reloads the page, which re-mints and repairs */ }
+        if (safeToUnstamp) {
+          try {
+            await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId);
+          } catch { /* the 409 below reloads the page, which re-mints and repairs */ }
+        }
         const cleanupRefusal = new Error('Could not update the payment session — refreshing to the latest amounts.');
         cleanupRefusal.statusCode = 409;
         cleanupRefusal.staleBalance = true;

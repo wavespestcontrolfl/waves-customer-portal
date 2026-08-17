@@ -544,7 +544,7 @@ async function releaseCombinedSessionBeforeCollection(database, invoice, { conte
     }
   }
   const live = freshInvoice || invoice;
-  if (!live?.stripe_payment_intent_id) return { released: false };
+  if (!live?.stripe_payment_intent_id) return { released: false, invoice: live };
   const StripeService = require('./stripe');
   let pi;
   try {
@@ -559,7 +559,7 @@ async function releaseCombinedSessionBeforeCollection(database, invoice, { conte
     e.statusCode = 409;
     throw e;
   }
-  if (!isCombinedPiMetadata(pi.metadata)) return { released: false };
+  if (!isCombinedPiMetadata(pi.metadata)) return { released: false, invoice: live };
   if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
     try {
       await StripeService.cancelPaymentIntent(pi.id);
@@ -570,11 +570,11 @@ async function releaseCombinedSessionBeforeCollection(database, invoice, { conte
     }
     await clearPaymentIntentStamps(database, pi.id);
     logger.info(`[pay-combined] released combined PI ${pi.id} before ${context} on invoice ${invoice.invoice_number || invoice.id}`);
-    return { released: true };
+    return { released: true, invoice: live };
   }
   if (pi.status === 'canceled') {
     await clearPaymentIntentStamps(database, pi.id);
-    return { released: true };
+    return { released: true, invoice: live };
   }
   const e = new Error(`A combined bank payment is in flight on this invoice — wait for it to settle or fail before ${context}`);
   e.statusCode = 409;

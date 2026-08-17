@@ -1541,10 +1541,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // An unreleasable session aborts the merge; the admin retries.
     {
       const PayCombined = require('./pay-combined');
-      await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
       const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
       if (loserRelease.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
+      }
+      // A payer-CHANGING merge defers on WINNER-side in-flight money too
+      // (codex r33 P1): a blank-payer winner absorbing the loser's payer
+      // would change the billing owner of a debit the homeowner already
+      // authorized — settlement never re-resolves ownership.
+      if (winnerRelease.inFlight > 0 && !winner.payer_id && loser.payer_id) {
+        throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
     }
     if (Object.keys(backfills).length) {

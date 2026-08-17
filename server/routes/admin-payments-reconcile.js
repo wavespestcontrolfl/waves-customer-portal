@@ -265,7 +265,12 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       // (codex #3427 r30 P0, serialized r31 P0): per-customer combined
       // lock + fresh in-lock re-read + release, held through this commit
       // so /setup cannot stamp a confirmable combined PI in the gap.
-      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
+      const reservation = await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
+      // Book against the FRESH locked row's owner (codex r33 P2): a merge
+      // committing between the route's read and this transaction repoints
+      // the invoice — the ledger row must credit the surviving customer,
+      // not the retired snapshot's.
+      if (reservation.invoice?.customer_id) invoice.customer_id = reservation.invoice.customer_id;
       if (stripeChargeId) {
         // Charge-scoped, transaction-scoped advisory lock. Two admins
         // reconciling the SAME charge against different same-value invoices
