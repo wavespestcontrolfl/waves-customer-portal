@@ -71,8 +71,9 @@ async function readPrefs(customerId) {
 // disable as a preference and later restore (codex #3432 r10 P2 + r11 P2).
 // The marker is server-only: the PUT schema can't set it, the write below
 // preserves it, and accepting a later interior-included commercial estimate
-// clears it (the office-reprice path back). Shared by GET (portal renders
-// the locked row with an explanation) and PUT (the trust boundary).
+// clears it (the office-reprice path back). This helper feeds GET's
+// editability signal; the PUT trust boundary re-checks the marker from the
+// FOR UPDATE row inside its transaction (codex #3432 r12 P2).
 const COMMERCIAL_SCOPE_KEY = 'commercial_interior_scope';
 
 async function readRawPrefsBlob(customerId) {
@@ -118,18 +119,6 @@ router.put('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Service preferences not yet available' });
     }
 
-    // A commercial customer whose sold scope is exterior-only cannot
-    // RE-ENABLE interior here — that would restore routine interior work
-    // without the priced component; scope changes go through the office and
-    // a reprice (codex #3432 r3 P1, narrowed r10 P2). Disabling stays
-    // available to everyone, and commercial accounts without the
-    // exterior-only stamp keep the preference exactly as before.
-    if (patch.interior_spray === true && await commercialInteriorReEnableLocked(req.customerId)) {
-      return res.status(400).json({
-        error: 'Interior service on your commercial plan is priced by scope — contact our office to add it to your program.',
-      });
-    }
-
     // Row-locked read-modify-write: two concurrent single-key PUTs
     // (interior toggled while exterior is still saving) each read the
     // pre-image and wrote the WHOLE blob, so the second commit silently
@@ -137,6 +126,7 @@ router.put('/', async (req, res, next) => {
     // instructions. FOR UPDATE serializes them on the customer row.
     let previous;
     let next;
+    let interiorReEnableRejected = false;
     await db.transaction(async (trx) => {
       const row = await trx('customers')
         .select('service_preferences')
@@ -146,6 +136,21 @@ router.put('/', async (req, res, next) => {
       const raw = typeof row?.service_preferences === 'string'
         ? JSON.parse(row.service_preferences || '{}')
         : (row?.service_preferences || {});
+      // A commercial customer whose sold scope is exterior-only cannot
+      // RE-ENABLE interior here — that would restore routine interior work
+      // without the priced component; scope changes go through the office and
+      // a reprice (codex #3432 r3 P1, narrowed r10 P2). The check reads the
+      // FOR UPDATE row: a pre-transaction read could pass just before an
+      // exterior-only acceptance stamps the marker, then write
+      // interior_spray: true while preserving the stamp it never saw
+      // (codex #3432 r12 P2). Disabling stays available to everyone, and
+      // accounts without the stamp keep the preference exactly as before.
+      if (patch.interior_spray === true
+          && raw && typeof raw === 'object'
+          && raw[COMMERCIAL_SCOPE_KEY] === 'excluded') {
+        interiorReEnableRejected = true;
+        return; // nothing written — the transaction commits empty
+      }
       previous = normalize(raw);
       next = normalize({ ...previous, ...patch });
       // The sold-scope marker survives every customer write — it is set and
@@ -159,6 +164,12 @@ router.put('/', async (req, res, next) => {
         updated_at: new Date(),
       });
     });
+
+    if (interiorReEnableRejected) {
+      return res.status(400).json({
+        error: 'Interior service on your commercial plan is priced by scope — contact our office to add it to your program.',
+      });
+    }
 
     // Figure out which keys actually flipped (for the admin notification body)
     const changed = Object.keys(patch).filter((k) => previous[k] !== next[k]);

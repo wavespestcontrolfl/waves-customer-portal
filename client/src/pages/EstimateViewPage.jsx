@@ -4706,6 +4706,16 @@ function EstimateViewPageInner() {
     setCtaPhase('submitting');
     setError(null);
     try {
+      // Settle any in-flight repricing mutation (add-on/bond/interior) before
+      // accepting: un-awaited, the accept can win the server race and lock the
+      // estimate at the pre-toggle scope while the customer's last click 409s
+      // behind it (codex #3432 r12 P2). Re-await until the chain ref is
+      // stable — a click queued during the first await joins the chain.
+      let settledChain;
+      do {
+        settledChain = addOnMutationChainRef.current;
+        await settledChain.catch(() => {});
+      } while (settledChain !== addOnMutationChainRef.current);
       const r = await fetch(`${API_BASE}/estimates/${token}/accept`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
