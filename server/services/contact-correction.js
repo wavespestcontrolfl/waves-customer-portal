@@ -413,8 +413,25 @@ async function extractSmsContactCorrections({ body }) {
     // ("for receipts, send to billing@vendor.com") licenses nothing
     // (codex #3413 r38; the r16 co-location attack stays closed).
     const RETRACTION_RE = /\b(?:actually|sorry|instead|i meant|make that|scratch that|correction|rather|no wait|oops)\b/i;
-    const retractionLicensed = (c, arr) => RETRACTION_RE.test(String(c.quote || ''))
-      && arr.some((o) => o !== c && o.field === c.field && quoteCarriesFieldIntent(o.field, o.quote));
+    // …and the clause must REFER BACK to the correction (codex #3413
+    // r39): after stripping the replacement value, every residual token
+    // must come from a closed retraction/connective vocabulary — a
+    // discourse marker fronting unrelated business ("Actually, send the
+    // receipt to billing@vendor…") licenses nothing.
+    const RETRACTION_TOKENS = new Set([
+      'actually', 'sorry', 'instead', 'i', 'meant', 'make', 'that', 'scratch',
+      'correction', 'rather', 'no', 'wait', 'oops', 'use', 'it', 'its', 'is',
+      'should', 'be', 'please', 'my', 'the', 'not', 'to', 'change', 'um', 'er',
+    ]);
+    const retractionLicensed = (c, arr) => {
+      const q = String(c.quote || '').toLowerCase();
+      if (!RETRACTION_RE.test(q)) return false;
+      if (!arr.some((o) => o !== c && o.field === c.field && quoteCarriesFieldIntent(o.field, o.quote))) return false;
+      const v = normValue(c.new_value).toLowerCase();
+      const residue = (v ? q.split(v).join(' ') : q)
+        .replace(/[^a-z0-9']+/g, ' ').trim();
+      return residue.split(/\s+/).filter(Boolean).every((t) => RETRACTION_TOKENS.has(t));
+    };
     return base
       .filter((c, _i, arr) => (ADDRESS_FIELDS.includes(c.field)
         ? addressLicensed(c)
@@ -483,7 +500,7 @@ function addressGroupComplete(byField) {
 // (codex #3413 r21): sentence-start or a first-person/definite determiner
 // DIRECTLY before it — "my accountant's new address" has a third-party
 // possessive in between and licenses nothing.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|going\s+to\s+move|about\s+to\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have|'m| am|'re| are)?\s+(?:just\s+|recently\s+)?(?:moved|will\s+move|going\s+to\s+move|about\s+to\s+move|plan(?:s|ning)?\s+to\s+move|intend\s+to\s+move|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
 // The only words allowed to introduce a move's adjacent address fragment
 // (codex #3413 r20): pure connective/address-introduction vocabulary. Any
 // other residual token — "rental", "tenant", "service" — marks the
@@ -535,7 +552,7 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
   // to / moved to 99 Pine Ave" — a possessed subject moving is not the
   // customer moving. Self-ish household subjects stay licensed.
-  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will|will\\s+be|has|have|had|just|recently|going\\s+to|about\\s+to)\\s+){0,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
+  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will|will\\s+be|has|have|had|just|recently|going\\s+to|about\\s+to|plans?\\s+to|planning\\s+to|wants?\\s+to|intends?\\s+to|hopes?\\s+to)\\s+){0,3}mov(?:e|ing|ed|es)\\s+(?:to|into)\\b`
   + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );

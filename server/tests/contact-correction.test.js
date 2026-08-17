@@ -3204,3 +3204,55 @@ describe('round-38 retraction license boundary', () => {
     expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
   });
 });
+
+describe('round-39 hardening', () => {
+  it('a discourse marker fronting unrelated business is NOT a retraction', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const body = 'My email is wrong; use jane@example.com. Actually, send the receipt to billing@vendor.example';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jane@example.com', quote: 'my email is wrong; use jane@example.com', confidence: 'high' },
+          { field: 'email', new_value: 'billing@vendor.example', quote: 'actually, send the receipt to billing@vendor.example', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied.map((a) => a.newValue)).toEqual(['jane@example.com']);
+    expect(knex._data.customers[0].email).toBe('jane@example.com');
+  });
+
+  it("a third party 'plans to move' subject never rewrites the address", async () => {
+    const body = 'My tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'my tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("the customer's own 'plan to move' carries move context", async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'i plan to move to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'i plan to move to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'I plan to move to 99 Pine Ave, Sarasota. Zip is 34231', knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBeNull();
+  });
+});
