@@ -3211,8 +3211,20 @@ async function handleChargeRefunded(charge) {
           if (settledRowInLock) {
             throw new Error(`payments rows appeared for charge ${chargeId} while fencing its pre-settlement refund — retry the event against the rows`);
           }
-          if (!isFullRefund) {
-            logger.error(`[stripe-webhook] PARTIAL refund on unsettled combined charge ${chargeId} — parked for operator`);
+          // CUMULATIVE-full gating (codex r16 P1, mirroring the
+          // post-settlement branch): charge.refunded reached via multiple
+          // partials must NOT write a fence stamped with only the final
+          // refund id — a bounce of that constituent would lift the whole
+          // fence and resettle despite the earlier refunds standing, and a
+          // bounce of an earlier one couldn't lift it at all. Park the
+          // final contribution with the other parked constituents instead;
+          // only a SINGLE whole-charge refund writes the clean fence.
+          const preChargeCents = Number(charge.amount) || 0;
+          const cumulativeFullPreSettle = isFullRefund
+            && preChargeCents > 0
+            && Math.round(refundAmountDollars * 100) < preChargeCents;
+          if (!isFullRefund || cumulativeFullPreSettle) {
+            logger.error(`[stripe-webhook] ${cumulativeFullPreSettle ? 'CUMULATIVE-full' : 'PARTIAL'} refund on unsettled combined charge ${chargeId} — parked for operator`);
             await trx('stripe_orphan_charges')
               .insert({
                 // Same per-refund key as the post-settlement partial park.
@@ -3222,15 +3234,15 @@ async function handleChargeRefunded(charge) {
                 invoice_id: null,
                 amount: refundAmountDollars,
                 source: 'combined_pay_webhook',
-                original_db_error: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge BEFORE settlement — attribute and reconcile manually`,
+                original_db_error: `${cumulativeFullPreSettle ? 'Final constituent of a CUMULATIVE full refund' : 'Partial refund'} ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge BEFORE settlement — attribute and reconcile manually${cumulativeFullPreSettle ? ' (the charge is now fully refunded across multiple partials; if settlement proceeds, reopen the invoices from the parked cases)' : ''}`,
               })
               .onConflict('stripe_payment_intent_id')
               .ignore();
             try {
               await NotificationService.notifyAdmin(
                 'refund',
-                `Partial refund on combined payment: $${refundAmountDollars}`,
-                `Charge ${chargeId} backs multiple invoices (not yet settled); a partial refund can't be auto-attributed. Reconcile in /admin/revenue.`,
+                `${cumulativeFullPreSettle ? 'Combined charge fully refunded via partials (pre-settlement)' : 'Partial refund on combined payment'}: $${refundAmountDollars}`,
+                `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? 'it is now FULLY refunded across multiple partial refunds — every constituent is parked' : 'a partial refund can\'t be auto-attributed'}. Reconcile in /admin/revenue.`,
                 { icon: '⚠️', link: '/admin/revenue' },
               );
             } catch { /* non-critical */ }

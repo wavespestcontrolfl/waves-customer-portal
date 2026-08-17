@@ -5643,6 +5643,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // Keys are read provisionally WITHOUT locking; after the locked read
         // below, a key mismatch (row moved concurrently) aborts the edit
         // rather than proceeding with the wrong day fenced.
+        // Combined-session lock BEFORE any scheduled_services row lock
+        // (codex #3427 r16 P1, same advisory-then-rows discipline as the
+        // tech-day fence below): the payer-activation release helper waits
+        // on pay.combined.customer, and taking row locks first would
+        // invert against /setup's advisory-then-reads order. Customer id
+        // read provisionally WITHOUT locking; the later release re-acquires
+        // re-entrantly.
+        if ((Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
+          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override)) {
+          const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+          if (provCust?.customer_id) {
+            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
+          }
+        }
         let provFence = null;
         if (updates.scheduled_date !== undefined) {
           const prov = await trx('scheduled_services')

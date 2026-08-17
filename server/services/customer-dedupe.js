@@ -791,6 +791,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         ['collections_case', custId],
       );
     }
+    // Combined-session lock BEFORE any customer row locks (codex #3427 r16
+    // P1): the payer-activation release helper later waits on
+    // pay.combined.customer — acquiring it up front (advisory-then-rows,
+    // same discipline as /setup) prevents the row-vs-advisory inversion.
+    // Payer state peeked WITHOUT locking; both ids locked sorted.
+    {
+      const payerPeek = await trx('customers').whereIn('id', [winnerId, loserId]).select('id', 'payer_id');
+      if (payerPeek.some((r) => r.payer_id)) {
+        await require('./pay-combined').lockCombinedCustomers(trx, [winnerId, loserId].map(String).sort());
+      }
+    }
     // A collection call mid-flight defers the merge (codex gh-r10): the
     // dial claim also takes these case locks, so this check is
     // authoritative — a 'dialing' case means a live call is using policy

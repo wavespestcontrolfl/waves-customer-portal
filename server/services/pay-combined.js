@@ -75,17 +75,36 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // shared advisory lock while this setup was queued behind it.
     {
       const PayerService = require('./payer');
-      const resolved = await PayerService.resolveForInvoice({
-        customerId: String(anchorInvoice.customer_id),
-        ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
-        throwOnError: true,
-      });
+      let resolved;
+      try {
+        resolved = await PayerService.resolveForInvoice({
+          customerId: String(anchorInvoice.customer_id),
+          ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
+          throwOnError: true,
+        });
+      } catch (resolveErr) {
+        if (resolveErr.combinedSetupAbort) throw resolveErr;
+        // Resolution UNCERTAINTY at the setup seam aborts too (codex r16
+        // P1): "the lookup is down" is not "no payer" — minting an
+        // anchor-only PI on an unproven self-pay anchor could charge the
+        // homeowner debt a just-assigned payer now owns. The GET path
+        // still degrades (a read must not 500).
+        if (throwOnPayerAnchor) {
+          const err = new Error('Could not verify billing ownership for this invoice — please try again in a moment.');
+          err.statusCode = 409;
+          err.staleBalance = true;
+          err.combinedSetupAbort = true;
+          throw err;
+        }
+        throw resolveErr; // outer catch degrades (GET / non-seam callers)
+      }
       if (resolved?.payerId) {
         if (throwOnPayerAnchor) {
           const err = new Error('This invoice is billed to a third-party payer and can no longer be paid from this page — refreshing.');
           err.statusCode = 409;
           err.staleBalance = true;
           err.payerBilledAnchor = true;
+          err.combinedSetupAbort = true;
           throw err;
         }
         logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
@@ -144,9 +163,9 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     }
     return eligible;
   } catch (err) {
-    // The payer-anchor abort is a deliberate verdict for the setup seam —
-    // it must reach the route, never degrade to single-invoice.
-    if (err.payerBilledAnchor) throw err;
+    // Setup-seam abort verdicts (payer-billed anchor OR resolution
+    // uncertainty) must reach the route, never degrade to single-invoice.
+    if (err.combinedSetupAbort || err.payerBilledAnchor) throw err;
     logger.warn(`[pay-combined] sibling selection failed for invoice ${anchorInvoice?.id}: ${err.message} — combined flow disabled for this session`);
     return null;
   }

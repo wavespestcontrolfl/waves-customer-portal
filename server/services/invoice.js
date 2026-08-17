@@ -3974,6 +3974,11 @@ const InvoiceService = {
           throw new Error(`Couldn't cancel the open payment session ${triagedVoidPiId} (${e.message}); resolve it before voiding`);
         }
       }
+      // A combined PI is stamped on its SIBLINGS too (codex #3427 r16 P2):
+      // canceling it while voiding one allocated invoice must unbind every
+      // other collectible row, or they stay stuck behind a canceled intent
+      // (edits blocked, open sibling pages posting to a dead PI).
+      await require("./pay-combined").clearPaymentIntentStamps(db, triagedVoidPiId);
     }
     // Void + deposit-ledger restore commit TOGETHER: a committed void beside
     // a still-consumed deposit strands the customer's money — the credit can
@@ -4123,6 +4128,9 @@ const InvoiceService = {
           throw new Error(`Couldn't cancel the open payment session ${triagedPiId} (${e.message}); resolve it before settling`);
         }
       }
+      // Unbind combined siblings from the canceled PI (codex #3427 r16 P2)
+      // — coverage-settling one allocated invoice must not strand the rest.
+      await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId);
     }
     let settled = null;
     await db.transaction(async (trx) => {
@@ -4587,6 +4595,9 @@ const InvoiceService = {
                 await StripeService.cancelPaymentIntent(triagedPiId, {
                   cancellation_reason: "abandoned",
                 });
+                // Unbind combined siblings from the canceled PI (codex
+                // #3427 r16 P2).
+                await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId);
                 logger.info(
                   `[invoice] Cancelled PaymentIntent ${triagedPiId} (was ${pi.status}) before voiding ${candidate.invoice_number} — scheduled service ${scheduledServiceId} cancelled`,
                 );

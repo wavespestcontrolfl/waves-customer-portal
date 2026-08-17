@@ -3234,6 +3234,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       let emailSync = null;
       try {
         await db.transaction(async (trx) => {
+          // Combined-session lock BEFORE the customer row lock (codex #3427
+          // r16 P1): /setup acquires pay.combined.customer and then reads/
+          // writes customer state on other connections — taking the row
+          // lock first here and waiting on the advisory lock inside the
+          // release helper forms an application-level deadlock PostgreSQL
+          // can't fully see. Advisory-then-rows puts both paths in one
+          // order; the later release call re-acquires re-entrantly.
+          if (updates.payer_id) {
+            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(req.params.id)]);
+          }
           // Serialize overlapping address edits on the same customer: the row
           // lock makes a second editor WAIT, and before/after are re-derived
           // from the locked row — a pre-transaction 'before' from the losing
