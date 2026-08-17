@@ -316,6 +316,71 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
 }
 
 /**
+ * Fail-closed release of any unconfirmed COMBINED payment session riding an
+ * invoice tied to the given scheduled services (codex #3427 r8 P1). Payer
+ * assignment via the scheduled-service writer bypasses every pay-page money
+ * seam — the browser can confirm a combined ACH PI directly after the last
+ * server verification — so assigning a payer must first cancel any
+ * unconfirmed combined PI those invoices ride, exactly like stop-dunning.
+ * Throws (aborting the caller's transaction) when a session can't be
+ * verified or released; money in flight is never touched — the settle
+ * paths keep their own ownership guards for it.
+ */
+async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds) {
+  const ids = (scheduledServiceIds || []).filter(Boolean);
+  if (!ids.length) return 0;
+  const rows = await database('invoices')
+    .whereIn('scheduled_service_id', ids)
+    .whereNotNull('stripe_payment_intent_id')
+    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    .select('id', 'invoice_number', 'stripe_payment_intent_id');
+  return releaseUnconfirmedCombinedSessions(database, rows);
+}
+
+/** Customer-default-payer variant of the same fence (the customers.payer_id
+ * writer creates the identical late-assignment gap). */
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
+  if (!customerId) return 0;
+  const rows = await database('invoices')
+    .where({ customer_id: customerId })
+    .whereNotNull('stripe_payment_intent_id')
+    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    .select('id', 'invoice_number', 'stripe_payment_intent_id');
+  return releaseUnconfirmedCombinedSessions(database, rows);
+}
+
+async function releaseUnconfirmedCombinedSessions(database, rows) {
+  const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
+  let released = 0;
+  for (const piId of piIds) {
+    const StripeService = require('./stripe');
+    let pi;
+    try {
+      pi = await StripeService.retrievePaymentIntent(piId);
+    } catch (err) {
+      throw new Error(`Could not verify payment session ${piId} before the payer change (${err.message}) — try again`);
+    }
+    if (!pi) continue; // Stripe unconfigured (dev)
+    if (!isCombinedPiMetadata(pi.metadata)) continue;
+    const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)
+      && pi.next_action?.type !== 'verify_with_microdeposits';
+    if (!unconfirmed) {
+      logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
+      continue;
+    }
+    try {
+      await StripeService.cancelPaymentIntent(piId);
+    } catch (err) {
+      throw new Error(`Could not release the combined payment session ${piId} before the payer change (${err.message}) — payer NOT changed, try again`);
+    }
+    await clearPaymentIntentStamps(database, piId);
+    released += 1;
+    logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
+  }
+  return released;
+}
+
+/**
  * Settle a combined PaymentIntent: one transaction (advisory-locked on the
  * PI, same namespace as the single-invoice settle) that, for EVERY invoice
  * in the allocation, flips it paid/processing and ensures its own
@@ -593,5 +658,7 @@ module.exports = {
   paymentIntentOwnsInvoice,
   combinedContextForInvoice,
   clearPaymentIntentStamps,
+  releaseUnconfirmedCombinedSessionsForScheduledServices,
+  releaseUnconfirmedCombinedSessionsForCustomer,
   settleCombinedPaymentIntent,
 };

@@ -5754,6 +5754,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // consumers append NULLs last.
           updates.route_order = null;
         }
+        // Assigning a payer must first release any UNCONFIRMED combined
+        // pay-page session riding this visit's invoices (codex #3427 r8
+        // P1): the browser confirms a combined ACH PI directly after the
+        // last server seam, and settlement never re-resolves ownership —
+        // without this fence the homeowner could be charged sibling debt
+        // that now belongs to third-party AP. Fail-closed: a session that
+        // can't be verified/released aborts this transaction (payer NOT
+        // changed); in-flight money is never touched. Children included —
+        // the payer propagation below reaches them too.
+        if (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id) {
+          const fencedVisitIds = [req.params.id];
+          try {
+            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
+            fencedVisitIds.push(...childIds);
+          } catch { /* no children / column absent */ }
+          await require('../services/pay-combined')
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the

@@ -3076,6 +3076,40 @@ async function handleChargeRefunded(charge) {
           } catch { /* non-critical */ }
           return combinedRows[0] || null;
         }
+        // CUMULATIVE-full (codex r8 P1): charge.refunded went true through
+        // MULTIPLE partial refunds — the earlier partials are already
+        // parked, and stamping only THIS refund's id across every row
+        // would make any later bounce unwind all-or-nothing (a bounce of
+        // this refund would restore everything as fully paid; a bounce of
+        // an earlier parked one would restore nothing). Park this
+        // contribution alongside the others for allocation-aware operator
+        // reconciliation; only a SINGLE refund covering the whole charge
+        // takes the clean full unwind below.
+        const combinedChargeCents = Number(charge.amount) || 0;
+        if (combinedChargeCents && Math.round(refundAmountDollars * 100) < combinedChargeCents) {
+          logger.error(`[stripe-webhook] Combined charge ${chargeId} reached FULLY refunded via multiple partials — final contribution parked; operator reconciles all constituents`);
+          await trx('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${charge.payment_intent || chargeId}:partial-refund:${refundId || 'unknown'}`,
+              stripe_charge_id: chargeId,
+              customer_id: combinedRows[0]?.customer_id || null,
+              invoice_id: null,
+              amount: refundAmountDollars,
+              source: 'combined_pay_webhook',
+              original_db_error: `Refund ${refundId || 'unknown'} of $${refundAmountDollars} completed a CUMULATIVE full refund of combined charge ${chargeId} — reconcile every constituent refund manually (rows deliberately untouched)`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .ignore();
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Combined charge fully refunded via partials: $${cumulativeRefundAmountDollars}`,
+              `Charge ${chargeId} is now fully refunded through multiple partial refunds. No rows were auto-unwound — reconcile the constituents in /admin/revenue.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return combinedRows[0] || null;
+        }
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         for (const row of combinedRows) {
           const meta = rowMeta(row);
@@ -3409,7 +3443,18 @@ async function handleRefundFailed(refund) {
             meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
           } catch { meta = {}; }
           const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
-          if (refundId && failedIds.includes(refundId)) { alreadyRecorded = true; continue; }
+          const isPreSettlementMarker = meta.pre_settlement === true && !meta.invoice_id;
+          if (refundId && failedIds.includes(refundId)) {
+            // Replay after a crash between the marker neutralization and
+            // the resettle (codex r8 P1): the fence must not suppress the
+            // recovery it exists to retry — re-arm the (idempotent)
+            // succeeded re-run for an already-neutralized marker.
+            if (isPreSettlementMarker) {
+              resettleFencedPiId = row.stripe_payment_intent_id || rowPiId;
+            }
+            alreadyRecorded = true;
+            continue;
+          }
           const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
           const wasStamped = !!refundId && (row.stripe_refund_id === refundId || stampedIds.includes(refundId));
           const nextMeta = {
@@ -3430,13 +3475,18 @@ async function handleRefundFailed(refund) {
           // double-count the charge once a later succeeded settles the
           // per-invoice rows. Neutralize it and re-run the full succeeded
           // lifecycle after commit.
-          if (meta.pre_settlement === true && !meta.invoice_id) {
+          if (isPreSettlementMarker) {
             await trx('payments').where({ id: row.id }).update({
               refund_amount: 0,
               refund_status: null,
               stripe_refund_id: null,
               status: 'canceled',
-              metadata: JSON.stringify({ ...nextMeta, superseded_reason: 'pre_settlement_refund_bounced' }),
+              // Amount zeroed too (codex r8 P1): same-charge consumers (the
+              // dispute handlers' full-vs-partial sums, payout recon) must
+              // not count a superseded full-amount marker beside the real
+              // per-invoice rows; the original amount survives in metadata.
+              amount: 0,
+              metadata: JSON.stringify({ ...nextMeta, superseded_reason: 'pre_settlement_refund_bounced', superseded_marker_amount: Number(row.amount) || 0 }),
             });
             neutralizedMarker = true;
             resettleFencedPiId = row.stripe_payment_intent_id || rowPiId;
@@ -5638,7 +5688,12 @@ async function handleDisputeCreated(dispute) {
       // invoice would make dunning chase the whole combined balance when
       // only dispute.amount was withdrawn. Park it for the operator and
       // touch nothing.
-      const combinedFullCents = combinedRows.reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // Canceled rows (neutralized pre-settlement markers) are excluded —
+      // their amounts are zeroed, but the filter keeps the sum honest even
+      // against legacy rows (codex r8 P1).
+      const combinedFullCents = combinedRows
+        .filter((r) => r.status !== 'canceled')
+        .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
       if (Number(dispute.amount) < combinedFullCents) {
         logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} ($${amount} of $${(combinedFullCents / 100).toFixed(2)}) on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
         await db('stripe_orphan_charges')
@@ -5667,6 +5722,10 @@ async function handleDisputeCreated(dispute) {
       }
       for (const row of combinedRows) {
         const meta = parseMeta(row);
+        // A neutralized pre-settlement marker is superseded — never
+        // resurrect it (codex r8 P1); the live per-invoice rows carry the
+        // dispute state.
+        if (row.status === 'canceled' && meta.superseded_reason) continue;
         // Same late-replay guard as the single path: a dispute already
         // CLOSED owns its row — never flip a won charge back to disputed.
         if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
@@ -5948,7 +6007,10 @@ async function handleDisputeClosed(dispute) {
       // (no statuses touched) because a charge-level partial can't be
       // attributed to a share — the closure must not apply the full-charge
       // transition either. Stamp nothing, notify, leave for the operator.
-      const combinedClosedFullCents = combinedClosedRows.reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // Same canceled-marker exclusion as the created handler (codex r8 P1).
+      const combinedClosedFullCents = combinedClosedRows
+        .filter((r) => r.status !== 'canceled')
+        .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
       if (Number(dispute.amount) < combinedClosedFullCents) {
         logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — parked at created, still needs manual reconcile`);
         try {
@@ -5964,6 +6026,9 @@ async function handleDisputeClosed(dispute) {
       let restoredCount = 0;
       for (const row of combinedClosedRows) {
         const meta = rowMetaOf(row);
+        // Skip already-superseded markers (codex r8 P1) — but NOT the live
+        // pre-settlement marker this closure is here to resolve.
+        if (row.status === 'canceled' && meta.superseded_reason) continue;
         const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
         const invId = meta.invoice_id || meta.dispute_invoice_id || null;
         if (status === 'won' || status === 'warning_closed') {
@@ -5983,7 +6048,11 @@ async function handleDisputeClosed(dispute) {
             const markerPi = await markerStripe.paymentIntents.retrieve(row.stripe_payment_intent_id);
             await db('payments').where({ id: row.id }).update({
               status: 'canceled',
-              metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved' }),
+              // Amount zeroed (codex r8 P1): same-charge sums and payout
+              // recon must not count the superseded full-amount marker
+              // beside the real per-invoice rows settlement adds.
+              amount: 0,
+              metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved', superseded_marker_amount: Number(row.amount) || 0 }),
             });
             if (markerPi.status === 'succeeded') {
               // FULL succeeded lifecycle, not a bare settle (codex r7 P1):
@@ -6008,8 +6077,16 @@ async function handleDisputeClosed(dispute) {
             // Same replacement guard as the single path: the reopen cleared
             // the PI, so a non-null different PI means a replacement payment
             // owns this invoice — never double-settle it.
-            if (invoice && invoice.status !== 'paid'
-              && (!invoicePi || (disputedPiId && invoicePi === disputedPiId))) {
+            const restoreNow = invoice && invoice.status !== 'paid'
+              && (!invoicePi || (disputedPiId && invoicePi === disputedPiId));
+            // Replay shape (codex r8 P1): a prior delivery committed the
+            // restore but crashed in the term sync below — the invoice is
+            // already 'paid' UNDER THIS DISPUTED PI, and skipping would
+            // strand the term suspended forever. Re-run the idempotent
+            // sync for that shape too.
+            const alreadyRestoredByThisPi = invoice && invoice.status === 'paid'
+              && invoicePi && disputedPiId && invoicePi === disputedPiId;
+            if (restoreNow) {
               await db('invoices').where({ id: invoice.id }).update({
                 status: 'paid',
                 paid_at: new Date().toISOString(),
@@ -6017,12 +6094,15 @@ async function handleDisputeClosed(dispute) {
                 stripe_charge_id: row.stripe_charge_id || null,
               });
               restoredCount += 1;
+            }
+            if (restoreNow || alreadyRestoredByThisPi) {
               // Recovery sync on the restored money (codex r4 P1): a paid
               // prepay invoice re-activates its dispute-suspended term.
               // UNCAUGHT (codex r5 P1): a swallowed failure marks the event
               // processed with the term stranded in payment_pending even
               // though the invoice is back to paid — propagate so Stripe
-              // redelivers and the idempotent loop re-runs the sync.
+              // redelivers and the idempotent loop (including the
+              // already-restored replay shape) re-runs the sync.
               const freshWon = await db('invoices').where({ id: invoice.id }).first();
               if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
             }

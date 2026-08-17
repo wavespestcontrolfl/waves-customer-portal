@@ -414,7 +414,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -512,6 +512,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: data.paymentIntentId,
           baseAmount: data.base,
           methodCategory,
+          // Authoritative combined verdict rides the replacement too
+          // (codex r8 P1) — undefined means an old server, leave as-is.
+          ...(Object.prototype.hasOwnProperty.call(data, 'combined') ? { combined: data.combined || null } : {}),
         });
         return { ok: true, replaced: true };
       }
@@ -532,6 +535,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       displayedBaseRef.current = data.base;
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
+      // Server-authoritative combined verdict (codex r8 P1): when the
+      // update dropped the allocation (kill switch flipped, sibling paid or
+      // stopped elsewhere), `combined: null` clears the parent's breakdown
+      // so the summary and "Pay securely" header stop showing a total
+      // Stripe no longer charges. Absent key = older server, leave as-is.
+      if (Object.prototype.hasOwnProperty.call(data, 'combined')) {
+        onCombinedUpdate?.(data.combined || null);
+      }
       return { ok: true, replaced: false, superseded: false };
     } catch (err) {
       setAmountSyncError(true);
@@ -555,7 +566,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         setSyncingAmount(false);
       }
     }
-  }, [paymentIntentId, token, saveCard, onPaymentIntentReplaced]);
+  }, [paymentIntentId, token, saveCard, onPaymentIntentReplaced, onCombinedUpdate]);
 
   // Re-sync the PI whenever the save-card checkbox toggles — Stripe's
   // mandate wording switches between one-time and recurring on the
@@ -1884,7 +1895,7 @@ export default function PayPageV2() {
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
   // PaymentForm is keyed by paymentIntentId, so it fully re-mounts Stripe
   // Elements against the new intent.
-  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount }) => {
+  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined }) => {
     if (!clientSecret || !paymentIntentId) return;
     setPaymentError(null);
     setStripeSetup((prev) => (prev ? {
@@ -1892,7 +1903,16 @@ export default function PayPageV2() {
       clientSecret,
       paymentIntentId,
       baseAmount: baseAmount ?? prev.baseAmount,
+      // undefined = caller didn't carry a verdict; null = clear breakdown.
+      ...(combined !== undefined ? { combined } : {}),
     } : prev));
+  }, []);
+
+  // /update-amount's authoritative combined verdict (codex r8 P1): null
+  // clears the itemized breakdown so the invoice summary and header total
+  // match what Stripe now charges (e.g. the kill switch flipped mid-session).
+  const handleCombinedUpdate = useCallback((combined) => {
+    setStripeSetup((prev) => (prev ? { ...prev, combined: combined || null } : prev));
   }, []);
 
   const handlePaymentSuccess = async (paymentIntent, methodCategory = null) => {
@@ -2569,6 +2589,7 @@ export default function PayPageV2() {
                 customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
                 customerEmail={payer ? (payer.email || '') : customer.email}
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
+                onCombinedUpdate={handleCombinedUpdate}
               />
             ) : paymentState === 'error' ? null : (
               <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>

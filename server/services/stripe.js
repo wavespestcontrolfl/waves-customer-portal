@@ -3939,6 +3939,20 @@ const StripeService = {
         total: base,
         cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
         surchargeRateBps: CONFIGURED_COST_BPS,
+        // Authoritative combined verdict (codex r8 P1): null means this PI
+        // now charges the anchor ALONE (gate flipped off, sibling dropped) —
+        // the client must clear its combined breakdown, not just the scalar,
+        // or the summary keeps showing a total Stripe no longer charges.
+        combined: combinedCtx
+          ? {
+            invoices: combinedCtx.allocation.map((a) => ({
+              invoiceNumber: a.invoiceNumber,
+              amountDue: a.cents / 100,
+              isCurrent: String(a.invoiceId) === String(invoiceId),
+            })),
+            total: combinedCtx.totalCents / 100,
+          }
+          : null,
         ...(retargeted ? { replaced: true, clientSecret: paymentIntent.client_secret } : {}),
       };
     } catch (err) {
@@ -4128,6 +4142,24 @@ const StripeService = {
       total: base,
       cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
       surchargeRateBps: CONFIGURED_COST_BPS,
+      // Same authoritative combined verdict as updateInvoicePaymentIntentMethod
+      // (codex r8 P1) — null clears the client's breakdown. The parsed
+      // allocation carries ids+cents only, so resolve display numbers.
+      combined: await (async () => {
+        if (!replacementAllocation) return null;
+        const numberRows = await db('invoices')
+          .whereIn('id', replacementAllocation.map((a) => a.invoiceId))
+          .select('id', 'invoice_number');
+        const numberById = new Map(numberRows.map((r) => [String(r.id), r.invoice_number]));
+        return {
+          invoices: replacementAllocation.map((a) => ({
+            invoiceNumber: numberById.get(String(a.invoiceId)) || null,
+            amountDue: a.cents / 100,
+            isCurrent: String(a.invoiceId) === String(invoiceId),
+          })),
+          total: PayCombined.allocationTotalCents(replacementAllocation) / 100,
+        };
+      })(),
     };
   },
 

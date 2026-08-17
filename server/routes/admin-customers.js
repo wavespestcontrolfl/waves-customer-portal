@@ -3280,6 +3280,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // — unauthenticated input never gets to claim a live
             // customer's mailbox; an operator can.
           }
+          // Assigning a DEFAULT payer must first release any unconfirmed
+          // combined pay-page session on this customer's invoices (codex
+          // #3427 r8 P1, same fence as the scheduled-service payer writer):
+          // live payer resolution reads this column, and the browser can
+          // confirm a combined ACH PI with no later server seam. Fail-closed
+          // — an unreleasable session aborts this transaction.
+          if (updates.payer_id !== undefined && updates.payer_id) {
+            await require('../services/pay-combined')
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id);
+          }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // Only an ACTUAL rate change invalidates the attribution (codex
           // #3245 r4): the directory editor posts the whole form on every

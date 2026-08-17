@@ -334,8 +334,13 @@ async function resolveTxnLinkMaps(transactionRows) {
   if (chargeSources.length) {
     try {
       const payments = await db('payments')
-        .whereIn('stripe_charge_id', chargeSources)
-        .orWhereIn('stripe_payment_intent_id', chargeSources);
+        .where(function bySource() {
+          this.whereIn('stripe_charge_id', chargeSources)
+            .orWhereIn('stripe_payment_intent_id', chargeSources);
+        })
+        // Neutralized pre-settlement markers (status canceled, amount 0)
+        // must not appear beside the real per-invoice rows (codex r8 P1).
+        .whereNot('status', 'canceled');
       // ARRAYS per source (codex #3427 r5 P1): a combined full-balance
       // charge backs one payments row PER allocated invoice — a
       // last-write-wins Map would attribute the whole balance transaction
