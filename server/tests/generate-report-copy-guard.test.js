@@ -331,6 +331,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // noun-less digit credentials + confirmed-nothing denials (r83)
+    expect(reportCopyRejection('Use 4417 to open the side gate.')).toBe('access_code');
+    expect(reportCopyRejection('Open the garage with 8842 if no one answers.')).toBe('access_code');
+    expect(reportCopyRejection('We treated 2 door frames and the garage exterior.')).toBeNull();
+    const confirmedNothing = parseCopy('WHAT WE DID\n\nWe treated the lawn; the technician confirmed nothing about re-entry timing and the treated area is safe once dry.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(confirmedNothing.body).toBeNull();
     // bring/take-back re-entry forms (r82)
     expect(reportCopyRejection('Wait thirty minutes before bringing pets onto the treated lawn.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Pets can be brought back outside after thirty minutes.')).toMatch(/^banned:/);
