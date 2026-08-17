@@ -1640,9 +1640,18 @@ const AppointmentReminders = {
     // so the first visit can be past/too-close. Without this the cron would keep
     // re-reading the row every 15 min for a window it can never satisfy. 72h band
     // is (24.25h, 72.25h]; the 24h reminder can still fire for any future time.
+    //
+    // cron_selfheal additionally pre-closes any window whose send moment has
+    // ALREADY PASSED (owner ruling 2026-08-17: no catch-up texts for the old
+    // unarmed backlog — "function as normal moving forward"). A row healed
+    // inside the 24h band would otherwise text a "24-hour" reminder an hour
+    // before the visit; a row healed inside the 72h band would send that
+    // reminder late. Healed rows only deliver windows that have not opened
+    // yet; booking-path registrations keep the original boundaries.
     const hoursUntil = (apptTime.getTime() - now.getTime()) / 3600000;
-    const seventyTwoMissed = hoursUntil <= 24.25;
-    const twentyFourMissed = hoursUntil <= 0;
+    const skipStartedWindows = reminderSource === 'cron_selfheal';
+    const seventyTwoMissed = hoursUntil <= (skipStartedWindows ? 72.25 : 24.25);
+    const twentyFourMissed = hoursUntil <= (skipStartedWindows ? 24.25 : 0);
     const [record] = await conn('appointment_reminders')
       .insert({
         scheduled_service_id: scheduledServiceId,

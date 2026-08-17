@@ -272,3 +272,80 @@ describe('owner ruling 2026-08-17 — reminders arm for every future visit', () 
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('returned null for svc-null'));
   });
 });
+
+describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+  });
+  const makeConn = (captured) => {
+    const estimateLookup = {
+      leftJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const lookup = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const sameTime = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      whereExists: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const insertRow = {
+      insert: jest.fn((row) => { captured.row = row; return insertRow; }),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-x' }]),
+    };
+    const queue = [estimateLookup, lookup, sameTime, insertRow];
+    const conn = jest.fn(() => queue.shift());
+    conn.raw = jest.fn().mockResolvedValue();
+    return conn;
+  };
+  const isoHoursFromNow = (h) => {
+    const d = new Date(Date.now() + h * 3600000);
+    // registerVisitReminderInTx parses ET wall-time strings; build one from the instant
+    const et = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
+    const get = (t) => et.find((p) => p.type === t).value;
+    return `${get('year')}-${get('month')}-${get('day')}T${get('hour') === '24' ? '00' : get('hour')}:${get('minute')}`;
+  };
+
+  test('a self-healed row inside a started window pre-closes it (no late text)', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-old',
+      customerId: 'cust-old',
+      appointmentTime: isoHoursFromNow(10), // inside BOTH bands
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+    });
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(true);
+  });
+
+  test('a self-healed row ahead of both windows arms them normally', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-future',
+      customerId: 'cust-future',
+      appointmentTime: isoHoursFromNow(200),
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+    });
+    expect(captured.row.reminder_72h_sent).toBe(false);
+    expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+
+  test('booking-path registrations keep the original late-send boundaries', async () => {
+    const captured = {};
+    await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
+      scheduledServiceId: 'svc-seed',
+      customerId: 'cust-seed',
+      appointmentTime: isoHoursFromNow(10),
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'system_seed',
+    });
+    // 10h out: 72h band already missed under original rule, 24h still sendable
+    expect(captured.row.reminder_72h_sent).toBe(true);
+    expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+});
