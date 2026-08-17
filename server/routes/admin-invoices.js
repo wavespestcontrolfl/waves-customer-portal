@@ -1819,6 +1819,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           return res.status(409).json({ error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before applying credit` });
         }
       }
+      // Unbind combined siblings from the canceled intent — regardless of
+      // who canceled it (codex #3427 r17 P2).
+      await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId);
     }
 
     // ── Atomic credit draw-down + prepaid transition ──

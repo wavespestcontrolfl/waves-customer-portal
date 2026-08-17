@@ -1194,6 +1194,13 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
       return;
     }
+    if (err.code === 'COMBINED_PI_ALREADY_REFUNDED') {
+      // The refund handler already unwound every share and reopened the
+      // invoices as refunded (codex r17 P1) — the delayed success has
+      // nothing left to do; no orphan (the cash is fully accounted).
+      logger.warn(`[stripe-webhook] ${err.message}`);
+      return;
+    }
     if (err.code === 'COMBINED_PI_DISPUTED') {
       // A dispute (possibly pre-settlement — codex r5 P1) already clawed
       // this money back: settling would mark invoices paid on funds that
@@ -4894,12 +4901,23 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
     throw new Error(`Combined ACH processing PI ${piId} amount mismatch; retry after cancellation`);
   }
 
-  await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
-    paymentMethod: 'us_bank_account',
-    cardBrand: null,
-    cardLastFour: null,
-    receiptUrl: null,
-  }, { eventCreated });
+  try {
+    await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+      paymentMethod: 'us_bank_account',
+      cardBrand: null,
+      cardLastFour: null,
+      receiptUrl: null,
+    }, { eventCreated });
+  } catch (err) {
+    // Same terminal-fence handling as the succeeded handler (codex r17
+    // P1): a refunded/disputed charge must not retry-loop the processing
+    // event — the refund/dispute paths own the ledger from here.
+    if (err.code === 'COMBINED_PI_ALREADY_REFUNDED' || err.code === 'COMBINED_PI_DISPUTED') {
+      logger.warn(`[stripe-webhook] combined processing event for PI ${piId} skipped: ${err.message}`);
+      return;
+    }
+    throw err;
+  }
 
   const anchorInvoiceId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
 

@@ -4595,9 +4595,6 @@ const InvoiceService = {
                 await StripeService.cancelPaymentIntent(triagedPiId, {
                   cancellation_reason: "abandoned",
                 });
-                // Unbind combined siblings from the canceled PI (codex
-                // #3427 r16 P2).
-                await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId);
                 logger.info(
                   `[invoice] Cancelled PaymentIntent ${triagedPiId} (was ${pi.status}) before voiding ${candidate.invoice_number} — scheduled service ${scheduledServiceId} cancelled`,
                 );
@@ -4609,6 +4606,10 @@ const InvoiceService = {
                 continue;
               }
             }
+            // Unbind combined siblings from the canceled PI — REGARDLESS of
+            // who canceled it (codex #3427 r17 P2: an already-canceled PI,
+            // e.g. via the Stripe dashboard, must not leave stale bindings).
+            await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId);
           }
 
           // ── Atomic re-check + void (row lock) ──────────────────────────

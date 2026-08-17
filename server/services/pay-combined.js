@@ -540,12 +540,11 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
     // rows never fence (no pre_settlement flag) — redelivery idempotency
     // is unchanged for them.
     const fenceRows = await trx('payments')
-      .where({ stripe_payment_intent_id: piId })
-      .whereIn('status', ['disputed', 'refunded']);
+      .where({ stripe_payment_intent_id: piId });
+    const fenceMetaOf = (r) => (typeof r.metadata === 'string' ? safeJson(r.metadata) : r.metadata) || {};
     const fenced = fenceRows.some((r) => {
       if (r.status === 'disputed') return true;
-      const meta = typeof r.metadata === 'string' ? safeJson(r.metadata) : r.metadata;
-      return meta?.pre_settlement === true;
+      return r.status === 'refunded' && fenceMetaOf(r).pre_settlement === true;
     });
     if (fenced) {
       // Coded so the webhook records the orphan for the operator instead of
@@ -554,6 +553,20 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       const disputedErr = new Error('This payment was disputed or refunded before settlement — the invoices cannot be marked paid from the old payment session');
       disputedErr.code = 'COMBINED_PI_DISPUTED';
       throw disputedErr;
+    }
+    // Charge ALREADY fully refunded (codex r17 P1): charge.refunded can
+    // land between the ACH processing rows and the delayed succeeded event
+    // — every combined row is 'refunded' (full) with no pre_settlement
+    // flag. Settling would record every share as an unexplained residual
+    // and run the success-side hooks on returned money; the delayed
+    // success is a NO-OP for this shape (coded so the webhook returns
+    // quietly — the refund path already accounted for the cash).
+    const combinedLedgerRows = fenceRows.filter((r) => fenceMetaOf(r).combined_payment && r.status !== 'canceled');
+    if (combinedLedgerRows.length
+      && combinedLedgerRows.every((r) => r.status === 'refunded' && r.refund_status === 'full')) {
+      const refundedErr = new Error(`Combined PI ${piId} was already fully refunded — the delayed settlement event is a no-op`);
+      refundedErr.code = 'COMBINED_PI_ALREADY_REFUNDED';
+      throw refundedErr;
     }
 
     const existingRows = await trx('payments').where({ stripe_payment_intent_id: piId });
@@ -566,13 +579,13 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       const isAnchor = String(entry.invoiceId) === String(anchorInvoiceId);
       if (!invoice) {
         logger.error(`[pay-combined] settle: allocated invoice ${entry.invoiceId} missing for PI ${piId} — recording residual`);
-        await recordResidual(trx, paymentIntent, entry, 'allocated invoice not found');
+        await recordResidual(trx, paymentIntent, entry, 'allocated invoice not found', { isAnchor, surchargeCents });
         continue;
       }
       const status = String(invoice.status || '').toLowerCase();
       if (['void', 'refunded', 'canceled', 'cancelled'].includes(status)) {
         logger.error(`[pay-combined] settle: allocated invoice ${invoice.invoice_number} is ${status} for PI ${piId} — recording residual`);
-        await recordResidual(trx, paymentIntent, entry, `allocated invoice is ${status}`);
+        await recordResidual(trx, paymentIntent, entry, `allocated invoice is ${status}`, { isAnchor, surchargeCents });
         continue;
       }
       if (['paid', 'prepaid'].includes(status)) {
@@ -585,7 +598,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         // an operator refunds it.
         if (String(invoice.stripe_payment_intent_id || '') !== String(piId)) {
           logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} already ${status} by another payment — recording residual for PI ${piId}`);
-          await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`);
+          await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`, { isAnchor, surchargeCents });
           continue;
         }
         const existing = rowForInvoice(invoice.id);
@@ -595,7 +608,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       }
       if (String(invoice.stripe_payment_intent_id || '') && String(invoice.stripe_payment_intent_id) !== String(piId)) {
         logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} bound to a different payment — recording residual for PI ${piId}`);
-        await recordResidual(trx, paymentIntent, entry, `invoice bound to ${invoice.stripe_payment_intent_id}`);
+        await recordResidual(trx, paymentIntent, entry, `invoice bound to ${invoice.stripe_payment_intent_id}`, { isAnchor, surchargeCents });
         continue;
       }
 
@@ -760,7 +773,7 @@ function safeJson(value) {
 // Durable operator queue entry for an allocation share that could NOT be
 // settled onto its invoice (row missing/void/already paid elsewhere): the
 // money is captured, so the shortfall must be loud, never silent.
-async function recordResidual(trx, paymentIntent, entry, reason) {
+async function recordResidual(trx, paymentIntent, entry, reason, { isAnchor = false, surchargeCents = 0 } = {}) {
   await trx('stripe_orphan_charges')
     .insert({
       stripe_payment_intent_id: `${paymentIntent.id}:${entry.invoiceId}`,
@@ -769,9 +782,13 @@ async function recordResidual(trx, paymentIntent, entry, reason) {
         : paymentIntent.latest_charge?.id || null,
       customer_id: paymentIntent.metadata?.waves_customer_id || null,
       invoice_id: entry.invoiceId,
-      amount: entry.cents / 100,
+      // The anchor's residual carries the captured card surcharge too
+      // (codex r17 P2): the whole surcharge was assigned to the anchor's
+      // share, and with no anchor payment row it would otherwise vanish
+      // from the ledger AND from the amount operators reconcile/refund.
+      amount: (entry.cents + (isAnchor ? surchargeCents : 0)) / 100,
       source: 'combined_pay_webhook',
-      original_db_error: String(reason).slice(0, 1000),
+      original_db_error: String(`${reason}${isAnchor && surchargeCents > 0 ? ` (includes $${(surchargeCents / 100).toFixed(2)} card surcharge assigned to the anchor share)` : ''}`).slice(0, 1000),
     })
     .onConflict('stripe_payment_intent_id')
     .ignore();
