@@ -843,9 +843,10 @@ Rules:
 - Never include gate codes, garage codes, lockbox codes, or any credential — you have not been given them and must not guess.
 - Plain, terse field language. No greetings, no markdown, no headings.
 - mentioned_terms: list EVERY product name and EVERY pest/organism/disease you mention anywhere in your response, lowercased. Empty array only if you mention none. A term you mention but do not list makes the response invalid.
+- If the facts include no prior visit, last_visit_summary MUST be the empty string — never write "no prior visits" prose or describe past work.
 
 Return VALID JSON ONLY:
-{"priorities": ["<up to 3 short action items for this visit>"], "watch_items": ["<known issues/quirks worth a glance, from the facts>"], "last_visit_summary": "<1-2 sentences on the last visit, from the facts>", "open_scope": "<open estimate/quote scope in one sentence, or empty string>", "customer_context": "<1-2 sentences of customer quirks/preferences from calls, notes, flags>", "mentioned_terms": ["<every product and pest/organism/disease named in this response, lowercased>"]}`;
+{"priorities": ["<up to 3 short action items for this visit>"], "watch_items": ["<known issues/quirks worth a glance, from the facts>"], "last_visit_summary": "<1-2 sentences on the last visit, from the facts, or empty string when the facts include no prior visit>", "open_scope": "<open estimate/quote scope in one sentence, or empty string>", "customer_context": "<1-2 sentences of customer quirks/preferences from calls, notes, flags>", "mentioned_terms": ["<every product and pest/organism/disease named in this response, lowercased>"]}`;
 
 function sanitizeList(value, max, itemMax = 200) {
   const list = Array.isArray(value) ? value : [];
@@ -1887,7 +1888,11 @@ function findUngroundedClaim(body, grounding) {
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the
       // product name; ground the remainder.
-      const bare = String(term).replace(/^(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?)\s+/i, '');
+      // accept/confirm added (live 08-15/16): "Accepted Bronze" — the
+      // estimate-status verb rides into the capitalized-run capture the
+      // same way application verbs do; 'bronze' (the grounded tier) is
+      // what must ground, not the verb.
+      const bare = String(term).replace(/^(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?|accept(?:ed|ing)?|confirm(?:ed|ing)?)\s+/i, '');
       if (!groundedExact(bare)) return { kind: 'novel_product', term };
       // In instruction fields even a BARE product mention directs the
       // technician ("priorities: ['Bifen IT']") — when it names a known
@@ -2129,6 +2134,17 @@ function findUngroundedClaim(body, grounding) {
   return null;
 }
 
+// First-visit disclaimer shapes for last_visit_summary. The schema used to
+// force 1-2 sentences with no empty-string escape, so on no-prior-visit
+// customers BOTH legs dutifully wrote "No prior visits on file"-style prose
+// and the r46 fabricated_history guard rejected every leg (100% template
+// fallback in prod, 08-15/16). A pure disclaimer asserts the same absence
+// the grounding does — strip it to null instead of rejecting the leg.
+// Anything with a digit, a completed-work verb, or beyond these shapes
+// still falls through to the r46 guard and rejects.
+const FIRST_VISIT_DISCLAIMER_RE = /\b(?:no|zero)\s+(?:prior|previous|past)\s+(?:visits?|services?|treatments?|inspections?|records?|(?:service\s+)?history)\b|\bno\s+(?:service\s+)?history\s+on\s+file\b|\bfirst\s+(?:visit|service)\b|\bnew\s+(?:customer|account)\b/i;
+const COMPLETED_WORK_VERB_RE = /\b(?:performed|completed|provided|rendered|treated|sprayed|serviced|applied|inspected)\b/i;
+
 // Full domain validation of one LLM JSON response. Returns
 // { reason } on rejection or { body } (the sanitized brief body) on
 // success. Runs INSIDE dispatchWithFallback's validate option so a bad
@@ -2171,7 +2187,24 @@ function validateBriefJson(json, grounding) {
     // must not ground on "Bifen IT" via the shared 'bifen' word (the
     // two-letter suffix is under the significant-word threshold).
     const phrase = String(term).toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
-    if (phrase && !selfReportGrounding.includes(phrase)) {
+    // Number tolerance on the HEAD NOUN only (live 08-16: facts said
+    // "ghost ant"/"spider" and the model listed "ghost ants"/"spiders" —
+    // both legs rejected). The rest of the phrase stays exact, so the
+    // "bifen sc"-must-not-ground-on-"bifen" rule is untouched: only the
+    // final word's wordVariants inflections are tried.
+    const phraseGrounded = (p) => {
+      if (selfReportGrounding.includes(p)) return true;
+      const words = p.split(' ');
+      const prefix = words.slice(0, -1).join(' ');
+      // Variant forms match on WORD BOUNDARIES, never bare substring —
+      // a stemmed singular is shorter and substring would false-ground
+      // it mid-word ('rat' inside 'operator').
+      return wordVariants(words[words.length - 1]).some((v) => {
+        const candidate = prefix ? `${prefix} ${v}` : v;
+        return new RegExp(`\\b${candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(selfReportGrounding);
+      });
+    };
+    if (phrase && !phraseGrounded(phrase)) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
     }
     // A term that prefix-truncates a catalog product name renames the
@@ -2195,10 +2228,17 @@ function validateBriefJson(json, grounding) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
     }
   }
+  let lastVisitSummary = cleanText(json.last_visit_summary, 500);
+  if (lastVisitSummary && !grounding.llmFacts?.lastVisit
+    && lastVisitSummary.length <= 200 && !/\d/.test(lastVisitSummary)
+    && FIRST_VISIT_DISCLAIMER_RE.test(lastVisitSummary)
+    && !COMPLETED_WORK_VERB_RE.test(lastVisitSummary)) {
+    lastVisitSummary = null;
+  }
   const body = {
     priorities: sanitizeList(json.priorities, 3),
     watch_items: sanitizeList(json.watch_items, 6),
-    last_visit_summary: cleanText(json.last_visit_summary, 500),
+    last_visit_summary: lastVisitSummary,
     open_scope: cleanText(json.open_scope, 400),
     customer_context: cleanText(json.customer_context, 500),
   };

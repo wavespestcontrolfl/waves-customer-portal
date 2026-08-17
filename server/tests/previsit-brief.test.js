@@ -4208,3 +4208,107 @@ describe('codex #3423 r77 — active-voice statuses, verb-form history, balance 
     expect(validateBriefJson({ ...BASE, customer_context: 'First visit for a new customer' }, fresh).body).toBeTruthy();
   });
 });
+
+describe('first-visit last_visit_summary fall-through (post-#3423 live failures)', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const noHistory = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true }, flags: [{ detail: 'gate on left side' }] } };
+
+  test('a pure no-prior-visit disclaimer strips to null instead of rejecting the leg', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['No prior visits on file.', 'First visit for this customer.', 'New customer — no service history on file.', 'No previous treatments recorded']) {
+      const res = validateBriefJson(
+        { ...BASE, last_visit_summary: s, customer_context: 'Gate on left side.' },
+        noHistory,
+      );
+      expect(res.body).toBeTruthy();
+      expect(res.body.last_visit_summary).toBeNull();
+    }
+  });
+
+  test('a disclaimer-only response is still an empty-output miss (template serves)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, last_visit_summary: 'No prior visits on file.' },
+      noHistory,
+    ).reason).toBe('empty_output');
+  });
+
+  test('substantive fabricated history still rejects with no prior visit', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Treated the kitchen for ants last month.', 'No prior visits since 2024.', 'Quarterly pest service was performed.']) {
+      expect(validateBriefJson(
+        { ...BASE, last_visit_summary: s, customer_context: 'Gate on left side.' },
+        noHistory,
+      ).reason).toMatch(/fabricated_history|numeric|novel|ungrounded|instruction/);
+    }
+  });
+
+  test('with a real lastVisit fact the summary is untouched', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const withHistory = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { date: '2026-07-01', serviceType: 'Quarterly Pest Control' } } };
+    const res = validateBriefJson(
+      { ...BASE, last_visit_summary: 'Quarterly Pest Control on 2026-07-01.' },
+      withHistory,
+    );
+    expect(res.body).toBeTruthy();
+    expect(res.body.last_visit_summary).toContain('Quarterly Pest Control');
+  });
+});
+
+describe('mentioned_terms head-noun number tolerance (post-#3423 live failures)', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('plural listing grounds on a singular fact and vice versa', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const singularFacts = { catalogVocabulary: { names: [], targets: ['ghost ant', 'spider'] }, llmFacts: { flags: [{ detail: 'ghost ant activity near kitchen window; spider webs at eaves' }] } };
+    expect(validateBriefJson(
+      { ...BASE, mentioned_terms: ['ghost ants', 'spiders'], customer_context: 'Ghost ants near kitchen window. Spiders at eaves.' },
+      singularFacts,
+    ).body).toBeTruthy();
+    const pluralFacts = { catalogVocabulary: { names: [], targets: ['ghost ants'] }, llmFacts: { flags: [{ detail: 'customer reports ghost ants by the pool cage' }] } };
+    expect(validateBriefJson(
+      { ...BASE, mentioned_terms: ['ghost ant'], customer_context: 'Ghost ant activity by the pool cage.' },
+      pluralFacts,
+    ).body).toBeTruthy();
+  });
+
+  test('a stemmed variant never grounds mid-word', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const operatorFacts = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'operator noted gate access from the alley' }] } };
+    expect(validateBriefJson(
+      { ...BASE, mentioned_terms: ['rats'], customer_context: 'Watch for rats.' },
+      operatorFacts,
+    ).reason).toMatch(/ungrounded_term:rats/);
+  });
+
+  test('multi-word product names still require the exact leading words', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const bifenItFacts = { catalogVocabulary: { names: ['bifen it'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson(
+      { ...BASE, mentioned_terms: ['bifen sc'], customer_context: 'Bifen IT on the plan.' },
+      bifenItFacts,
+    ).reason).toMatch(/ungrounded_term:bifen sc/);
+  });
+});
+
+describe('estimate-status verbs ride the capitalized-run capture (post-#3423 live failures)', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('"Accepted Bronze" grounds on the accepted bronze estimate fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted', tier: 'bronze' } } } };
+    expect(validateBriefJson(
+      { ...BASE, open_scope: 'Accepted Bronze estimate.' },
+      accepted,
+    ).body).toBeTruthy();
+  });
+
+  test('an invented product after the status verb still rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted', tier: 'bronze' } } } };
+    expect(validateBriefJson(
+      { ...BASE, open_scope: 'Accepted PhantomGuard plan.' },
+      accepted,
+    ).reason).toBeTruthy();
+  });
+});
