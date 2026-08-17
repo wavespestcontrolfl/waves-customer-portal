@@ -2447,6 +2447,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // combined allocation despite the flip. Revoke the session as part of
   // the failure handling: cancel fail-closed (a throw retries the event)
   // and clear every stamp before the invoices reopen below.
+  let gateOffRevokedPi = false;
   if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)
     && !require('../config/feature-gates').isEnabled('payIncludeBalance')) {
     const gateOffStripe = getStripe();
@@ -2457,8 +2458,8 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
         const alreadyTerminal = /canceled|succeeded/i.test(cancelErr.message || '');
         if (!alreadyTerminal) throw new Error(`Gate-off revoke of failed combined PI ${piId} could not cancel (${cancelErr.message}); retry`);
       }
-      await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
-      logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId} before reopening its invoices`);
+      gateOffRevokedPi = true;
+      logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId}; stamps clear after the reopen below`);
     }
   }
 
@@ -2478,6 +2479,30 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
         paid_at: null,
         ach_processing_notified_at: null,
       });
+  }
+
+  // Gate-off stamp cleanup AFTER the reopen (codex r27 P2): the clear
+  // helper excludes 'processing' rows, so clearing before the loop was a
+  // no-op — now the rows are reopened (sent/overdue) and unbind cleanly,
+  // so no invoice stays bound to the revoked PI.
+  if (gateOffRevokedPi) {
+    await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+  }
+  // Provisional residuals from the PROCESSING-stage settle resolve when
+  // the combined intent terminates without settling (codex r27 P2): the
+  // parked cash never arrived, so the reconciliation queue must not keep
+  // reporting it (and the sibling fence must not keep blocking the
+  // invoice).
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const resolvedProvisional = await db('stripe_orphan_charges')
+      .where({ resolved: false, source: 'combined_pay_processing' })
+      .where('stripe_payment_intent_id', 'like', `${piId}:%`)
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Automatically resolved: the combined ACH debit failed before settling — the provisional residual cash never arrived',
+      });
+    if (resolvedProvisional > 0) logger.info(`[stripe-webhook] combined PI ${piId} failed — resolved ${resolvedProvisional} provisional residual(s)`);
   }
 
   // A create timeout may have left no PI on the parked invoice. Stripe's
@@ -5683,6 +5708,17 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     }
     // Any remaining collectible stamps (not yet 'processing') unbind too.
     await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+    // Provisional processing-stage residuals resolve with the cancellation
+    // (codex r27 P2) — the parked cash never arrived.
+    const resolvedProvisional = await db('stripe_orphan_charges')
+      .where({ resolved: false, source: 'combined_pay_processing' })
+      .where('stripe_payment_intent_id', 'like', `${piId}:%`)
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Automatically resolved: the combined intent was canceled before settling — the provisional residual cash never arrived',
+      });
+    if (resolvedProvisional > 0) logger.info(`[stripe-webhook] canceled combined PI ${piId} — resolved ${resolvedProvisional} provisional residual(s)`);
   }
 }
 
@@ -6553,8 +6589,64 @@ async function handleDisputeClosed(dispute) {
             // Same replacement guard as the single path: the reopen cleared
             // the PI, so a non-null different PI means a replacement payment
             // owns this invoice — never double-settle it.
+            // A DIFFERENT live PI = a replacement session started after the
+            // created-reopen (codex r27 P1). The payment row above was
+            // already flipped back to 'paid' — leaving both alive would let
+            // the customer pay the same share AGAIN with the reinstated
+            // funds unaccounted. Cancel an UNCONFIRMED replacement and take
+            // the invoice back; money in flight (or a cash/other-rail
+            // payment) instead PARKS the reinstated amount for the
+            // operator. Fail closed on an unreadable replacement.
+            let replacementNeutralized = false;
+            if (invoice && invoice.status !== 'paid' && invoicePi && disputedPiId && invoicePi !== disputedPiId) {
+              const wonStripe = getStripe();
+              if (!wonStripe) throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unverifiable (Stripe unavailable); retry`);
+              let replPi;
+              try {
+                replPi = await wonStripe.paymentIntents.retrieve(invoicePi);
+              } catch (replErr) {
+                throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unreadable (${replErr.message}); retry`);
+              }
+              if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+                try {
+                  await wonStripe.paymentIntents.cancel(replPi.id);
+                  await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
+                  await db('invoices').where({ id: invId }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                  invoice.stripe_payment_intent_id = null;
+                  replacementNeutralized = true;
+                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
+                } catch (cancelErr) {
+                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
+                }
+              }
+              if (!replacementNeutralized) {
+                // Replacement money is real — park the reinstated share so
+                // the reconciliation queue owns it (never silently absent).
+                await db('stripe_orphan_charges')
+                  .insert({
+                    stripe_payment_intent_id: `${disputedPiId}:dispute-won:${dispute.id}:${invId}`,
+                    stripe_charge_id: row.stripe_charge_id || chargeId,
+                    customer_id: row.customer_id || null,
+                    invoice_id: invId,
+                    amount: Number(row.amount) || 0,
+                    source: 'combined_pay_webhook',
+                    original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but a replacement payment owns the invoice — credit or refund the reinstated share manually`,
+                  })
+                  .onConflict('stripe_payment_intent_id')
+                  .ignore();
+                try {
+                  await NotificationService.notifyAdmin(
+                    'dispute',
+                    `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                    `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but a replacement payment already owns it — credit or refund the reinstated share in /admin/revenue.`,
+                    { icon: '⚠️', link: '/admin/revenue' },
+                  );
+                } catch { /* non-critical */ }
+              }
+            }
+            const invoicePiNow = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
             const restoreNow = invoice && invoice.status !== 'paid'
-              && (!invoicePi || (disputedPiId && invoicePi === disputedPiId));
+              && (!invoicePiNow || (disputedPiId && invoicePiNow === disputedPiId));
             // Replay shape (codex r8 P1): a prior delivery committed the
             // restore but crashed in the term sync below — the invoice is
             // already 'paid' UNDER THIS DISPUTED PI, and skipping would

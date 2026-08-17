@@ -673,13 +673,13 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       const isAnchor = String(entry.invoiceId) === String(anchorInvoiceId);
       if (!invoice) {
         logger.error(`[pay-combined] settle: allocated invoice ${entry.invoiceId} missing for PI ${piId} — recording residual`);
-        await recordResidual(trx, paymentIntent, entry, 'allocated invoice not found', { isAnchor, surchargeCents });
+        await recordResidual(trx, paymentIntent, entry, 'allocated invoice not found', { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
         continue;
       }
       const status = String(invoice.status || '').toLowerCase();
       if (['void', 'refunded', 'canceled', 'cancelled'].includes(status)) {
         logger.error(`[pay-combined] settle: allocated invoice ${invoice.invoice_number} is ${status} for PI ${piId} — recording residual`);
-        await recordResidual(trx, paymentIntent, entry, `allocated invoice is ${status}`, { isAnchor, surchargeCents });
+        await recordResidual(trx, paymentIntent, entry, `allocated invoice is ${status}`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
         continue;
       }
       if (['paid', 'prepaid'].includes(status)) {
@@ -692,7 +692,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         // an operator refunds it.
         if (String(invoice.stripe_payment_intent_id || '') !== String(piId)) {
           logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} already ${status} by another payment — recording residual for PI ${piId}`);
-          await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`, { isAnchor, surchargeCents });
+          await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
           continue;
         }
         const existing = rowForInvoice(invoice.id);
@@ -702,7 +702,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       }
       if (String(invoice.stripe_payment_intent_id || '') && String(invoice.stripe_payment_intent_id) !== String(piId)) {
         logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} bound to a different payment — recording residual for PI ${piId}`);
-        await recordResidual(trx, paymentIntent, entry, `invoice bound to ${invoice.stripe_payment_intent_id}`, { isAnchor, surchargeCents });
+        await recordResidual(trx, paymentIntent, entry, `invoice bound to ${invoice.stripe_payment_intent_id}`, { isAnchor, surchargeCents, provisional: paymentStatus !== 'paid' });
         continue;
       }
 
@@ -874,7 +874,7 @@ function safeJson(value) {
 // Durable operator queue entry for an allocation share that could NOT be
 // settled onto its invoice (row missing/void/already paid elsewhere): the
 // money is captured, so the shortfall must be loud, never silent.
-async function recordResidual(trx, paymentIntent, entry, reason, { isAnchor = false, surchargeCents = 0 } = {}) {
+async function recordResidual(trx, paymentIntent, entry, reason, { isAnchor = false, surchargeCents = 0, provisional = false } = {}) {
   await trx('stripe_orphan_charges')
     .insert({
       stripe_payment_intent_id: `${paymentIntent.id}:${entry.invoiceId}`,
@@ -888,11 +888,25 @@ async function recordResidual(trx, paymentIntent, entry, reason, { isAnchor = fa
       // share, and with no anchor payment row it would otherwise vanish
       // from the ledger AND from the amount operators reconcile/refund.
       amount: (entry.cents + (isAnchor ? surchargeCents : 0)) / 100,
-      source: 'combined_pay_webhook',
+      // PROVISIONAL residuals (codex r27 P2) come from the PROCESSING-stage
+      // settle — the ACH cash has not arrived yet, and the failure/cancel
+      // handlers resolve them by this source when the debit terminates
+      // without settling.
+      source: provisional ? 'combined_pay_processing' : 'combined_pay_webhook',
       original_db_error: String(`${reason}${isAnchor && surchargeCents > 0 ? ` (includes $${(surchargeCents / 100).toFixed(2)} card surcharge assigned to the anchor share)` : ''}`).slice(0, 1000),
     })
     .onConflict('stripe_payment_intent_id')
     .ignore();
+  // A PAID settle upgrades a still-provisional row to the durable source
+  // and RE-OPENS it (the cash has now genuinely arrived unmatched) — so
+  // the refund/dispute cleanups, which match 'combined_pay_webhook', can
+  // resolve it later. Targeted by source, so operator-resolved durable
+  // cases are never re-opened by a webhook redelivery.
+  if (!provisional) {
+    await trx('stripe_orphan_charges')
+      .where({ stripe_payment_intent_id: `${paymentIntent.id}:${entry.invoiceId}`, source: 'combined_pay_processing' })
+      .update({ source: 'combined_pay_webhook', resolved: false, resolved_at: null, resolution_notes: null });
+  }
 }
 
 module.exports = {
