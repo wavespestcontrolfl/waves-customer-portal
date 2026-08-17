@@ -860,6 +860,9 @@ function mapV1ToLegacyShape(v1Result) {
       // reads for the tech EXTERIOR ONLY preference.
       interiorOption: li.interiorOption || null,
       interiorScope: li.interiorScope || null,
+      // Durable floor-replay provenance (codex #3432 r6 P0) — must survive
+      // the mapper so a persisted armed replay keeps arming.
+      ...(li.legacyFloorArmed === true ? { legacyFloorArmed: true } : {}),
       taxable: li.taxable === true,
       taxCategory: li.taxCategory || null,
       discountable: false,

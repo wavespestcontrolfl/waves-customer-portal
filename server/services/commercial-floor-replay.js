@@ -48,15 +48,23 @@ function commercialFloorBoundServices(estData = {}) {
   const armed = new Set();
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
-    // Post-split rows are definitively NOT legacy evidence (codex #3432 r5
-    // P0): interiorOption/interiorScope shipped WITH the disarm, and a new
+    const key = recurringServiceKey(row) || row.service;
+    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[key];
+    if (!legacyMin) continue;
+    // Durable provenance stamp (codex #3432 r6 P0): an ARMED replay
+    // regenerates the row with the post-split fields, so if that result is
+    // persisted back (membership reconcile → whole-blob write) the marker
+    // exclusion below would erase the evidence on the NEXT replay and drop
+    // the quote to the disarmed buildup. The pricers stamp legacyFloorArmed
+    // on every floors-armed output, so once legacy, always legacy — across
+    // any number of persist/replay cycles.
+    if (row.legacyFloorArmed === true) { armed.add(key); continue; }
+    // Post-split rows are otherwise NOT legacy evidence (r5 P0):
+    // interiorOption/interiorScope shipped WITH the disarm, and a new
     // combined price can round to the legacy value while its exterior-only
     // variant is lower — arming would clamp that variant up and erase the
     // customer's toggled savings on the next authoritative replay.
     if (row.interiorOption || row.interiorScope) continue;
-    const key = recurringServiceKey(row) || row.service;
-    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[key];
-    if (!legacyMin) continue;
     const annual = Number(row.annual);
     if (Number.isFinite(annual) && Math.abs(annual - legacyMin) < 0.005) armed.add(key);
   }

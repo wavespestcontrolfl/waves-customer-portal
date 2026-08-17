@@ -7084,6 +7084,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
 // so the office knows to update the tech's next work order.
 function ServicePrefsSection() {
   const [prefs, setPrefs] = useState(null);
+  const [editable, setEditable] = useState(null); // per-key editability from the server
   const [busy, setBusy] = useState(null); // which key is currently saving
   const [error, setError] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -7094,7 +7095,10 @@ function ServicePrefsSection() {
   const loadPrefs = useCallback(() => {
     setLoadFailed(false);
     api.getServicePreferences()
-      .then((d) => setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true }))
+      .then((d) => {
+        setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true });
+        setEditable(d.editable || null);
+      })
       .catch(() => setLoadFailed(true));
   }, []);
 
@@ -7152,6 +7156,13 @@ function ServicePrefsSection() {
       </div>
       {rows.map((r) => {
         const on = prefs[r.key] !== false;
+        // Server-declared lock (commercial plans price interior service as a
+        // plan component): render the row disabled with the office-reprice
+        // explanation instead of an optimistic flip that bounces off the PUT.
+        const locked = editable ? editable[r.key] === false : false;
+        const desc = locked
+          ? 'Part of your priced commercial plan — contact our office to change your service scope.'
+          : r.desc;
         return (
           <div key={r.key} style={{
             display: 'flex',
@@ -7178,14 +7189,14 @@ function ServicePrefsSection() {
               </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{r.title}</div>
-                <div style={{ fontSize: 14, color: '#475569', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
+                <div style={{ fontSize: 14, color: '#475569', marginTop: 2, lineHeight: 1.45 }}>{desc}</div>
               </div>
             </div>
             <ToggleSwitch
               checked={on}
-              onChange={() => toggle(r.key)}
-              disabled={busy === r.key}
-              label={`${r.title} ${on ? 'enabled' : 'disabled'}`}
+              onChange={() => { if (!locked) toggle(r.key); }}
+              disabled={busy === r.key || locked}
+              label={`${r.title} ${on ? 'enabled' : 'disabled'}${locked ? ' (set by your plan)' : ''}`}
             />
           </div>
         );

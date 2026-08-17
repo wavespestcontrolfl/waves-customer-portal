@@ -63,11 +63,33 @@ async function readPrefs(customerId) {
   return normalize(raw);
 }
 
+// Commercial plans price interior service as a plan component (owner
+// 2026-08-17): the interior_spray preference is not customer-editable there
+// — it doubles as the tech surfaces' sold-scope signal, and flipping it
+// would change work scope without the reprice. Shared by GET (so the portal
+// can render the row locked with an explanation) and PUT (the trust
+// boundary).
+async function commercialInteriorLocked(customerId) {
+  const cust = await db('customers')
+    .select('waveguard_tier', 'property_type')
+    .where({ id: customerId })
+    .first();
+  return String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
+    || String(cust?.property_type || '').toLowerCase() === 'commercial';
+}
+
 // GET /api/service-preferences
 router.get('/', async (req, res, next) => {
   try {
     const prefs = await readPrefs(req.customerId);
-    res.json({ preferences: prefs });
+    const interiorLocked = await commercialInteriorLocked(req.customerId);
+    res.json({
+      preferences: prefs,
+      // Per-key editability for the portal UI (codex #3432 r6 P2): a locked
+      // key renders disabled with the office-reprice explanation instead of
+      // an optimistic flip that bounces off the PUT rejection.
+      editable: { interior_spray: !interiorLocked, exterior_sweep: true },
+    });
   } catch (err) { next(err); }
 });
 
@@ -90,18 +112,10 @@ router.put('/', async (req, res, next) => {
     // customer flip it here would re-enable routine interior work without
     // restoring the priced component — scope changes go through the office
     // and a reprice (codex #3432 r3 P1). exterior_sweep stays editable.
-    if ('interior_spray' in patch) {
-      const cust = await db('customers')
-        .select('waveguard_tier', 'property_type')
-        .where({ id: req.customerId })
-        .first();
-      const isCommercial = String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
-        || String(cust?.property_type || '').toLowerCase() === 'commercial';
-      if (isCommercial) {
-        return res.status(400).json({
-          error: 'Interior service on a commercial plan is part of your priced program — contact our office to change it.',
-        });
-      }
+    if ('interior_spray' in patch && await commercialInteriorLocked(req.customerId)) {
+      return res.status(400).json({
+        error: 'Interior service on a commercial plan is part of your priced program — contact our office to change it.',
+      });
     }
 
     // Row-locked read-modify-write: two concurrent single-key PUTs

@@ -9852,13 +9852,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // whose only property IS the accepted one. Anything else: skip
             // and log so the office annotates the plan instead.
             const existingProps = await trx('customer_properties')
-              .where({ customer_id: customerId }).select('address_line1');
-            const estAddr = normalizeAddressForMatch(estimate.address);
-            const singlePropIsAcceptedAddress = existingProps.length === 1 && (() => {
-              const line1 = normalizeAddressForMatch(existingProps[0].address_line1);
-              return line1.length >= 5 && !!estAddr
-                && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
-            })();
+              .where({ customer_id: customerId }).select('address_line1', 'address_line2');
+            // Full property tuple — street line AND unit (r6 P1: linkage
+            // treats address_line2 as identity, so "Apt 4" on file must not
+            // match an accepted "Apt 5"). parseEstimateAddress canonicalizes
+            // the unit into line 2 on the estimate side; a partial parse
+            // fails closed to not stamping.
+            const parsedScopeAddr = require('../services/estimate-property-linkage')
+              .parseEstimateAddress(estimate.address);
+            const normAddr = (v) => normalizeAddressForMatch(v || '');
+            const singlePropIsAcceptedAddress = existingProps.length === 1
+              && !!parsedScopeAddr && parsedScopeAddr.partial !== true
+              && normAddr(existingProps[0].address_line1).length >= 5
+              && normAddr(existingProps[0].address_line1) === normAddr(parsedScopeAddr.address_line1)
+              && normAddr(existingProps[0].address_line2) === normAddr(parsedScopeAddr.address_line2);
             if (existingProps.length === 0 || singlePropIsAcceptedAddress) {
               prefs.interior_spray = false;
             } else {

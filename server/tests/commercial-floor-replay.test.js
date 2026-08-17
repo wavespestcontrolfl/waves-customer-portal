@@ -163,6 +163,41 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
       .commercialFloorsArmedServices).toBeUndefined();
   });
 
+  test('provenance survives persist/replay cycles: armed output re-arms after being written back (r6 P0)', () => {
+    // Legacy floored estimate → armed replay REGENERATES the row with the
+    // post-split fields; if that result is persisted back (membership
+    // reconcile → whole-blob write), the marker exclusion alone would erase
+    // the evidence. The pricer's legacyFloorArmed stamp carries it forward:
+    // once legacy, always legacy.
+    const legacy = {
+      engineInputs: LEGACY_INPUTS,
+      engineResult: {
+        lineItems: [{ service: 'commercial_pest', annual: 900, monthly: 75, perApp: 225, visitsPerYear: 4 }],
+      },
+    };
+    const firstReplay = generateEstimate(extractEngineInputs(legacy));
+    const replayedLine = firstReplay.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(replayedLine.annual).toBe(900);
+    expect(replayedLine.legacyFloorArmed).toBe(true);
+    // Simulate the authoritative write-back: the regenerated result IS the
+    // stored result now.
+    const persisted = { engineInputs: LEGACY_INPUTS, engineResult: firstReplay };
+    expect(extractEngineInputs(persisted).commercialFloorsArmedServices).toEqual(['commercial_pest']);
+    const secondReplay = generateEstimate(extractEngineInputs(persisted));
+    expect(secondReplay.lineItems.find((l) => l.service === 'commercial_pest').annual).toBe(900);
+  });
+
+  test('floors-armed replay reprices a legacy explicit-zero-bed T&S line instead of demoting it to manual quote (r6 P0)', () => {
+    const { priceCommercialTreeShrub: priceTs } = require('../services/pricing-engine/service-pricing');
+    // Fresh pricing: explicit zero bed → manual quote (owner 2026-08-17).
+    expect(priceTs({ bedArea: 0, lotSqFt: 100000 }, { treeCount: 0 }).quoteRequired).toBe(true);
+    // Armed replay of a pre-disarm quote: reproduce the $900 line.
+    const replayed = priceTs({ bedArea: 0, lotSqFt: 100000 }, { treeCount: 0, floorsArmed: true });
+    expect(replayed.quoteRequired).toBe(false);
+    expect(replayed.annual).toBe(900);
+    expect(replayed.legacyFloorArmed).toBe(true);
+  });
+
   test('a stored/forged armed flag inside engineInputs is neutralized — evidence is server-derived per replay', () => {
     const estData = {
       engineInputs: { ...LEGACY_INPUTS, commercialFloorsArmedServices: ['commercial_pest'] },

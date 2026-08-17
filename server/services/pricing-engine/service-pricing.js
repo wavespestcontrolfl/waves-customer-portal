@@ -2996,6 +2996,11 @@ function priceCommercialLawn(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable provenance for the floor replay (codex #3432 r6 P0): an armed
+    // replay's output may be persisted back over the stored rows, so the
+    // stamp — not the (replay-added) post-split fields — carries the legacy
+    // evidence forward. Once legacy, always legacy.
+    ...(options.floorsArmed === true ? { legacyFloorArmed: true } : {}),
     // The app-mix breakdown describes the default 8-visit program; at an
     // overridden cadence the mix shifts on-site, so claiming the default
     // split would be wrong — omit it rather than misstate it.
@@ -3223,6 +3228,8 @@ function priceCommercialPest(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(floorsArmed ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {
@@ -3312,6 +3319,8 @@ function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, servi
     perVisit: perApp,
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(floorsArmed === true ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {
@@ -3628,9 +3637,12 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   // An explicit measured-zero bed area (all-hardscape lot) used to price at the
   // $900 minimum; with floors disarmed it would price at the admin-only buildup
   // (~$220/yr), which is not a sellable ornamental program — manual quote.
+  // FRESH pricing only (codex #3432 r6 P0): a floors-armed replay of a
+  // pre-disarm zero-bed estimate must reproduce its quoted $900 line, not
+  // demote an outstanding tokenized quote to a manual-quote block.
   // Only the explicit path can surface zero here (the resolver routes
   // estimated/lot-based zeros to the lot-density estimate).
-  if (bedArea === 0 && !estimated) {
+  if (bedArea === 0 && !estimated && options.floorsArmed !== true) {
     return commercialPestFamilyManualLine({
       service: 'commercial_tree_shrub',
       name: 'Commercial Tree & Shrub',
@@ -3742,6 +3754,8 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(options.floorsArmed === true ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {
