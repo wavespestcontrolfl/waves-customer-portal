@@ -317,6 +317,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // pending-obligation forms never unlock the exemption either (r73)
+    const stillNeeds = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry; the technician still needs to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(stillNeeds.body).toBeNull();
+    const yetTo = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician has yet to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(yetTo.body).toBeNull();
+    const waitingTo = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry; the technician is waiting to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(waitingTo.body).toBeNull();
+    const willConfirm = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician will confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(willConfirm.body).toBeNull();
     // failure/inability predicates are negations too (r71)
     const failed = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry; the technician failed to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(failed.body).toBeNull();

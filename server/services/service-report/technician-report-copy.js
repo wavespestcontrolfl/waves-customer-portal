@@ -185,8 +185,11 @@ function technicianReportCustomerCopy(notes) {
   // negation, so "the technician did not confirm timing" (and a homeowner
   // claiming to confirm) never unlock the exemption. Failure and inability
   // predicates are negations too — "the technician failed to confirm
-  // timing" is an explicitly UNCONFIRMED claim (codex r71).
-  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
+  // timing" is an explicitly UNCONFIRMED claim (codex r71), and so are
+  // pending-obligation forms — "still needs to / has yet to / is waiting
+  // to / will confirm timing" describe a confirmation that has NOT
+  // happened (codex r73).
+  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
   const screenText = TIMING_CONFIRM_RE.test(body)
     ? body.replace(SAFE_IDIOM_RE, 'once dry')
     : body;
