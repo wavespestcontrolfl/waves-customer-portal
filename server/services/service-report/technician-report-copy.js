@@ -63,6 +63,10 @@ const REPORT_ACCESS_CODE_RES = [
   // ≥3 digits so counts ("2 doors") never trip
   /\b\d{3,8}\b[^\n.!?]{0,20}\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|lock)\b/i,
   /\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?|enter(?:s|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}\b/i,
+  // a device followed by its own action and digits is the same credential
+  // ("The gate opens with 4417", codex r85) — the trailing measurement-unit
+  // lookahead keeps dimensional prose legal ("opens onto 400 square feet")
+  /\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b[^\n.!?]{0,20}\b\d{3,8}\b(?!\s*(?:feet|foot|ft|inch(?:es)?|in\b|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
   // individually separated digits ("PIN is 1 2 3 4", "1-2-3-4") are the
   // same credential the contiguous shapes catch (codex r74) — three or
   // more single digits joined by spaces/hyphens beside a code noun

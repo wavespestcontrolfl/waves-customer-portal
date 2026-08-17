@@ -331,6 +331,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // device-first credential actions + wait-inside timing (r85)
+    expect(reportCopyRejection('The gate opens with 4417.')).toBe('access_code');
+    expect(reportCopyRejection('The garage door unlocks with 8842 after hours.')).toBe('access_code');
+    expect(reportCopyRejection('The gate opens onto 400 square feet of treated turf.')).toBeNull();
+    expect(reportCopyRejection('Pets must wait indoors for 30 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Pets need to wait inside for thirty minutes.')).toMatch(/^banned:/);
     // device assignments, post-timing denials, remain-indoors timing (r84)
     expect(reportCopyRejection('The side gate is 4417.')).toBe('access_code');
     expect(reportCopyRejection('The gate is 100 feet from the lanai and was retreated.')).toBeNull();
