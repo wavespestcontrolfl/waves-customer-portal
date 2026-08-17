@@ -722,7 +722,7 @@ function acceptedMixServiceName(notes) {
 // signature: service_type === estimates.service_interest, or the 'Estimate
 // service' default). Mapped canonical labels ("Quarterly Pest Control") and
 // anything without a usable mix line pass through unchanged.
-async function estimateBackedServiceName(scheduledServiceId, parentName, conn = db) {
+async function estimateBackedServiceName(scheduledServiceId, parentName, conn = db, { strict = false } = {}) {
   const stored = String(parentName || '').trim();
   if (!stored) return parentName;
   try {
@@ -736,7 +736,13 @@ async function estimateBackedServiceName(scheduledServiceId, parentName, conn = 
     const mixName = acceptedMixServiceName(svc.notes);
     if (!mixName || mixName === stored) return parentName;
     return mixName;
-  } catch {
+  } catch (err) {
+    // strict: the caller replaces a COMPLETE persisted label with this
+    // merge, so a failed component read must surface (send-time live
+    // resolution falls back to the stored label) instead of silently
+    // degrading to the raw category. Default keeps the historical
+    // best-effort shape for registration-time callers.
+    if (strict) throw err;
     return parentName;
   }
 }
@@ -762,7 +768,7 @@ async function buildServiceLabel(scheduledServiceId, parentName) {
   }
 }
 
-async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }) {
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, strict = false }) {
   // Rebuild the merged label from the PRISTINE service names of every
   // reminder sharing this customer+slot — never parse a merged label back
   // apart. Real service names contain both list delimiters (e.g. "Rodent
@@ -798,7 +804,7 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
       // coalesce() above re-reads the raw canonical ss.service_type, so the
       // estimate fall-through category would resurface in merged labels
       // without the same recovery registration applies.
-      label = await estimateBackedServiceName(r.scheduled_service_id, label, conn);
+      label = await estimateBackedServiceName(r.scheduled_service_id, label, conn, { strict });
       try {
         const addons = await conn('scheduled_service_addons')
           .where({ scheduled_service_id: r.scheduled_service_id })
@@ -807,7 +813,13 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
         if (all.length === 2) label = `${all[0]} & ${all[1]}`;
         else if (all.length > 2) label = `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
         else if (all.length === 1) label = all[0];
-      } catch { /* keep the base label */ }
+      } catch (addonErr) {
+        // strict: an add-on read failure means this merge may be MISSING a
+        // component the persisted label already carries — surface it so the
+        // send-time caller keeps the stored label (codex #3430 r1 P2).
+        if (strict) throw addonErr;
+        /* keep the base label */
+      }
     }
     candidateLabels.push(label);
   }
@@ -835,6 +847,39 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   if (parts.length === 1) return parts[0];
   // List-style join (owner call 07-06): "A, B & C".
   return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
+}
+
+// Send-time label for the 72h/24h reminder legs. appointment_reminders.
+// service_type is FROZEN at registration (a recurring child inherits its
+// parent's label at spawn, and no later relabel re-syncs the row — the
+// 20260716150000 trigger covers time/flags only), so a visit whose
+// service_type changed after arming would text the stale name ("Quarterly
+// Pest Control" for a relabeled Termite Bond visit, 08-14 incident).
+// Re-resolve from the live scheduled_services row via buildMergedServiceLabel
+// (coalesces ss.service_type, re-applies add-ons + the estimate-backed name
+// recovery, merges sendable same-slot siblings). Fall back to the stored
+// label for legacy unlinked rows, for a merged result with no live
+// component ('service' = its no-real-label placeholder — e.g. the
+// appointment moved out from under this scan), and on any error: a
+// reminder with yesterday's label beats no reminder.
+async function liveReminderServiceLabel(row) {
+  const stored = smsServiceLabelStored(row.service_type);
+  if (!row.scheduled_service_id) return stored;
+  try {
+    const live = await buildMergedServiceLabel(db, {
+      customerId: row.customer_id,
+      apptTime: row.appointment_time,
+      nextLabel: null,
+      // A partially-failed merge (add-on or estimate-name read down) must
+      // not replace a complete persisted label — throw to the stored
+      // fallback below instead (codex #3430 r1 P2).
+      strict: true,
+    });
+    const cleaned = String(live || '').trim();
+    return cleaned && cleaned !== 'service' ? cleaned : stored;
+  } catch {
+    return stored;
+  }
 }
 
 function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
@@ -2244,7 +2289,7 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
-            const serviceLabel = smsServiceLabelStored(r.service_type);
+            const serviceLabel = await liveReminderServiceLabel(r);
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
@@ -2371,7 +2416,7 @@ const AppointmentReminders = {
                 customerId: r.customer_id,
                 scheduledServiceId: r.scheduled_service_id,
                 apptTime,
-                serviceLabel: smsServiceLabelStored(r.service_type),
+                serviceLabel: await liveReminderServiceLabel(r),
               });
               logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
             }
@@ -2394,7 +2439,7 @@ const AppointmentReminders = {
 
             const time = formatTime(apptTime);
 
-            const serviceLabel = smsServiceLabelStored(r.service_type);
+            const serviceLabel = await liveReminderServiceLabel(r);
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
@@ -4181,6 +4226,8 @@ AppointmentReminders._test = {
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
   getReminderPrefs,
+  liveReminderServiceLabel,
+  buildMergedServiceLabel,
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
