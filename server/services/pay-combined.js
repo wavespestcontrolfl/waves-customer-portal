@@ -457,7 +457,13 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     } catch (err) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (${err.message}) — try again`);
     }
-    if (!pi) continue; // Stripe unconfigured (dev)
+    // A null return = Stripe unconfigured, NOT "no session" (codex r23
+    // P1): a browser can still hold this PI's client secret and confirm
+    // directly with Stripe — the ownership change must fail closed, never
+    // commit past an unverifiable live session.
+    if (!pi) {
+      throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
+    }
     if (!isCombinedPiMetadata(pi.metadata)) continue;
     // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
     // a pending bank verification is still an UNCAPTURED session, and the
@@ -505,16 +511,22 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
     .havingRaw('count(*) > 1')
     .pluck('stripe_payment_intent_id');
   let revoked = 0;
+  let failed = 0;
   for (const piId of candidatePiIds) {
     const StripeService = require('./stripe');
     let pi;
     try {
       pi = await StripeService.retrievePaymentIntent(piId);
     } catch (err) {
-      logger.error(`[pay-combined] gate-off revoke: PI ${piId} unreadable (${err.message}) — needs manual review`);
+      logger.error(`[pay-combined] gate-off revoke: PI ${piId} unreadable (${err.message}) — will retry`);
+      failed += 1;
       continue;
     }
-    if (!pi || !isCombinedPiMetadata(pi.metadata)) continue;
+    // A null return = Stripe unconfigured (codex r23 P1): the session is
+    // UNVERIFIABLE, not absent — count as failed so the durable retry
+    // keeps trying rather than silently leaving a confirmable PI live.
+    if (!pi) { failed += 1; continue; }
+    if (!isCombinedPiMetadata(pi.metadata)) continue;
     if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
       logger.warn(`[pay-combined] gate-off revoke: combined PI ${piId} is ${pi.status} — money may be in flight, left to the settle paths`);
       continue;
@@ -522,16 +534,17 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
     try {
       await StripeService.cancelPaymentIntent(piId);
     } catch (err) {
-      logger.error(`[pay-combined] gate-off revoke: could not cancel combined PI ${piId} (${err.message}) — needs manual review`);
+      logger.error(`[pay-combined] gate-off revoke: could not cancel combined PI ${piId} (${err.message}) — will retry`);
+      failed += 1;
       continue;
     }
     await clearPaymentIntentStamps(db, piId);
     revoked += 1;
   }
   if (candidatePiIds.length) {
-    logger.warn(`[pay-combined] gate OFF at boot — revoked ${revoked}/${candidatePiIds.length} outstanding combined session(s)`);
+    logger.warn(`[pay-combined] gate OFF — revoked ${revoked}/${candidatePiIds.length} outstanding combined session(s)${failed ? `, ${failed} failed (retry scheduled)` : ''}`);
   }
-  return { revoked, candidates: candidatePiIds.length };
+  return { revoked, failed, candidates: candidatePiIds.length };
 }
 
 /**

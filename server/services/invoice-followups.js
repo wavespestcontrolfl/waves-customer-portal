@@ -1288,6 +1288,12 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
       } catch (err) {
         throw new Error(`Could not verify invoice ${lockedInvoice.invoice_number}'s active payment before stopping dunning (${err.message}) — try again`);
       }
+      // Null = Stripe unconfigured, not "no session" (codex r23 P1): the
+      // attached PI may be a live combined session a browser can still
+      // confirm — the stop must not acknowledge past an unverifiable one.
+      if (!pi) {
+        throw new Error(`Could not verify invoice ${lockedInvoice.invoice_number}'s active payment before stopping dunning (payment service unavailable) — try again`);
+      }
       const isSiblingOnCombined = pi
         && PayCombined.isCombinedPiMetadata(pi.metadata)
         && String(pi.metadata?.waves_invoice_id || '') !== String(invoiceId)

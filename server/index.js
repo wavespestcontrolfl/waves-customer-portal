@@ -999,14 +999,27 @@ httpServer.listen(PORT, () => {
     // created by completion, email, or public PDF requests.
     {
       // GATE_PAY_INCLUDE_BALANCE kill-switch enforcement (codex #3427 r22
-      // P1): booting with the gate OFF revokes any outstanding unconfirmed
-      // combined pay sessions — a prepared combined ACH PI is confirmable
-      // straight from the browser, so the flip must not leave one able to
-      // charge every sibling. One-shot; gate flips require a restart.
-      setTimeout(() => {
+      // P1, hardened r23): booting with the gate OFF revokes any
+      // outstanding unconfirmed combined pay sessions — a prepared
+      // combined ACH PI is confirmable straight from the browser, so the
+      // flip must not leave one able to charge every sibling. Runs
+      // IMMEDIATELY at boot and retries DURABLY every 5 minutes until a
+      // pass completes with zero failures (unreadable PIs, cancel errors,
+      // and Stripe-unconfigured all count as failures) — never a single
+      // swallowed attempt.
+      const kickGateOffRevoke = () => {
         require('./services/pay-combined').revokeOutstandingCombinedSessionsOnGateOff()
-          .catch((err) => logger.error(`[pay-combined] gate-off revoke sweep failed: ${err.message}`));
-      }, 20 * 1000).unref();
+          .then((summary) => {
+            if (summary && !summary.skipped && summary.failed > 0) {
+              setTimeout(kickGateOffRevoke, 5 * 60 * 1000).unref();
+            }
+          })
+          .catch((err) => {
+            logger.error(`[pay-combined] gate-off revoke sweep failed: ${err.message} — retrying in 5m`);
+            setTimeout(kickGateOffRevoke, 5 * 60 * 1000).unref();
+          });
+      };
+      kickGateOffRevoke();
     }
 
     {
