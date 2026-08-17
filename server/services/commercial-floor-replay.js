@@ -1,21 +1,26 @@
 // Commercial account-minimum replay evidence (floors disarmed owner
-// 2026-08-17; codex #3432 r1 P0 + r2 P0).
+// 2026-08-17; codex #3432 r1 P0 + r2 P0 + r3 P0).
 //
 // A pre-disarm estimate whose stored commercial row sits EXACTLY at its
 // era's minimum was clamped there — replaying it live under the disarmed
 // engine (public pricing-bundle rebuild OR the authoritative
 // serverRecomputeFromEstimateData path membership reconciliation uses)
 // would silently reopen the quote at the lower raw buildup, and
-// acceptance/write-back would lock that drifted amount. Row evidence only:
-// the disarmed engine never lands on these exact values except when the
-// clamp bound, and a coincidental exact-equality re-arms a clamp that is a
-// no-op at that price. minApplied is NOT usable as the signal — the
-// disarmed engine stamps it on every sub-reference price.
+// acceptance/write-back would lock that drifted amount.
 //
-// Shared by estimate-public (savedFloorReplayOverrides) and
-// admin-estimate-persistence (serverRecomputeFromEstimateData) so the
-// view-time and save-time replays resolve the same evidence — the same
-// split the pest-curve and tree-shrub-knob replays follow.
+// The evidence is PER SERVICE (r3 P0): a post-disarm quote can land a line
+// exactly on a legacy value by coincidence (the buildup inputs are
+// continuous), and an estimate-wide boolean would then re-arm every
+// commercial floor on replay and RAISE a different sub-minimum line.
+// Scoped to the matching service, the coincidence is always harmless — an
+// armed clamp at exactly its own floor value is the identity.
+//
+// minApplied is NOT usable as the signal — the disarmed engine stamps it
+// on every sub-reference price. Shared by estimate-public
+// (savedFloorReplayOverrides) and admin-estimate-persistence
+// (serverRecomputeFromEstimateData) so view-time and save-time replays
+// resolve the same evidence — the same split the pest-curve and
+// tree-shrub-knob replays follow.
 
 const COMMERCIAL_LEGACY_MIN_ANNUAL = {
   commercial_lawn: 1200,
@@ -26,7 +31,9 @@ const COMMERCIAL_LEGACY_MIN_ANNUAL = {
   commercial_rodent_bait: 900,
 };
 
-function commercialFloorBoundEvidence(estData = {}) {
+// Service keys whose stored annual sits exactly at that service's legacy
+// minimum. Empty array = no evidence (replay live).
+function commercialFloorBoundServices(estData = {}) {
   // Lazy require: estimate-converter sits high in the service graph and a
   // top-level require here could form a load-order cycle.
   const { recurringServiceKey } = require('./estimate-converter');
@@ -38,16 +45,19 @@ function commercialFloorBoundEvidence(estData = {}) {
   for (const container of [estData?.engineResult, result]) {
     if (container && Array.isArray(container.lineItems)) rows.push(...container.lineItems);
   }
-  return rows.some((row) => {
-    if (!row || typeof row !== 'object') return false;
-    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[recurringServiceKey(row) || row.service];
-    if (!legacyMin) return false;
+  const armed = new Set();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const key = recurringServiceKey(row) || row.service;
+    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[key];
+    if (!legacyMin) continue;
     const annual = Number(row.annual);
-    return Number.isFinite(annual) && Math.abs(annual - legacyMin) < 0.005;
-  });
+    if (Number.isFinite(annual) && Math.abs(annual - legacyMin) < 0.005) armed.add(key);
+  }
+  return [...armed];
 }
 
 module.exports = {
   COMMERCIAL_LEGACY_MIN_ANNUAL,
-  commercialFloorBoundEvidence,
+  commercialFloorBoundServices,
 };

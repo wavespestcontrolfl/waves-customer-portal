@@ -13102,8 +13102,13 @@ function savedFloorReplayOverrides(estData) {
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
-  const { commercialFloorBoundEvidence } = require('../services/commercial-floor-replay');
-  if (commercialFloorBoundEvidence(estData)) overrides.commercialFloorsArmed = true;
+  // Deliberately set even when EMPTY (undefined): the key's presence in the
+  // overrides spread neutralizes any value persisted inside the stored
+  // inputs themselves — this flag is server-derived on every replay, never
+  // trusted from a stored blob (mirrors the sanitizer on the save path).
+  const { commercialFloorBoundServices } = require('../services/commercial-floor-replay');
+  const commercialArmed = commercialFloorBoundServices(estData);
+  overrides.commercialFloorsArmedServices = commercialArmed.length ? commercialArmed : undefined;
   return overrides;
 }
 

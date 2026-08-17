@@ -986,7 +986,12 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // set (or a stale pre-flip preview). It is stripped here like every other
 // client-claimed pricing identity and re-derived server-side ONLY when the
 // caller declares a replay of an already-persisted estimate.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs'];
+// commercialFloorsArmedServices is the replay-only commercial-minimum
+// re-arm flag (commercial-floor-replay): browser-supplied, it would restore
+// the retired minimums on a FRESH save (codex #3432 r3 P1). Stripped here
+// and re-derived server-side only under the declared persisted-replay
+// branch below — same lifecycle as treeShrubPricingKnobs.
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -1113,10 +1118,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // commercial estimate stored at its era's minimum must keep its quoted
     // price through this authoritative recompute too (membership-lapse
     // reconciliation writes the result back over the stored totals). Same
-    // row evidence the public replay uses (savedFloorReplayOverrides).
-    if (require('./commercial-floor-replay').commercialFloorBoundEvidence(estimateData)) {
-      v1Input.commercialFloorsArmed = true;
-    }
+    // PER-SERVICE row evidence the public replay uses
+    // (savedFloorReplayOverrides; codex r3 P0 — never a global re-arm).
+    const commercialArmed = require('./commercial-floor-replay').commercialFloorBoundServices(estimateData);
+    if (commercialArmed.length) v1Input.commercialFloorsArmedServices = commercialArmed;
   }
 
   try {

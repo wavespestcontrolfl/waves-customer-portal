@@ -83,10 +83,31 @@ describe('priceCommercialPest — exterior/interior component split', () => {
     expect(off.detail).toMatch(/exterior barrier \+ monitoring; interior service available/i);
   });
 
-  test('missing building footprint still falls to a manual quote regardless of scope', () => {
-    const r = priceCommercialPest({ lotSqFt: 60000 }, { interiorService: 'excluded', buildingSizeMeasured: false });
+  test('missing building footprint falls to a manual quote when interior is selected', () => {
+    const r = priceCommercialPest({ lotSqFt: 60000 }, {});
     expect(r.quoteRequired).toBe(true);
     expect(r.annual).toBeNull();
+  });
+
+  test('buildingSizeMeasured:false stays an absolute manual-quote override (synthetic wizard data)', () => {
+    // A profile-computed perimeter can be derived from the same synthetic
+    // building size the wizard flagged — never auto-price under it.
+    const r = priceCommercialPest({ lotSqFt: 60000, perimeter: 283 }, { interiorService: 'excluded', buildingSizeMeasured: false });
+    expect(r.quoteRequired).toBe(true);
+    expect(r.annual).toBeNull();
+  });
+
+  test('exterior-only with an explicit measured perimeter auto-prices without a footprint (r3 P2)', () => {
+    const r = priceCommercialPest({ lotSqFt: 60000, perimeter: 283 }, { pestVisits: 4, interiorService: 'excluded' });
+    expect(r.quoteRequired).toBe(false);
+    // Exterior buildup never reads the footprint — same price as the
+    // 5,000 sqft fixture's exterior variant (perimeter 283 both).
+    expect(r.annual).toBeCloseTo(464.99, 2);
+    // No snapshot: the interior component would price off the 2,000 sqft
+    // fallback, so the toggle must not offer it.
+    expect(r.interiorOption).toBeNull();
+    expect(r.pricingConfidence).toBe('LOW');
+    expect(r.footprintEstimated).toBe(true);
   });
 });
 

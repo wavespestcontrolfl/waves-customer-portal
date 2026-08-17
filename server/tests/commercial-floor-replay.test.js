@@ -66,7 +66,7 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
       },
     };
     const replayInputs = extractEngineInputs(estData);
-    expect(replayInputs.commercialFloorsArmed).toBe(true);
+    expect(replayInputs.commercialFloorsArmedServices).toEqual(['commercial_pest']);
     const replayed = generateEstimate(replayInputs).lineItems.find((l) => l.service === 'commercial_pest');
     // The replay reproduces the QUOTED price, not the disarmed buildup.
     expect(replayed.annual).toBe(900);
@@ -80,7 +80,7 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
         recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', mo: 75, annual: 900, perTreatment: 225 }] },
       },
     };
-    expect(extractEngineInputs(estData).commercialFloorsArmed).toBe(true);
+    expect(extractEngineInputs(estData).commercialFloorsArmedServices).toEqual(['commercial_pest']);
   });
 
   test('a post-disarm estimate (sub-minimum stored annual) replays live — no injection', () => {
@@ -91,7 +91,7 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
       },
     };
     const replayInputs = extractEngineInputs(estData);
-    expect(replayInputs.commercialFloorsArmed).toBeUndefined();
+    expect(replayInputs.commercialFloorsArmedServices).toBeUndefined();
     const replayed = generateEstimate(replayInputs).lineItems.find((l) => l.service === 'commercial_pest');
     expect(replayed.annual).toBeCloseTo(629.53, 2);
   });
@@ -104,7 +104,7 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
       },
     };
     const replayInputs = extractEngineInputs(estData);
-    expect(replayInputs.commercialFloorsArmed).toBeUndefined();
+    expect(replayInputs.commercialFloorsArmedServices).toBeUndefined();
     expect(generateEstimate(replayInputs).lineItems.find((l) => l.service === 'commercial_pest').annual).toBe(3527.2);
   });
 
@@ -113,7 +113,42 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
       engineInputs: { propertyType: 'single_family', homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
       result: { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 75, annual: 900 }] } },
     };
-    expect(extractEngineInputs(estData).commercialFloorsArmed).toBeUndefined();
+    expect(extractEngineInputs(estData).commercialFloorsArmedServices).toBeUndefined();
+  });
+
+  test('evidence is PER SERVICE: one line coincidentally at a legacy value never re-arms another (r3 P0)', () => {
+    // Post-disarm quote where the lawn line happens to compute to exactly
+    // $1,200 — the pest line below $900 must stay at its live buildup on
+    // replay; only the (no-op) lawn clamp re-arms.
+    const estData = {
+      engineInputs: {
+        ...LEGACY_INPUTS,
+        turfSf: 6782,
+        services: { pest: {}, lawn: {} },
+      },
+      engineResult: {
+        lineItems: [
+          { service: 'commercial_lawn', annual: 1200, monthly: 100, visitsPerYear: 8 },
+          { service: 'commercial_pest', annual: 629.53, monthly: 52.46, perApp: 157.38, visitsPerYear: 4 },
+        ],
+      },
+    };
+    const replayInputs = extractEngineInputs(estData);
+    expect(replayInputs.commercialFloorsArmedServices).toEqual(['commercial_lawn']);
+    const replayed = generateEstimate(replayInputs);
+    const pest = replayed.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.annual).toBeLessThan(900);
+    expect(pest.annual).toBeCloseTo(629.53, 2);
+  });
+
+  test('a stored/forged armed flag inside engineInputs is neutralized — evidence is server-derived per replay', () => {
+    const estData = {
+      engineInputs: { ...LEGACY_INPUTS, commercialFloorsArmedServices: ['commercial_pest'] },
+      engineResult: {
+        lineItems: [{ service: 'commercial_pest', annual: 629.53, monthly: 52.46, perApp: 157.38, visitsPerYear: 4 }],
+      },
+    };
+    expect(extractEngineInputs(estData).commercialFloorsArmedServices).toBeUndefined();
   });
 });
 
@@ -151,6 +186,16 @@ describe('serverRecomputeFromEstimateData replays commercial floors (persisted-e
     const out = await serverRecomputeFromEstimateData(flooredEstimateData(), {
       needsSync: () => false,
     });
+    expect(out.recomputed).toBe(true);
+    const row = out.serverResult.recurring.services.find((svc) => svc.service === 'commercial_pest');
+    expect(row.annual).toBeCloseTo(629.53, 2);
+  });
+
+  test('a browser-forged armed flag on a fresh save is stripped (r3 P1)', async () => {
+    const data = flooredEstimateData();
+    data.engineInputs.commercialFloorsArmedServices = ['commercial_pest', 'commercial_lawn'];
+    data.engineResult.lineItems = []; // no row evidence — a forged flag is the only signal
+    const out = await serverRecomputeFromEstimateData(data, { needsSync: () => false });
     expect(out.recomputed).toBe(true);
     const row = out.serverResult.recurring.services.find((svc) => svc.service === 'commercial_pest');
     expect(row.annual).toBeCloseTo(629.53, 2);

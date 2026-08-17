@@ -3034,12 +3034,14 @@ function resolveCommercialPestFootprint(property = {}) {
   // from the footprint (a square's perimeter = 4·√area) so a missing perimeter
   // never zeroes the exterior-barrier labor.
   const explicitPerimeter = Number(property.perimeter ?? property.perimeterLF ?? property.perimeterLf);
-  const perimeter = Number.isFinite(explicitPerimeter) && explicitPerimeter > 0
+  const perimeterExplicit = Number.isFinite(explicitPerimeter) && explicitPerimeter > 0;
+  const perimeter = perimeterExplicit
     ? explicitPerimeter
     : (footprint > 0 ? 4 * Math.sqrt(footprint) : 0);
   return {
     footprint,
     perimeter,
+    perimeterExplicit,
     footprintSource: res.source,
     // True when resolvePestFootprint fell back to its 2,000 sqft default — i.e.
     // NO usable building size was supplied. Commercial pest prices off the
@@ -3051,9 +3053,14 @@ function resolveCommercialPestFootprint(property = {}) {
 
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
-  const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  const { footprint, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
   // Risk-type cadence override (office 4/yr … restaurant 12/yr); default 12.
   const visits = Number.isFinite(options.pestVisits) && options.pestVisits > 0 ? options.pestVisits : cfg.programVisits;
+  // Interior service is customer-selectable (on by default, owner 2026-08-17).
+  // Resolved BEFORE the size guard: exterior-only pricing is perimeter-driven,
+  // so an explicit measured perimeter can auto-price it without a building
+  // footprint (codex #3432 r3 P2).
+  const interiorSelected = options.interiorService !== 'excluded';
 
   // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
   // fallback, which is unrelated to the actual building. Fall back to a manual
@@ -3061,8 +3068,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // lot-derivable so they still auto-price; pest is not.) A caller can also force
   // this via buildingSizeMeasured:false — the public wizard sets it when the
   // building size is its synthetic confirm-step default, which would otherwise
-  // resolve as a real footprint.
-  if (defaulted || options.buildingSizeMeasured === false) {
+  // resolve as a real footprint (and could equally taint a profile-computed
+  // perimeter, so that override stays absolute). The one auto-priceable
+  // exception: an EXTERIOR-ONLY program with an explicit measured perimeter —
+  // its buildup never reads the footprint.
+  if (options.buildingSizeMeasured === false || (defaulted && (interiorSelected || !perimeterExplicit))) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',
@@ -3086,11 +3096,6 @@ function priceCommercialPest(property = {}, options = {}) {
       pricingConfidence: 'LOW',
     };
   }
-
-  // Interior service is customer-selectable (on by default, owner 2026-08-17).
-  // Only the explicit 'excluded' sentinel deselects it — anything else keeps
-  // today's interior-included behavior.
-  const interiorSelected = options.interiorService !== 'excluded';
 
   // Exterior base component: perimeter barrier + monitoring. Carries the
   // per-visit overhead, drive, and annual admin — they're incurred whether or
@@ -3146,7 +3151,11 @@ function priceCommercialPest(property = {}, options = {}) {
     extOnSiteMin,
     'Commercial pest program (exterior barrier + monitoring; interior service available as an add-on). Estimated from property data — final price confirmed on site.',
   );
-  const interiorOption = {
+  // No snapshot on a defaulted footprint (exterior-only priced off an explicit
+  // perimeter): the interior component would be priced off the 2,000 sqft
+  // fallback, so the toggle must not offer it — adding interior goes through
+  // the office with a real building size.
+  const interiorOption = defaulted ? null : {
     key: 'interior_service',
     label: 'Interior service',
     selected: interiorSelected,
@@ -3170,7 +3179,9 @@ function priceCommercialPest(property = {}, options = {}) {
   const minApplied = computedAnnual < cfg.minAnnual;
   const { annual, monthly, perApp } = selected;
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
-  const pricingConfidence = footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM';
+  // A defaulted footprint (exterior-only priced off an explicit perimeter)
+  // is always LOW confidence — the building size itself is unverified.
+  const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf) ? 'LOW' : 'MEDIUM';
 
   return {
     service: 'commercial_pest',
@@ -3193,7 +3204,7 @@ function priceCommercialPest(property = {}, options = {}) {
     footprint,
     footprintUsed: footprint,
     footprintSource,
-    footprintEstimated: false,
+    footprintEstimated: defaulted,
     perimeter: roundMoney(perimeter),
     frequency: visits,
     visitsPerYear: visits,

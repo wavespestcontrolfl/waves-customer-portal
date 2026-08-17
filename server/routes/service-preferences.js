@@ -84,6 +84,26 @@ router.put('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Service preferences not yet available' });
     }
 
+    // Commercial plans price interior service as a plan component (owner
+    // 2026-08-17), and interior_spray doubles as the sold-scope signal the
+    // tech surfaces read (EXTERIOR ONLY warnings). Letting a commercial
+    // customer flip it here would re-enable routine interior work without
+    // restoring the priced component — scope changes go through the office
+    // and a reprice (codex #3432 r3 P1). exterior_sweep stays editable.
+    if ('interior_spray' in patch) {
+      const cust = await db('customers')
+        .select('waveguard_tier', 'property_type')
+        .where({ id: req.customerId })
+        .first();
+      const isCommercial = String(cust?.waveguard_tier || '').toLowerCase() === 'commercial'
+        || String(cust?.property_type || '').toLowerCase() === 'commercial';
+      if (isCommercial) {
+        return res.status(400).json({
+          error: 'Interior service on a commercial plan is part of your priced program — contact our office to change it.',
+        });
+      }
+    }
+
     // Row-locked read-modify-write: two concurrent single-key PUTs
     // (interior toggled while exterior is still saving) each read the
     // pre-image and wrote the WHOLE blob, so the second commit silently
