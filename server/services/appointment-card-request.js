@@ -669,7 +669,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // NOT texting — this is a prohibition recheck, not an eligibility probe.
     if (trigger === 'previsit_backstop') {
       try {
-        const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+        const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
         const recurringRow = await db('scheduled_services')
           .where({ customer_id: visit.customer_id })
           .whereNotIn('status', TERMINAL_STATUSES)
@@ -678,6 +678,17 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         if (recurringRow) {
           await releaseClaim();
           return skip('existing_recurring_customer');
+        }
+        // Customer-LEVEL plan evidence too (codex #3426 r3 P1): a member's
+        // tier (or legacy positive monthly_rate) proves the relationship
+        // even when no nonterminal recurring visit row exists — same
+        // canonical predicate as the sweep's filter and locked recheck.
+        const memberRow = await db('customers')
+          .where({ id: visit.customer_id })
+          .first('waveguard_tier', 'monthly_rate');
+        if (memberRow && isMembershipCustomerRow(memberRow)) {
+          await releaseClaim();
+          return skip('existing_plan_member');
         }
       } catch (err) {
         await releaseClaim();

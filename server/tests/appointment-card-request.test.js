@@ -353,6 +353,32 @@ describe('backstop trigger — existing-recurring-customer prohibition (owner ru
     expect(res.action).toBe('sent');
   });
 
+  test('customer-LEVEL plan evidence (tier, no recurring row) → skip, claim released, no SMS (codex #3426 r3 P1)', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: 'Silver' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('existing_plan_member');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+  });
+
+  test('legacy member — positive monthly_rate, tier never populated → skip', async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: null, monthly_rate: '49.00' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.reason).toBe('existing_plan_member');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test("non-membership tier value ('none') is not plan evidence — the backstop still sends", async () => {
+    mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: 'none', monthly_rate: 0 });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(res.action).toBe('sent');
+  });
+
   test('recheck lookup failure fails toward NOT texting — prohibition, not eligibility', async () => {
     mockTableHandlers.scheduled_services.first = (chain) => {
       if (chain.calls.some(([op]) => op === 'whereNotIn')) throw new Error('boom');

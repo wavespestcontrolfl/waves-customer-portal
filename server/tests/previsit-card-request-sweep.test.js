@@ -75,6 +75,11 @@ describe('previsitCardInviteEligible', () => {
       .toEqual({ send: false, reason: 'existing_recurring_customer' });
   });
 
+  test('a customer-level plan member is never backstopped even without a live recurring row (codex #3426 r3 P1)', () => {
+    expect(previsitCardInviteEligible({ ...base, activePlanMember: true }))
+      .toEqual({ send: false, reason: 'existing_plan_member' });
+  });
+
   test('the recurring exclusion is in the QUERY and rechecked under the lock — not only completed history', () => {
     const sweep = require('fs').readFileSync(
       require.resolve('../services/previsit-card-request-sweep'), 'utf8',
@@ -86,7 +91,7 @@ describe('previsitCardInviteEligible', () => {
     expect(sweep).toContain("qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id')");
     // Fail-closed race recheck inside the advisory lock, same as the
     // invited-history rechecks.
-    expect(sweep).toContain('if (reqRow || stampRow || !liveCustomer || recurringRow)');
+    expect(sweep).toContain('if (reqRow || stampRow || !liveCustomer || recurringRow || isMembershipCustomerRow(liveCustomer))');
     // Shared active-plan vocabulary (codex #3426 r1 P1): recurring evidence
     // counts every NON-terminal row — an in-progress (en_route/on_site)
     // recurring visit is an active plan — never only the sweep's own
@@ -94,6 +99,25 @@ describe('previsitCardInviteEligible', () => {
     expect(sweep).toContain("require('./waveguard-existing-services')");
     expect(sweep.match(/whereNotIn\('rec\.status', TERMINAL_STATUSES\)/g)).toHaveLength(2);
     expect(sweep).not.toContain("whereIn('rec.status', LIVE_VISIT_STATUSES)");
+  });
+
+  test('customer-LEVEL plan evidence uses the ONE canonical predicate in filter and locked recheck (codex #3426 r3 P1)', () => {
+    const sweep = require('fs').readFileSync(
+      require.resolve('../services/previsit-card-request-sweep'), 'utf8',
+    );
+    // A legacy member can hold a tier (or a legacy positive monthly_rate)
+    // with NO nonterminal recurring visit row — row-only evidence misses
+    // them. The predicate is isMembershipCustomerRow, shared with the admin
+    // "No Plan" badge and the estimate repricer, applied in JS on selected
+    // columns — never a re-encoded SQL copy that could drift.
+    expect(sweep).toContain('isMembershipCustomerRow');
+    expect(sweep).toContain("'c.waveguard_tier as customer_waveguard_tier'");
+    expect(sweep).toContain("'c.monthly_rate as customer_monthly_rate'");
+    // Candidate filter leg (pre-cap: members must not burn the batch cap)…
+    expect(sweep).toContain('activePlanMember: isMembershipCustomerRow({');
+    // …and the in-lock recheck leg on the same customers probe.
+    expect(sweep).toContain('|| isMembershipCustomerRow(liveCustomer)');
+    expect(sweep).toContain("first('id', 'waveguard_tier', 'monthly_rate')");
   });
 
   test('the sweep transaction joins the customer-comms lock namespace — conversions serialize with the send (codex #3426 r2)', () => {
@@ -108,7 +132,7 @@ describe('previsitCardInviteEligible', () => {
     // the same transaction so the lock holds through dispatch.
     expect(sweep).toContain("require('../utils/customer-comms-lock')");
     const lockIdx = sweep.indexOf('await lockCustomerComms(trx, visit.customer_id);');
-    const recheckIdx = sweep.indexOf('if (reqRow || stampRow || !liveCustomer || recurringRow)');
+    const recheckIdx = sweep.indexOf('if (reqRow || stampRow || !liveCustomer || recurringRow || isMembershipCustomerRow(liveCustomer))');
     const funnelIdx = sweep.indexOf('const result = await requestCardForAppointment({');
     expect(lockIdx).toBeGreaterThan(-1);
     expect(recheckIdx).toBeGreaterThan(lockIdx);
