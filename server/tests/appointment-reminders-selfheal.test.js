@@ -44,7 +44,7 @@ describe('selfHealMissingReminderRows', () => {
         forUpdate: jest.fn(() => ({
           first: jest.fn(async () => {
             const row = (trxVisitRows || []).find((v) => v.id === id);
-            return row ? { customer_id: row.customer_id } : null;
+            return row ? { ...row } : null;
           }),
         })),
       })),
@@ -202,7 +202,7 @@ describe('owner ruling 2026-08-17 — reminders arm for every future visit', () 
         forUpdate: jest.fn(() => ({
           first: jest.fn(async () => {
             const row = (trxVisitRows || []).find((v) => v.id === id);
-            return row ? { customer_id: row.customer_id } : null;
+            return row ? { ...row } : null;
           }),
         })),
       })),
@@ -347,5 +347,77 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
     // 10h out: 72h band already missed under original rule, 24h still sendable
     expect(captured.row.reminder_72h_sent).toBe(true);
     expect(captured.row.reminder_24h_sent).toBe(false);
+  });
+});
+
+describe('codex #3429 r2 — locked-row slot re-read and terminal skip', () => {
+  let trxVisitRows;
+  const makeTrxConn = () => {
+    const trx = jest.fn(() => ({
+      where: jest.fn(({ id }) => ({
+        forUpdate: jest.fn(() => ({
+          first: jest.fn(async () => {
+            const row = (trxVisitRows || []).find((v) => v.id === id);
+            return row ? { ...row } : null;
+          }),
+        })),
+      })),
+    }));
+    trx.__isTrxConn = true;
+    return trx;
+  };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    trxVisitRows = [];
+    db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
+  });
+
+  test('a mid-sweep staff move registers the LOCKED slot, not the sweep snapshot', async () => {
+    const sweepSnapshot = {
+      id: 'svc-moved',
+      customer_id: 'cust-m',
+      scheduled_date: new Date('2026-08-20T00:00:00.000Z'),
+      window_start: '09:00:00',
+      service_type: 'Quarterly Pest Control Service',
+      created_at: new Date('2026-08-01T12:00:00.000Z'),
+    };
+    db.mockImplementation(() => sweepChain([sweepSnapshot]));
+    // Staff moved the visit between the sweep read and the row lock.
+    trxVisitRows = [{
+      ...sweepSnapshot,
+      scheduled_date: new Date('2026-08-22T00:00:00.000Z'),
+      window_start: '14:00:00',
+      service_type: 'Quarterly Pest + Termite Control Service',
+    }];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
+      .mockResolvedValue({ id: 'rem-m' });
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(1);
+    expect(register).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      appointmentTime: '2026-08-22T14:00',
+      serviceType: 'Quarterly Pest + Termite Control Service',
+    }));
+  });
+
+  test('a visit that went terminal mid-sweep skips silently — no heal, no error', async () => {
+    const visit = {
+      id: 'svc-gone',
+      customer_id: 'cust-g',
+      scheduled_date: new Date('2026-08-20T00:00:00.000Z'),
+      window_start: '09:00:00',
+      service_type: 'Quarterly Pest Control Service',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [{ ...visit, status: 'cancelled' }];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx');
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(0);
+    expect(register).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

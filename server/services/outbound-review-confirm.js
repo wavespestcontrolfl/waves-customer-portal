@@ -128,8 +128,11 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       logger.error(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id} — reporting retryable: ${stampErr.message}`);
     }
   }
-  // 1. Arm the 72h/24h reminders that were deferred at booking time.
-  // Idempotent (registerAppointment dedupes by scheduled_service_id);
+  // 1. Ensure the 72h/24h reminder row exists and matches the confirmed
+  // slot. Since the 2026-08-17 owner ruling the self-heal sweep usually
+  // arms it FIRST (within 15 min of booking) — this leg is now the
+  // idempotent backstop (registerAppointment dedupes by
+  // scheduled_service_id) rather than the sole arming point;
   // sendConfirmation:false = arm reminders only, the office owns any
   // confirmation message.
   try {

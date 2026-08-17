@@ -18,10 +18,12 @@
  *   - status 'pending', customer_confirmed false, no confirmed_at;
  *   - the customer self-service routes hide/refuse it until the office
  *     confirms (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS membership);
- *   - reminder arming, lead conversion, the review-card resolve, and the
- *     card-on-file funnel all happen at OFFICE CONFIRM time via the shared
+ *   - lead conversion, the review-card resolve, and the card-on-file
+ *     funnel all happen at OFFICE CONFIRM time via the shared
  *     runOutboundReviewConfirmHook (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS
- *     membership) — NEVER here;
+ *     membership) — NEVER here. Reminder rows arm AUTOMATICALLY via the
+ *     registration self-heal sweep (owner ruling 2026-08-17), with the
+ *     self-serve reschedule link suppressed until office confirm;
  *   - an 'outbound_booking_review' triage card surfaces it in the existing
  *     admin confirm queue (payload.origin = 'voice_agent').
  * CREATE TIME SENDS NOTHING: no SMS, no email, no reminder registration —

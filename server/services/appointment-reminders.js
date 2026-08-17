@@ -1984,34 +1984,46 @@ const AppointmentReminders = {
 
       for (const svc of missing) {
         try {
-          // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
-          // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
-          // Formatting that instant in ET would move the day back by one.
-          const datePart = svc.scheduled_date instanceof Date
-            ? svc.scheduled_date.toISOString().slice(0, 10)
-            : String(svc.scheduled_date || '').slice(0, 10);
-          const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
-          const record = await db.transaction(async (trx) => {
-            // Owner from the LOCKED visit row (Codex #3109 r26): a
-            // merge-undo can reverse-repoint the visit between the sweep's
-            // unlocked read and this insert — the FOR UPDATE serializes
-            // against that repoint, so the reminder always stamps the
-            // visit's CURRENT owner (a vanished/ownerless row skips).
+          const res = await db.transaction(async (trx) => {
+            // EVERYTHING from the LOCKED visit row, not the sweep's unlocked
+            // snapshot (Codex #3109 r26 for the owner; #3429 r2 P1 for the
+            // slot): a merge-undo can reverse-repoint the visit, and staff
+            // can move its date/window, between the sweep read and this
+            // insert. No reminder row existed while the move ran, so the
+            // schedule-change sync trigger had nothing to update — a row
+            // registered from the stale snapshot would remind for the
+            // superseded slot forever. FOR UPDATE serializes against both;
+            // a vanished/ownerless row skips, and a row that went terminal
+            // mid-sweep skips silently (the next sweep won't select it).
             const lockedVisit = await trx('scheduled_services')
-              .where({ id: svc.id }).forUpdate().first('customer_id');
-            if (!lockedVisit || !lockedVisit.customer_id) return null;
-            return AppointmentReminders.registerVisitReminderInTx(trx, {
-            scheduledServiceId: svc.id,
-            customerId: lockedVisit.customer_id,
-            appointmentTime: `${datePart}T${windowStart}`,
-            serviceType: svc.service_type,
-            source: 'cron_selfheal',
-            // Preserve the visit's real booking time: the 72h pass skips
-            // "booked < 72h before appointment" off created_at, and a healed
-            // row stamped with the cron time would wrongly skip that reminder.
-            createdAt: svc.created_at,
+              .where({ id: svc.id }).forUpdate()
+              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status');
+            if (!lockedVisit || !lockedVisit.customer_id) return { skip: 'vanished' };
+            if (SELF_HEAL_TERMINAL_STATUSES.has(String(lockedVisit.status || '').toLowerCase())) {
+              return { skip: 'terminal' };
+            }
+            // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
+            // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
+            // Formatting that instant in ET would move the day back by one.
+            const datePart = lockedVisit.scheduled_date instanceof Date
+              ? lockedVisit.scheduled_date.toISOString().slice(0, 10)
+              : String(lockedVisit.scheduled_date || '').slice(0, 10);
+            const windowStart = String(lockedVisit.window_start || '').slice(0, 5) || '08:00';
+            const record = await AppointmentReminders.registerVisitReminderInTx(trx, {
+              scheduledServiceId: svc.id,
+              customerId: lockedVisit.customer_id,
+              appointmentTime: `${datePart}T${windowStart}`,
+              serviceType: lockedVisit.service_type,
+              source: 'cron_selfheal',
+              // Preserve the visit's real booking time: the 72h pass skips
+              // "booked < 72h before appointment" off created_at, and a healed
+              // row stamped with the cron time would wrongly skip that reminder.
+              createdAt: lockedVisit.created_at,
             });
+            return { record };
           });
+          if (res && res.skip) continue;
+          const record = res && res.record;
           if (record) {
             healed += 1;
           } else {
