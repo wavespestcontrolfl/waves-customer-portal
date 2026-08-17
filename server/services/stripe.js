@@ -3335,6 +3335,11 @@ const StripeService = {
           const siblings = await PayCombined.combinedEligibleSiblings(lockedInvoice, {
             database: trx,
             reusePaymentIntentId: lockedInvoice.stripe_payment_intent_id || null,
+            // Setup is a money seam: an anchor that live-resolves to a payer
+            // ABORTS the mint (409 → page reloads) instead of degrading to
+            // an anchor-only PI the homeowner could still confirm (codex
+            // r13 P1).
+            throwOnPayerAnchor: true,
           });
           if (siblings?.length) {
             combinedAllocation = PayCombined.buildAllocation(lockedInvoice, siblings);
@@ -3605,7 +3610,17 @@ const StripeService = {
         // Include the currently stored PI id in the key so a replacement
         // setup cannot replay an older canceled intent for this invoice.
         const sourceIntent = lockedInvoice.stripe_payment_intent_id || 'new';
-        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}`;
+        // Allocation-salted (codex r13 P2): a rolled-back stamp write can
+        // leave a PI parked under this key; if the eligible sibling SET
+        // changes while the total stays equal, the retry would send
+        // different combined_allocation metadata under the same key and
+        // Stripe rejects it as key reuse — /setup then fails until the key
+        // expires. Salting with the allocation snapshot gives the changed
+        // set a fresh key.
+        const allocKeyPart = combinedAllocation
+          ? require('crypto').createHash('sha1').update(PayCombined.encodeAllocation(combinedAllocation)).digest('hex').slice(0, 10)
+          : 'single';
+        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}_${allocKeyPart}`;
         paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
         if (paymentIntent.status === 'canceled') {
@@ -4109,8 +4124,12 @@ const StripeService = {
       }
 
       const saveFlag = metadata?.save_card_opt_in === 'true' ? 'save' : 'nosave';
+      // Amount + allocation salted like the setup key (codex r13 P2).
+      const replaceAllocPart = metadata?.combined_allocation
+        ? require('crypto').createHash('sha1').update(String(metadata.combined_allocation)).digest('hex').slice(0, 10)
+        : 'single';
       newIntent = await stripe.paymentIntents.create(piParams, {
-        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}`,
+        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}_${baseCents}_${replaceAllocPart}`,
       });
 
       const invoiceUpdated = await trx('invoices')

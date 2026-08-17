@@ -1520,6 +1520,16 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
     }
     if (Object.keys(backfills).length) {
+      // Payer transfer = payer ACTIVATION for the winner (codex #3427 r13
+      // P1): every invoice starts resolving to the transferred payer, so
+      // any unconfirmed combined pay-page session on the winner must be
+      // released FIRST — same fail-closed fence (and pay.combined.customer
+      // serialization) as the customer-editor payer write. An unreleasable
+      // session aborts the merge; the admin retries.
+      if (backfills.payer_id) {
+        await require('./pay-combined')
+          .releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
+      }
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
     }
 

@@ -165,8 +165,15 @@ describe('payout reconciliation combined-charge attribution', () => {
     expect(row.description).toContain('$105.30');
   });
 
-  test('single-payment charges keep the original one-to-one attribution', () => {
-    const single = paymentRow('pay-only', ANCHOR_ID, 105.30);
+  test('single NON-combined payments keep the original one-to-one attribution', () => {
+    const single = {
+      id: 'pay-only',
+      customer_id: 'cust-1',
+      amount: 105.30,
+      stripe_charge_id: 'ch_combined_1',
+      stripe_payment_intent_id: 'pi_combined_1',
+      metadata: JSON.stringify({ invoice_id: ANCHOR_ID }),
+    };
     const maps = {
       paymentsBySource: new Map([['ch_combined_1', [single]]]),
       customersById: new Map(),
@@ -176,5 +183,20 @@ describe('payout reconciliation combined-charge attribution', () => {
     expect(row.invoice_id).toBe(ANCHOR_ID);
     expect(row.description).toBe('Combined balance payment');
     expect(row.payout_id).toBe('po_1');
+  });
+
+  test('a LONE combined row (residual sibling) is still treated as combined (codex r13)', () => {
+    // The sibling's share parked as a residual — only the anchor row was
+    // recorded. The whole txn amount must not be attributed to it.
+    const anchorOnly = paymentRow('pay-anchor', ANCHOR_ID, 105.30);
+    const maps = {
+      paymentsBySource: new Map([['ch_combined_1', [anchorOnly]]]),
+      customersById: new Map(),
+    };
+    const row = _txnRowFromStripe(txn, maps, null);
+    expect(row.payment_id).toBe('pay-anchor');
+    expect(row.invoice_id).toBeNull();
+    expect(row.description).toContain('combined:');
+    expect(row.description).toContain('allocation may be incomplete');
   });
 });

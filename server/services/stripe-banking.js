@@ -381,13 +381,18 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
     } catch { return {}; }
   };
   let payment = linked[0] || null;
-  if (linked.length > 1) {
+  // Combined detection by METADATA, not row count (codex r13 P2): a share
+  // that couldn't settle (terminal invoice → residual) leaves only ONE
+  // recorded row for a combined charge — the whole Stripe amount must not
+  // be attributed to that one invoice while the residual share vanishes.
+  const isCombinedLink = linked.length > 1 || linked.some((p) => metaOf(p).combined_payment);
+  if (isCombinedLink) {
     // Combined full-balance charge: ONE balance transaction carries the
     // whole amount + fee across N per-invoice payment rows (codex #3427 r5
     // P1). The ledger row stays one-per-txn (unique stripe_txn_id), so:
     // anchor the linkage on the ANCHOR payment row (it carries the
     // surcharge), leave invoice_id null (no single invoice owns the txn),
-    // and expose the full allocation in the description so the payout
+    // and expose the recorded allocation in the description so the payout
     // ledger never silently drops a share.
     payment = linked.find((p) => {
       const m = metaOf(p);
@@ -396,7 +401,7 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
     }) || payment;
     combinedNote = `combined: ${linked
       .map((p) => `$${Number(p.amount || 0).toFixed(2)} → invoice ${metaOf(p).invoice_id || `payment ${p.id}`}`)
-      .join('; ')}`;
+      .join('; ')}${linked.length === 1 ? ' (allocation may be incomplete — check residual shares in stripe_orphan_charges)' : ''}`;
   }
   if (payment) {
     paymentId = payment.id;
@@ -405,7 +410,7 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
       const customer = customersById.get(customerId);
       if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
     }
-    if (linked.length === 1) {
+    if (!isCombinedLink) {
       const meta = metaOf(payment);
       if (meta.invoice_id) invoiceId = meta.invoice_id;
     }

@@ -24,7 +24,11 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/invoice', () => ({ getByToken: jest.fn() }));
 jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => []) }));
-jest.mock('../services/stripe', () => ({ isAvailable: () => true }));
+jest.mock('../services/stripe', () => ({
+  isAvailable: () => true,
+  // Sibling reconciliation fence (codex #3427 r13 P1): clean by default.
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+}));
 jest.mock('../config/stripe-config', () => ({ publishableKey: 'pk_test_1' }));
 jest.mock('../services/pdf/invoice-pdf', () => ({ generateInvoicePDF: jest.fn() }));
 jest.mock('../services/payment-method-consents', () => ({}));

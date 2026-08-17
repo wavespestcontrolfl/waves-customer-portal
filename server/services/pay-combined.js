@@ -55,7 +55,7 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false } = {}) {
   try {
     if (!isEnabled('payIncludeBalance')) return null;
     if (!anchorInvoice?.customer_id) return null;
@@ -68,8 +68,11 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // GET /pay/:token serialize the homeowner's sibling invoices to the
     // third party holding the anchor link. Fail CLOSED: a resolved payer
     // or a resolve failure both disable the combined flow (single-invoice
-    // behavior), same contract verifyAllocationLocked enforces at the
-    // money seams.
+    // behavior). At the SETUP money seam (`throwOnPayerAnchor`) a resolved
+    // payer must go further and ABORT the mint entirely (codex r13 P1):
+    // degrading to single-invoice would still charge the homeowner debt
+    // that now belongs to third-party AP — e.g. a payer edit that won the
+    // shared advisory lock while this setup was queued behind it.
     {
       const PayerService = require('./payer');
       const resolved = await PayerService.resolveForInvoice({
@@ -78,6 +81,13 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
         throwOnError: true,
       });
       if (resolved?.payerId) {
+        if (throwOnPayerAnchor) {
+          const err = new Error('This invoice is billed to a third-party payer and can no longer be paid from this page — refreshing.');
+          err.statusCode = 409;
+          err.staleBalance = true;
+          err.payerBilledAnchor = true;
+          throw err;
+        }
         logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
         return null;
       }
@@ -106,12 +116,37 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       && (!inv.stripe_payment_intent_id
         || (reusePaymentIntentId && String(inv.stripe_payment_intent_id) === String(reusePaymentIntentId))));
     if (!eligible.length) return null;
+    // Saved-card/orphan reconciliation fence per sibling (codex r13 P1): a
+    // sibling with an unresolved charge attempt or orphaned charge may
+    // ALREADY be collected — a combined PI capturing its share too would
+    // double-collect, and the webhook's post-capture quarantine is too
+    // late. Drop such siblings from the selection (graceful — the anchor
+    // still pays alone or with the clean siblings); the locked verifier
+    // re-checks at every money seam.
+    {
+      const StripeService = require('./stripe');
+      const cleared = [];
+      for (const inv of eligible) {
+        try {
+          await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database);
+          cleared.push(inv);
+        } catch (fenceErr) {
+          logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
+        }
+      }
+      if (!cleared.length) return null;
+      eligible.length = 0;
+      eligible.push(...cleared);
+    }
     if (eligible.length > MAX_COMBINED_SIBLINGS) {
       logger.warn(`[pay-combined] customer ${anchorInvoice.customer_id} has ${eligible.length} eligible siblings (cap ${MAX_COMBINED_SIBLINGS}) — combined flow disabled for this session`);
       return null;
     }
     return eligible;
   } catch (err) {
+    // The payer-anchor abort is a deliberate verdict for the setup seam —
+    // it must reach the route, never degrade to single-invoice.
+    if (err.payerBilledAnchor) throw err;
     logger.warn(`[pay-combined] sibling selection failed for invoice ${anchorInvoice?.id}: ${err.message} — combined flow disabled for this session`);
     return null;
   }
@@ -244,6 +279,19 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (amountDueCents(row) !== entry.cents) throw staleErr(`invoice ${row.invoice_number} remainder changed`);
     const bound = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
     const isAnchor = String(row.id) === String(anchorInvoiceId);
+    // Sibling reconciliation fence at every money seam (codex r13 P1): an
+    // unresolved saved-card attempt / orphaned charge on a sibling means
+    // its share may already be collected — refuse-as-stale so the page
+    // reloads and the fresh selection excludes it. The ANCHOR's own
+    // route/setup preflights cover the anchor.
+    if (!isAnchor) {
+      try {
+        await require('./stripe').assertNoInvoiceChargeReconciliationPending(row.id, trx);
+      } catch (fenceErr) {
+        logger.warn(`[pay-combined] sibling ${row.invoice_number} failed the reconciliation fence during locked verification: ${fenceErr.message}`);
+        throw staleErr(`invoice ${row.invoice_number} has a pending payment reconciliation`);
+      }
+    }
     if (expectPaymentIntentId && bound && bound !== String(expectPaymentIntentId)) {
       throw staleErr(`invoice ${row.invoice_number} has a different active payment`);
     }
