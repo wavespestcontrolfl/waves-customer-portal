@@ -37,6 +37,19 @@ const mockRunSms = jest.fn();
 jest.mock('../services/contact-correction', () => ({
   detectContactCorrectionIntent: (...args) => mockDetectIntent(...args),
   runSmsContactCorrection: (...args) => mockRunSms(...args),
+  snapshotContactCasFields: (row) => (row
+    ? {
+      first_name: row.first_name ?? null,
+      last_name: row.last_name ?? null,
+      email: row.email ?? null,
+      address_line1: row.address_line1 ?? null,
+      address_line2: row.address_line2 ?? null,
+      city: row.city ?? null,
+      state: row.state ?? null,
+      zip: row.zip ?? null,
+      phone: row.phone ?? null,
+    }
+    : null),
 }));
 
 const queue = require('../services/contact-correction-queue');
@@ -683,5 +696,48 @@ describe('round-25 hardening', () => {
     });
     await queue.attachContactCorrectionContext(7, { customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex });
     expect(knex._data.contact_correction_jobs[1].rebase_floor_id).toBe(3);
+  });
+});
+
+describe('round-26 hardening', () => {
+  it('attach captures snapshot and floor together from the locked customer row', async () => {
+    // The route's earlier read said Riverz, but a queue job committed
+    // Riverson before the attach — the serialized capture reads the LIVE
+    // row, so snapshot and floor stay mutually consistent.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 7, status: 'reserved' }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, first_name: 'Jordan', last_name: 'Riverson', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null }],
+    });
+    await queue.attachContactCorrectionContext(7, {
+      customerId: CUSTOMER_ID,
+      expectedValues: { last_name: 'Riverz' }, // stale route read — must NOT win
+      knex,
+    });
+    const job = knex._data.contact_correction_jobs[1];
+    expect(job.rebase_floor_id).toBe(3);
+    expect(JSON.parse(job.expected_values).last_name).toBe('Riverson');
+  });
+
+  it('the stale sweep independently rejects wrong-number bodies', async () => {
+    // Context was stamped before the route classified the opt-out, then
+    // the process died — promotion must not let the number's new holder
+    // modify the former owner's record.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({
+        id: 1,
+        customer_id: CUSTOMER_ID,
+        expected_values: { last_name: 'Riverz' },
+        body: 'Wrong number. The email is wrong; change it to intruder@example.com',
+        created_at: Date.now() - 11 * 60_000,
+      })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.promoted).toBe(0);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_wrong_number');
   });
 });

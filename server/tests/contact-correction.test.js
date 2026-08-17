@@ -855,7 +855,7 @@ describe('round-6 hardening', () => {
   });
 
   it('canonicalizes BEFORE validating — a spelled-out state becomes its code instead of being discarded', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), zip: '31401' }], agent_decisions: [] });
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
       corrections: [{ field: 'state', newValue: 'Georgia' }],
@@ -2589,7 +2589,7 @@ describe('round-25 hardening', () => {
   });
 
   it('a state-only correction carries its own field intent end to end', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), zip: '31401' }], agent_decisions: [] });
     mockCallAnthropic.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'state', new_value: 'GA', quote: 'my state is wrong; it should be GA', confidence: 'high' }] },
@@ -2629,5 +2629,58 @@ describe('round-25 hardening', () => {
     expect(stateForZip('56901')).toBe('DC');
     expect(stateForZip('34001')).toBeNull(); // military AA, never FL
     expect(stateForZip('34231')).toBe('FL');
+  });
+});
+
+describe('round-26 hardening', () => {
+  it('a partial state correction contradicting the stored ZIP fails closed', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] }); // stored FL 34200
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'state', newValue: 'GA', quote: 'my state is wrong; it should be GA' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'state', reason: 'state_zip_mismatch' });
+    expect(knex._data.customers[0].state).toBe('FL');
+  });
+
+  it('a partial ZIP correction contradicting the stored state fails closed', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'zip', newValue: '31401', quote: 'my zip is wrong, it is 31401' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'zip', reason: 'state_zip_mismatch' });
+    expect(knex._data.customers[0].zip).toBe('34200');
+  });
+
+  it('a coherent partial state+zip pair still applies', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'state', newValue: 'GA', quote: 'my state is wrong; it should be GA' },
+        { field: 'zip', newValue: '31401', quote: 'zip is 31401' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field).sort()).toEqual(['state', 'zip']);
+    expect(knex._data.customers[0].state).toBe('GA');
+    expect(knex._data.customers[0].zip).toBe('31401');
+  });
+
+  it("a third party's address COMPONENT is rejected, not just 'address'", async () => {
+    const body = "My tenant's city is wrong; change it to Tampa";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'city', new_value: 'Tampa', quote: "my tenant's city is wrong; change it to Tampa", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });

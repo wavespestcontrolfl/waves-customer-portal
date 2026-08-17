@@ -8374,6 +8374,13 @@ const CallRecordingProcessor = {
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
       : null;
+    // Claim-time snapshot valid only when the customer being corrected IS
+    // the one linked at claim (r19/r26): a target resolved during this
+    // pass has no source-time baseline.
+    const claimSnapshotForTarget = (contactCasBaselineAtClaim
+      && String(customerId || call.customer_id) === String(call.customer_id))
+      ? contactCasBaselineAtClaim
+      : null;
     const candidateStaging = await stageCustomerFieldCandidates({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
@@ -8413,10 +8420,7 @@ const CallRecordingProcessor = {
       // Claim-time CAS baseline — valid only when the customer being
       // corrected IS the one linked at claim; a customer linked or
       // created during this pass falls back to the lane's own read.
-      expectedValuesSnapshot: (contactCasBaselineAtClaim
-        && String(customerId || call.customer_id) === String(call.customer_id))
-        ? contactCasBaselineAtClaim
-        : null,
+      expectedValuesSnapshot: claimSnapshotForTarget,
       // Historical/forced/RETRY passes never auto-apply names (codex
       // #3413 r22, tightened r25): the claim-time baseline of any pass
       // that is not the call's FIRST processing reflects post-call values,
@@ -8427,8 +8431,14 @@ const CallRecordingProcessor = {
       // missing generation (no-RETURNING environments) fails closed. The
       // 24h bound additionally covers a first claim arriving late off a
       // backlog.
+      // …and (r26) a claim-time snapshot FOR THIS TARGET: a customer
+      // linked, created, or reassigned during processing has no source-
+      // time baseline, so the lane's fallback read would adopt any admin
+      // edit made during transcription as the CAS baseline and let the
+      // older transcript overwrite it. No snapshot ⇒ proposal-only.
       allowNameAutoApply: !opts.force
         && procGeneration === 1
+        && Boolean(claimSnapshotForTarget)
         && (Date.now() - new Date(call.created_at || processingStartedAt).getTime()) < 24 * 60 * 60 * 1000,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);

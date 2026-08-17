@@ -154,23 +154,38 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
 async function attachContactCorrectionContext(jobId, { customerId, expectedValues = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
-    // Rebase floor (codex #3413 r25): the highest DONE job id for this
-    // customer at capture time. Only queue writes ABOVE the floor may
-    // rebase this job's baseline — an older chain whose value was later
-    // reverted by an admin must not be replayed onto a fresh snapshot.
-    const floorRow = await knex('contact_correction_jobs')
-      .where({ customer_id: customerId, status: 'done' })
-      .orderBy('id', 'desc')
-      .first('id');
-    const updated = await knex('contact_correction_jobs')
-      .where({ id: jobId, status: 'reserved' })
-      .update({
-        customer_id: customerId,
-        expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
-        rebase_floor_id: floorRow?.id ?? null,
-        updated_at: knex.fn.now(),
-      });
-    return updated > 0;
+    // Snapshot and rebase floor are captured together, SERIALIZED against
+    // the queue's customer writes (codex #3413 r26): the route's earlier
+    // customer read could pre-date an apply commit whose job then turns
+    // 'done' before the floor lookup — the floor would cover a write the
+    // snapshot never saw, excluding it from rebase and staling the newer
+    // correction. Locking the customer row here makes the pair atomic:
+    // any in-flight apply either committed before this read (write in the
+    // snapshot AND its job under the floor) or commits after (write above
+    // the floor, rebase overlays it). The caller's expectedValues remain
+    // only as a fallback when the row cannot be re-read.
+    return await knex.transaction(async (trx) => {
+      const contactCorrection = require('./contact-correction');
+      const row = await trx('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .forUpdate()
+        .first();
+      const snapshot = (row && contactCorrection.snapshotContactCasFields(row)) || expectedValues;
+      const floorRow = await trx('contact_correction_jobs')
+        .where({ customer_id: customerId, status: 'done' })
+        .orderBy('id', 'desc')
+        .first('id');
+      const updated = await trx('contact_correction_jobs')
+        .where({ id: jobId, status: 'reserved' })
+        .update({
+          customer_id: customerId,
+          expected_values: snapshot ? JSON.stringify(snapshot) : null,
+          rebase_floor_id: floorRow?.id ?? null,
+          updated_at: trx.fn.now(),
+        });
+      return updated > 0;
+    });
   } catch (err) {
     logger.warn(`[contact-correction-queue] context attach failed for job ${jobId}: ${err.message}`);
     return false;
@@ -267,6 +282,17 @@ async function promoteStaleReservations(knex) {
       const contactCorrection = require('./contact-correction');
       if (!job.body || !contactCorrection.detectContactCorrectionIntent(job.body)) {
         await cancelContactCorrectionJob(job.id, 'stale_no_intent', { knex });
+        continue;
+      }
+      // Wrong-number declarations are re-derived here independently
+      // (codex #3413 r26): the route stamps context BEFORE classifying
+      // the opt-out, and its guard lives on the live path only — a crash
+      // (or a failed fire-and-forget cancel) after "Wrong number. The
+      // email is wrong; change it to …" must not let the sweep promote a
+      // correction against the number's FORMER owner.
+      const optCommand = require('../services/messaging/opt-out-detector').detectSmsOptCommand(job.body);
+      if (optCommand?.action === 'opt_out' && optCommand?.reason === 'wrong_number') {
+        await cancelContactCorrectionJob(job.id, 'stale_wrong_number', { knex });
         continue;
       }
       if (!job.customer_id) {

@@ -473,7 +473,16 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:
 // apostrophe-possessive noun, or a bare plural noun directly before
 // "new address" (transcribed possessives drop the apostrophe) all mark
 // the statement third-party; "previous/prior address" stays first-person.
-const THIRD_PARTY_ADDRESS_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior|business)\b)[a-z]{4,}s\s+new\s+address\b/i;
+// Every supported address topic, not just the literal word "address"
+// (codex #3413 r26): "My tenant's city is wrong" and "My accountant's
+// ZIP is wrong" are third-party statements too.
+const TP_ADDR_TOPIC_SRC = "(?:address|street|city|state|zip(?: ?code)?|unit|apt|apartment|suite)";
+const THIRD_PARTY_ADDRESS_RE = new RegExp(
+  `\\b(?:his|her|their)\\s+(?:\\w+\\s+)?${TP_ADDR_TOPIC_SRC}\\b`
+  + `|\\b(?!(?:previous|prior)\\b)[a-z]+(?:'s|s')\\s+(?:\\w+\\s+)?${TP_ADDR_TOPIC_SRC}\\b`
+  + '|\\b(?!(?:previous|prior|business)\\b)[a-z]{4,}s\\s+new\\s+address\\b',
+  'i',
+);
 // Same ownership doctrine for email and name (codex #3413 r22): "my
 // accountant's email is wrong; change it to …" is grounded, co-located,
 // and field-intent-bearing — but the mailbox belongs to a third party,
@@ -771,6 +780,26 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // components are staged and either hits a compare-and-set miss,
       // applying the survivor would commit a hybrid name nobody stated
       // (admin's "James" + the message's "Doe" from a proposed "Jane Doe").
+      // State/ZIP pair coherence for PARTIAL corrections (codex #3413
+      // r26): a state-only or ZIP-only fix must agree with the OTHER
+      // component as it will stand after the write — "my state is GA"
+      // against a stored FL ZIP (or a GA ZIP against a stored FL state)
+      // would commit an internally inconsistent address and re-key the
+      // property on it. Full new-address groups were validated pre-
+      // transaction; this covers the partial case using the stored row.
+      if ((byField.has('state') || byField.has('zip')) && !(hadNewStreet || moveContext)) {
+        const effState = byField.has('state') ? byField.get('state').newValue : normValue(before.state);
+        const effZip = byField.has('zip') ? byField.get('zip').newValue : normValue(before.zip);
+        if (effZip && effState) {
+          const { stateForZip } = require('./data-hygiene/normalizers');
+          const derived = stateForZip(effZip);
+          if (!derived || derived !== effState) {
+            for (const f of ['state', 'zip']) {
+              if (byField.has(f)) { skipped.push({ field: f, reason: 'state_zip_mismatch' }); byField.delete(f); }
+            }
+          }
+        }
+      }
       const NAME_GROUP = ['first_name', 'last_name'];
       if (expectedValues && NAME_GROUP.every((f) => byField.has(f))) {
         const nameCasMiss = NAME_GROUP.some((f) => Object.prototype.hasOwnProperty.call(expectedValues, f)

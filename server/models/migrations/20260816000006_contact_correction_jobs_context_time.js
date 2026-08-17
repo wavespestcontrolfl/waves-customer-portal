@@ -1,29 +1,14 @@
 /**
- * contact_correction_jobs.rebase_floor_id (codex #3413 r25; this file
- * previously added context_attached_at, retired in the same PR when the
- * timestamp-cutoff rebase was abandoned — filename kept so knex's
- * migration ledger stays consistent for environments that ran it).
- *
- * The floor is the highest DONE job id for the customer at the moment the
- * route captures the CAS baseline. The snapshot rebase overlays only
- * queue writes ABOVE the floor: jobs completed before the capture are by
- * definition either reflected in the snapshot or superseded by a
- * non-queue edit the snapshot holds — without the floor, a historical
- * chain (old job wrote A→B, admin later restored A) could rebase a fresh
- * baseline back to B. Expressed in job-id space, not time, because
- * completed_at carries the transaction clock, not commit visibility.
+ * RETIRED IN PLACE (codex #3413 r25/r26). This migration originally added
+ * contact_correction_jobs.context_attached_at for a timestamp-cutoff
+ * snapshot rebase that was abandoned within this same PR in favor of the
+ * job-id-space rebase floor. The filename must survive for knex's
+ * migration ledger (environments that ran the original shape have it
+ * recorded), so it remains as a no-op: fresh environments add nothing,
+ * and migration 20260816000007 adds rebase_floor_id and drops
+ * context_attached_at wherever the original shape ran.
  */
 
-exports.up = async function up(knex) {
-  if (await knex.schema.hasColumn('contact_correction_jobs', 'rebase_floor_id')) return;
-  await knex.schema.alterTable('contact_correction_jobs', (t) => {
-    t.bigInteger('rebase_floor_id');
-  });
-};
+exports.up = async function up() {};
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasColumn('contact_correction_jobs', 'rebase_floor_id'))) return;
-  await knex.schema.alterTable('contact_correction_jobs', (t) => {
-    t.dropColumn('rebase_floor_id');
-  });
-};
+exports.down = async function down() {};
