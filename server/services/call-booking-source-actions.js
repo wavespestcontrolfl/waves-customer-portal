@@ -21,8 +21,11 @@ const CALL_OUTBOUND_REVIEW_SOURCE_ACTION = 'ai_call_outbound_review';
 // A PENDING booking requested by the live AI voice agent on an inbound call
 // (voice-agent relay-booking.js, dark behind VOICE_RELAY_CONTEXT_ENABLED +
 // GATE_VOICE_AI_BOOKING). Same office-review lifecycle as an outbound-review
-// booking: the office confirms it before it's real; reminders arm at
-// confirm-time; the customer can't self-confirm it first.
+// booking: the office confirms it before it's real and the customer can't
+// self-confirm or self-reschedule it first. Reminder rows, however, arm
+// AUTOMATICALLY via the registration self-heal sweep (owner ruling
+// 2026-08-17) — office confirm still owns the remaining activation legs
+// (lead close, review-card resolve, card funnel, customer visibility).
 const VOICE_AGENT_BOOKING_SOURCE_ACTION = 'voice_agent';
 
 // Pending rows a logged-in customer must NOT see, self-confirm, or self-

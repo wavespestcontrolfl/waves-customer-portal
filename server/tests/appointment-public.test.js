@@ -339,3 +339,19 @@ describe('pre-update idempotency uses the same verdict (codex r7)', () => {
     expect(confirmRaceVerdict({ status: 'confirmed', customer_confirmed: true })).toBe('idempotent_success');
   });
 });
+
+describe('codex #3429 r3 P2 — dispatch-owned unreviewed bookings hide self-service actions', () => {
+  const { dispatchOwnedUnreviewed } = appointmentRouter._test;
+
+  test('unreviewed dispatch-owned pending visits are flagged', () => {
+    for (const sourceAction of ['ai_call_pipeline_followup', 'ai_call_outbound_review', 'voice_agent']) {
+      expect(dispatchOwnedUnreviewed({ status: 'pending', source_action: sourceAction, customer_confirmed: false })).toBe(true);
+    }
+  });
+
+  test('confirmed, customer-confirmed, or ordinary visits are not flagged', () => {
+    expect(dispatchOwnedUnreviewed({ status: 'confirmed', source_action: 'ai_call_pipeline_followup', customer_confirmed: false })).toBe(false);
+    expect(dispatchOwnedUnreviewed({ status: 'pending', source_action: 'ai_call_pipeline_followup', customer_confirmed: true })).toBe(false);
+    expect(dispatchOwnedUnreviewed({ status: 'pending', source_action: null, customer_confirmed: false })).toBe(false);
+  });
+});

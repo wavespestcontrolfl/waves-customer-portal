@@ -444,3 +444,41 @@ describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
     expect(collectiveAnchorActive()).toBe(false);
   });
 });
+
+describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
+  test('eligibility refuses an unconfirmed dispatch-owned pending visit', () => {
+    for (const sourceAction of ['ai_call_pipeline_followup', 'ai_call_outbound_review', 'voice_agent']) {
+      expect(eligibility({
+        status: 'pending', scheduled_date: '2026-07-10',
+        source_action: sourceAction, customer_confirmed: false,
+      }, NOW)).toEqual({ ok: false, reason: 'not_available' });
+    }
+  });
+
+  test('office-confirmed or customer-confirmed dispatch-owned visits stay reschedulable', () => {
+    expect(eligibility({
+      status: 'confirmed', scheduled_date: '2026-07-10',
+      source_action: 'ai_call_pipeline_followup', customer_confirmed: false,
+    }, NOW)).toEqual({ ok: true });
+    expect(eligibility({
+      status: 'pending', scheduled_date: '2026-07-10',
+      source_action: 'ai_call_pipeline_followup', customer_confirmed: true,
+    }, NOW)).toEqual({ ok: true });
+    expect(eligibility({
+      status: 'pending', scheduled_date: '2026-07-10',
+      source_action: null, customer_confirmed: false,
+    }, NOW)).toEqual({ ok: true });
+  });
+
+  test('buildRescheduleLink never mints for an unconfirmed dispatch-owned pending visit', async () => {
+    const { buildRescheduleLink } = require('../services/reschedule-link');
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
+        source_action: 'ai_call_pipeline_followup', status: 'pending', customer_confirmed: false,
+      }),
+    }));
+    await expect(buildRescheduleLink('svc-1')).resolves.toEqual({ url: null, line: '' });
+  });
+});

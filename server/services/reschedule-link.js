@@ -28,6 +28,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { shortenOrPassthrough } = require('./short-url');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
@@ -38,8 +39,18 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'reschedule_token');
+      .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed');
     if (!svc?.reschedule_token) return { url: null, line: '' };
+    // Never mint a self-serve link for a dispatch-owned booking the office
+    // hasn't reviewed (codex #3429 r2 P1): reminders now arm before office
+    // confirm, and a bearer reschedule URL would let the recipient move a
+    // booking the authenticated schedule routes deliberately hide/refuse.
+    // Callers already treat { url: null, line: '' } as "send without link".
+    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+      && String(svc.status || '').toLowerCase() === 'pending'
+      && !svc.customer_confirmed) {
+      return { url: null, line: '' };
+    }
 
     const longUrl = portalUrl(`/reschedule/${svc.reschedule_token}`);
     const url = await shortenOrPassthrough(longUrl, {
