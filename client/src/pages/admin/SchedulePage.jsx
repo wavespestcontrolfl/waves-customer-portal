@@ -12021,9 +12021,20 @@ export function CompletionPanel({
     // selected) never reaches addProduct's guards, but it still changes
     // actionsCompleted at completion (codex r37).
     if (generating) return;
-    invalidateGeneratedReportOnTypedEdit();
     const noteText =
       action.note || action.label || action.raw || "Completed protocol item";
+    // Reselecting an entry the dropdown already marks "(applied)" changes
+    // nothing — appendUniqueLabel would dedupe, recordActionScope rewrites
+    // the same metadata, and the product is already on the visit — so it
+    // must not clear a valid untouched report (codex r80).
+    if (
+      selectedProtocolActionLabels.includes(noteText)
+      && (!action.product?.id
+        || selectedProducts.find((p) => p.productId === action.product.id))
+    ) {
+      return;
+    }
+    invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
     recordActionScope(noteText, action.scope, action.treatmentApplied);
     addChipNote(

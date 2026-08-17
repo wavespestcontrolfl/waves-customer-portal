@@ -331,6 +331,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // indoor-wait timing forms + non-treatment timing confirmations (r80)
+    expect(reportCopyRejection('Keep pets indoors for thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Keep pets inside for 30 minutes.')).toMatch(/^banned:/);
+    const apptTiming = parseCopy('WHAT WE DID\n\nWe treated the lawn; the technician confirmed the appointment timing and the treated area is safe once dry.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(apptTiming.body).toBeNull();
     // pet-safe compounds never unlock the standalone-safe exemption (r79)
     const petSafe = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treatment is pet-safe once dry and your technician confirms timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(petSafe.body).toBeNull();

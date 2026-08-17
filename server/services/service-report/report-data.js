@@ -4285,9 +4285,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           // over the matcher — honored here like trapSetupScreened above,
           // EXCEPT on zero-state snapshots: their stories refuse the body
           // for fixed wording regardless of the count reconciliation, so
-          // the flag never means body acceptance there (codex r42).
+          // the flag never means body acceptance there (codex r42). A
+          // non-gauge cleared severity/activity select is a zero state too
+          // (codex r80) — buildTodaysResult keeps the fixed "No active
+          // signs" template for it, so the summary must not resurrect the
+          // body that result refused (the reconcile flag can originate
+          // from a trapping companion's count prompt).
           || (snap.todaysResult?.reconcileConfirmed === true
-            && snap.activity?.score !== 0),
+            && snap.activity?.score !== 0
+            && !['None observed', 'No activity'].includes(
+              String(snap.values?.severity || snap.values?.activity_level || ''),
+            )),
       );
     // A completion-time request-context rejection (trade name from the
     // visit's own products, companion contradiction) is frozen into
