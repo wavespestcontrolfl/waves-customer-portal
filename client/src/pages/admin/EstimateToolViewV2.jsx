@@ -440,6 +440,7 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
   profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
   profile.commercialPestCadence = formIsCommercial ? form.commercialPestCadence || null : null;
+  profile.commercialInteriorService = formIsCommercial ? form.commercialInteriorService || null : null;
   profile.commercialLawnCadence = formIsCommercial ? form.commercialLawnCadence || null : null;
   profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
@@ -2193,6 +2194,7 @@ export default function EstimateToolViewV2({
     commercialSubtype: "",
     commercialRiskType: "",
     commercialPestCadence: "",
+    commercialInteriorService: "",
     commercialLawnCadence: "",
     treeShrubDensity: "",
     mosquitoPressure: "",
@@ -3218,6 +3220,7 @@ export default function EstimateToolViewV2({
     form.commercialSubtype,
     form.commercialRiskType,
     form.commercialPestCadence,
+    form.commercialInteriorService,
     form.commercialLawnCadence,
     form.treeShrubDensity,
     form.mosquitoPressure,
@@ -4252,6 +4255,7 @@ export default function EstimateToolViewV2({
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
         commercialPestCadence: formIsCommercial ? form.commercialPestCadence || "" : "",
+        commercialInteriorService: formIsCommercial ? form.commercialInteriorService || "" : "",
         commercialLawnCadence: formIsCommercial ? form.commercialLawnCadence || "" : "",
         treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
@@ -4828,6 +4832,7 @@ export default function EstimateToolViewV2({
       commercialSubtype: "",
       commercialRiskType: "",
       commercialPestCadence: "",
+      commercialInteriorService: "",
       commercialLawnCadence: "",
       treeShrubDensity: "",
       mosquitoPressure: "",
@@ -5633,6 +5638,7 @@ export default function EstimateToolViewV2({
                       commercialSubtype: "",
                       commercialRiskType: "",
                       commercialPestCadence: "",
+                      commercialInteriorService: "",
                       commercialLawnCadence: "",
                       treeShrubDensity: "",
                       mosquitoPressure: "",
@@ -6094,6 +6100,17 @@ export default function EstimateToolViewV2({
                       { value: "quarterly", label: "Quarterly (4x/yr)" },
                       { value: "bimonthly", label: "Bi-monthly (6x/yr)" },
                       { value: "monthly", label: "Monthly (12x/yr)" },
+                    ]}
+                  />
+                </FieldV2>
+              )}
+              {(commercialDetected || form.commercialInteriorService) && (
+                <FieldV2 label="Pest interior service">
+                  <SelectV2
+                    k="commercialInteriorService"
+                    options={[
+                      { value: "", label: "Included (default)" },
+                      { value: "excluded", label: "Exterior-only (interior offered as add-on)" },
                     ]}
                   />
                 </FieldV2>

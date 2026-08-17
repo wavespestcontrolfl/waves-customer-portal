@@ -3084,25 +3084,73 @@ function priceCommercialPest(property = {}, options = {}) {
     };
   }
 
-  const materialPerVisit = cfg.materialPerVisitBase
-    + cfg.materialPerKSqFtPerVisit * (footprint / 1000);
-  const onSiteMin = cfg.laborMinutesBase
-    + cfg.laborMinutesPerKSqFt * (footprint / 1000)
-    + cfg.laborMinutesPerimeterPer100Lf * (perimeter / 100);
-  const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
+  // Interior service is customer-selectable (on by default, owner 2026-08-17).
+  // Only the explicit 'excluded' sentinel deselects it — anything else keeps
+  // today's interior-included behavior.
+  const interiorSelected = options.interiorService !== 'excluded';
+
+  // Exterior base component: perimeter barrier + monitoring. Carries the
+  // per-visit overhead, drive, and annual admin — they're incurred whether or
+  // not interior is selected.
+  const extMaterialPerVisit = cfg.exterior.materialPerVisitBase;
+  const extOnSiteMin = cfg.exterior.laborMinutesBase
+    + cfg.exterior.laborMinutesPerimeterPer100Lf * (perimeter / 100);
+  const extLaborPerVisit = GLOBAL.LABOR_RATE * ((extOnSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
   const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
 
-  const annualMaterial = materialPerVisit * visits;
-  const annualLabor = laborPerVisit * visits;
-  const annualDrive = drivePerVisit * visits;
-  const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
+  // Interior service component: footprint-driven treatment time + product.
+  // No overhead/drive/admin share — those ride the exterior base.
+  const intMaterialPerVisit = cfg.interior.materialPerVisitBase
+    + cfg.interior.materialPerKSqFtPerVisit * (footprint / 1000);
+  const intOnSiteMin = cfg.interior.laborMinutesBase
+    + cfg.interior.laborMinutesPerKSqFt * (footprint / 1000);
+  const intLaborPerVisit = GLOBAL.LABOR_RATE * (intOnSiteMin / 60);
 
-  const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  const materialPerVisit = extMaterialPerVisit + intMaterialPerVisit;
+  const onSiteMinCombined = extOnSiteMin + intOnSiteMin;
+
+  const extAnnualCost = (extMaterialPerVisit + extLaborPerVisit + drivePerVisit) * visits + cfg.adminAnnual;
+  const intAnnualCost = (intMaterialPerVisit + intLaborPerVisit) * visits;
+  const combinedAnnualCost = extAnnualCost + intAnnualCost;
+
+  const computedExteriorAnnual = extAnnualCost / (1 - cfg.targetGrossMargin);
+  const computedCombinedAnnual = combinedAnnualCost / (1 - cfg.targetGrossMargin);
+  const exteriorOnlyAnnual = roundMoney(computedExteriorAnnual);
+  const combinedAnnual = roundMoney(computedCombinedAnnual);
+
+  // Both variants rounded once, deltas taken between the rounded values so the
+  // customer-visible arithmetic is exact: exteriorOnly + add === combined.
+  const variantFigures = (annualR, mins) => ({
+    annual: annualR,
+    monthly: roundMoney(annualR / 12),
+    perApp: roundMoney(annualR / visits),
+    onSiteMin: roundMoney(mins),
+  });
+  const combinedFigures = variantFigures(combinedAnnual, onSiteMinCombined);
+  const exteriorFigures = variantFigures(exteriorOnlyAnnual, extOnSiteMin);
+  const interiorOption = {
+    key: 'interior_service',
+    label: 'Interior service',
+    selected: interiorSelected,
+    annualAdd: roundMoney(combinedFigures.annual - exteriorFigures.annual),
+    monthlyAdd: roundMoney(combinedFigures.monthly - exteriorFigures.monthly),
+    perAppAdd: roundMoney(combinedFigures.perApp - exteriorFigures.perApp),
+    combined: combinedFigures,
+    exteriorOnly: exteriorFigures,
+  };
+
+  // All headline figures reflect the SELECTED scope — downstream margin checks
+  // (IB estimate tools) and tech-time comparisons (pricing-reality-check,
+  // estimate-actuals) read these and must see what was actually sold.
+  const selected = interiorSelected ? combinedFigures : exteriorFigures;
+  const annualCost = interiorSelected ? combinedAnnualCost : extAnnualCost;
+  const computedAnnual = interiorSelected ? computedCombinedAnnual : computedExteriorAnnual;
+  const annualMaterial = (interiorSelected ? materialPerVisit : extMaterialPerVisit) * visits;
+  const annualLabor = (interiorSelected ? extLaborPerVisit + intLaborPerVisit : extLaborPerVisit) * visits;
+  const annualDrive = drivePerVisit * visits;
   // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(computedAnnual);
-  const monthly = roundMoney(annual / 12);
-  const perApp = roundMoney(annual / visits);
+  const { annual, monthly, perApp } = selected;
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   const pricingConfidence = footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM';
 
@@ -3122,7 +3170,9 @@ function priceCommercialPest(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: 'Commercial pest program (interior treatment + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.',
+    detail: interiorSelected
+      ? 'Commercial pest program (interior service + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.'
+      : 'Commercial pest program (exterior barrier + monitoring; interior service available as an add-on). Estimated from property data — final price confirmed on site.',
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     footprint,
     footprintUsed: footprint,
@@ -3131,12 +3181,13 @@ function priceCommercialPest(property = {}, options = {}) {
     perimeter: roundMoney(perimeter),
     frequency: visits,
     visitsPerYear: visits,
-    onSiteMin: roundMoney(onSiteMin),
+    onSiteMin: selected.onSiteMin,
     monthly,
     annual,
     perApp,
     internalPerVisitRevenue: perApp,
     perVisit: perApp,
+    interiorOption,
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
@@ -3149,6 +3200,10 @@ function priceCommercialPest(property = {}, options = {}) {
       adminCost: cfg.adminAnnual,
       directCost: roundMoney(annualMaterial + annualLabor + annualDrive),
       total: roundMoney(annualCost),
+      componentCosts: {
+        exteriorAnnualCost: roundMoney(extAnnualCost),
+        interiorAnnualCost: roundMoney(intAnnualCost),
+      },
     },
     margin,
     marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,

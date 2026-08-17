@@ -151,9 +151,11 @@ const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · App
 const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
 
 // Commercial pack — every claim is grounded in standing owner statements or
-// an already-shipped surface: interior treatment included on request, tenant
-// re-services included in the plan, tenants can join the portal/app for
-// notifications, no-contract + Auto Pay + cancel-in-app terms, and
+// an already-shipped surface: interior treatment available on every visit
+// (a customer-selectable priced component since owner 2026-08-17 — worded
+// "available", not "included", so the claim stays true whether the customer
+// keeps or removes it), tenant re-services included in the plan, tenants can
+// join the portal/app for notifications, no-contract terms, and
 // satellite/county-records pricing (the same methodology the residential
 // aiBody claims). The residential-only promises (90-day money-back, waived
 // setup, "unlimited callbacks 100% guaranteed") are deliberately absent —
@@ -166,7 +168,7 @@ const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No p
 const GLASS_COMMERCIAL_CTA_MICRO = 'No long-term contract · Licensed & insured · Satisfaction guaranteed';
 const GLASS_COMMERCIAL = {
   heroH1: 'Hello {first}, your commercial service plan is ready!',
-  heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service included on request, tenant-reported pests handled between visits, and no long-term contract.',
+  heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service available on every visit, tenant-reported pests handled between visits, and no long-term contract.',
   eyebrow: 'Your commercial service plan',
   aiTitle: 'Your price was built from your property — not somebody else’s',
   aiBody: 'We measured your building, lot, and grounds from satellite imagery and county property records before pricing this plan — the price fits your actual property, not a generic average.',
@@ -529,7 +531,7 @@ const GLASS_SERVICE_INCLUSIONS = {
   // claims. "Products applied" is what the service report already documents.
   commercial_pest: [
     'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
-    'Interior treatment included on request — no extra charge, no surprise fees',
+    'Interior treatment available on every visit — priced from your building, no surprise fees',
     'Tenant-reported pests handled between visits — re-service requests are included in the plan',
     'Tenants can be added to the Waves app for arrival alerts and service reports',
     'Every visit documented — time on site, areas treated, and products applied',
@@ -570,6 +572,9 @@ const GLASS_SERVICE_DAY_LINES = {
   palm_injection: 'That’s about {amount}/day — less than one replacement palm, to keep the ones you have healthy.',
   rodent_bait: 'That’s about {amount}/day for round-the-clock rodent monitoring.',
   foam_recurring: 'That’s about {amount}/day for targeted termite treatment that keeps the pressure down.',
+  // Commercial pest (slug active once commercial glass is released): the
+  // residential fallback said "home protection" on a business property.
+  commercial_pest: 'That’s about {amount}/day for always-on protection for your business.',
 };
 
 const DAY_LINE_CADENCE_KEYS = ['quarterly', 'bi_monthly', 'monthly'];

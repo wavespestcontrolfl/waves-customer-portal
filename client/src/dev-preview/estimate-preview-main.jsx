@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'lawn_member_upgrade', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'lawn_member_upgrade', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs', 'commercial'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -651,7 +651,7 @@ function proposalProgramsScenario() {
           inclusions: [
             '4 scheduled applications per year',
             'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
-            'Interior treatment included on request — no extra charge, no surprise fees',
+            'Interior treatment available on every visit — priced from your building, no surprise fees',
             'Tenant-reported pests handled between visits — re-service requests are included in the plan',
             'Every visit documented — time on site, areas treated, and products applied',
           ],
@@ -696,6 +696,84 @@ function proposalProgramsScenario() {
   };
 }
 
+// Auto-priced solo commercial pest with the interior-service option snapshot
+// (owner 2026-08-17): one server-shaped monthly frequency (commercial sells a
+// single cadence) + section.interiorOption exactly as
+// attachCommercialInteriorSelector emits it gate-on. Figures are the real
+// engine outputs for a 3,000 sqft building (see
+// server/tests/commercial-pest-interior-option.test.js).
+function commercialScenario() {
+  return {
+    estimate: {
+      ...BASE_ESTIMATE,
+      category: 'COMMERCIAL',
+      serviceCategory: 'commercial_pest',
+      customerFirstName: 'Cameron',
+      customerName: 'Cameron Ellis',
+      address: '6220 University Pkwy, Sarasota, FL 34240',
+    },
+    pricing: {
+      services: [{
+        key: 'commercial_pest',
+        label: 'Commercial Pest Control',
+        isRecurring: true,
+        isPest: false,
+        waveGuardTierEligible: false,
+        defaultFrequencyKey: 'monthly',
+        frequencies: [{
+          key: 'monthly',
+          label: 'Monthly',
+          serviceCategory: 'commercial_pest',
+          serviceTierKey: 'monthly',
+          monthlyBase: 121.02,
+          monthly: 121.02,
+          annual: 1452.22,
+          perTreatment: 121.02,
+          visitsPerYear: 12,
+          billingFrequencyKey: 'monthly',
+          billedPerApplication: true,
+          manualDiscount: null,
+          included: [{
+            key: 'commercial_pest_monthly',
+            label: 'Monthly commercial pest program',
+            detail: '12 visits per year',
+            includedAtThisFrequency: true,
+          }],
+          addOns: [],
+          perServiceTreatments: [{
+            service: 'commercial_pest',
+            label: 'Commercial Pest Control',
+            perTreatment: 121.02,
+            displayPrice: 121.02,
+            visitsPerYear: 12,
+            waveGuardDiscountEligible: false,
+          }],
+        }],
+        interiorOption: {
+          selected: true,
+          label: 'Interior service',
+          perApplicationAdd: 41.52,
+          monthlyAdd: 41.52,
+          annualAdd: 498.18,
+          detail: 'Interior treatment on every visit. Remove it and your techs treat the exterior barrier only — tenant-reported interior issues are still covered on request.',
+        },
+        setupFee: null,
+        quoteRequired: false,
+        copy: { priceWording: {} },
+      }],
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: 'Commercial',
+      askChips: ['What does each visit include?', 'Do you treat inside the units?', 'What if a tenant reports a pest?', 'How do I cancel if I need to?'],
+      anchorOneTimePrice: 0,
+      oneTimeBreakdown: { total: 0, items: [] },
+      setupFee: null,
+      annualPrepayEligible: true,
+      defaultServiceMode: 'recurring',
+    },
+    cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false, commercialGlass: true, commercialAutoPriced: true },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
@@ -708,6 +786,7 @@ const PAYLOADS = {
   proposal_terms: proposalTermsScenario,
   proposal_structured: proposalStructuredScenario,
   proposal_programs: proposalProgramsScenario,
+  commercial: commercialScenario,
 };
 
 // ── canned endpoint responses ───────────────────────────────────────────

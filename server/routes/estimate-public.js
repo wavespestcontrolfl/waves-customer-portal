@@ -122,6 +122,20 @@ const addServiceRequestLimiter = rateLimit({
   message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
 });
 
+// Same dark-launch posture as the bond limiter below: while
+// GATE_COMMERCIAL_INTERIOR_OPTION is off the route answers a uniform 403,
+// so the limiter engages only when the feature is on. 30/hr comfortably
+// covers a customer comparing with/without interior service.
+const commercialInteriorSwitchLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  skip: () => !commercialInteriorOptionGateOn(),
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
 const bondTermSwitchLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 30,
@@ -5484,7 +5498,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="proposal-included-title">What your commercial pest service includes</div>
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
-        <li>Interior treatment included on request &mdash; no extra charge, no surprise fees</li>
+        <li>Interior treatment available on every visit &mdash; priced from your building, no surprise fees</li>
         <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
         <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
@@ -12012,6 +12026,216 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
   }
 });
 
+// ── Commercial pest interior-service switcher (owner 2026-08-17) ───────────
+// Same architecture as the bond term switcher above: the pricer stamps a
+// QUOTE-TIME interiorOption snapshot on the commercial_pest line (combined +
+// exteriorOnly variants, both rounded once), the customer toggles via
+// PUT /:token/interior-service, and the stored row is rewritten to the chosen
+// variant so accept freezes exactly what the page displayed.
+
+// Quote-time interior-option snapshot, both persisted shapes: v1-mapped saves
+// carry it on the recurring commercial_pest row (commAdd forwards it);
+// modular-engine saves carry it on the commercial_pest LINE ITEM.
+function commercialInteriorRowsFromEstimateData(parsedData = {}) {
+  const rows = [];
+  const result = parsedData?.result && typeof parsedData.result === 'object' ? parsedData.result : null;
+  for (const rec of [result?.recurring, parsedData.recurring]) {
+    if (!rec || !Array.isArray(rec.services)) continue;
+    const row = rec.services.find((svc) => recurringServiceKey(svc) === 'commercial_pest');
+    if (row && !rows.includes(row)) rows.push(row);
+  }
+  for (const container of [parsedData?.engineResult, result]) {
+    if (!container || !Array.isArray(container.lineItems)) continue;
+    const row = container.lineItems.find((li) => li && li.service === 'commercial_pest');
+    if (row && !rows.includes(row)) rows.push(row);
+  }
+  return rows;
+}
+
+function commercialInteriorOptionFromEstimateData(parsedData = {}) {
+  const withSnapshot = commercialInteriorRowsFromEstimateData(parsedData)
+    .find((row) => row.interiorOption && typeof row.interiorOption === 'object'
+      && row.interiorOption.combined && row.interiorOption.exteriorOnly);
+  return withSnapshot ? withSnapshot.interiorOption : null;
+}
+
+// A toggle must reach every REPLAYABLE input shape too (the bond switcher's
+// codex #2915 r4 lesson applies identically): the bundle/accept path replays
+// extractEngineInputs(estData) through the live engine, so a rewrite that
+// only touched the stored rows would let the replay resurrect the interior
+// charge into pricingBundle frequencies — displaying exterior-only while
+// accept locks and bills the combined amount. Engine shapes carry the flat
+// input; V2/admin saves carry engineRequest.options.
+function syncCommercialInteriorIntoReplayableInputs(parsedData = {}, included) {
+  const value = included ? 'included' : 'excluded';
+  for (const shape of [parsedData?.engineInputs, parsedData?.engineRequest]) {
+    if (!shape || typeof shape !== 'object') continue;
+    if (shape.options && typeof shape.options === 'object'
+      && ('commercialInteriorService' in shape.options || Array.isArray(shape.selectedServices))) {
+      shape.options.commercialInteriorService = value;
+    } else if (!shape.options) {
+      shape.commercialInteriorService = value;
+    }
+  }
+  const formInputs = parsedData?.inputs;
+  if (formInputs && typeof formInputs === 'object' && 'commercialInteriorService' in formInputs) {
+    formInputs.commercialInteriorService = value;
+  }
+}
+
+// Rewrite the persisted commercial_pest rows to the chosen variant using the
+// QUOTE-TIME snapshot (never live constants — rates were locked when the
+// estimate priced). Adjusts the recurring aggregates and engine totals by the
+// exact variant delta; the caller applies the same deltas to
+// estimates.monthly_total/annual_total. The rewritten rows are the billing
+// truth: accept freezes them and the converter bills per application from them.
+function applySelectedCommercialInteriorToEstimateData(parsedData = {}, included) {
+  const option = commercialInteriorOptionFromEstimateData(parsedData);
+  if (!option) return { ok: false, reason: 'interior_option_not_available' };
+  const rows = commercialInteriorRowsFromEstimateData(parsedData);
+  if (!rows.length) return { ok: false, reason: 'interior_option_not_available' };
+
+  const target = included ? option.combined : option.exteriorOnly;
+  const targetMonthly = Number(target.monthly) || 0;
+  const targetAnnual = Number(target.annual) || 0;
+  const targetPerApp = Number(target.perApp) || 0;
+
+  const currentRow = rows[0];
+  const currentMonthly = Number(currentRow.mo ?? currentRow.monthly) || 0;
+  const currentAnnual = Number(currentRow.annual) || Math.round(currentMonthly * 12 * 100) / 100;
+  const monthlyDelta = Math.round((targetMonthly - currentMonthly) * 100) / 100;
+  const annualDelta = Math.round((targetAnnual - currentAnnual) * 100) / 100;
+  const wasIncluded = rows.some((row) => row.interiorOption?.selected === true)
+    || (!rows.some((row) => row.interiorOption?.selected === false));
+
+  for (const row of rows) {
+    if ('mo' in row || row.monthly !== undefined) row.monthly = targetMonthly;
+    if ('mo' in row) row.mo = targetMonthly;
+    row.annual = targetAnnual;
+    if (row.perTreatment !== undefined) row.perTreatment = targetPerApp;
+    for (const key of ['perApp', 'perVisit', 'internalPerVisitRevenue']) {
+      if (row[key] !== undefined) row[key] = targetPerApp;
+    }
+    if (row.onSiteMin !== undefined && Number.isFinite(Number(target.onSiteMin))) {
+      row.onSiteMin = Number(target.onSiteMin);
+    }
+    if (row.interiorOption && typeof row.interiorOption === 'object') {
+      row.interiorOption.selected = included;
+    }
+  }
+
+  const result = parsedData?.result && typeof parsedData.result === 'object' ? parsedData.result : null;
+  const recLists = [result?.recurring, parsedData.recurring]
+    .filter((rec, idx, arr) => rec && Array.isArray(rec.services) && arr.indexOf(rec) === idx);
+  for (const rec of recLists) {
+    for (const field of ['monthlyTotal', 'grandTotal']) {
+      if (Number.isFinite(Number(rec[field]))) rec[field] = Math.round((Number(rec[field]) + monthlyDelta) * 100) / 100;
+    }
+    for (const field of ['annualAfterDiscount', 'annualBeforeDiscount']) {
+      if (Number.isFinite(Number(rec[field]))) rec[field] = Math.round((Number(rec[field]) + annualDelta) * 100) / 100;
+    }
+  }
+  if (result?.totals && typeof result.totals === 'object') {
+    const totalDeltas = [['year1', annualDelta], ['year2', annualDelta], ['year2mo', monthlyDelta]];
+    for (const [field, delta] of totalDeltas) {
+      if (Number.isFinite(Number(result.totals[field]))) result.totals[field] = Math.round((Number(result.totals[field]) + delta) * 100) / 100;
+    }
+  }
+  for (const container of [parsedData?.engineResult, result]) {
+    const summary = container?.summary && typeof container.summary === 'object' ? container.summary : null;
+    if (!summary || container.lineItems === undefined) continue;
+    const adjust = [
+      ['recurringAnnualBeforeDiscount', annualDelta],
+      ['recurringAnnualAfterDiscount', annualDelta],
+      ['recurringMonthlyAfterDiscount', monthlyDelta],
+      ['year1Total', annualDelta],
+      ['year2Annual', annualDelta],
+      ['year2Monthly', monthlyDelta],
+    ];
+    for (const [field, delta] of adjust) {
+      if (Number.isFinite(Number(summary[field]))) {
+        summary[field] = Math.round((Number(summary[field]) + delta) * 100) / 100;
+      }
+    }
+  }
+  syncCommercialInteriorIntoReplayableInputs(parsedData, included);
+  const changed = monthlyDelta !== 0 || annualDelta !== 0 || wasIncluded !== included;
+  return { ok: true, changed, monthlyDelta, annualDelta, interiorSelected: included };
+}
+
+router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (req, res, next) => {
+  try {
+    // Kill-switch completeness (bond codex #2915 r1): the gate must dead-end
+    // this mutation even for estimates whose payloads still carry an
+    // interiorOption snapshot from when the gate was on.
+    if (!commercialInteriorOptionGateOn()) return res.status(403).json({ error: 'interior_option_disabled' });
+    // Generic-404 posture (AGENTS.md contract): malformed tokens, unknown
+    // tokens, and non-active rows are indistinguishable.
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (typeof req.body?.included !== 'boolean') {
+      return res.status(400).json({ error: 'included is required' });
+    }
+    const included = req.body.included;
+
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const outcome = applySelectedCommercialInteriorToEstimateData(parsedData, included);
+    if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+
+    const monthlyTotal = Math.max(0, Math.round((Number(estimate.monthly_total || 0) + outcome.monthlyDelta) * 100) / 100);
+    const annualTotal = Math.max(0, Math.round((Number(estimate.annual_total || 0) + outcome.annualDelta) * 100) / 100);
+    invalidateSendSnapshotPricingBundle(parsedData);
+    const updateCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+      .whereNull('price_locked_at')
+      // Same marker/claim + ms-truncated CAS rails as the bond write above —
+      // this is a whole-blob estimate_data write from a pre-read.
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
+      .update({
+        estimate_data: JSON.stringify(parsedData),
+        monthly_total: monthlyTotal,
+        annual_total: annualTotal,
+        updated_at: db.fn.now(),
+      });
+    if (!updateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    clearEstimatePricingCache(estimate.id);
+    logger.info(`[estimate] ${estimate.id}: commercial interior service -> ${included ? 'included' : 'excluded'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
+    return res.json({
+      success: true,
+      interiorSelected: included,
+      monthlyTotal,
+      annualTotal,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
@@ -17611,6 +17835,37 @@ function termiteBondOptionGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
 }
 
+// Commercial interior-service option kill switch (dark-ship, owner flips).
+// Same posture as the bond gate: gate-off hides the selector and dead-ends
+// the PUT, but an already-toggled row is sold state and keeps pricing as
+// written — unset never rewrites a quoted price.
+function commercialInteriorOptionGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_COMMERCIAL_INTERIOR_OPTION || '').toLowerCase());
+}
+
+// Commercial interior-service selector payload (owner 2026-08-17): the
+// quote-time option snapshot + current selection ride the commercial_pest
+// section, and the customer toggles via PUT /:token/interior-service
+// (server-side re-total, bond pattern), so accept freezes rewritten rows.
+function attachCommercialInteriorSelector(services = [], estData = {}) {
+  const section = (services || []).find((s) => s?.key === 'commercial_pest');
+  if (!section) return services;
+  const option = commercialInteriorOptionFromEstimateData(estData);
+  // Selector (unsold state) requires BOTH a persisted snapshot and the live
+  // gate — sold state keeps pricing from the rewritten rows regardless.
+  if (option && commercialInteriorOptionGateOn()) {
+    section.interiorOption = {
+      selected: option.selected !== false,
+      label: option.label || 'Interior service',
+      perApplicationAdd: Number(option.perAppAdd) || 0,
+      monthlyAdd: Number(option.monthlyAdd) || 0,
+      annualAdd: Number(option.annualAdd) || 0,
+      detail: 'Interior treatment on every visit. Remove it and your techs treat the exterior barrier only — tenant-reported interior issues are still covered on request.',
+    };
+  }
+  return services;
+}
+
 // Termite bond selector payload (owner 2026-07-20): the quote-time option
 // snapshot + current selection ride the TERMITE section — bond lines are
 // section-suppressed riders (see buildPricingServices), and the customer
@@ -18592,6 +18847,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     lowConfidenceLines,
   );
   attachTermiteBondSelector(services, estData);
+  attachCommercialInteriorSelector(services, estData);
   // Same resolver as buildPricingServices — basis and price ladder must come
   // from ONE result object (ui-verify caught them diverging; see helper).
   // Engine-invocation bundles carry measuredBasisAnchor: the basis computed
@@ -21716,6 +21972,9 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+module.exports.applySelectedCommercialInteriorToEstimateData = applySelectedCommercialInteriorToEstimateData;
+module.exports.commercialInteriorOptionFromEstimateData = commercialInteriorOptionFromEstimateData;
+module.exports.attachCommercialInteriorSelector = attachCommercialInteriorSelector;
 // Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
 // and the mirrored-section label rule.
 module.exports.extractEngineInputs = extractEngineInputs;

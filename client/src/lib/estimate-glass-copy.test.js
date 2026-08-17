@@ -281,7 +281,7 @@ describe('commercial glass release', () => {
     const stack = glassRowInclusions('commercial_pest');
     expect(Array.isArray(stack)).toBe(true);
     const joined = stack.join(' ');
-    expect(joined).toContain('Interior treatment included on request');
+    expect(joined).toContain('Interior treatment available on every visit');
     expect(joined).toContain('No long-term contract');
     expect(joined).not.toMatch(/auto pay|in the app/i);
     expect(joined).not.toMatch(/90-day/i);

@@ -3260,6 +3260,7 @@ function ReviewBeforeBookingCard({ reason }) {
 // original line.
 const SERVICE_CARD_HEADLINES = {
   pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
+  commercial_pest: 'Commercial Pest Protection by Waves — priced from your property, built for your business',
   mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
   termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
   lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
@@ -3596,6 +3597,8 @@ export function ServiceSection({
   termiteComparison = null,
   onSelectBondTerm = null,
   bondBusy = false,
+  onToggleInteriorService = null,
+  interiorBusy = false,
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
@@ -3803,6 +3806,42 @@ export function ServiceSection({
               selected={section.selectedBondTerm || 'none'}
               onChange={(term) => onSelectBondTerm(term)}
               disabled={disabled || bondBusy}
+            />
+          </div>
+        ) : null}
+
+        {/* Commercial interior-service toggle (owner 2026-08-17): the interior
+            component is priced from the building's size and customer-removable.
+            Amounts come from the section's quote-time interiorOption snapshot;
+            a toggle calls PUT /:token/interior-service (server-side re-total)
+            and the page reloads server truth — the displayed price and the
+            billed price can never diverge. Gated on the RAW section key: the
+            glass slug normalizes commercial_pest to pest_control. */}
+        {section.key === 'commercial_pest' && section.interiorOption
+          && onToggleInteriorService ? (
+          <div style={{ marginTop: 6 }} aria-label="Interior service options">
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
+              Interior service — treatments inside the building
+            </div>
+            {section.interiorOption.detail ? (
+              <div style={{ fontSize: 14, color: '#3f6584', margin: '0 0 6px' }}>
+                {section.interiorOption.detail}
+              </div>
+            ) : null}
+            <GlassFrequencyPills
+              frequencies={[
+                {
+                  key: 'included',
+                  label: `Interior included · +$${section.interiorOption.perApplicationAdd}/application`,
+                },
+                { key: 'excluded', label: 'Exterior only' },
+              ]}
+              selected={section.interiorOption.selected ? 'included' : 'excluded'}
+              onChange={(key) => {
+                const next = key === 'included';
+                if (next !== Boolean(section.interiorOption.selected)) onToggleInteriorService(next);
+              }}
+              disabled={disabled || interiorBusy}
             />
           </div>
         ) : null}
@@ -4456,6 +4495,47 @@ function EstimateViewPageInner() {
         await loadEstimate({ preserveSelection: true }).catch(() => {});
       } finally {
         setBondBusy(false);
+      }
+    };
+    const chained = addOnMutationChainRef.current.then(run, run);
+    addOnMutationChainRef.current = chained;
+    await chained;
+  }, [adminDraftPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
+
+  // Commercial interior-service toggle (owner 2026-08-17). Mirrors the bond
+  // picker above: draft preview stays inert, the PUT + reload sequence rides
+  // the SAME mutation chain, and any error path resyncs to server truth.
+  const [interiorBusy, setInteriorBusy] = useState(false);
+  const onToggleInteriorService = useCallback(async (included) => {
+    if (ctaPhaseRef.current === 'submitting') return;
+    if (adminDraftPreview) {
+      setError('Draft preview — the interior-service choice is the customer\'s to make once the estimate is sent. Preset it with the estimator\'s Pest interior service selector.');
+      return;
+    }
+    const run = async () => {
+      setInteriorBusy(true);
+      try {
+        const r = await fetch(`${API_BASE}/estimates/${token}/interior-service`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ included }),
+        });
+        if (!r.ok) throw new Error(`interior service update failed: ${r.status}`);
+        // The plan amount just changed — a payment choice made against the
+        // old amount (prepay especially) must be re-made against the new one.
+        if (paymentPreference) {
+          setPaymentPreference(null);
+          setCtaPhase('configure');
+        }
+        await loadEstimate({ preserveSelection: true });
+        scrollToPriceSection();
+      } catch (err) {
+        setError(err.message);
+        // Resync to server truth — the PUT may have landed despite the error
+        // surfacing here (same rationale as the bond/add-on paths).
+        await loadEstimate({ preserveSelection: true }).catch(() => {});
+      } finally {
+        setInteriorBusy(false);
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
@@ -5507,6 +5587,8 @@ function EstimateViewPageInner() {
                 onAddOnToggle={onToggleAddOn}
                 onSelectBondTerm={onSelectBondTerm}
                 bondBusy={bondBusy}
+                onToggleInteriorService={onToggleInteriorService}
+                interiorBusy={interiorBusy}
                 onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}

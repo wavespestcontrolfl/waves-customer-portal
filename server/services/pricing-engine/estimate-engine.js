@@ -704,6 +704,9 @@ function generateEstimate(input) {
         buildingSizeMeasured: input.buildingSizeMeasured,
         // Risk-type cadence override (null → program default 12).
         pestVisits: commercialPestVisits,
+        // Interior service selection ('excluded' → exterior-only base price;
+        // anything else keeps interior included, the default).
+        interiorService: input.commercialInteriorService,
       });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest

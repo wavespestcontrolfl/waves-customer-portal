@@ -854,6 +854,9 @@ function mapV1ToLegacyShape(v1Result) {
       estimatedPricing: true,
       commercialSubtype: li.commercialSubtype || null,
       pricingConfidence: li.pricingConfidence || null,
+      // Interior-service option snapshot (commercial pest only) — must survive
+      // the mapper or the public page can't offer the toggle.
+      interiorOption: li.interiorOption || null,
       taxable: li.taxable === true,
       taxCategory: li.taxCategory || null,
       discountable: false,

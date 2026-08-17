@@ -681,22 +681,36 @@ const COMMERCIAL_TREE_SHRUB = {
   taxCategory: 'lawn_spraying_or_treatment',
 };
 // Commercial PEST (general pest control for non-residential accounts). Cost-
-// buildup keyed off building footprint (interior treatment) + perimeter
-// (exterior barrier). Monthly is the commercial baseline cadence (most
-// commercial accounts run monthly; the rep confirms/adjusts the frequency on
-// site). UNLIKE commercial lawn/tree, commercial pest is TAXED in FL
-// (nonresidential_pest_control = 7%). All values tunable against real quotes.
+// buildup split into an EXTERIOR base (perimeter barrier + monitoring —
+// always included) and an INTERIOR service component (footprint-driven —
+// customer-selectable, ON by default; owner 2026-08-17). The component sums
+// reproduce the pre-split combined buildup exactly (4+2=6 material base,
+// 15+10=25 base labor), so a default (interior-on) quote is cent-identical
+// to the pre-split price. Monthly is the commercial baseline cadence (the
+// rep confirms/adjusts the frequency on site). UNLIKE commercial lawn/tree,
+// commercial pest is TAXED in FL (nonresidential_pest_control = 7%). All
+// values tunable against real quotes.
 const COMMERCIAL_PEST = {
   programVisits: 12,                  // monthly service — the common commercial baseline
-  materialPerVisitBase: 6,            // baseline chemistry per visit (interior + exterior barrier)
-  materialPerKSqFtPerVisit: 1.5,      // $/1000 sqft footprint/visit — added product for larger interiors
-  laborMinutesBase: 25,               // mobilization + interior base per visit
-  laborMinutesPerKSqFt: 6,            // interior treatment labor per 1000 sqft footprint
-  laborMinutesPerimeterPer100Lf: 4,   // exterior barrier labor per 100 linear ft of perimeter
+  // Exterior base program — perimeter barrier + monitoring. Carries the
+  // per-visit overhead, drive, and annual admin (they're incurred whether or
+  // not interior is selected).
+  exterior: {
+    materialPerVisitBase: 4,          // exterior barrier chemistry per visit
+    laborMinutesBase: 15,             // mobilization + exterior base per visit
+    laborMinutesPerimeterPer100Lf: 4, // exterior barrier labor per 100 linear ft of perimeter
+  },
+  // Interior service component — customer-selectable add-on (on by default).
+  interior: {
+    materialPerVisitBase: 2,          // interior baseline chemistry per visit
+    materialPerKSqFtPerVisit: 1.5,    // $/1000 sqft footprint/visit — added product for larger interiors
+    laborMinutesBase: 10,             // interior base per visit
+    laborMinutesPerKSqFt: 6,          // interior treatment labor per 1000 sqft footprint
+  },
   laborOverheadMinutesPerVisit: 10,   // reporting / logbook / pest-sighting documentation
   routeDriveMinutes: 15,
   adminAnnual: 120,                   // COI tracking, net-terms invoicing, account management
-  targetGrossMargin: 0.45,            // commercial target margin (tunable)
+  targetGrossMargin: 0.45,            // commercial target margin (tunable, applies to both components)
   minAnnual: 900,                     // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceFootprintSf: 30000,    // above this the footprint estimate is flagged LOW confidence
   taxable: true,

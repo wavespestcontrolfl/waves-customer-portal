@@ -110,7 +110,7 @@ function programFamilyForService(serviceKey) {
 // commercial_pest stack, #3281 — no residential guarantee claims).
 const COMMERCIAL_PEST_INCLUSIONS = [
   'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
-  'Interior treatment included on request — no extra charge, no surprise fees',
+  'Interior treatment available on every visit — priced from your building, no surprise fees',
   'Tenant-reported pests handled between visits — re-service requests are included in the plan',
   'Tenants can be added to the Waves app for arrival alerts and service reports',
   'Every visit documented — time on site, areas treated, and products applied',
