@@ -317,21 +317,21 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
       appointmentTime: isoHoursFromNow(10), // inside BOTH bands
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
-      createdAt: new Date(Date.now() - 72 * 3600000), // backlog: booked days ago
+      createdAt: new Date('2026-08-10T00:00:00Z'), // backlog: booked before the rollout cutoff
     });
     expect(captured.row.reminder_72h_sent).toBe(true);
     expect(captured.row.reminder_24h_sent).toBe(true);
   });
 
-  test('a FRESH last-minute booking healed next sweep keeps its 24h reminder (codex r3 P1)', async () => {
+  test('a POST-CUTOFF booking keeps its 24h reminder however late the heal (codex r3+r4 P1)', async () => {
     const captured = {};
     await AppointmentReminders.registerVisitReminderInTx(makeConn(captured), {
       scheduledServiceId: 'svc-fresh',
       customerId: 'cust-fresh',
-      appointmentTime: isoHoursFromNow(10), // booked <24h out, healed 15 min later
+      appointmentTime: isoHoursFromNow(10), // booked <24h out, heal delayed hours by an outage
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
-      createdAt: new Date(Date.now() - 15 * 60000),
+      createdAt: new Date('2026-09-01T00:00:00Z'), // any post-cutoff booking
     });
     // Booking-path boundaries: 72h band already missed, 24h still sendable.
     expect(captured.row.reminder_72h_sent).toBe(true);
@@ -346,7 +346,7 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
       appointmentTime: isoHoursFromNow(200),
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
-      createdAt: new Date(Date.now() - 72 * 3600000),
+      createdAt: new Date('2026-08-10T00:00:00Z'),
     });
     expect(captured.row.reminder_72h_sent).toBe(false);
     expect(captured.row.reminder_24h_sent).toBe(false);

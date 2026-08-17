@@ -53,6 +53,15 @@ const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'res
 // Bounds each 15-min cron run; a large backlog drains within a few hours.
 const SELF_HEAL_REGISTRATION_LIMIT = 25;
 
+// Rollout cutoff for the 2026-08-17 owner ruling ("reminder texts apply
+// automatically… I don't want the OLD reminders to go out"). Visits BOOKED
+// before this fixed instant are the pre-ruling unarmed backlog: the sweep
+// arms them silently, pre-closing any reminder window that already started.
+// Visits booked after it always keep the booking-path window boundaries,
+// however late their registration heals (codex #3429 r4 P1: a relative
+// lateness test would also silence future bookings delayed by an outage).
+const NO_CATCHUP_BACKLOG_CUTOFF = new Date('2026-08-17T04:00:00Z');
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -1641,23 +1650,24 @@ const AppointmentReminders = {
     // re-reading the row every 15 min for a window it can never satisfy. 72h band
     // is (24.25h, 72.25h]; the 24h reminder can still fire for any future time.
     //
-    // A STALE self-heal arm additionally pre-closes any window whose send
+    // A BACKLOG self-heal arm additionally pre-closes any window whose send
     // moment has already passed (owner ruling 2026-08-17: no catch-up texts
     // for the old unarmed backlog — "function as normal moving forward").
     // A backlog row healed inside the 24h band would otherwise text a
-    // "24-hour" reminder an hour before the visit. Stale = the visit was
-    // BOOKED more than an hour before this registration (≥2 sweep periods):
-    // a fresh booking the sweep is that row's normal registration path for
-    // (created minutes ago, healed next 15-min tick) keeps the booking-path
-    // boundaries, so a last-minute booking still gets its 24h reminder
-    // exactly as if it had registered at booking time (codex #3429 r3 P1).
+    // "24-hour" reminder an hour before the visit. Backlog = the visit was
+    // BOOKED before the ruling's rollout cutoff, a FIXED instant (codex
+    // #3429 r4 P1: a moving lateness threshold would also silence a future
+    // booking whose heal was merely delayed by an outage — delayed repairs
+    // of post-cutoff bookings must retain every still-reachable reminder,
+    // exactly like a booking-path registration). Post-cutoff heals always
+    // keep the booking-path boundaries.
     const hoursUntil = (apptTime.getTime() - now.getTime()) / 3600000;
     const bookedAtMs = createdAt ? new Date(createdAt).getTime() : NaN;
-    const staleArm = reminderSource === 'cron_selfheal'
+    const backlogArm = reminderSource === 'cron_selfheal'
       && Number.isFinite(bookedAtMs)
-      && now.getTime() - bookedAtMs > 60 * 60 * 1000;
-    const seventyTwoMissed = hoursUntil <= (staleArm ? 72.25 : 24.25);
-    const twentyFourMissed = hoursUntil <= (staleArm ? 24.25 : 0);
+      && bookedAtMs < NO_CATCHUP_BACKLOG_CUTOFF.getTime();
+    const seventyTwoMissed = hoursUntil <= (backlogArm ? 72.25 : 24.25);
+    const twentyFourMissed = hoursUntil <= (backlogArm ? 24.25 : 0);
     const [record] = await conn('appointment_reminders')
       .insert({
         scheduled_service_id: scheduledServiceId,
