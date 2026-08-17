@@ -1258,8 +1258,22 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id', 'invoice_number');
   await db.transaction(async (trx) => {
     const PayCombined = require('./pay-combined');
+    // The pre-transaction customer read can be OBSOLETE (codex r22 P1): a
+    // merge holding both combined locks but not yet committed still shows
+    // the loser's customer_id — locking that would serialize against the
+    // wrong customer while /setup locks the winner. Re-read the owner
+    // AFTER each lock and re-lock under the current owner if it moved
+    // (xact locks accumulate, so old+new both stay held — strictly safer).
     if (invoice?.customer_id) {
-      await PayCombined.lockCombinedCustomers(trx, [String(invoice.customer_id)]);
+      let ownerId = String(invoice.customer_id);
+      for (let attempt = 0; ; attempt++) {
+        await PayCombined.lockCombinedCustomers(trx, [ownerId]);
+        const freshOwner = await trx('invoices').where({ id: invoiceId }).first('customer_id');
+        const freshId = freshOwner?.customer_id ? String(freshOwner.customer_id) : null;
+        if (!freshId || freshId === ownerId) break;
+        if (attempt >= 4) throw new Error(`Invoice ownership kept changing while stopping dunning for ${invoiceId} — try again`);
+        ownerId = freshId;
+      }
     }
     // Re-read under the lock — a setup that committed while we waited may
     // have stamped a PI the unlocked read missed.

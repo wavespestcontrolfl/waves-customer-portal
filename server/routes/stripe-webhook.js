@@ -1227,6 +1227,12 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
       await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
     }
+    // A settled invoice may be gating a payment-held WDO report — nudge
+    // the release sweep like the single-invoice path does (codex r22 P3);
+    // the 60s interval remains the fallback.
+    try {
+      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
+    } catch { /* interval-backed */ }
   }
 
   // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
@@ -4953,6 +4959,18 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
     const currentIntent = await stripe.paymentIntents.retrieve(piId);
     if (currentIntent.status !== 'processing') {
       logger.info(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}; current status is ${currentIntent.status}`);
+      return;
+    }
+    // Attempt-identity check (codex r22 P2): a retried reusable PI can be
+    // 'processing' AGAIN when a delayed processing event from the PRIOR
+    // attempt arrives — status alone accepts it, and the handler would run
+    // the OLD event's immutable amount/allocation (acknowledging the old
+    // total, settling the old sibling set). The live intent is the
+    // authority: a mismatched allocation or amount marks this event stale;
+    // the current attempt's own delivery carries the right snapshot.
+    if (String(currentIntent.metadata?.combined_allocation || '') !== String(paymentIntent.metadata?.combined_allocation || '')
+      || Number(currentIntent.amount) !== Number(paymentIntent.amount)) {
+      logger.warn(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}: event allocation/amount differs from the live intent (retry superseded it)`);
       return;
     }
   }

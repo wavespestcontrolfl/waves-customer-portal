@@ -484,6 +484,57 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
 }
 
 /**
+ * Kill-switch enforcement sweep (codex #3427 r22 P1): after /update-amount
+ * (the last server seam) a combined ACH PI is confirmable directly from the
+ * browser with no further gate check — so DISABLING the gate must also
+ * revoke outstanding unconfirmed combined sessions, or the advertised kill
+ * switch leaves already-prepared PIs able to charge every sibling. Gate
+ * flips require a restart (env-sourced), so boot-with-gate-off is exactly
+ * the "gate was just disabled" moment. Identifies candidates without
+ * Stripe reads first (only combined stamping ever binds ONE PI to more
+ * than one collectible invoice), verifies combined metadata at Stripe,
+ * cancels unconfirmed sessions, and clears every stamp. Best-effort per
+ * PI; the update-amount degrade remains the per-session backstop.
+ */
+async function revokeOutstandingCombinedSessionsOnGateOff() {
+  if (isEnabled('payIncludeBalance')) return { skipped: true };
+  const candidatePiIds = await db('invoices')
+    .whereNotNull('stripe_payment_intent_id')
+    .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    .groupBy('stripe_payment_intent_id')
+    .havingRaw('count(*) > 1')
+    .pluck('stripe_payment_intent_id');
+  let revoked = 0;
+  for (const piId of candidatePiIds) {
+    const StripeService = require('./stripe');
+    let pi;
+    try {
+      pi = await StripeService.retrievePaymentIntent(piId);
+    } catch (err) {
+      logger.error(`[pay-combined] gate-off revoke: PI ${piId} unreadable (${err.message}) — needs manual review`);
+      continue;
+    }
+    if (!pi || !isCombinedPiMetadata(pi.metadata)) continue;
+    if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)) {
+      logger.warn(`[pay-combined] gate-off revoke: combined PI ${piId} is ${pi.status} — money may be in flight, left to the settle paths`);
+      continue;
+    }
+    try {
+      await StripeService.cancelPaymentIntent(piId);
+    } catch (err) {
+      logger.error(`[pay-combined] gate-off revoke: could not cancel combined PI ${piId} (${err.message}) — needs manual review`);
+      continue;
+    }
+    await clearPaymentIntentStamps(db, piId);
+    revoked += 1;
+  }
+  if (candidatePiIds.length) {
+    logger.warn(`[pay-combined] gate OFF at boot — revoked ${revoked}/${candidatePiIds.length} outstanding combined session(s)`);
+  }
+  return { revoked, candidates: candidatePiIds.length };
+}
+
+/**
  * Settle a combined PaymentIntent: one transaction (advisory-locked on the
  * PI, same namespace as the single-invoice settle) that, for EVERY invoice
  * in the allocation, flips it paid/processing and ensures its own
@@ -810,5 +861,6 @@ module.exports = {
   lockCombinedCustomers,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
+  revokeOutstandingCombinedSessionsOnGateOff,
   settleCombinedPaymentIntent,
 };

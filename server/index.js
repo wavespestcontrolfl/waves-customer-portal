@@ -998,6 +998,18 @@ httpServer.listen(PORT, () => {
     // the worker in-process so the single Railway web dyno drains retry jobs
     // created by completion, email, or public PDF requests.
     {
+      // GATE_PAY_INCLUDE_BALANCE kill-switch enforcement (codex #3427 r22
+      // P1): booting with the gate OFF revokes any outstanding unconfirmed
+      // combined pay sessions — a prepared combined ACH PI is confirmable
+      // straight from the browser, so the flip must not leave one able to
+      // charge every sibling. One-shot; gate flips require a restart.
+      setTimeout(() => {
+        require('./services/pay-combined').revokeOutstandingCombinedSessionsOnGateOff()
+          .catch((err) => logger.error(`[pay-combined] gate-off revoke sweep failed: ${err.message}`));
+      }, 20 * 1000).unref();
+    }
+
+    {
       const runPdfQueue = async () => {
         try {
           const { processDuePdfRenderJobs } = require('./services/service-report/pdf-queue');
