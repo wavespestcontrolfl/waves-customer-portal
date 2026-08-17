@@ -1943,7 +1943,6 @@ const AppointmentReminders = {
   async selfHealMissingReminderRows() {
     let healed = 0;
     try {
-      const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const missing = await db('scheduled_services as ss')
         .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
         .whereNull('ar.id')
@@ -1954,17 +1953,16 @@ const AppointmentReminders = {
         // boundary by the session offset).
         .where('ss.scheduled_date', '>=', etDateString(new Date()))
         // Dispatch-owned pending bookings (call follow-ups, outbound-review
-        // bookings) are left unarmed ON PURPOSE until the office confirms —
-        // arming them here would text the customer first. admin-schedule
-        // registers them at the office-confirm transition. NULL-safe on
-        // purpose: NOT (pending AND source_action IN (...)) is NULL — not
-        // true — for NULL source_action, which would silently drop ordinary
-        // pending visits with no source marker from the sweep.
-        .where(function () {
-          this.whereNot('ss.status', 'pending')
-            .orWhereNull('ss.source_action')
-            .orWhereNotIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
-        })
+        // bookings) used to be left unarmed until the office confirmed —
+        // owner ruling 2026-08-17: reminders arm AUTOMATICALLY for every
+        // future visit; the only opt-out is the customer's own portal/app
+        // notification prefs (and SMS suppression), both enforced at send
+        // time. Two call-created visits sat unarmed for weeks under the old
+        // carve-out and their customers got zero reminder texts. Healed rows
+        // still never send a booking-confirmation text (confirmation_sent
+        // is stamped true at registration), and the customer self-service
+        // visibility guards on DISPATCH_OWNED_PENDING_SOURCE_ACTIONS are
+        // untouched — this only arms the 72h/24h reminder lane.
         .whereNotExists(function () {
           this.select(1)
             .from('customers')
@@ -2005,9 +2003,21 @@ const AppointmentReminders = {
             createdAt: svc.created_at,
             });
           });
-          if (record) healed += 1;
+          if (record) {
+            healed += 1;
+          } else {
+            // A null return with the visit still present is registerVisitReminderInTx
+            // declining silently (bad ids / unparseable time) — a visit stuck in this
+            // state re-nulls EVERY run with no trace, which is how an unarmed row
+            // hid for days. Name it in the log so the next one is diagnosable.
+            logger.error(
+              `[appt-remind] Self-heal registration returned null for ${svc.id} `
+              + `(window_start=${svc.window_start ?? 'NULL'}, scheduled_date=${svc.scheduled_date})`
+            );
+          }
         } catch (err) {
-          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);
+          const where = (err.stack || '').split('\n')[1]?.trim() || '';
+          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}${where ? ` @ ${where}` : ''}`);
         }
       }
       if (healed) {

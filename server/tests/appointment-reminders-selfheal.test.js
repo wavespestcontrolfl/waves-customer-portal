@@ -193,3 +193,82 @@ describe('selfHealMissingReminderRows', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Self-heal registration sweep failed'));
   });
 });
+
+describe('owner ruling 2026-08-17 — reminders arm for every future visit', () => {
+  let trxVisitRows;
+  const makeTrxConn = () => {
+    const trx = jest.fn((table) => ({
+      where: jest.fn(({ id }) => ({
+        forUpdate: jest.fn(() => ({
+          first: jest.fn(async () => {
+            const row = (trxVisitRows || []).find((v) => v.id === id);
+            return row ? { customer_id: row.customer_id } : null;
+          }),
+        })),
+      })),
+    }));
+    trx.__isTrxConn = true;
+    return trx;
+  };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    trxVisitRows = [];
+    db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
+  });
+
+  test('the sweep no longer builds the dispatch-owned pending carve-out', async () => {
+    const chain = sweepChain([]);
+    db.mockImplementation(() => chain);
+
+    await AppointmentReminders.selfHealMissingReminderRows();
+
+    // The carve-out was the only whereNot in the sweep query; the ruling
+    // removed it so call-created pending visits arm like every other visit.
+    expect(chain.whereNot).not.toHaveBeenCalled();
+    expect(chain.where).not.toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  test('a dispatch-owned pending call-followup visit registers via the sweep', async () => {
+    const visit = {
+      id: 'svc-followup',
+      customer_id: 'cust-f',
+      scheduled_date: new Date('2026-08-25T00:00:00.000Z'),
+      window_start: '13:00:00',
+      service_type: 'Cockroach Treatment',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
+      .mockResolvedValue({ id: 'rem-f' });
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(1);
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), expect.objectContaining({
+      scheduledServiceId: 'svc-followup',
+      appointmentTime: '2026-08-25T13:00',
+      source: 'cron_selfheal',
+    }));
+  });
+
+  test('a silent null return from registration is logged with the visit inputs', async () => {
+    const visit = {
+      id: 'svc-null',
+      customer_id: 'cust-n',
+      scheduled_date: new Date('2026-08-25T00:00:00.000Z'),
+      window_start: '13:00:00',
+      service_type: 'Cockroach Treatment',
+    };
+    db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
+    jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx').mockResolvedValue(null);
+
+    const healed = await AppointmentReminders.selfHealMissingReminderRows();
+
+    expect(healed).toBe(0);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('returned null for svc-null'));
+  });
+});
