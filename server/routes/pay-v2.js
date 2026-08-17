@@ -317,7 +317,16 @@ router.get('/:token', async (req, res, next) => {
     // charged); payer-billed anchors and admin-stopped-dunning invoices
     // never appear.
     let previousBalance = null;
-    if (isInvoiceCollectibleStatus(data.status) && !data.payer_id) {
+    // Account credit that will FULLY cover the anchor suppresses the
+    // combined preview (codex r18 P1): /setup's auto-apply transitions the
+    // anchor to prepaid and returns covered_by_credit with NO PaymentIntent
+    // — a "Total due today" that included siblings would silently shrink
+    // to nothing at Pay time. The siblings stay on their own dunning rails.
+    let creditWillCoverAnchor = false;
+    try {
+      creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
+    } catch { creditWillCoverAnchor = false; }
+    if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
       const PayCombined = require('../services/pay-combined');
       const siblings = await PayCombined.combinedEligibleSiblings(data, {
         reusePaymentIntentId: data.stripe_payment_intent_id || null,

@@ -3161,6 +3161,29 @@ async function handleChargeRefunded(charge) {
               .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
           }
         }
+        // Residual reconciliation cases for this charge resolve WITH the
+        // money (codex r18 P2): unsettleable shares were parked as
+        // `<pi>:<invoiceId>` orphan rows — a full charge refund returns
+        // that cash too, so the case must not keep reporting unmatched
+        // money or keep fencing the invoice through
+        // assertNoInvoiceChargeReconciliationPending. Partial-refund/
+        // partial-dispute parks are their OWN cases and stay open.
+        const residualPiId = charge.payment_intent || combinedRows[0]?.stripe_payment_intent_id || null;
+        const resolvedResiduals = await trx('stripe_orphan_charges')
+          .where({ resolved: false, source: 'combined_pay_webhook' })
+          .where(function residualKeys() {
+            this.where('stripe_charge_id', chargeId);
+            if (residualPiId) this.orWhere('stripe_payment_intent_id', 'like', `${residualPiId}:%`);
+          })
+          .whereNot('stripe_payment_intent_id', 'like', '%:partial-%')
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: the combined charge was fully refunded (${refundId || 'refund id unknown'}) — the unmatched cash was returned to the customer`,
+          });
+        if (resolvedResiduals > 0) {
+          logger.info(`[stripe-webhook] Combined charge ${chargeId} full refund resolved ${resolvedResiduals} residual reconciliation case(s)`);
+        }
         logger.info(`[stripe-webhook] Combined charge ${chargeId} fully refunded — ${combinedRows.length} rows refunded at their shares, invoices reopened as refunded`);
         return combinedRows[0] || null;
       }
