@@ -11009,6 +11009,10 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        // Photos themselves are not persisted — record how many the
+        // installed report was generated against so a restore that can't
+        // bring them back invalidates the prose they grounded (codex r78).
+        generationPhotoCount: servicePhotos.length,
         preGenerationNotes: preGenerationNotesRef.current,
         // ... and the chip-ownership state those notes carry (codex r77).
         preGenerationChipDetached: preGenerationChipDetachedRef.current,
@@ -11317,6 +11321,16 @@ export function CompletionPanel({
     // otherwise adopt the pruned state as original and keep prose that
     // describes facts no longer submitted (codex r64).
     let restorePruned = false;
+    // The draft deliberately does not persist servicePhotos — if the
+    // installed report rode a nonzero photo set the restore couldn't bring
+    // back, the prose is grounded in inputs completion will no longer
+    // submit, so it invalidates like any other pruned generation input
+    // (codex r78).
+    if (generatedReportTextRef.current
+      && Number.isInteger(savedDraft.generationPhotoCount)
+      && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      restorePruned = true;
+    }
     const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues

@@ -76,6 +76,10 @@ const REPORT_ACCESS_CODE_RES = [
   // count like the space-linked forms — bounded segments, so ordinary
   // hyphenated prose never chains past four tokens (codex r70)
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}(?:-[a-z0-9#*]{1,11}){0,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
+  // the explicit password nouns accept LONG alphabetic tokens too
+  // ("the gate password is sunshineflorida") — concatenated-word
+  // credentials routinely exceed the 12-char bound above (codex r78)
+  /\b(?:passcode|password|passphrase)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,31}(?:-[a-z0-9#*]{1,15}){0,3}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // continuing-state linkers (was/remains/stays/became/continue-to-be/
   // has-been/modal-be/going-to-be/changed-to) bind lowercase tokens too
   // (codex r72) — but ONLY hyphenated ones: after "was"/"remains" a plain

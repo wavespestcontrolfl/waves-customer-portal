@@ -375,6 +375,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // dog/cat re-entry, awarded EPA approval, long alphabetic passwords (r78)
+    expect(reportCopyRejection('Let your dog outside after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The cats can go outside in 2 hours.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The EPA awarded approval to this treatment.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate password is sunshineflorida.')).toBe('access_code');
+    expect(reportCopyRejection('The gate passphrase is bluewavesforever.')).toBe('access_code');
     // readiness-for-pets/children/foot-traffic timing forms (r77)
     expect(reportCopyRejection('The treated lawn will be ready for pets after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The yard is available for children in 2 hours.')).toMatch(/^banned:/);

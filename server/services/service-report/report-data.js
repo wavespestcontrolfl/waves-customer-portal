@@ -4268,8 +4268,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Today's Result refused (codex r26 on #3420).
     const governingSnapshots = [
       typedSnapshot,
+      // CUSTOMER-facing companions only, for staff too (codex r78):
+      // completion never offers the body to an internal_only companion, so
+      // treating one as a governing story for staff makes acceptance
+      // impossible and the admin preview would fall back to the legacy
+      // recap while the customer report promotes the reviewed body. The
+      // summary decision must match what the customer actually receives.
       ...(typedSnapshot ? [] : companionSnapshots.filter(
-        (snap) => staffViewer || snap.delivery === 'auto_send',
+        (snap) => snap.delivery === 'auto_send',
       )),
     ].filter((snap) => snap?.todaysResult);
     const typedStoryAcceptedBody = !governingSnapshots.length
