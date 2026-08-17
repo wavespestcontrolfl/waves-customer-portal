@@ -755,7 +755,7 @@ function commercialScenario() {
           perApplicationAdd: 41.52,
           monthlyAdd: 41.52,
           annualAdd: 498.18,
-          detail: 'Interior treatment on every visit. Remove it and your techs treat the exterior barrier only — tenant-reported interior issues are still covered on request.',
+          detail: 'Interior treatment on every visit. Remove it and visits treat the exterior barrier only — add it back anytime before you approve, or through our office afterward.',
         },
         setupFee: null,
         quoteRequired: false,

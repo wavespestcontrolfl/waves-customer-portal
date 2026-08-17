@@ -9852,12 +9852,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // whose only property IS the accepted one. Anything else: skip
             // and log so the office annotates the plan instead.
             const existingProps = await trx('customer_properties')
-              .where({ customer_id: customerId }).select('address_line1', 'address_line2');
-            // Full property tuple — street line AND unit (r6 P1: linkage
-            // treats address_line2 as identity, so "Apt 4" on file must not
-            // match an accepted "Apt 5"). parseEstimateAddress canonicalizes
-            // the unit into line 2 on the estimate side; a partial parse
-            // fails closed to not stamping.
+              .where({ customer_id: customerId })
+              .select('address_line1', 'address_line2', 'city', 'zip');
+            // Full property tuple — street line, unit, AND locality (r6/r7
+            // P1s: the post-commit linker distinguishes properties by line2
+            // and city/zip, so "Apt 4" must not match an accepted "Apt 5"
+            // and a same-street address in another city must not match at
+            // all). parseEstimateAddress canonicalizes the unit into line 2
+            // on the estimate side; a partial parse (no city/zip) fails
+            // closed to not stamping.
             const parsedScopeAddr = require('../services/estimate-property-linkage')
               .parseEstimateAddress(estimate.address);
             const normAddr = (v) => normalizeAddressForMatch(v || '');
@@ -9865,7 +9868,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               && !!parsedScopeAddr && parsedScopeAddr.partial !== true
               && normAddr(existingProps[0].address_line1).length >= 5
               && normAddr(existingProps[0].address_line1) === normAddr(parsedScopeAddr.address_line1)
-              && normAddr(existingProps[0].address_line2) === normAddr(parsedScopeAddr.address_line2);
+              && normAddr(existingProps[0].address_line2) === normAddr(parsedScopeAddr.address_line2)
+              && normAddr(existingProps[0].city) === normAddr(parsedScopeAddr.city)
+              && String(existingProps[0].zip || '').trim().slice(0, 5) === String(parsedScopeAddr.zip || '').trim().slice(0, 5);
             if (existingProps.length === 0 || singlePropIsAcceptedAddress) {
               prefs.interior_spray = false;
             } else {
@@ -17969,7 +17974,11 @@ function attachCommercialInteriorSelector(services = [], estData = {}) {
       perApplicationAdd: Number(option.perAppAdd) || 0,
       monthlyAdd: Number(option.monthlyAdd) || 0,
       annualAdd: Number(option.annualAdd) || 0,
-      detail: 'Interior treatment on every visit. Remove it and your techs treat the exterior barrier only — tenant-reported interior issues are still covered on request.',
+      // No "interior still covered on request" promise here (codex #3432 r7
+      // P1): the sold exterior-only scope instructs techs EXTERIOR ONLY on
+      // every visit, so interior work after acceptance goes through the
+      // office (and a reprice) — the copy must not promise otherwise.
+      detail: 'Interior treatment on every visit. Remove it and visits treat the exterior barrier only — add it back anytime before you approve, or through our office afterward.',
     };
   }
   return services;
