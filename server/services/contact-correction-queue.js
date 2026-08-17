@@ -160,11 +160,15 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
       const attached = await attachContactCorrectionContext(jobId, { senderPhone: existing.sender_phone, knex });
       if (!attached) return false;
     }
+    // The ATTACHED customer is authoritative (codex #3413 r34): the
+    // locked attach matched, snapshotted, and floored ONE customer — the
+    // route's earlier lookup could be stale across a phone reassignment,
+    // and overwriting the linkage here would pair customer A's id with
+    // customer B's baseline. The route's customerId is a guard only.
     const updated = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
       .update({
         status: 'queued',
-        customer_id: customerId,
         sms_log_id: smsLogId || null,
         // The body rides the queued transition itself (codex #3413 r32):
         // a transient failure of the earlier attachReservationBody would
@@ -416,19 +420,19 @@ async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex 
     // (codex #3413 r32): a fixed prefix limit let one noisy sender's
     // backlog fill the candidate window and starve every other sender's
     // eligible head behind it.
+    // The cap sits AFTER per-sender reduction and is applied IN SQL
+    // (r33/r34): heads are one row per sender, so blocked senders each
+    // consume exactly one slot; ordering + limiting the grouped set at
+    // the database keeps a mass-backlog sweep from materializing every
+    // sender head per kick.
     const headRows = await trx('contact_correction_jobs')
       .where({ status: 'queued' })
       .where('next_attempt_at', '<=', trx.fn.now())
       .groupBy('sender_key')
+      .orderBy('id', 'asc')
+      .limit(1000)
       .min({ id: 'id' });
-    // The cap sits AFTER per-sender reduction (r33): heads are one row
-    // per sender, so blocked senders each consume exactly one slot and a
-    // 1000-sender bound is a pure runaway backstop, not a starvation
-    // window.
-    const headIds = headRows
-      .map((r) => Number(r.id))
-      .sort((a, b) => a - b)
-      .slice(0, 1000);
+    const headIds = headRows.map((r) => Number(r.id)).sort((a, b) => a - b);
     if (!headIds.length) return [];
     const candidates = await trx('contact_correction_jobs')
       .whereIn('id', headIds)

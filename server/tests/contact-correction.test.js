@@ -2968,3 +2968,24 @@ describe('round-33 hardening', () => {
     expect(knex._data.customers[0].state).toBe('FL');
   });
 });
+
+describe('round-34 hardening', () => {
+  it('an ownership disclaimer in the preceding sentence blocks a narrowed name quote', async () => {
+    const body = "The account isn't mine. You have my name wrong; it should be Jane Smith";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'first_name', new_value: 'Jane', quote: 'you have my name wrong; it should be Jane Smith', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'you have my name wrong; it should be Jane Smith', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('inflected change language passes the entry prefilter', () => {
+    expect(detectContactCorrectionIntent('My address changed to 12 Oak St, Sarasota 34231')).toBe(true);
+    expect(detectContactCorrectionIntent('My email has changed to jane@example.com')).toBe(true);
+  });
+});

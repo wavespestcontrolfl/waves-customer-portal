@@ -131,7 +131,10 @@ function makeStubKnex(rowsByTable = {}) {
           const cur = groups.get(key);
           if (cur === undefined || r[srcCol] < cur[srcCol]) groups.set(key, r);
         }
-        return Promise.resolve([...groups.entries()].map(([key, row]) => ({ [chain._groupCol]: key, [alias]: row[srcCol] })));
+        let out = [...groups.entries()].map(([key, row]) => ({ [chain._groupCol]: key, [alias]: row[srcCol] }));
+        if (order) out = out.sort((x, y) => (x[order.col] < y[order.col] ? -1 : 1) * (order.dir === 'desc' ? -1 : 1));
+        if (lim != null) out = out.slice(0, lim);
+        return Promise.resolve(out);
       },
       limit(n) { lim = n; return chain; },
       forUpdate() { return chain; },
