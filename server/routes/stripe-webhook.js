@@ -3752,16 +3752,51 @@ async function handleRefundFailed(refund) {
           // bounce — is authoritative. Flipping them 'paid' would leave
           // every invoice paid and coverage active even if the debit later
           // fails (the failure path preserves paid rows).
-          const wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
+          let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
+          let debitAlreadyTerminal = false;
+          if (wasStillProcessing && row.status === 'refunded') {
+            // The debit may ALREADY be terminal (codex r34 P1): a
+            // payment_failed/canceled delivered before this bounce skipped
+            // the then-'refunded' rows, so no later intent event remains —
+            // restoring 'processing' from stale metadata would strand the
+            // allocation non-collectible forever. The LIVE intent decides;
+            // fail closed on an unreadable read.
+            const bounceStripeCheck = getStripe();
+            if (bounceStripeCheck && (row.stripe_payment_intent_id || rowPiId)) {
+              const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(row.stripe_payment_intent_id || rowPiId);
+              if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
+                debitAlreadyTerminal = true;
+                wasStillProcessing = false;
+              }
+            }
+          }
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
             stripe_refund_id: null,
-            ...(row.status === 'refunded' ? { status: wasStillProcessing ? 'processing' : 'paid' } : {}),
+            ...(row.status === 'refunded'
+              ? {
+                status: debitAlreadyTerminal ? 'failed' : (wasStillProcessing ? 'processing' : 'paid'),
+                ...(debitAlreadyTerminal ? { failure_reason: 'ACH debit terminated before settling (refund bounced afterwards)' } : {}),
+              }
+              : {}),
             metadata: JSON.stringify(nextMeta),
           });
           const invId = meta.invoice_id || null;
-          if (invId) {
+          if (invId && debitAlreadyTerminal) {
+            // Reopen like the failure path — the money never arrived.
+            const termInvoice = await trx('invoices').where({ id: invId, status: 'refunded' }).first();
+            if (termInvoice) {
+              await trx('invoices').where({ id: invId, status: 'refunded' }).update({
+                status: nextInvoiceStatusAfterFailedPayment(termInvoice),
+                paid_at: null,
+                stripe_payment_intent_id: null,
+                stripe_charge_id: null,
+                ach_processing_notified_at: null,
+                updated_at: new Date(),
+              });
+            }
+          } else if (invId) {
             const flipped = await trx('invoices')
               .where({ id: invId, status: 'refunded' })
               .update(wasStillProcessing
@@ -6787,16 +6822,56 @@ async function handleDisputeClosed(dispute) {
             // sync for that shape too.
             const alreadyRestoredByThisPi = invoice && invoice.status === 'paid'
               && invoicePi && disputedPiId && invoicePi === disputedPiId;
+            let restoredThisPass = false;
             if (restoreNow) {
-              await db('invoices').where({ id: invoice.id }).update({
-                status: 'paid',
-                paid_at: new Date().toISOString(),
-                stripe_payment_intent_id: row.stripe_payment_intent_id || null,
-                stripe_charge_id: row.stripe_charge_id || null,
-              });
-              restoredCount += 1;
+              // CONDITIONAL restore (codex r34 P1): the snapshot above was
+              // read unlocked — a /setup can mint a replacement PI in the
+              // gap, and an unconditional overwrite would stamp the
+              // disputed PI over a binding whose client secret the
+              // customer still holds. The WHERE re-verifies the binding at
+              // write time; zero rows = a replacement raced in → park the
+              // reinstated share instead.
+              const restoredRows = await db('invoices')
+                .where({ id: invoice.id })
+                .whereNot('status', 'paid')
+                .where(function bindingUnchanged() {
+                  this.whereNull('stripe_payment_intent_id');
+                  if (disputedPiId) this.orWhere('stripe_payment_intent_id', disputedPiId);
+                })
+                .update({
+                  status: 'paid',
+                  paid_at: new Date().toISOString(),
+                  stripe_payment_intent_id: row.stripe_payment_intent_id || null,
+                  stripe_charge_id: row.stripe_charge_id || null,
+                });
+              if (restoredRows > 0) {
+                restoredCount += 1;
+                restoredThisPass = true;
+              } else {
+                logger.warn(`[stripe-webhook] dispute ${dispute.id} won — invoice ${invId} binding changed before the restore committed; parking the reinstated share`);
+                await db('stripe_orphan_charges')
+                  .insert({
+                    stripe_payment_intent_id: `${disputedPiId || chargeId}:dispute-won:${dispute.id}:${invId}`,
+                    stripe_charge_id: row.stripe_charge_id || chargeId,
+                    customer_id: row.customer_id || null,
+                    invoice_id: invId,
+                    amount: Number(row.amount) || 0,
+                    source: 'combined_pay_webhook',
+                    original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but a replacement payment bound the invoice before the restore — credit or refund the reinstated share manually`,
+                  })
+                  .onConflict('stripe_payment_intent_id')
+                  .ignore();
+                try {
+                  await NotificationService.notifyAdmin(
+                    'dispute',
+                    `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                    `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but a replacement payment raced the restore — credit or refund the reinstated share in /admin/revenue.`,
+                    { icon: '⚠️', link: '/admin/revenue' },
+                  );
+                } catch { /* non-critical */ }
+              }
             }
-            if (restoreNow || alreadyRestoredByThisPi) {
+            if (restoredThisPass || alreadyRestoredByThisPi) {
               // Recovery sync on the restored money (codex r4 P1): a paid
               // prepay invoice re-activates its dispute-suspended term.
               // UNCAUGHT (codex r5 P1): a swallowed failure marks the event
