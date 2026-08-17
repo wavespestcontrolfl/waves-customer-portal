@@ -4032,6 +4032,14 @@ function EstimateViewPageInner() {
   const ctaPhaseRef = useRef('configure');
   // Serializes add-on toggle PUT+reload sequences (see onToggleAddOn).
   const addOnMutationChainRef = useRef(Promise.resolve());
+  // Bumped by every repricing mutation run (add-on/bond/interior, success or
+  // failure) — performAccept compares it across its chain-settle wait: a
+  // moved epoch means the totals/payment options the customer reviewed were
+  // repriced underneath the approval click, so the accept aborts back to
+  // configure instead of resuming its pre-toggle closure and sending a
+  // payment preference the repricing flow deliberately cleared
+  // (codex #3432 r13 P2).
+  const repriceEpochRef = useRef(0);
   const setCtaPhase = useCallback((phase) => {
     ctaPhaseRef.current = phase;
     setCtaPhaseState(phase);
@@ -4454,6 +4462,11 @@ function EstimateViewPageInner() {
         // the server applied), and the old revert-only path left the price
         // showing a set the server no longer prices.
         await loadEstimate({ preserveSelection: true }).catch(() => {});
+      } finally {
+        // Completion-time bump (not start-time): a run already in flight
+        // when performAccept captures the epoch must still move it before
+        // the settle-wait compare.
+        repriceEpochRef.current += 1;
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
@@ -4502,6 +4515,7 @@ function EstimateViewPageInner() {
         await loadEstimate({ preserveSelection: true }).catch(() => {});
       } finally {
         setBondBusy(false);
+        repriceEpochRef.current += 1;
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
@@ -4543,6 +4557,7 @@ function EstimateViewPageInner() {
         await loadEstimate({ preserveSelection: true }).catch(() => {});
       } finally {
         setInteriorBusy(false);
+        repriceEpochRef.current += 1;
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
@@ -4711,11 +4726,24 @@ function EstimateViewPageInner() {
       // estimate at the pre-toggle scope while the customer's last click 409s
       // behind it (codex #3432 r12 P2). Re-await until the chain ref is
       // stable — a click queued during the first await joins the chain.
+      const repriceEpochAtEntry = repriceEpochRef.current;
       let settledChain;
       do {
         settledChain = addOnMutationChainRef.current;
         await settledChain.catch(() => {});
       } while (settledChain !== addOnMutationChainRef.current);
+      // A repricing mutation ran while we waited — the totals and payment
+      // options the customer approved were rebuilt underneath the click (a
+      // successful toggle deliberately clears the payment choice; a failed
+      // one may have landed server-side before erroring). This closure's
+      // paymentPreference predates that, so abort back to configure and let
+      // the customer re-confirm against the current amount
+      // (codex #3432 r13 P2).
+      if (repriceEpochRef.current !== repriceEpochAtEntry) {
+        setCtaPhase('configure');
+        setError('Your plan was just updated — review the new price and confirm again.');
+        return;
+      }
       const r = await fetch(`${API_BASE}/estimates/${token}/accept`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
