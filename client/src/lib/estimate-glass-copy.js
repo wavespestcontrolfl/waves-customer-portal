@@ -480,6 +480,14 @@ export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
 }
 
 // ── Technical offer stacks (non-pest rows) ──────────────────────────────────
+// Commercial interior bullet + its exterior-only replacement: with the
+// selector set to exterior-only, "available on every visit" would contradict
+// the sold scope (the tech is instructed EXTERIOR ONLY), so the swapped
+// bullet states the real path back — the office and a reprice (codex #3432
+// r8). glassRowInclusions performs the swap off opts.interiorSelected.
+const COMMERCIAL_PEST_INTERIOR_BULLET = 'Interior treatment available on every visit — priced from your building, no surprise fees';
+const COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET = 'Exterior-only program — interior service can be added through our office, priced from your building';
+
 // Glass rewrites of PriceCard's SERVICE_INCLUSIONS, keyed by the same
 // serviceKey() slugs. Same facts as the baseline lists (what each program
 // actually does) plus guarantee lines already shipped elsewhere on the page
@@ -531,7 +539,7 @@ const GLASS_SERVICE_INCLUSIONS = {
   // claims. "Products applied" is what the service report already documents.
   commercial_pest: [
     'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
-    'Interior treatment available on every visit — priced from your building, no surprise fees',
+    COMMERCIAL_PEST_INTERIOR_BULLET,
     'Tenant-reported pests handled between visits — re-service requests are included in the plan',
     'Tenants can be added to the Waves app for arrival alerts and service reports',
     'Every visit documented — time on site, areas treated, and products applied',
@@ -543,11 +551,19 @@ const GLASS_SERVICE_INCLUSIONS = {
 // every other service gets its glass rewrite; unknown keys fall back to
 // null so PriceCard keeps the baseline SERVICE_INCLUSIONS list (fail-safe:
 // no glass list means no new claims).
-export function glassRowInclusions(rowServiceKey, visitsPerYear, includeSetupBullet = false) {
+export function glassRowInclusions(rowServiceKey, visitsPerYear, includeSetupBullet = false, opts = {}) {
   if (rowServiceKey === 'pest_control') {
     return glassPestInclusions(visitsPerYear, includeSetupBullet);
   }
-  return GLASS_SERVICE_INCLUSIONS[rowServiceKey] || null;
+  const stack = GLASS_SERVICE_INCLUSIONS[rowServiceKey] || null;
+  // Scope-aware commercial interior bullet: only an EXPLICIT exterior-only
+  // selection (false) swaps it — true/undefined/null keep the included copy.
+  if (rowServiceKey === 'commercial_pest' && stack && opts.interiorSelected === false) {
+    return stack.map((line) => (line === COMMERCIAL_PEST_INTERIOR_BULLET
+      ? COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET
+      : line));
+  }
+  return stack;
 }
 
 // ── Per-day value line ──────────────────────────────────────────────────────

@@ -3711,6 +3711,9 @@ export function ServiceSection({
         {current ? (
           <PriceCard
             frequency={current}
+            // Commercial interior selection (raw: true/false, or null when
+            // no selector) — drives the scope-aware inclusions bullet.
+            commercialInteriorSelected={section.interiorOption ? section.interiorOption.selected !== false : null}
             // Every eligible section badges its own card — multi-service
             // plans no longer hoist one plan-level badge (owner directive
             // 2026-07-10). The server's waveGuardTierEligible flag keeps

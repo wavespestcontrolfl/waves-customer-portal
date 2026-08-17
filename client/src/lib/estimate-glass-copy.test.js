@@ -277,6 +277,20 @@ describe('commercial glass release', () => {
     expect(glassServiceSlug('commercial_rodent_bait')).toBe('rodent_bait');
   });
 
+  it('swaps the interior bullet for the office-reprice line on an exterior-only selection', () => {
+    // codex #3432 r8: "available on every visit" would contradict the sold
+    // exterior-only scope (techs are instructed EXTERIOR ONLY).
+    const exteriorOnly = glassRowInclusions('commercial_pest', undefined, false, { interiorSelected: false });
+    const joined = exteriorOnly.join(' ');
+    expect(joined).not.toContain('available on every visit');
+    expect(joined).toContain('Exterior-only program — interior service can be added through our office');
+    // true / null / omitted all keep the included copy.
+    for (const opts of [{ interiorSelected: true }, { interiorSelected: null }, {}, undefined]) {
+      expect(glassRowInclusions('commercial_pest', undefined, false, opts).join(' '))
+        .toContain('Interior treatment available on every visit');
+    }
+  });
+
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {
     const stack = glassRowInclusions('commercial_pest');
     expect(Array.isArray(stack)).toBe(true);

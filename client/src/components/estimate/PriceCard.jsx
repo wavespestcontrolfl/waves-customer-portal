@@ -207,7 +207,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -708,6 +708,10 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   glassServiceSlug(String(row.service || row.key || row.label || '')),
                   row.visitsPerYear,
                   glassSetupBullet,
+                  // Scope-aware commercial interior bullet (codex #3432 r8):
+                  // an exterior-only selection swaps "available on every
+                  // visit" for the office-reprice path.
+                  { interiorSelected: commercialInteriorSelected },
                 )) || serviceInclusions(row)}
                 collapsible={glass}
               />
