@@ -80,6 +80,56 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     serviceProducts: [],
   };
 
+  test('per-basis recorded rates never land verbatim in actual_rate_per_1000 (codex PR #3419 r15)', async () => {
+    const completions = [];
+    const actuals = [];
+    const trx = (table) => ({
+      where: () => ({ first: () => Promise.resolve(null) }),
+      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      insert: (row) => {
+        if (String(table).startsWith('lawn_protocol_service_completions')) {
+          completions.push(row);
+          return {
+            onConflict: () => ({
+              merge: () => ({
+                returning: () => Promise.resolve([{ id: 'completion-1', ...row }]),
+              }),
+            }),
+          };
+        }
+        if (String(table).startsWith('lawn_protocol_product_actuals')) actuals.push(row);
+        return Promise.resolve([row]);
+      },
+    });
+
+    await recordLawnProtocolCompletion(trx, {
+      ...baseArgs,
+      plan: basePlan(),
+      completionInput: { inventoryDeductions: [] },
+      serviceProducts: [
+        { id: 'sp-acre', product_name: 'Manor', application_rate: 0.25, rate_unit: 'oz/acre' },
+        { id: 'sp-spot', product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' },
+        { id: 'sp-1k', product_name: 'LESCO T-Storm 2G Fungicide', application_rate: 1.5, rate_unit: 'lb/1000sf' },
+        { id: 'sp-bare', product_name: 'Talstar', application_rate: 2, rate_unit: 'oz' },
+      ],
+    });
+
+    expect(actuals).toHaveLength(4);
+    const byId = new Map(actuals.map((a) => [a.service_product_id, a]));
+    // /acre converts exactly (1 acre = 43.56 k sq ft), unit rebased.
+    expect(byId.get('sp-acre').actual_rate_per_1000).toBeCloseTo(0.25 / 43.56, 4);
+    expect(byId.get('sp-acre').actual_rate_unit).toBe('oz');
+    // Other per-basis units have no honest per-1,000 representation.
+    expect(byId.get('sp-spot').actual_rate_per_1000).toBeNull();
+    expect(byId.get('sp-spot').actual_rate_unit).toBeNull();
+    expect(JSON.parse(byId.get('sp-spot').metadata).recordedRateUnit).toBe('g/spot');
+    // Per-1,000 and bare units pass through unchanged.
+    expect(byId.get('sp-1k').actual_rate_per_1000).toBe(1.5);
+    expect(byId.get('sp-1k').actual_rate_unit).toBe('lb/1000sf');
+    expect(byId.get('sp-bare').actual_rate_per_1000).toBe(2);
+    expect(byId.get('sp-bare').actual_rate_unit).toBe('oz');
+  });
+
   test('no submitted checklist records empty checklist with zero missing tasks', async () => {
     const inserted = [];
     const completion = await recordLawnProtocolCompletion(fakeTrx(inserted), {

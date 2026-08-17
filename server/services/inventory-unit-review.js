@@ -55,7 +55,7 @@ function clampCap(raw, fallback) {
 // never be selected.
 const UNSUPPORTED_UNIT_SQL = `
   nullif(trim(coalesce(inventory_unit, '')), '') is not null
-  AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
+  AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg','each')
 `;
 
 // The catalog's CANONICAL storage keys — the exact strings a fixed row ends
@@ -64,7 +64,7 @@ const UNSUPPORTED_UNIT_SQL = `
 // to resolveInventoryUnitAlias, which decides park-vs-fix), plus the whole
 // oz family ('oz'/'ounce' in any case/plural), which is ambiguous and must
 // never even occupy a slot in the capped batch.
-const CANONICAL_STORAGE_UNITS = ['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg'];
+const CANONICAL_STORAGE_UNITS = ['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg', 'each'];
 const OZ_FAMILY_SQL = "regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') IN ('oz','ounce')";
 
 /**

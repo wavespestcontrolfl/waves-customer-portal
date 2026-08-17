@@ -2,12 +2,19 @@ function normalizeInventoryUnit(unit) {
   return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/s$/, '');
 }
 
-// A "/gal" unit (oz/gal, fl_oz/gal, g/gal) is a mix concentration, not a
-// quantity — an amount recorded against it is the amount of concentrate.
-// Strip the dilution suffix so inventory math runs on the base unit.
+// A per-basis unit is a rate, not a quantity: "/gal" mix concentrations
+// (oz/gal), and the label-native bases the rate-render backfill added
+// (g/spot, fl_oz/100gal, ml/inch dbh, each/station, …). An amount recorded
+// against one is the amount of PRODUCT in the base unit, so strip the basis
+// suffix so inventory deduction and the compliance quantity run on a
+// convertible base unit. "/1000sf" units are the one exception: bare
+// per-1,000 handling is a catalog-wide preexisting convention and they pass
+// through unchanged, as before.
 function baseQuantityUnit(unit) {
   const raw = String(unit || '').trim();
-  return raw.toLowerCase().endsWith('/gal') ? raw.slice(0, -'/gal'.length) : unit;
+  const slash = raw.indexOf('/');
+  if (slash <= 0 || raw.toLowerCase().endsWith('/1000sf')) return unit;
+  return raw.slice(0, slash);
 }
 
 const INVENTORY_UNITS = {
@@ -29,14 +36,48 @@ const INVENTORY_UNITS = {
   g: { dimension: 'weight', factor: 0.035274 },
   gram: { dimension: 'weight', factor: 0.035274 },
   kg: { dimension: 'weight', factor: 35.274 },
+  // Count-based stock (bait stations, briquets, dunks, blox, cartridges —
+  // the each/* label bases): a discrete item count, its own dimension.
+  // Deliberately NO cross-dimension conversion: item weight/volume varies
+  // per product and inventing a per-item factor here would fabricate
+  // deduction quantities — count stock must be kept in 'each'.
+  each: { dimension: 'count', factor: 1 },
 };
 
 function unitDefinition(unit) {
   return INVENTORY_UNITS[normalizeInventoryUnit(unit)] || null;
 }
 
+// Rate-unit vocabulary accepted on application records — the single
+// allowlist shared by the /complete route and the pest recap (codex P1
+// r11): both closeout paths must reject unknown units before they reach
+// service_products and the FDACS ledger.
+const VALID_RATE_UNITS = new Set([
+  'oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'each',
+  'oz/gal', 'fl_oz/gal', 'g/gal', 'ml/gal', 'lb/gal', 'gal/gal',
+  'oz/1000sf', 'lb/1000sf', 'g/1000sf',
+  // Label-native per-basis units carried in products_catalog default_unit
+  // (rate-render backfill): gel spot placements, 100-gal dilutions,
+  // trunk-injection doses, per-acre broadcast, ornamental-bed rates, and
+  // station/placement densities.
+  'g/spot', 'fl_oz/100gal', 'oz/100gal',
+  'ml/inch dbh', 'g/inch dbh', 'ml/palm',
+  'oz/acre', 'fl_oz/acre', 'lb/acre', 'gal/acre',
+  'lb/100sf', 'each/100sf', 'each/acre', 'fl_oz/50ft',
+  'each/20ft', 'each/station', 'each/placement',
+]);
+
+function isValidRateUnit(unit) {
+  return VALID_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+}
+
 function conversionBasis(fromDef, toDef) {
   if (!fromDef || !toDef) return null;
+  // Ambiguous 'oz' can only stand in for a measured dimension — never for
+  // a count ('oz' of bait stations is not a number of stations).
+  const measurable = (dim) => dim === 'volume' || dim === 'weight';
+  if (fromDef.dimension === 'ambiguous' && !measurable(toDef.dimension)) return null;
+  if (toDef.dimension === 'ambiguous' && !measurable(fromDef.dimension)) return null;
   const fromDimension = fromDef.dimension === 'ambiguous' ? toDef.dimension : fromDef.dimension;
   const toDimension = toDef.dimension === 'ambiguous' ? fromDef.dimension : toDef.dimension;
   if (!fromDimension || !toDimension || fromDimension !== toDimension) return null;
@@ -90,6 +131,8 @@ function describeInventoryConversion(amount, fromUnit, toUnit) {
 
 module.exports = {
   INVENTORY_UNITS,
+  VALID_RATE_UNITS,
+  isValidRateUnit,
   baseQuantityUnit,
   convertInventoryQuantity,
   describeInventoryConversion,

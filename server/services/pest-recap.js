@@ -29,6 +29,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
+const { isValidRateUnit } = require('./inventory-units');
 const { etDateString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -119,28 +120,72 @@ async function buildRecapContext(serviceId, knex = db) {
     .where({ active: true })
     .orderBy('category')
     .orderBy('name')
-    .select('id', 'name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit')
+    .select(
+      'id', 'name', 'category', 'active_ingredient', 'moa_group',
+      // Rate-prefill inputs: the modal computes the same prefill as
+      // CompletionPanel (per-1,000 verified rate first, else the per-basis
+      // display default's low bound) and shows it as an EDITABLE field —
+      // the persisted rate is technician-confirmed, never a silent default.
+      // application_method is a prefill INPUT too (codex P1 r7): an
+      // explicit catalog method (e.g. foliar_spray) suppresses the pest
+      // perimeter-spray inference and with it the 4-oz house default —
+      // omitting it here would feed the shared resolver different inputs
+      // than CompletionPanel receives.
+      'default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000',
+      // The per-1,000 label ceiling for the modal's over-label warning
+      // (codex P1 r19) — per-basis ceilings come from the display band.
+      'max_label_rate_per_1000',
+      'application_method',
+    )
     .catch(() => []);
 
+  // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
+  // a transient error would let the modal treat a real completed visit as
+  // fresh and submit an authoritative empty set that erases and retracts
+  // its applications once the error clears. The flag makes the modal fail
+  // closed instead.
+  let existingRecordLoadFailed = false;
   const existingRecord = await knex('service_records')
     .where({ scheduled_service_id: serviceId })
     .orderBy('created_at', 'desc')
     .first('id', 'technician_notes', 'status')
-    .catch(() => null);
+    .catch(() => {
+      existingRecordLoadFailed = true;
+      return null;
+    });
 
   // Products already recorded on the existing record, so reopening a recap
   // shows (and preserves) the chemicals already applied instead of starting
-  // from an empty selection.
+  // from an empty selection. A FAILED load is not an empty list (codex P1,
+  // PR #3419 r13): the flag tells the modal its picker cannot speak for
+  // the recorded set, so it must not submit an authoritative
+  // (productsConfirmed) replacement that would erase and retract real
+  // applications over a transient error.
+  let productsLoadFailed = false;
+  // product_id lets the modal match a recorded row to its catalog entry
+  // by stable id (codex P2 r16) — a rename between visits would otherwise
+  // duplicate the product on resubmit. Column-guarded like the writers.
+  const hasProductIdCol = existingRecord
+    ? await knex.schema.hasColumn('service_products', 'product_id').catch(() => false)
+    : false;
   const existingProducts = existingRecord
     ? await knex('service_products')
       .where({ service_record_id: existingRecord.id })
-      .select('product_name', 'product_category', 'active_ingredient', 'moa_group')
-      .catch(() => [])
+      .select([
+        'product_name', 'product_category', 'active_ingredient', 'moa_group',
+        'application_rate', 'rate_unit',
+        ...(hasProductIdCol ? ['product_id'] : []),
+      ])
+      .catch(() => {
+        productsLoadFailed = true;
+        return [];
+      })
     : [];
 
   return {
     ok: true,
     eligible,
+    existingRecordLoadFailed,
     service: {
       id: svc.id,
       customerId: svc.customer_id,
@@ -153,7 +198,9 @@ async function buildRecapContext(serviceId, knex = db) {
     },
     timeline,
     products,
-    existingRecord: existingRecord ? { ...existingRecord, products: existingProducts } : null,
+    existingRecord: existingRecord
+      ? { ...existingRecord, products: existingProducts, productsLoadFailed }
+      : null,
   };
 }
 
@@ -216,6 +263,16 @@ async function submitRecap({
   actorId,
   technicianNotes,
   products = [],
+  // Modern clients set true: the submitted product SET is deliberate, so
+  // an empty set is a full deselection (clear the recorded applications),
+  // not a legacy resend-only omission (codex P1 r11).
+  productsConfirmed = false,
+  // Recorded products the client could NOT represent in its picker
+  // (renamed/inactive catalog rows). An authoritative set preserves these
+  // by name instead of dropping authority for the whole submission —
+  // otherwise deselecting a VISIBLE product alongside one unrepresentable
+  // row would silently survive the partial path (codex P1 r16).
+  productsPreserve = [],
   customerRecap,
   sendSms = false,
   clientPestRating = null,
@@ -452,25 +509,359 @@ async function submitRecap({
       createdRecord = true;
     }
 
-    // 3. service_products for the chemicals the tech selected.
-    const productRows = (Array.isArray(products) ? products : [])
-      .map((p) => ({
-        service_record_id: recordId,
-        product_name: String(p.product_name || p.name || '').slice(0, 150),
-        product_category: p.product_category || p.category || null,
-        active_ingredient: p.active_ingredient || null,
-        moa_group: p.moa_group || null,
-        notes: p.notes || null,
-      }))
-      .filter((r) => r.product_name);
+    // 3. service_products for the chemicals the tech selected. The rate is
+    // TECHNICIAN-CONFIRMED: the recap modal collects it in an editable field
+    // (prefilled from the catalog default, same computation as
+    // CompletionPanel) and submits it per product. The server records only a
+    // submitted rate — it never writes a catalog default as an observed
+    // application (codex P1 r5): application_rate feeds the compliance
+    // ledger and application-limit math, which read it as ground truth.
+    const productEntries = (Array.isArray(products) ? products : [])
+      .map((p) => {
+        const rate = p.application_rate != null && p.application_rate !== ''
+          ? Number(p.application_rate)
+          : null;
+        const unit = String(p.rate_unit || '').trim();
+        return {
+          // Modern clients send the selected catalog row's id and
+          // rate_confirmed: true. Both are validated/consumed server-side
+          // below — neither is trusted as-is (codex P1s r9).
+          submittedProductId: p.product_id != null ? String(p.product_id) : null,
+          rateConfirmed: p.rate_confirmed === true,
+          row: {
+            service_record_id: recordId,
+            product_name: String(p.product_name || p.name || '').slice(0, 150),
+            product_category: p.product_category || p.category || null,
+            active_ingredient: p.active_ingredient || null,
+            moa_group: p.moa_group || null,
+            notes: p.notes || null,
+            ...(Number.isFinite(rate) && rate > 0 && unit
+              ? { application_rate: rate, rate_unit: unit.slice(0, 50) }
+              : {}),
+          },
+        };
+      })
+      .filter((e) => e.row.product_name);
+    const productRows = productEntries.map((e) => e.row);
     // Replace product rows only when this submit specifies a set, so an
-    // explicit re-selection isn't additive. An EMPTY submission must not
-    // wipe the recorded applications: reopening a completed recap to
-    // re-send (the modal starts with no products selected) would otherwise
-    // delete the service's chemical history. Empty = leave existing rows.
-    if (productRows.length) {
-      await trx('service_products').where({ service_record_id: recordId }).del();
-      await trx('service_products').insert(productRows);
+    // explicit re-selection isn't additive. An EMPTY submission from a
+    // legacy client must not wipe the recorded applications (resend-only
+    // reopen). A modern client marks its set deliberate with
+    // productsConfirmed, so a CONFIRMED empty set is a full deselection
+    // (codex P1 r11): the recorded rows are cleared and every attributable
+    // ledger row retracted, same as deselecting them one by one.
+    const preserveNames = (Array.isArray(productsPreserve) ? productsPreserve : [])
+      .map((n) => String(n || '').trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 100);
+    const confirmedEmptyReplace = productsConfirmed === true
+      && productRows.length === 0
+      && Array.isArray(products)
+      && !createdRecord;
+    if (productRows.length || confirmedEmptyReplace) {
+      // Resolve each submitted catalog id to a REAL catalog row before
+      // anything is persisted (codex P1 r9): the exact id keys the
+      // compliance ledger identity, so a name-pattern fallback ("Advion
+      // Cockroach Gel" ilike-matching "Advion Cockroach Gel Bait") is used
+      // only for payloads without an id. id::text comparison so a garbage
+      // id from an arbitrary caller can't throw a cast error mid-trx.
+      const hasProductIdCol = await trx.schema
+        .hasColumn('service_products', 'product_id')
+        .catch(() => false);
+      const hasMethodCol = await trx.schema
+        .hasColumn('service_products', 'application_method')
+        .catch(() => false);
+      for (const entry of productEntries) {
+        // Rate units share the /complete allowlist (codex P1 r11): a
+        // typo'd or unsupported unit from a stale client or direct API
+        // caller must not reach service_products or the FDACS ledger.
+        if (entry.row.rate_unit && !isValidRateUnit(entry.row.rate_unit)) {
+          const err = new Error(`Invalid product unit for ${entry.row.product_name}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
+        if (entry.submittedProductId == null) continue;
+        const catalog = await trx('products_catalog')
+          .whereRaw('id::text = ?', [entry.submittedProductId])
+          .first('id', 'name', 'category', 'active_ingredient', 'moa_group', 'application_method', 'active');
+        // A supplied id that doesn't resolve is REJECTED, not silently
+        // demoted to the name path (codex P1 r11) — same contract as the
+        // /complete validation; the id-less legacy path stays for
+        // payloads that never sent one. The throw rolls the trx back.
+        if (!catalog) {
+          const err = new Error(`Product not found: ${entry.submittedProductId}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
+        if (catalog.active === false) {
+          const err = new Error(`Product is inactive: ${catalog.name}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
+        entry.catalogId = catalog.id;
+        if (hasProductIdCol) entry.row.product_id = entry.catalogId;
+        // Bind the persisted row's metadata to the VALIDATED catalog row
+        // (codex P1 r10) — the compliance writer resolves EPA/AI facts
+        // from the id, so the displayed name/category must come from the
+        // same row, not from caller-supplied fields that may be stale.
+        // Same authority order as the /complete path.
+        if (catalog.name) entry.row.product_name = String(catalog.name).slice(0, 150);
+        entry.row.product_category = catalog.category ?? entry.row.product_category;
+        entry.row.active_ingredient = catalog.active_ingredient ?? entry.row.active_ingredient;
+        entry.row.moa_group = catalog.moa_group ?? entry.row.moa_group;
+        // An explicit catalog method is a truthful application detail
+        // (codex P1 r10: the FDACS row otherwise records no method).
+        // Methodless products stay null — null is "not recorded"; a
+        // fabricated method would be a false field observation.
+        if (catalog.application_method && hasMethodCol) {
+          entry.row.application_method = catalog.application_method;
+        }
+      }
+      // A re-submitted product with NO rate from a client that did NOT
+      // confirm the field state (older client, API caller) keeps the rate
+      // already recorded for it: the previously observed value outranks
+      // absence and must survive the replace-not-merge delete below. A
+      // rate-less row WITH rate_confirmed is a deliberate clear (codex P1
+      // r9) — the tech removed a wrong rate, so nothing is restored.
+      const rateless = productEntries
+        .filter((e) => e.row.application_rate == null && !e.rateConfirmed);
+      if (rateless.length && !createdRecord) {
+        const priorRows = await trx('service_products')
+          .where({ service_record_id: recordId })
+          .select([
+            'product_name', 'application_rate', 'rate_unit',
+            ...(hasProductIdCol ? ['product_id'] : []),
+          ])
+          .catch(() => []);
+        const withRate = (Array.isArray(priorRows) ? priorRows : [])
+          .filter((r) => r.application_rate != null);
+        // Catalog id first (codex P2 r17): binding already rewrote the
+        // row's product_name to the CURRENT catalog name, so after a
+        // rename the recorded row's old name can never match — only the
+        // stable id can. Names remain the fallback for id-less rows.
+        const priorById = new Map(
+          withRate.filter((r) => r.product_id != null).map((r) => [String(r.product_id), r]),
+        );
+        const priorByName = new Map(
+          withRate.map((r) => [String(r.product_name || '').trim().toLowerCase(), r]),
+        );
+        for (const e of rateless) {
+          const prior = (e.catalogId != null ? priorById.get(String(e.catalogId)) : null)
+            || priorByName.get(String(e.row.product_name).trim().toLowerCase());
+          if (prior) {
+            e.row.application_rate = prior.application_rate;
+            e.row.rate_unit = prior.rate_unit;
+          }
+        }
+      }
+      // Product-less legacy ledger rows (product_id NULL — a supported
+      // legacy state in the FDACS writer) are reachable ONLY through
+      // their service_product_id link, which the delete below SET-NULLs.
+      // Capture them WITH their source row's product name BEFORE the FK
+      // link is erased (codex P1 r14) so the replace can reconcile them:
+      // a same-name replacement row re-adopts its legacy row (one record,
+      // no second identified row minted beside it), and an authoritative
+      // set retracts the leftovers like any other deselected application
+      // — the retraction sweep's product_id predicate can't reach them.
+      const legacyLedgerRows = createdRecord
+        ? []
+        : await trx('property_application_history')
+          .leftJoin('service_products', 'property_application_history.service_product_id', 'service_products.id')
+          .where('property_application_history.service_record_id', recordId)
+          .whereNull('property_application_history.product_id')
+          .whereNotNull('property_application_history.service_product_id')
+          .select('property_application_history.id as ledger_id', 'service_products.product_name');
+      const legacyByName = new Map();
+      for (const row of (Array.isArray(legacyLedgerRows) ? legacyLedgerRows : [])) {
+        const name = String(row.product_name || '').trim().toLowerCase();
+        if (name && !legacyByName.has(name)) legacyByName.set(name, row.ledger_id);
+      }
+      // An AUTHORITATIVE set (productsConfirmed) replaces everything; an
+      // UNCONFIRMED set replaces only the rows it names — a recorded
+      // product the client could not represent (inactive/renamed, so the
+      // modal cleared productsConfirmed) must survive a partial resubmit
+      // (codex P1 r12), keeping both its service_products row and its
+      // live ledger link.
+      if (productsConfirmed === true) {
+        let clearQuery = trx('service_products').where({ service_record_id: recordId });
+        if (preserveNames.length) {
+          // The named unrepresentable rows (and their live ledger links)
+          // survive an otherwise-authoritative replace (codex P1 r16).
+          clearQuery = clearQuery.whereRaw(
+            'LOWER(TRIM(product_name)) != ALL(?::text[])',
+            [preserveNames],
+          );
+        }
+        await clearQuery.del();
+      } else {
+        await trx('service_products')
+          .where({ service_record_id: recordId })
+          .whereRaw('LOWER(TRIM(product_name)) = ANY(?::text[])', [
+            productRows.map((r) => String(r.product_name).trim().toLowerCase()),
+          ])
+          .del();
+      }
+      const insertedProducts = productRows.length
+        ? await trx('service_products')
+          .insert(productRows)
+          .returning(['id', 'product_name', 'application_rate', 'rate_unit'])
+        : [];
+      // The delete above SET-NULLs the compliance ledger's
+      // (property_application_history) service_product_id link, and the
+      // ledger's stable (service_record_id, product_id) identity makes
+      // createComplianceRecords skip — not replace — these applications on
+      // any later run. A recap that edits a recorded rate must not leave
+      // the ledger (the DACS inspector export and application-limit caps
+      // read it as ground truth) holding the stale value (codex P1 r7):
+      // re-link each replacement row to its ledger row and sync the
+      // recorded rate, in the same trx as the replace so the report and
+      // the ledger can never diverge. The validated exact catalog id wins;
+      // the ledger writer's name resolution is the id-less fallback. A
+      // rate-less row from a legacy client leaves the ledger rate standing
+      // (absence never erases an observed value); a CONFIRMED clear (codex
+      // P1 r9) clears the ledger rate with it.
+      const linkedCatalogIds = [];
+      const insertedList = Array.isArray(insertedProducts) ? insertedProducts : [];
+      for (let i = 0; i < insertedList.length; i += 1) {
+        const sp = insertedList[i];
+        // returning() preserves insert order, so the entry metadata
+        // (validated catalog id, rate_confirmed) pairs by index.
+        const entry = productEntries[i] || {};
+        if (!sp?.id || !sp.product_name) continue;
+        let ledgerProductId = entry.catalogId ?? null;
+        if (ledgerProductId == null) {
+          const catalog = await trx('products_catalog')
+            .where('name', 'ilike', `%${sp.product_name}%`)
+            .first('id');
+          ledgerProductId = catalog?.id ?? null;
+        }
+        const ledgerSyncPatch = {
+          service_product_id: sp.id,
+          // Re-selecting a previously deselected product un-retracts
+          // its ledger row — the re-link IS the correction record.
+          retracted_at: null,
+          retraction_reason: null,
+          // The validated catalog method reaches EXISTING ledger rows
+          // too (codex P1 r12) — createComplianceRecords skips the
+          // stable (service_record_id, product_id) row, so this sync is
+          // the only writer that can refresh its method.
+          ...(entry.row && entry.row.application_method
+            ? { application_method: entry.row.application_method }
+            : {}),
+          ...(sp.application_rate != null
+            ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
+            : entry.rateConfirmed
+              ? { application_rate: null, rate_unit: null }
+              : {}),
+        };
+        let synced = 0;
+        if (ledgerProductId != null) {
+          linkedCatalogIds.push(ledgerProductId);
+          synced = await trx('property_application_history')
+            .where({ service_record_id: recordId, product_id: ledgerProductId })
+            .update(ledgerSyncPatch);
+        }
+        // No identified ledger row took the sync — re-adopt a captured
+        // product-less legacy row of the same name instead (codex P1
+        // r14): the legacy row stays THE record of this application, and
+        // createComplianceRecords sees it linked so it never mints a
+        // second identified row beside it.
+        const legacyKey = String(sp.product_name).trim().toLowerCase();
+        const legacyId = legacyByName.get(legacyKey);
+        if (!synced && legacyId != null) {
+          legacyByName.delete(legacyKey);
+          await trx('property_application_history')
+            .where({ id: legacyId })
+            .update(ledgerSyncPatch);
+        }
+      }
+      // Deselected products (codex P1 r9): the replace removed their
+      // service_products rows, so their ledger rows still carry a NULL
+      // link after the re-link pass above. RETRACT them — never delete
+      // (codex P1 r10): the ledger is append-safe by design (the FK is ON
+      // DELETE SET NULL so rows survive product replacement), so the row
+      // stays as the auditable record of the correction while compliance
+      // reporting and application-limit totals (which filter
+      // retracted_at) mirror the corrected record. Rows with no catalog
+      // product are left standing: they can't be attributed to a specific
+      // product, and an unmatched-name replacement row keeps such a row
+      // as the record of its application. Only an AUTHORITATIVE set may
+      // retract (codex P1 r12) — an unconfirmed partial submit preserved
+      // its unmatched rows above, so absence from it proves nothing.
+      if (productsConfirmed === true) {
+        // Preserved (unrepresentable) products survive the replace, but
+        // an EARLIER pre-retraction-era replace may have left their
+        // identified ledger row orphaned (service_product_id nulled by ON
+        // DELETE SET NULL) — and linkedCatalogIds only carries submitted
+        // products, so the sweep would retract an application that is
+        // still on the service record (codex P1 r17). Re-link each
+        // preserved row's orphaned ledger row to its surviving
+        // service_products row and exclude its catalog id from the sweep.
+        if (preserveNames.length) {
+          const preservedRows = await trx('service_products')
+            .where({ service_record_id: recordId })
+            .whereRaw('LOWER(TRIM(product_name)) = ANY(?::text[])', [preserveNames])
+            .select(['id', 'product_name', ...(hasProductIdCol ? ['product_id'] : [])]);
+          for (const row of (Array.isArray(preservedRows) ? preservedRows : [])) {
+            let preservedCatalogId = row.product_id ?? null;
+            if (preservedCatalogId == null && row.product_name) {
+              const catalog = await trx('products_catalog')
+                .where('name', 'ilike', `%${row.product_name}%`)
+                .first('id');
+              preservedCatalogId = catalog?.id ?? null;
+            }
+            if (preservedCatalogId == null) continue;
+            linkedCatalogIds.push(preservedCatalogId);
+            await trx('property_application_history')
+              .where({ service_record_id: recordId, product_id: preservedCatalogId })
+              .whereNull('service_product_id')
+              .update({ service_product_id: row.id });
+          }
+        }
+        let staleLedgerQuery = trx('property_application_history')
+          .where({ service_record_id: recordId })
+          .whereNull('service_product_id')
+          .whereNotNull('product_id')
+          .whereNull('retracted_at');
+        if (linkedCatalogIds.length) {
+          staleLedgerQuery = staleLedgerQuery.whereNotIn('product_id', linkedCatalogIds);
+        }
+        await staleLedgerQuery.update({
+          retracted_at: new Date(),
+          retraction_reason: 'recap_deselected',
+        });
+        // Captured product-less rows no replacement re-adopted: their
+        // source row was deleted and the authoritative set does not
+        // contain them — retract them like any other deselected
+        // application (codex P1 r14).
+        const leftoverLegacyIds = [...legacyByName.values()];
+        if (leftoverLegacyIds.length) {
+          await trx('property_application_history')
+            .whereIn('id', leftoverLegacyIds)
+            .whereNull('service_product_id')
+            .whereNull('retracted_at')
+            .update({
+              retracted_at: new Date(),
+              retraction_reason: 'recap_deselected',
+            });
+        }
+      }
+      // A first-time recap completion (never through /complete) has NO
+      // ledger rows for the update above to hit — the recap was the only
+      // completion path that skipped the FDACS writer entirely (codex P1
+      // r8). Run the shared idempotent writer after the sync, in the same
+      // trx: rows the loop just re-linked are already ledgered (unique
+      // service_product_id / stable record+product identity) and are
+      // skipped; anything new — a fresh recap completion, a product added
+      // on an edit — gets its compliance row with the recap's
+      // technician-confirmed rate.
+      if (productRows.length) {
+        const ComplianceService = require('./compliance');
+        await ComplianceService.createComplianceRecords(recordId, { trx });
+      }
     }
 
     // Re-completing an EXISTING record rewrites its notes / rating / products —
