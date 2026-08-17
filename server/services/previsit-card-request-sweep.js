@@ -30,6 +30,10 @@
  *     IS a clearance decision and stamps it (runOutboundReviewConfirmHook);
  *     a lazily-activated legacy row (silent reschedule) is NOT and never
  *     re-admits on status alone (Codex #3361 r27 P1);
+ *   - never a customer with a LIVE RECURRING series (owner ruling
+ *     2026-08-15): a recurring plan is an established relationship even
+ *     when pre-portal history left no completed visit rows for the
+ *     first-time predicate to see — the backstop is for one-time bookings;
  *   - one visit per customer per run (the soonest), and ONLY for customers
  *     the funnel has never invited anywhere (no appointment_card_requests
  *     row, no card_link_sent_at stamp on any visit) — repeat nudges are a
@@ -55,6 +59,12 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // excluded from the sweep; the office confirmation is the clearance decision.
 const OFFICE_REVIEW_SOURCE_ACTIONS = require('./call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS;
 const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+// Shared active-plan status vocabulary (codex #3426 r1 P1): recurring
+// evidence must count every NON-TERMINAL row — an in-progress (en_route/
+// on_site) recurring visit is still an active plan — not just the sweep's
+// own pending/confirmed candidate statuses.
+const { TERMINAL_STATUSES, isMembershipCustomerRow, notMembershipCustomerSql } = require('./waveguard-existing-services');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const BATCH_CAP = 25;
 
 function sweepGateEnabled() {
@@ -74,12 +84,16 @@ function previsitCardInviteEligible({
   outboundReviewUncleared = false,
   cardLinkSentAt = null,
   customerEverInvited = false,
+  existingRecurringCustomer = false,
+  activePlanMember = false,
 } = {}) {
   if (!LIVE_VISIT_STATUSES.includes(String(status || ''))) return { send: false, reason: 'not_live' };
   if (isCallback || reServiceLabel) return { send: false, reason: 'callback_visit' };
   if (outboundReviewUncleared) return { send: false, reason: 'outbound_review_uncleared' };
   if (cardLinkSentAt) return { send: false, reason: 'already_texted' };
   if (customerEverInvited) return { send: false, reason: 'customer_already_invited' };
+  if (existingRecurringCustomer) return { send: false, reason: 'existing_recurring_customer' };
+  if (activePlanMember) return { send: false, reason: 'existing_plan_member' };
   return { send: true };
 }
 
@@ -186,6 +200,35 @@ async function runSweep(dbh = db) {
         .whereRaw('done.customer_id = s.customer_id')
         .where('done.status', 'completed');
     })
+    // Existing RECURRING customers are never backstopped (owner ruling
+    // 2026-08-15). The completed-history predicate above misses members
+    // whose service history predates the portal's visit rows (pre-portal
+    // imports carry no completed scheduled_services), so a 16-month member
+    // read as first-time and got a "finish booking" + cancel-fee text on a
+    // plan visit he'd already confirmed. A live recurring series — the
+    // candidate visit itself included — is its own proof of an established
+    // relationship; new plan conversions still get their card invite at
+    // booking time from the funnel's primary trigger.
+    .whereNotExists(function recurringPlan() {
+      this.select(dbh.raw('1'))
+        .from('scheduled_services as rec')
+        .whereRaw('rec.customer_id = s.customer_id')
+        .whereNotIn('rec.status', TERMINAL_STATUSES)
+        // The canonical recurring marker TRIO (codex #3426 r4 P1 — same set
+        // project-completion's hasActiveRecurringSchedule and pay-v2 read):
+        // a legacy top-level series row can identify recurrence through
+        // recurring_pattern alone, with is_recurring false/null and no
+        // parent id.
+        .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id').orWhereNotNull('rec.recurring_pattern'));
+    })
+    // Customer-LEVEL plan members are excluded IN the query, before the
+    // LIMIT (codex #3426 r4 P2): a JS-only filter after a fixed window let
+    // member rows crowd eligible one-time customers out of consideration
+    // entirely. The predicate is the SQL twin of isMembershipCustomerRow,
+    // exported by the SAME module so the tier vocabulary and the legacy
+    // monthly_rate fallback can never fork; the JS legs below stay as
+    // defense in depth.
+    .whereRaw(notMembershipCustomerSql('c'))
     // Never-invited is part of the QUERY (codex r1 P2): applying it after a
     // LIMIT let already-invited customers' visits starve eligible first-time
     // customers out of the window entirely.
@@ -202,7 +245,16 @@ async function runSweep(dbh = db) {
         .whereNotNull('v2.card_link_sent_at');
     })
     .orderBy([{ column: 's.scheduled_date', order: 'asc' }, { column: 's.window_start', order: 'asc' }])
-    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at', 's.call_sms_cleared_at', 's.call_sms_cleared_recipient')
+    // Customer-LEVEL plan evidence rides along for the shared membership
+    // predicate below (codex #3426 r3 P1): a legacy/pre-portal member can
+    // hold an active tier (or a legacy positive monthly_rate with no tier
+    // column ever populated) while owning NO nonterminal recurring visit
+    // row — the row-only NOT EXISTS above can't see them. The predicate is
+    // isMembershipCustomerRow (waveguard-existing-services — the same
+    // canonical evidence the admin "No Plan" badge and the estimate
+    // repricer read), applied in JS on the selected columns rather than
+    // re-encoded in SQL, so the vocabulary can never fork.
+    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at', 's.call_sms_cleared_at', 's.call_sms_cleared_recipient', 'c.waveguard_tier as customer_waveguard_tier', 'c.monthly_rate as customer_monthly_rate')
     .limit(500);
 
   const seenCustomers = new Set();
@@ -233,6 +285,14 @@ async function runSweep(dbh = db) {
       outboundReviewUncleared: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && !visit.call_sms_cleared_at,
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
+      existingRecurringCustomer: false, // same split: the recurringPlan NOT EXISTS owns the fast path, the locked recheck owns the race
+      // Customer-level membership (tier or legacy monthly_rate) excludes even
+      // without a live recurring row (codex #3426 r3 P1). Evaluated BEFORE
+      // the attempts counter, so members never burn the batch cap.
+      activePlanMember: isMembershipCustomerRow({
+        waveguard_tier: visit.customer_waveguard_tier,
+        monthly_rate: visit.customer_monthly_rate,
+      }),
     });
     if (!verdict.send) { skipped += 1; continue; }
 
@@ -245,8 +305,21 @@ async function runSweep(dbh = db) {
     attempts += 1;
     try {
       await dbh.transaction(async (trx) => {
+        // Rung 6 (customer-comms) closes the conversion race END TO END
+        // (codex #3426 r2): every plan-conversion writer holds
+        // `customer-comms:<id>` around its scheduled_services inserts
+        // (customer-comms-lock.js contract; estimate-converter takes it on
+        // both its own-transaction and caller-trx seeding paths), and this
+        // transaction stays open through the funnel call BELOW — send
+        // included. So a conversion either commits before this lock is
+        // granted (the recheck sees the recurring row and skips) or waits
+        // until after this commit (the customer was genuinely not recurring
+        // at send time). The private invite key alone couldn't do this —
+        // conversion writers never take it. Order vs the invite key is
+        // free of cycles: this sweep is that key's only taker.
+        await lockCustomerComms(trx, visit.customer_id);
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['previsit-card-invite', String(visit.customer_id)]);
-        const [reqRow, stampRow, liveCustomer] = await Promise.all([
+        const [reqRow, stampRow, liveCustomer, recurringRow] = await Promise.all([
           trx('appointment_card_requests as r')
             .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
             .where('v.customer_id', visit.customer_id)
@@ -258,12 +331,30 @@ async function runSweep(dbh = db) {
           // Archive race (codex r5): an admin archiving the customer between
           // the candidate query and this send must win — recheck under the
           // lock, fail toward not texting.
+          // Membership columns ride the same probe: the in-lock recheck must
+          // apply the customer-LEVEL plan evidence too (codex #3426 r3 P1) —
+          // a tier stamp landing between the candidate query and this send
+          // (self-booking-plan-sync enrollment / nightly reconcile) makes
+          // the customer a member. isMembershipCustomerRow deliberately
+          // WITHOUT the active===false carve-out isActivePlanCustomer
+          // applies: this is a prohibition, and an inactive member is still
+          // the wrong audience for a "finish booking" text — strictly
+          // fail-toward-not-texting.
           trx('customers')
             .where({ id: visit.customer_id })
             .whereNull('deleted_at')
-            .first('id'),
+            .first('id', 'waveguard_tier', 'monthly_rate'),
+          // Recurring-plan race (owner ruling 2026-08-15): a booking
+          // converted to a plan between the candidate query and this send
+          // makes the customer an existing recurring customer — recheck
+          // under the lock, fail toward not texting.
+          trx('scheduled_services as rec')
+            .where('rec.customer_id', visit.customer_id)
+            .whereNotIn('rec.status', TERMINAL_STATUSES)
+            .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id').orWhereNotNull('rec.recurring_pattern'))
+            .first('rec.id'),
         ]);
-        if (reqRow || stampRow || !liveCustomer) { skipped += 1; return; }
+        if (reqRow || stampRow || !liveCustomer || recurringRow || isMembershipCustomerRow(liveCustomer)) { skipped += 1; return; }
         const result = await requestCardForAppointment({
           scheduledServiceId: visit.id,
           trigger: 'previsit_backstop',

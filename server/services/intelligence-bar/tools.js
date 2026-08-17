@@ -8,7 +8,7 @@
  */
 
 const db = require('../../models/db');
-const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms, withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1040,6 +1040,16 @@ async function updateCustomer(customerId, updates) {
   let impliedLaneStamp = null;
   try {
     await db.transaction(async (trx) => {
+      // Membership-affecting writes join the customer-comms serialization
+      // (codex #3426 r6 P2): the previsit backstop sweep holds
+      // `customer-comms:<id>` through its membership recheck AND the SMS
+      // dispatch, so a tier/rate write that makes this customer a member
+      // either commits before the sweep's in-lock recheck reads or waits
+      // until after the send. Comms lock BEFORE the customers row lock
+      // (customer-comms-lock.js contract).
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+        await lockCustomerComms(trx, customerId);
+      }
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
@@ -1278,6 +1288,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
+        // Membership-affecting bulk writes join the customer-comms
+        // serialization (codex #3426 r6 P2) — same reason as updateCustomer.
+        // Comms locks BEFORE the row locks below, and in a STABLE (sorted)
+        // order so two concurrent bulk writers over overlapping id sets
+        // acquire in the same sequence instead of deadlocking.
+        for (const cid of [...customerIds].map(String).sort()) {
+          await lockCustomerComms(trx, cid);
+        }
         const beforeRows = await trx('customers')
           .whereIn('id', customerIds)
           .forUpdate()
@@ -1341,6 +1359,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
     let rowLaneStamp = null;
     try {
       await db.transaction(async (trx) => {
+        // Membership-affecting writes join the customer-comms serialization
+        // (codex #3426 r6 P2) — same rule as the single-edit path: comms
+        // lock BEFORE this row's lock. Per-row transactions each hold one
+        // key, so no cross-row ordering concern on this branch.
+        if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+          await lockCustomerComms(trx, customerId);
+        }
         // Same row-lock serialization as the single-edit path.
         const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
         const lockedMerged = { ...lockedBefore, ...clean };

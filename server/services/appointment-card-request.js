@@ -649,6 +649,56 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       }
     };
 
+    // Existing recurring customers never get the BACKSTOP ask (owner ruling
+    // 2026-08-15, codex #3426 r1 P2). The race with an in-flight plan
+    // conversion is closed by the CALLER: the sweep's transaction holds the
+    // rung-6 `customer-comms:<id>` advisory lock — the one every
+    // plan-conversion writer takes around its scheduled_services inserts —
+    // through this entire call, send included (codex #3426 r2). A
+    // conversion therefore commits either before that lock was granted
+    // (visible to this read) or after the send has already dispatched.
+    // This in-funnel recheck stays as defense in depth for the claim
+    // boundary: the one-text-ever claim above is the last boundary this
+    // funnel owns, so the prohibition is re-verified AFTER the claim and
+    // the claim released on evidence.
+    // Scoped to the backstop trigger only: booking-time triggers fire for a
+    // brand-new plan's own recurring rows by design. Status vocabulary is
+    // shared with waveguard-existing-services (an in-progress en_route/
+    // on_site recurring visit is still an active plan). Unlike the
+    // fail-toward-asking probes above, a lookup failure here fails toward
+    // NOT texting — this is a prohibition recheck, not an eligibility probe.
+    if (trigger === 'previsit_backstop') {
+      try {
+        const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
+        const recurringRow = await db('scheduled_services')
+          .where({ customer_id: visit.customer_id })
+          .whereNotIn('status', TERMINAL_STATUSES)
+          // Canonical recurring marker TRIO (codex #3426 r4 P1): legacy
+          // top-level series rows can carry recurring_pattern alone.
+          .where((qb) => qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id').orWhereNotNull('recurring_pattern'))
+          .first('id');
+        if (recurringRow) {
+          await releaseClaim();
+          return skip('existing_recurring_customer');
+        }
+        // Customer-LEVEL plan evidence too (codex #3426 r3 P1): a member's
+        // tier (or legacy positive monthly_rate) proves the relationship
+        // even when no nonterminal recurring visit row exists — same
+        // canonical predicate as the sweep's filter and locked recheck.
+        const memberRow = await db('customers')
+          .where({ id: visit.customer_id })
+          .first('waveguard_tier', 'monthly_rate');
+        if (memberRow && isMembershipCustomerRow(memberRow)) {
+          await releaseClaim();
+          return skip('existing_plan_member');
+        }
+      } catch (err) {
+        await releaseClaim();
+        logger.warn(`[appt-card-request] backstop recurring recheck failed — not texting: ${err.message}`);
+        return skip('recurring_recheck_failed');
+      }
+    }
+
     // Fresh rows insert WITHOUT sent_at — sent_at is the durable "a text
     // (probably) left" marker, stamped only once the provider outcome is
     // known or uncertain, so the stale-claim lease above can tell
