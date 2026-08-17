@@ -3097,7 +3097,7 @@ async function handleChargeRefunded(charge) {
           }
           if (rowFenced || tableFenced) {
             logger.warn(`[stripe-webhook] combined refund ${refundId} on charge ${chargeId} was already fenced as FAILED — skipping the refund stamp (Stripe kept the money)`);
-            return combinedRows[0] || null;
+            return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
           }
         }
         if (!isFullRefund) {
@@ -3125,7 +3125,7 @@ async function handleChargeRefunded(charge) {
               { icon: '⚠️', link: '/admin/revenue' },
             );
           } catch { /* non-critical */ }
-          return combinedRows[0] || null;
+          return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
         }
         // CUMULATIVE-full (codex r8 P1): charge.refunded went true through
         // MULTIPLE partial refunds — the earlier partials are already
@@ -3159,11 +3159,17 @@ async function handleChargeRefunded(charge) {
               { icon: '⚠️', link: '/admin/revenue' },
             );
           } catch { /* non-critical */ }
-          return combinedRows[0] || null;
+          return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
         }
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         for (const row of combinedRows) {
           const meta = rowMeta(row);
+          // Superseded pre-settlement markers stay canceled (codex r21 P2)
+          // — flipping the zeroed, customer-less marker back to 'refunded'
+          // would let it surface as the branch's primary row and pollute
+          // same-charge consumers; the real per-invoice rows carry the
+          // refund.
+          if (row.status === 'canceled' && meta.superseded_reason) continue;
           await trx('payments').where({ id: row.id }).update({
             status: 'refunded',
             refund_amount: row.amount,
@@ -3204,7 +3210,7 @@ async function handleChargeRefunded(charge) {
           logger.info(`[stripe-webhook] Combined charge ${chargeId} full refund resolved ${resolvedResiduals} residual reconciliation case(s)`);
         }
         logger.info(`[stripe-webhook] Combined charge ${chargeId} fully refunded — ${combinedRows.length} rows refunded at their shares, invoices reopened as refunded`);
-        return combinedRows[0] || null;
+        return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
       }
       // PRE-SETTLEMENT combined refund (codex r6 P0): charge.refunded can
       // arrive before payment_intent.succeeded wrote any allocation rows —
@@ -6355,12 +6361,36 @@ async function handleDisputeClosed(dispute) {
         }
       }
       if (Number(dispute.amount) < combinedClosedFullCents) {
-        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — parked at created, still needs manual reconcile`);
+        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — ${status === 'lost' ? 'parked case stands, still needs manual reconcile' : 'funds restored, case auto-resolved'}`);
+        // A restored partial (won/warning_closed) resolves its per-dispute
+        // reconciliation case (codex r21 P2) — Stripe put the money back, so
+        // no unmatched cash remains. The UPSERT also handles the
+        // closed-before-created ordering: a pre-created RESOLVED row makes
+        // the late created's onConflict-ignore insert a no-op instead of a
+        // fresh false-positive case. LOST keeps its case open (money gone,
+        // attribution still owed).
+        if (status === 'won' || status === 'warning_closed') {
+          await db('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute:${dispute.id}`,
+              stripe_charge_id: chargeId,
+              customer_id: null,
+              invoice_id: null,
+              amount: Number(amount),
+              source: 'combined_pay_webhook',
+              original_db_error: `Partial dispute ${dispute.id} on a combined balance charge closed as ${status}`,
+              resolved: true,
+              resolved_at: new Date(),
+              resolution_notes: `Automatically resolved: partial dispute ${dispute.id} closed as ${status} — Stripe restored the disputed amount`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .merge(['resolved', 'resolved_at', 'resolution_notes']);
+        }
         try {
           await NotificationService.notifyAdmin(
             'dispute',
             `PARTIAL combined dispute ${status}: $${amount}`,
-            `Partial dispute ${dispute.id} on combined charge ${chargeId} closed as ${status}. Shares were never auto-attributed — reconcile manually in /admin/revenue.`,
+            `Partial dispute ${dispute.id} on combined charge ${chargeId} closed as ${status}. ${status === 'lost' ? 'Shares were never auto-attributed — reconcile manually in /admin/revenue.' : 'The disputed amount was restored; its reconciliation case was auto-resolved.'}`,
             { icon: status === 'won' ? '✅' : '❌', link: '/admin/revenue' },
           );
         } catch { /* non-critical */ }
@@ -6576,12 +6606,31 @@ async function handleDisputeClosed(dispute) {
         // full-PI outcome marker either (codex r10 P1, same reasoning as
         // the created fallback).
         if (Number(dispute.amount) < Number(closedPi.amount || 0)) {
-          logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status} — parked case stands, no full-PI marker`);
+          logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status} — ${status === 'lost' ? 'parked case stands' : 'funds restored, case auto-resolved'}`);
+          // Same restored-outcome case resolution + late-created suppression
+          // as the post-settlement partial closure (codex r21 P2).
+          if (status === 'won' || status === 'warning_closed') {
+            await db('stripe_orphan_charges')
+              .insert({
+                stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute:${dispute.id}`,
+                stripe_charge_id: chargeId,
+                customer_id: null,
+                invoice_id: null,
+                amount: Number(amount),
+                source: 'combined_pay_webhook',
+                original_db_error: `Partial dispute ${dispute.id} on an unsettled combined balance charge closed as ${status}`,
+                resolved: true,
+                resolved_at: new Date(),
+                resolution_notes: `Automatically resolved: partial dispute ${dispute.id} closed as ${status} — Stripe restored the disputed amount`,
+              })
+              .onConflict('stripe_payment_intent_id')
+              .merge(['resolved', 'resolved_at', 'resolution_notes']);
+          }
           try {
             await NotificationService.notifyAdmin(
               'dispute',
               `PARTIAL combined dispute ${status} (pre-settlement): $${amount}`,
-              `Partial dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status}. Reconcile manually in /admin/revenue.`,
+              `Partial dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status}. ${status === 'lost' ? 'Reconcile manually in /admin/revenue.' : 'The disputed amount was restored; its reconciliation case was auto-resolved.'}`,
               { icon: status === 'won' ? '✅' : '❌', link: '/admin/revenue' },
             );
           } catch { /* non-critical */ }
