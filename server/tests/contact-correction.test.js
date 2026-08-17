@@ -3765,3 +3765,18 @@ describe('round-50 hardening', () => {
     expect(res.map((c) => c.field)).toEqual(['email']);
   });
 });
+
+describe('round-51 hardening', () => {
+  it('subjectless conditional changes never apply', async () => {
+    for (const body of [
+      'If approved, my new email is future@example.com',
+      'Unless accepted, my new email is future@example.com',
+    ]) {
+      mockCallAnthropic.mockResolvedValue({
+        ok: true,
+        json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
+      });
+      expect(await extractSmsContactCorrections({ body })).toEqual([]);
+    }
+  });
+});
