@@ -82,6 +82,17 @@ const REPORT_ACCESS_CODE_RES = [
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)
   /(?:["'‘’“”][A-Za-z0-9#*][A-Za-z0-9#*-]{1,14}(?:\s+[A-Za-z0-9#*][A-Za-z0-9#*-]{0,11}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
+  // unquoted lowercase positional credentials (codex r71): hyphenated
+  // tokens are distinctive enough to take the full positional window like
+  // UPPERCASE does ("Use blue-waves at the keypad") — plain prose words
+  // carry no hyphen, and the domain's ordinary hyphenated vocabulary
+  // (follow-up, touch-up, re-entry, …) is excluded, so "a follow-up for
+  // the keypad" and "use caution near the keypad" stay legal ...
+  /\b(?!(?:this|that|it|same|the|a|an|to|for|follow-up|touch-up|tune-up|clean-up|walk-through|check-in|move-in|move-out|drop-off|pick-up|on-site|re-entry|re-service|re-treat(?:ment)?|one-time|day-to-day|up-to-date|state-of-the-art)\b)[a-z][a-z0-9#*]*(?:-[a-z0-9#*]+){1,3}\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  // ... while ANY bounded lowercase token counts before an as-linked code
+  // noun ("use bluewaves as the gate code") — the as-linker names the token
+  // AS the credential, so only descriptive verbs/stopwords are excluded
+  /\b(?!(?:this|that|it|same|the|a|an|to|for|known|listed|used|posted|saved|stored|set|entered|kept|noted|labell?ed|marked|recorded|serves?|acts?|works?|functions?|doubles?)\b)[a-z][a-z0-9#*-]{1,14}\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)
@@ -164,8 +175,10 @@ function technicianReportCustomerCopy(notes) {
   // AFFIRMATIVE technician confirmation only (codex r66/r67): the subject
   // must be the technician and the tempered gaps refuse to cross a
   // negation, so "the technician did not confirm timing" (and a homeowner
-  // claiming to confirm) never unlock the exemption.
-  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
+  // claiming to confirm) never unlock the exemption. Failure and inability
+  // predicates are negations too — "the technician failed to confirm
+  // timing" is an explicitly UNCONFIRMED claim (codex r71).
+  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
   const screenText = TIMING_CONFIRM_RE.test(body)
     ? body.replace(SAFE_IDIOM_RE, 'once dry')
     : body;

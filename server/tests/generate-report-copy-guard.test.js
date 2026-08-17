@@ -317,6 +317,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // failure/inability predicates are negations too (r71)
+    const failed = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry; the technician failed to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(failed.body).toBeNull();
+    const unableTo = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician was unable to confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(unableTo.body).toBeNull();
     // perfect-continuous credential linkers (r66)
     expect(reportCopyRejection('The gate code has continued to be BLUE.')).toBe('access_code');
     const unconditional = parseCopy('WHAT WE DID\n\nWe treated the lawn and it is now safe for pets.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
@@ -347,6 +352,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // failed/unable confirmation predicates never unlock the safe-once-dry
+    // exemption + unquoted lowercase positional creds (r71)
+    expect(reportCopyRejection('Use blue-waves as the gate code.')).toBe('access_code');
+    expect(reportCopyRejection('Use blue-waves at the keypad.')).toBe('access_code');
+    expect(reportCopyRejection('Enter bluewaves as the gate code.')).toBe('access_code');
+    // negative pins keep a stopworded follow after "keypad" — a bare noun
+    // there already trips the r42 unlinked shape by design
+    expect(reportCopyRejection('Use caution near the keypad and secure the gate.')).toBeNull();
+    expect(reportCopyRejection('A follow-up for the keypad was scheduled.')).toBeNull();
     // usability adjectives join the accessible class + unquoted hyphenated
     // word creds behind an is-linker (r70)
     expect(reportCopyRejection('The treated area will be usable after thirty minutes.')).toMatch(/^banned:/);
