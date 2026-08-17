@@ -132,6 +132,9 @@ async function buildRecapContext(serviceId, knex = db) {
       // omitting it here would feed the shared resolver different inputs
       // than CompletionPanel receives.
       'default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000',
+      // The per-1,000 label ceiling for the modal's over-label warning
+      // (codex P1 r19) — per-basis ceilings come from the display band.
+      'max_label_rate_per_1000',
       'application_method',
     )
     .catch(() => []);

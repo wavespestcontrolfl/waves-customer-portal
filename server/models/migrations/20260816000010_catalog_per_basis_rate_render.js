@@ -59,13 +59,17 @@ const VERIFIED_BY = 'rate-render-backfill-2026-08-14';
 
 const DATA = [
   // ── Gel baits: grams per spot placement ─────────────────────────────
-  { name: 'Advion Ant Bait Gel', basis: 'display', rate: '0.1-1', unit: 'g/spot',
+  // Gel rows seed application_method bait_placement (codex P1 r19): their
+  // catalog category is plain 'Insecticide', so method inference would
+  // otherwise fall through to perimeter_spray — a spray method (demanding
+  // irrelevant linear footage) beside a g/spot placement rate.
+  { name: 'Advion Ant Bait Gel', basis: 'display', method: 'bait_placement', rate: '0.1-1', unit: 'g/spot',
     note: 'rate-render: 0.1-1 g per spot from the Syngenta label (EPA 100-1498, EPA PPLS 000100-01498-20200417.pdf): "Apply 0.1 to 1.0 gram spots" to active trails/nest sites.' },
-  { name: 'Advion Cockroach Gel Bait', basis: 'display', rate: '0.5', unit: 'g/spot',
+  { name: 'Advion Cockroach Gel Bait', basis: 'display', method: 'bait_placement', rate: '0.5', unit: 'g/spot',
     note: 'rate-render: ~0.5 g per spot from the Syngenta label (EPA 100-1484, EPA PPLS 000100-01484-20200626.pdf): spots of about 0.5 g, 1-3 spots/10 linear ft light-moderate, 3-5 heavy.' },
-  { name: 'Advion Evolution Cockroach Gel Bait', basis: 'display', rate: '0.5', unit: 'g/spot',
+  { name: 'Advion Evolution Cockroach Gel Bait', basis: 'display', method: 'bait_placement', rate: '0.5', unit: 'g/spot',
     note: 'rate-render: ~0.5 g per spot from the Syngenta Advion Evolution specimen label (EPA 100-1484): spots of about 0.5 g, 1-3 spots/10 linear ft light-moderate, 3-5 heavy.' },
-  { name: 'Vendetta Plus', basis: 'display', rate: '0.25-0.5', unit: 'g/spot',
+  { name: 'Vendetta Plus', basis: 'display', method: 'bait_placement', rate: '0.25-0.5', unit: 'g/spot',
     note: 'rate-render: 0.25-0.5 g per bait point from the MGK label (EPA 1021-2593, EPA PPLS 001021-02593-20200319.pdf): 4-6 points/100 sq ft light, 12-24 heavy.' },
 
   // ── Structural dilutions: per gallon of finished mix ────────────────

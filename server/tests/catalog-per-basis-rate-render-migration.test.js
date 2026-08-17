@@ -105,14 +105,15 @@ describe('up() fill-only + provenance', () => {
     await migration.up(fakeKnex(rows));
     expect(rows[0].default_rate).toBe(GEL.rate);
     expect(rows[0].default_unit).toBe(GEL.unit);
+    expect(rows[0].application_method).toBe('bait_placement');
     expect(fieldsOf(ownedFields(rows[0].label_source_note, GEL.note))).toEqual([
-      'default_rate', 'default_unit',
+      'default_rate', 'default_unit', 'application_method',
     ]);
     expect(rows[0].label_verified_by).toBe('rate-render-backfill-2026-08-14');
   });
 
   test('row with a preexisting rate is left entirely alone (atomic pair)', async () => {
-    const rows = [baseRow({ name: GEL.name, default_rate: '0.3' })];
+    const rows = [baseRow({ name: GEL.name, default_rate: '0.3', application_method: 'bait_placement' })];
     await migration.up(fakeKnex(rows));
     expect(rows[0].default_rate).toBe('0.3'); // admin value wins
     // Pairing an admin rate with our unit would mislabel it — no write.
@@ -122,7 +123,7 @@ describe('up() fill-only + provenance', () => {
   });
 
   test('unit-only placeholder ("oz" with no rate) is replaced by the label pair', async () => {
-    const rows = [baseRow({ name: GEL.name, default_unit: 'oz' })];
+    const rows = [baseRow({ name: GEL.name, default_unit: 'oz', application_method: 'bait_placement' })];
     const knex = fakeKnex(rows);
     await migration.up(knex);
     expect(rows[0].default_rate).toBe(GEL.rate);
@@ -154,6 +155,7 @@ describe('up() fill-only + provenance', () => {
       name: GEL.name,
       default_rate: GEL.rate, // preexisting value that EQUALS the backfill value
       default_unit: GEL.unit,
+      application_method: 'bait_placement',
       label_source_note: 'prior batch note',
     })];
     await migration.up(fakeKnex(rows));
