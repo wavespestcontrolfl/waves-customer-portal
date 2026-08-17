@@ -141,6 +141,28 @@ describe('extractEngineInputs injects commercialFloorsArmed from row evidence', 
     expect(pest.annual).toBeCloseTo(629.53, 2);
   });
 
+  test('post-split rows are never legacy evidence, even at exactly the legacy value (r5 P0)', () => {
+    // A NEW quote can round its combined price to exactly $900 while its
+    // exterior-only variant is lower — arming would clamp that variant up
+    // and erase a customer's toggled savings. The post-split markers
+    // (interiorOption / interiorScope) prove the row postdates the disarm.
+    const postSplitRow = {
+      service: 'commercial_pest',
+      annual: 900,
+      monthly: 75,
+      perApp: 225,
+      visitsPerYear: 4,
+      interiorScope: 'included',
+      interiorOption: { selected: true, combined: { annual: 900 }, exteriorOnly: { annual: 586.67 } },
+    };
+    const estData = { engineInputs: LEGACY_INPUTS, engineResult: { lineItems: [postSplitRow] } };
+    expect(extractEngineInputs(estData).commercialFloorsArmedServices).toBeUndefined();
+    // Marker alone (snapshot-less exterior-only path) is equally decisive.
+    const markerOnly = { service: 'commercial_pest', annual: 900, interiorScope: 'excluded' };
+    expect(extractEngineInputs({ engineInputs: LEGACY_INPUTS, engineResult: { lineItems: [markerOnly] } })
+      .commercialFloorsArmedServices).toBeUndefined();
+  });
+
   test('a stored/forged armed flag inside engineInputs is neutralized — evidence is server-derived per replay', () => {
     const estData = {
       engineInputs: { ...LEGACY_INPUTS, commercialFloorsArmedServices: ['commercial_pest'] },

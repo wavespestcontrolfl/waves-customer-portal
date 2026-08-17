@@ -48,6 +48,12 @@ function commercialFloorBoundServices(estData = {}) {
   const armed = new Set();
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
+    // Post-split rows are definitively NOT legacy evidence (codex #3432 r5
+    // P0): interiorOption/interiorScope shipped WITH the disarm, and a new
+    // combined price can round to the legacy value while its exterior-only
+    // variant is lower — arming would clamp that variant up and erase the
+    // customer's toggled savings on the next authoritative replay.
+    if (row.interiorOption || row.interiorScope) continue;
     const key = recurringServiceKey(row) || row.service;
     const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[key];
     if (!legacyMin) continue;

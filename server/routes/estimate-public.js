@@ -9840,17 +9840,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const commercialExteriorOnly = estData?.proposal?.enabled !== true
             && commercialInteriorExcludedFromEstimateData(estData);
           if (commercialExteriorOnly) {
-            // Customer-LEVEL preference: only safe to stamp when this is the
-            // customer's only property — previsit-brief reads the customer
-            // blob, and a multi-property customer's OTHER pest plans may
-            // include paid interior work (codex #3432 r4 P1). Multi-property:
-            // skip and log so the office annotates the plan instead.
-            const [{ count: propCount } = { count: 0 }] = await trx('customer_properties')
-              .where({ customer_id: customerId }).count('id as count');
-            if (Number(propCount) <= 1) {
+            // Customer-LEVEL preference: only safe to stamp when the accepted
+            // address is the customer's ONLY property — previsit-brief reads
+            // the customer blob, and other properties' pest plans may include
+            // paid interior work (codex #3432 r4 P1). The accepted address's
+            // customer_properties row is created post-commit
+            // (linkAcceptedEstimateProperty), so an existing single stored
+            // property only counts as "same property" when its street line
+            // matches the estimate address (r5 P1 — same matching idiom as
+            // pickAcceptCustomerMatch); zero stored rows = brand-new customer
+            // whose only property IS the accepted one. Anything else: skip
+            // and log so the office annotates the plan instead.
+            const existingProps = await trx('customer_properties')
+              .where({ customer_id: customerId }).select('address_line1');
+            const estAddr = normalizeAddressForMatch(estimate.address);
+            const singlePropIsAcceptedAddress = existingProps.length === 1 && (() => {
+              const line1 = normalizeAddressForMatch(existingProps[0].address_line1);
+              return line1.length >= 5 && !!estAddr
+                && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
+            })();
+            if (existingProps.length === 0 || singlePropIsAcceptedAddress) {
               prefs.interior_spray = false;
             } else {
-              logger.warn(`[estimate-accept] customer ${customerId}: exterior-only commercial scope NOT stamped to customer-level service_preferences (${propCount} properties on file) — annotate the plan/schedule for the tech.`);
+              logger.warn(`[estimate-accept] customer ${customerId}: exterior-only commercial scope NOT stamped to customer-level service_preferences (${existingProps.length} propert${existingProps.length === 1 ? 'y (address mismatch)' : 'ies'} on file) — annotate the plan/schedule for the tech.`);
             }
           }
           if (await trx.schema.hasColumn('customers', 'service_preferences')) {
