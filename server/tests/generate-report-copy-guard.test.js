@@ -331,6 +331,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();
+    // bring/take-back re-entry forms (r82)
+    expect(reportCopyRejection('Wait thirty minutes before bringing pets onto the treated lawn.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Pets can be brought back outside after thirty minutes.')).toMatch(/^banned:/);
     // allow-pets timing, long continuing-state passwords (r81)
     expect(reportCopyRejection('Wait thirty minutes before allowing pets onto the treated lawn.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The gate password remains sunshineflorida.')).toBe('access_code');
@@ -526,6 +529,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(containsProductName('This will help drive crabgrass pressure down.', drive, { wholeWord: true })).toBe(false);
     expect(containsProductName('We applied XLR8 to the treated areas.', drive, { wholeWord: true })).toBe(true);
     expect(containsProductName('We applied Drive XLR8 today.', drive, { wholeWord: true })).toBe(true);
+    // r82: punctuation-collapsed echoes match as a single word
+    expect(containsProductName('We applied BoraCare to the attic.', [{ name: 'Bora-Care' }], { wholeWord: true })).toBe(true);
+    expect(containsProductName('We applied TZone along the walkway.', [{ name: 'T-Zone SE' }], o)).toBe(true);
+    expect(containsProductName('We treated the bora bora palm bed.', [{ name: 'Bora-Care' }], { wholeWord: true })).toBe(true); // 'bora' is a distinctive token on its own
   });
 
   // r49 (#3420): the shared builder screens extraNames and fails CLOSED

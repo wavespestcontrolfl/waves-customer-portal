@@ -278,7 +278,9 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
     if (shortDistinctive.some((token) => wordSet.has(token))) return true;
     if (nameTokens.length >= 2) {
       const phrase = ` ${nameTokens.join(' ')} `;
-      if (normHay.includes(phrase)) return true;
+      // Punctuation-collapsed echoes match as a single word too —
+      // "BoraCare" for "Bora-Care" (codex r82).
+      if (normHay.includes(phrase) || wordSet.has(nameTokens.join(''))) return true;
       // Abbreviated echoes drop the formulation suffix ("T-Zone" for
       // "T-Zone SE") — adjacent token pairs match as phrases too, when the
       // pair carries at least one token that isn't generic vocabulary, a
@@ -290,7 +292,10 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
         // phrase ("t zone") — only fully-generic pairs are skipped.
         const hasIdentity = pair.some((token) => !isGeneric(token)
           && !/^\d+$/.test(token));
-        if (hasIdentity && normHay.includes(` ${pair[0]} ${pair[1]} `)) return true;
+        // ... and the pair collapses to one word the same way ("TZone"
+        // for "T-Zone SE", codex r82).
+        if (hasIdentity && (normHay.includes(` ${pair[0]} ${pair[1]} `)
+          || wordSet.has(`${pair[0]}${pair[1]}`))) return true;
       }
       // Brand-stem echoes for ALL-generic names ("Advance Termite Bait
       // Station" → "Advance bait stations"): the leading name token acts as

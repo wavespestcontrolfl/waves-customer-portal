@@ -11013,6 +11013,12 @@ export function CompletionPanel({
         // installed report was generated against so a restore that can't
         // bring them back invalidates the prose they grounded (codex r78).
         generationPhotoCount: servicePhotos.length,
+        // The lawn-assessment identity the installed report rode (same
+        // untouched-draft reasoning as the photo count) — a restore that
+        // finds a retaken/reconfirmed assessment must invalidate the
+        // prose generated from the old scores (codex r82).
+        generationLawnAssessmentId: lawnAssessmentId ?? null,
+        generationLawnAssessmentRevision: lawnAssessmentRevision ?? null,
         preGenerationNotes: preGenerationNotesRef.current,
         // ... and the chip-ownership state those notes carry (codex r77).
         preGenerationChipDetached: preGenerationChipDetachedRef.current,
@@ -11329,6 +11335,16 @@ export function CompletionPanel({
     if (generatedReportTextRef.current
       && Number.isInteger(savedDraft.generationPhotoCount)
       && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      restorePruned = true;
+    }
+    // Same contract for the lawn-assessment identity (codex r82): a
+    // retake/reconfirm while the draft waited means the installed prose
+    // describes the OLD scores — the baseline reset below would otherwise
+    // adopt the new assessment silently.
+    if (generatedReportTextRef.current
+      && 'generationLawnAssessmentId' in savedDraft
+      && ((savedDraft.generationLawnAssessmentId ?? null) !== (lawnAssessmentId ?? null)
+        || (savedDraft.generationLawnAssessmentRevision ?? null) !== (lawnAssessmentRevision ?? null))) {
       restorePruned = true;
     }
     const restoredFindings =
