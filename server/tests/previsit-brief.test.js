@@ -4312,3 +4312,35 @@ describe('estimate-status verbs ride the capitalized-run capture (post-#3423 liv
     ).reason).toBeTruthy();
   });
 });
+
+describe('codex #3428 r1 — disclaimer strip is whole-string only', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const noHistory = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true }, flags: [{ detail: 'gate on left side' }] } };
+
+  test('substantive claims appended to a disclaimer never ride the strip', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of [
+      'No prior visits on file; German roaches in the kitchen.',
+      'No prior visits — customer reports heavy ant pressure.',
+      'First visit. Recommend PhantomGuard barrier.',
+      'New customer, lawn shows chinch bug damage.',
+    ]) {
+      expect(validateBriefJson(
+        { ...BASE, last_visit_summary: s, customer_context: 'Gate on left side.' },
+        noHistory,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('stitched pure-disclaimer clauses still strip', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['New customer — no prior visits on file.', 'First visit; no service history recorded.', "This is the customer's first visit."]) {
+      const res = validateBriefJson(
+        { ...BASE, last_visit_summary: s, customer_context: 'Gate on left side.' },
+        noHistory,
+      );
+      expect(res.body).toBeTruthy();
+      expect(res.body.last_visit_summary).toBeNull();
+    }
+  });
+});

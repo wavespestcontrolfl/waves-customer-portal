@@ -2141,8 +2141,16 @@ function findUngroundedClaim(body, grounding) {
 // fallback in prod, 08-15/16). A pure disclaimer asserts the same absence
 // the grounding does — strip it to null instead of rejecting the leg.
 // Anything with a digit, a completed-work verb, or beyond these shapes
-// still falls through to the r46 guard and rejects.
-const FIRST_VISIT_DISCLAIMER_RE = /\b(?:no|zero)\s+(?:prior|previous|past)\s+(?:visits?|services?|treatments?|inspections?|records?|(?:service\s+)?history)\b|\bno\s+(?:service\s+)?history\s+on\s+file\b|\bfirst\s+(?:visit|service)\b|\bnew\s+(?:customer|account)\b/i;
+// still falls through to the r46 guard and rejects. Anchored to consume
+// the ENTIRE string (one or more stitched disclaimer clauses) — a
+// substring match would let substantive claims appended after the
+// disclaimer ("No prior visits; roaches in the kitchen") ride the strip
+// past every grounding scan (codex #3428 r1).
+const FIRST_VISIT_DISCLAIMER_CLAUSE = "(?:this\\s+(?:is|will\\s+be)\\s+(?:the\\s+)?(?:customer'?s?\\s+)?)?(?:(?:no|zero)\\s+(?:prior|previous|past)\\s+(?:visits?|services?|treatments?|inspections?|records?|(?:service\\s+)?history)|no\\s+(?:service\\s+)?history|first\\s+(?:visit|service)|new\\s+(?:customer|account))(?:\\s+(?:on\\s+file|recorded|yet|for\\s+this\\s+(?:customer|account|property|service\\s+line)|with\\s+waves(?:\\s+pest\\s+control)?))?";
+const FIRST_VISIT_DISCLAIMER_RE = new RegExp(
+  `^\\W*(?:${FIRST_VISIT_DISCLAIMER_CLAUSE})(?:[\\s,;:—–-]+(?:${FIRST_VISIT_DISCLAIMER_CLAUSE}))*[\\s.;!—–-]*$`,
+  'i',
+);
 const COMPLETED_WORK_VERB_RE = /\b(?:performed|completed|provided|rendered|treated|sprayed|serviced|applied|inspected)\b/i;
 
 // Full domain validation of one LLM JSON response. Returns
