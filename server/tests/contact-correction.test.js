@@ -3791,3 +3791,46 @@ describe('round-52 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-53 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('an unseparated passive conditional never applies', async () => {
+    for (const body of [
+      'If approved my new email is future@example.com',
+      'Unless accepted my new email is future@example.com',
+    ]) {
+      mockCallAnthropic.mockResolvedValue({
+        ok: true,
+        json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
+      });
+      expect(await extractSmsContactCorrections({ body })).toEqual([]);
+    }
+  });
+
+  it('a conditional call name never auto-applies', async () => {
+    const quote = 'if the court approves it, my name is actually Jane Smith and the old name is wrong';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: quote }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+});

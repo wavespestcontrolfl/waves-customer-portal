@@ -647,7 +647,7 @@ const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|
 // the condition occurs. The conditional token must lead into a
 // subject/determiner so polite framings ("when you get a chance, fix my
 // email") stay licensed.
-const CONDITIONAL_CHANGE_RE = /\b(?:if|unless|in\s+case|assuming|once|should)\s+(?:i|we|they|he|she|it|the|my|that|things?|everything)\b|\b(?:if|unless|in\s+case|assuming|once)\s+[\p{L}][^,;.!?\n]{0,40}(?:,|\bthen\b)/iu;
+const CONDITIONAL_CHANGE_RE = /\b(?:if|unless|in\s+case|assuming|once|should)\s+(?:i|we|they|he|she|it|the|my|that|things?|everything)\b|\b(?:if|unless|in\s+case|assuming|once)\s+[\p{L}][^,;.!?\n]{0,40}(?:,|\bthen\b)|\b(?:if|unless|once|assuming)\s+(?:it\s+is\s+|it'?s\s+|all\s+is\s+|everything\s+is\s+)?(?:approved|accepted|confirmed|completed|finali[sz]ed|done|signed|processed|paid|settled|closed|granted)\b/iu;
 
 // A NEGATED name statement is not a correction (r46): "my name is not
 // Jane Smith anymore" states the OLD name — staging its components would
@@ -1642,7 +1642,12 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // caller turn away must still stand down the rename.
       if (CALL_AUTO_FIELDS[c.field_name]
         && tpProbes.some((p) => NAME_OWNERSHIP_DISCLAIMER_RE.test(p)
-          || NEGATED_NAME_RE.test(p))) return false;
+          || NEGATED_NAME_RE.test(p)
+          // Future/condition-scoped statements hold on calls too (r53):
+          // "if the court approves it, my name is …" is not a present
+          // correction.
+          || FUTURE_CHANGE_RE.test(p)
+          || CONDITIONAL_CHANGE_RE.test(p))) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);
