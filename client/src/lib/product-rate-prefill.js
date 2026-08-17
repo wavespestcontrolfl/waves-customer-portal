@@ -134,9 +134,19 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
   // apply, start the tech at the label band's LOW end in the label's own
   // unit — parseFloat reads the low bound out of an "X-Y" band.
   const perBasisUnit = isPerBasisUnit(defaultUnit);
-  const labelDisplayRate = perBasisUnit
-    ? parseFloat(String(product.default_rate ?? product.defaultRate ?? ""))
-    : NaN;
+  const labelBandText = String(product.default_rate ?? product.defaultRate ?? "");
+  const labelDisplayRate = perBasisUnit ? parseFloat(labelBandText) : NaN;
+  // The band's UPPER bound ("X-Y" -> Y; single value -> itself) in the
+  // label's own unit — the high-rate review ceiling for per-basis rates
+  // (codex P1 r18): maxLabelRatePer1000 only covers per-1,000 products,
+  // so without this a band like "0.25-1.5 fl_oz/gal" or "1-16
+  // each/placement" had no reviewable maximum at all.
+  const labelBandParts = perBasisUnit
+    ? labelBandText.split("-").map((part) => parseFloat(part)).filter((n) => Number.isFinite(n) && n > 0)
+    : [];
+  const labelMaxRate = labelBandParts.length
+    ? labelBandParts[labelBandParts.length - 1]
+    : null;
   // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
   // tech a clean number.
   const rate = usePestSprayDefault
@@ -148,6 +158,7 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
         : catalogRate;
   return {
     rate,
+    labelMaxRate,
     rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
     amountUnit: usePestSprayDefault
       ? "oz"

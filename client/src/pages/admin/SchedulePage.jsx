@@ -10434,10 +10434,16 @@ export function CompletionPanel({
       code: "conditional_protocol_product_review",
       message: `${product.name || "Selected product"} is conditional on the WaveGuard protocol card and was not in the generated mix — double-check the fit before applying.`,
     })),
-    ...highRateSelectedProducts.map((product) => ({
-      code: "high_rate_application",
-      message: `${product.name || "Selected product"} rate ${product.rate} ${product.rateUnit || ""}/1k exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}/1k.`,
-    })),
+    ...highRateSelectedProducts.map((product) => {
+      // Per-basis rates carry their basis in the unit itself — appending
+      // "/1k" there would misstate the label instruction (codex P2 r15
+      // sibling: captions/messages derive from the rate unit).
+      const suffix = isPerBasisUnit(product.catalogRateUnit) ? "" : "/1k";
+      return {
+        code: "high_rate_application",
+        message: `${product.name || "Selected product"} rate ${product.rate} ${product.rateUnit || ""}${suffix} exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix}.`,
+      };
+    }),
     ...labelUnitReviewProducts.map((product) => ({
       code: "label_rate_unit_review",
       message: `${product.name || "Selected product"} rate unit ${product.rateUnit || "unknown"} does not match label unit ${product.catalogRateUnit || "unknown"} — double-check the rate math before applying.`,
@@ -11748,6 +11754,7 @@ export function CompletionPanel({
       amountUnit: prefillAmountUnit,
       perBasisUnit,
       defaultUnit,
+      labelMaxRate,
     } = resolveRatePrefill(product, {
       applicationMethod,
       serviceLine: serviceLineFromType(serviceTypeForArea),
@@ -11808,9 +11815,14 @@ export function CompletionPanel({
         // deduction can't convert a concentration), so the resolver defaults
         // the amount unit to the base unit before the "/" instead.
         amountUnit: prefillAmountUnit,
+        // Per-basis products carry their band's upper bound here (codex P1
+        // r18) — the high-rate review is unit-matched (rateUnitsMatch
+        // against catalogRateUnit), so the ceiling compares in the label's
+        // own basis despite the field's per-1k name.
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
+          labelMaxRate ??
           null,
         totalAmount: prefillTotal,
         totalAmountManual: false,

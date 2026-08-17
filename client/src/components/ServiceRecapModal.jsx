@@ -59,7 +59,17 @@ function catalogRatePrefill(p, serviceType) {
   const resolved = resolveRatePrefill(p, { applicationMethod, serviceLine: 'pest' });
   const rate = Number(resolved.rate);
   if (!Number.isFinite(rate) || rate <= 0 || !resolved.rateUnit) return null;
-  return { rate: String(rate), unit: resolved.rateUnit };
+  // The label ceiling for the inline high-rate warning (codex P1 r18):
+  // per-basis bands carry their upper bound from the resolver; per-1,000
+  // rates use the verified catalog max. Neither applies to the 4-oz house
+  // default (its 'oz' unit is not the catalog rate's basis).
+  const maxRaw = resolved.perBasisUnit
+    ? resolved.labelMaxRate
+    : resolved.usePestSprayDefault
+      ? null
+      : parseFloat(String(p.max_label_rate_per_1000 ?? ''));
+  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
 }
 
 function fmtTime(ts) {
@@ -170,10 +180,14 @@ export default function ServiceRecapModal({
               // editor while rate_confirmed still marked the field
               // deliberate, and the server would read that as a clear
               // (codex P1 r11).
-              const unit = rp.rate_unit
-                || catalogRatePrefill(cat, data?.service?.serviceType)?.unit
-                || '';
-              seededRates[cat.id] = { rate: String(rp.application_rate), unit };
+              const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
+              const unit = rp.rate_unit || prefill?.unit || '';
+              seededRates[cat.id] = {
+                rate: String(rp.application_rate),
+                unit,
+                // The label ceiling only applies in its own unit.
+                ...(prefill?.max != null && prefill.unit === unit ? { max: prefill.max } : {}),
+              };
             } else {
               const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
               if (prefill) seededRates[cat.id] = prefill;
@@ -480,6 +494,11 @@ export default function ServiceRecapModal({
                         }}
                       />
                       <span style={{ color: P.muted, fontSize: 12, minWidth: 56 }}>{entry.unit}</span>
+                      {entry.max != null && parseFloat(entry.rate) > entry.max && (
+                        <span style={{ color: P.red, fontSize: 11, whiteSpace: 'nowrap' }}>
+                          &gt; label max {entry.max}
+                        </span>
+                      )}
                     </div>
                   ))}
               </div>

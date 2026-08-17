@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isPerBasisUnit } from "../../lib/product-rate-prefill";
+import { isPerBasisUnit, resolveRatePrefill } from "../../lib/product-rate-prefill";
 import {
   PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
@@ -668,5 +668,31 @@ describe("catalogUnitOption", () => {
     expect(catalogUnitOption("oz", ["oz", "fl_oz"])).toBeNull();
     expect(catalogUnitOption("", ["oz", "fl_oz"])).toBeNull();
     expect(catalogUnitOption(null, ["oz", "fl_oz"])).toBeNull();
+  });
+});
+
+describe("resolveRatePrefill labelMaxRate (codex P1 r18)", () => {
+  it("carries a per-basis band's upper bound as the review ceiling", () => {
+    const resolved = resolveRatePrefill(
+      { name: "Adjourn SC", default_rate: "0.25-1.5", default_unit: "fl_oz/gal" },
+      { applicationMethod: "perimeter_spray", serviceLine: "pest" },
+    );
+    expect(resolved.labelMaxRate).toBe(1.5);
+  });
+
+  it("a single-value per-basis rate is its own ceiling", () => {
+    const resolved = resolveRatePrefill(
+      { name: "Gravex", default_rate: "1.2", default_unit: "fl_oz/100gal" },
+      { applicationMethod: "broadcast_spray", serviceLine: "lawn" },
+    );
+    expect(resolved.labelMaxRate).toBe(1.2);
+  });
+
+  it("per-1,000 products keep their ceiling in max_label_rate_per_1000 (no per-basis max)", () => {
+    const resolved = resolveRatePrefill(
+      { name: "T-Storm", default_rate_per_1000: 1.5, default_unit: "lb" },
+      { applicationMethod: "granular_broadcast", serviceLine: "lawn" },
+    );
+    expect(resolved.labelMaxRate).toBeNull();
   });
 });
