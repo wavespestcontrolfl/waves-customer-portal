@@ -225,6 +225,16 @@ router.post('/sms', async (req, res) => {
     // customer is decided at fire time; unlinked/unused reservations are
     // cancelled (body scrubbed).
     if (correctionJobId) await correctionQueue.attachReservationBody(correctionJobId, Body);
+    // Context attaches BEFORE the media await (codex #3413 r35): an MMS
+    // fetch/upload can stall, and a crash in that window used to leave a
+    // body-only reservation the sweep cancels as context-free while the
+    // durable SID claim suppresses Twilio's redelivery — permanently
+    // losing the correction. The attach performs its OWN single-customer
+    // match, snapshot, and floor capture under one customer lock (r33);
+    // the route's later read is for routing only.
+    if (correctionJobId) {
+      await correctionQueue.attachContactCorrectionContext(correctionJobId, { senderPhone: From });
+    }
 
     const inboundMedia = await uploadTwilioMedia(req.body);
 
@@ -258,12 +268,6 @@ router.post('/sms', async (req, res) => {
     // before this stamp (or on a pre-match exit path like spam-block) is
     // cancelled instead of promoted. Awaited: an unstamped crash window
     // fails closed, a stamped one replays faithfully.
-    if (correctionJobId && customer?.id) {
-      // The attach performs its OWN single-customer match, snapshot, and
-      // floor capture under one customer lock (r33) — the route's earlier
-      // read is for routing only.
-      await correctionQueue.attachContactCorrectionContext(correctionJobId, { senderPhone: From });
-    }
     const fireContactCorrection = async (smsLogId) => {
       if (!correctionJobId || !customer?.id) return;
       // Marked synchronously so the route-level finally never cancels a
@@ -436,6 +440,9 @@ router.post('/sms', async (req, res) => {
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
       }).catch(() => {});
       const xmlEscape = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      // A HELP command can still CONTAIN a correction ("HELP. My email is
+      // wrong; use …") — enqueue like the other consumed branches (r35).
+      await fireContactCorrection(null);
       return res.type('text/xml').send(`<Response><Message>${xmlEscape(HELP_RESPONSE_TEMPLATE)}</Message></Response>`);
     }
 
@@ -475,6 +482,10 @@ router.post('/sms', async (req, res) => {
           description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
         }).catch(() => {});
       }
+
+      // A START/opt-in can still CONTAIN a correction ("START. My email
+      // changed to …") — enqueue like the other consumed branches (r35).
+      await fireContactCorrection(null);
 
       return res.type('text/xml').send(
         `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`

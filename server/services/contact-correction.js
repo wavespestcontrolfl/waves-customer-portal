@@ -522,6 +522,10 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`
+  // Third-party MOVE subject (r35): "My tenant is moving to 99 Pine Ave"
+  // — a possessed subject moving is not the customer moving. Self-ish
+  // household subjects stay licensed.
+  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will\\s+be)\\s+)?moving\\s+(?:to|into)\\b`
   + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );
@@ -570,12 +574,18 @@ function sourceClausesFor(text, quote) {
     let prevLeft = 0;
     let left = 0;
     let right = hay.length;
+    let nextRight = hay.length;
     let m;
     while ((m = delims.exec(hay))) {
       if (m.index < qs) { prevLeft = left; left = m.index + 1; }
-      if (m.index >= qe) { right = m.index; break; }
+      if (m.index >= qe) {
+        if (right === hay.length) { right = m.index; } else { nextRight = m.index; break; }
+      }
     }
-    probes.push(hay.slice(prevLeft, right));
+    // The probe spans preceding AND following clauses (r27/r35): the
+    // possessive can trail the correction too — "The email is wrong; use
+    // …. That's my accountant's email."
+    probes.push(hay.slice(prevLeft, right === hay.length ? right : nextRight));
     from = qs + 1;
   }
   if (!probes.length) probes.push(deQuote(String(quote || '').toLowerCase()));
@@ -1442,7 +1452,13 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
         ? callerLines.map((line, i) => (line.includes(tpNeedle) ? i : -1)).filter((i) => i >= 0)
         : [];
       const tpProbes = (tpMatchIdx.length
-        ? tpMatchIdx.map((i) => `${i > 0 ? `${callerLines[i - 1]} ; ` : ''}${callerLines[i]}`)
+        ? tpMatchIdx.map((i) => [
+          i > 0 ? callerLines[i - 1] : '',
+          callerLines[i],
+          // The FOLLOWING caller turn joins the probe too (r35): "the
+          // name should be Janet Smith" / "that's my wife's name".
+          i + 1 < callerLines.length ? callerLines[i + 1] : '',
+        ].filter(Boolean).join(' ; '))
         : [String(c.evidence_quote || '')])
         .map((l) => l.replace(/[‘’]/g, "'"));
       const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;

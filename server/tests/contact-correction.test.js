@@ -2989,3 +2989,78 @@ describe('round-34 hardening', () => {
     expect(detectContactCorrectionIntent('My email has changed to jane@example.com')).toBe(true);
   });
 });
+
+describe('round-35 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a FOLLOWING ownership clause blocks the correction (SMS)', async () => {
+    const body = "The email is wrong; use bookkeeper@example.com. That's my accountant's email.";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email is wrong; use bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a FOLLOWING caller turn blocks the rename (call)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Caller: The name should be Janet Smith.',
+          "Caller: That's my wife's name.",
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Janet', evidence_quote: 'the name should be Janet Smith' }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: 'the name should be Janet Smith' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+  });
+
+  it("a third party's move never rewrites the customer's address", async () => {
+    const body = 'My tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'my tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("the customer's own move still passes the move-subject guard", async () => {
+    const body = 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we are moving to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we are moving to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
+  });
+});
