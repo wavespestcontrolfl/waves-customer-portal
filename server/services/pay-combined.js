@@ -451,6 +451,31 @@ async function lockCombinedCustomers(database, customerIds) {
   }
 }
 
+/**
+ * Lock the invoice's LIVE owner (codex r31/r37 P1): the caller's unlocked
+ * snapshot can carry a merge-retired customer id — locking only that would
+ * serialize against the wrong customer while a payer edit proceeds under
+ * the survivor's lock. Bounded re-read/re-lock until customer_id is stable
+ * (xact locks accumulate — old and new both stay held); exhausted retries
+ * refuse as a staleBalance 409. Returns the stable owner id (or null).
+ */
+async function lockCombinedCustomerStable(database, invoiceId, snapshotCustomerId) {
+  let ownerId = snapshotCustomerId ? String(snapshotCustomerId) : null;
+  for (let attempt = 0; ; attempt++) {
+    if (ownerId) await lockCombinedCustomers(database, [ownerId]);
+    const fresh = await database('invoices').where({ id: invoiceId }).first('customer_id');
+    const freshId = fresh?.customer_id ? String(fresh.customer_id) : null;
+    if (!freshId || freshId === ownerId) return freshId || ownerId;
+    if (attempt >= 4) {
+      const ownerErr = new Error('The account changed while preparing this payment — refreshing.');
+      ownerErr.statusCode = 409;
+      ownerErr.staleBalance = true;
+      throw ownerErr;
+    }
+    ownerId = freshId;
+  }
+}
+
 async function releaseUnconfirmedCombinedSessions(database, rows) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
   let released = 0;
@@ -1013,6 +1038,7 @@ module.exports = {
   combinedContextForInvoice,
   clearPaymentIntentStamps,
   lockCombinedCustomers,
+  lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
   releaseCombinedSessionBeforeCollection,

@@ -3380,10 +3380,15 @@ async function handleChargeRefunded(charge) {
         let combinedPiMeta = PayCombined.isCombinedPiMetadata(charge.metadata) ? charge.metadata : null;
         if (!combinedPiMeta) {
           const preStripe = getStripe();
-          if (preStripe) {
-            const refundedPi = await preStripe.paymentIntents.retrieve(charge.payment_intent);
-            if (PayCombined.isCombinedPiMetadata(refundedPi?.metadata)) combinedPiMeta = refundedPi.metadata;
+          // Fail CLOSED (codex r37 P0): with no client we cannot rule out
+          // a combined PI — falling through to the single-invoice path
+          // would refund only the anchor and let a reordered succeeded
+          // settle the siblings on fully-returned money.
+          if (!preStripe) {
+            throw new Error(`charge.refunded for ${chargeId}: PI ${charge.payment_intent} cannot be verified as combined or single (Stripe client unavailable); retry`);
           }
+          const refundedPi = await preStripe.paymentIntents.retrieve(charge.payment_intent);
+          if (PayCombined.isCombinedPiMetadata(refundedPi?.metadata)) combinedPiMeta = refundedPi.metadata;
         }
         if (combinedPiMeta) {
           // Serialize with handleRefundFailed's no-row fence write (codex
@@ -6811,22 +6816,45 @@ async function handleDisputeClosed(dispute) {
                   // A prior delivery canceled the replacement but crashed
                   // before the stamp cleanup (codex r36 P2) — finish the
                   // neutralization instead of parking money that never
-                  // moved.
+                  // moved. Neutralized ONLY when the binding is proven
+                  // ours-or-clear (codex r37 P1): a fresh /setup
+                  // replacement bound in the gap keeps its live secret and
+                  // takes the park path.
                   await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
                   const unboundCanceled = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
-                  if (unboundCanceled > 0) invoice.stripe_payment_intent_id = null;
-                  replacementNeutralized = true;
-                  logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} was already canceled; stamps cleaned, the reinstated charge settles invoice ${invId}`);
+                  if (unboundCanceled > 0) {
+                    invoice.stripe_payment_intent_id = null;
+                    replacementNeutralized = true;
+                  } else {
+                    const nowBound = await db('invoices').where({ id: invId }).first('stripe_payment_intent_id');
+                    const nowPi = nowBound?.stripe_payment_intent_id ? String(nowBound.stripe_payment_intent_id) : null;
+                    if (!nowPi) {
+                      invoice.stripe_payment_intent_id = null;
+                      replacementNeutralized = true; // already cleared by a prior retry
+                    } else {
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — a fresh replacement (${nowPi}) bound invoice ${invId} while cleaning canceled ${replPi.id}; parking the reinstated amount`);
+                    }
+                  }
+                  if (replacementNeutralized) logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} was already canceled; stamps cleaned, the reinstated charge settles invoice ${invId}`);
                 } else if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+                  // ONLY the cancel itself may take the park-on-error path
+                  // (codex r37 P2): a post-cancel DB failure must PROPAGATE
+                  // so redelivery finishes through the already-canceled
+                  // branch above — swallowing it would park a phantom
+                  // replacement and strand the invoice behind a dead PI.
+                  let cancelSucceeded = false;
                   try {
                     await wonStripe.paymentIntents.cancel(replPi.id);
+                    cancelSucceeded = true;
+                  } catch (cancelErr) {
+                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
+                  }
+                  if (cancelSucceeded) {
                     await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
                     // CONDITIONAL unbind (codex r36 P1): only clear the
                     // binding if it is still the replacement we canceled —
                     // a /setup racing this window can commit a FRESH
-                    // replacement whose client secret the customer holds,
-                    // and clearing that would let the restore below stamp
-                    // the reinstated charge over a live session.
+                    // replacement whose client secret the customer holds.
                     const unbound = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
                     if (unbound > 0) {
                       invoice.stripe_payment_intent_id = null;
@@ -6835,8 +6863,6 @@ async function handleDisputeClosed(dispute) {
                     } else {
                       logger.warn(`[stripe-webhook] dispute ${dispute.id} won — a fresh replacement bound invoice ${invId} while neutralizing ${replPi.id}; parking the reinstated amount`);
                     }
-                  } catch (cancelErr) {
-                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
                   }
                 }
               }

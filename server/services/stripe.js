@@ -3984,10 +3984,10 @@ const StripeService = {
         // the page reloads instead of the customer confirming a total a
         // sibling change invalidated.
         paymentIntent = await db.transaction(async (updateTrx) => {
-          await updateTrx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['pay.combined.customer', String(invoice.customer_id)],
-          );
+          // Stable-owner lock (codex r37 P1): the unlocked snapshot can
+          // carry a merge-retired customer id — re-lock until stable so a
+          // payer edit on the survivor serializes with this seam.
+          await PayCombined.lockCombinedCustomerStable(updateTrx, invoiceId, invoice.customer_id);
           await PayCombined.verifyAllocationLocked(updateTrx, combinedCtx.allocation, {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
@@ -4190,10 +4190,8 @@ const StripeService = {
     let newIntent;
     await db.transaction(async (trx) => {
       if (replacementAllocation && invoice.customer_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['pay.combined.customer', String(invoice.customer_id)],
-        );
+        // Stable-owner lock (codex r37 P1) — same contract as setup.
+        await PayCombined.lockCombinedCustomerStable(trx, invoiceId, invoice.customer_id);
       }
       const lockedInvoice = await trx('invoices')
         .where({ id: invoiceId })
@@ -4482,10 +4480,8 @@ const StripeService = {
         // sorted allocation locks — serialize against other combined
         // money seams for this customer before any row lock.
         if (finalizeCombinedCtx && invoice.customer_id) {
-          await finalizeTrx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['pay.combined.customer', String(invoice.customer_id)],
-          );
+          // Stable-owner lock (codex r37 P1) — same contract as setup.
+          await require('./pay-combined').lockCombinedCustomerStable(finalizeTrx, invoiceId, invoice.customer_id);
         }
         const lockedInvoice = await finalizeTrx('invoices')
           .where({ id: invoiceId })
