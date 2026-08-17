@@ -3064,3 +3064,37 @@ describe('round-35 hardening', () => {
     expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
   });
 });
+
+describe('round-36 hardening', () => {
+  it("a third party's PAST-TENSE move never rewrites the customer's address", async () => {
+    const body = 'My tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'state', new_value: 'FL', quote: 'my tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231', confidence: 'high' },
+        ],
+      },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("the customer's own past-tense move still passes", async () => {
+    const body = 'We just moved to 99 Pine Ave, Sarasota. Zip is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we just moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we just moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['address_line1', 'city', 'zip']);
+  });
+});

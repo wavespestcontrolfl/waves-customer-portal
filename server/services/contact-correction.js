@@ -522,10 +522,10 @@ const THIRD_PARTY_ADDRESS_RE = new RegExp(
   `\\b(?:his|her|their)\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior)\\b)${TP_OWNER_SRC}(?:'s|s')\\s+${TP_MODIFIER_SRC}${TP_ADDR_TOPIC_SRC}\\b`
   + `|\\b(?!(?:previous|prior|business)\\b)[\\p{L}\\p{M}]{4,}s\\s+new\\s+address\\b`
-  // Third-party MOVE subject (r35): "My tenant is moving to 99 Pine Ave"
-  // — a possessed subject moving is not the customer moving. Self-ish
-  // household subjects stay licensed.
-  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will\\s+be)\\s+)?moving\\s+(?:to|into)\\b`
+  // Third-party MOVE subject (r35, past tense r36): "My tenant is moving
+  // to / moved to 99 Pine Ave" — a possessed subject moving is not the
+  // customer moving. Self-ish household subjects stay licensed.
+  + `|\\b(?:my|our|the|his|her|their)\\s+(?!(?:new|old|own|current|next|family|household|whole)\\b)${TP_OWNER_SRC}\\s+(?:(?:is|are|was|were|will\\s+be|has|have|had|just|recently)\\s+){0,2}mov(?:ing|ed|es)\\s+(?:to|into)\\b`
   + tpInverseForms(TP_ADDR_TOPIC_SRC),
   'iu',
 );
