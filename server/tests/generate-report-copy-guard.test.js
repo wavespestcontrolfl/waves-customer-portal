@@ -375,6 +375,13 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // plain-away timing + unquoted multiword continuing credentials (r76)
+    expect(reportCopyRejection('Keep pets away for thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Stay away for 30 minutes after the application.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate passphrase remains open sesame.')).toBe('access_code');
+    expect(reportCopyRejection('The gate passphrase remains open sesame for the side gate.')).toBe('access_code');
+    expect(reportCopyRejection('The keypad was fully functional during the visit.')).toBeNull();
+    expect(reportCopyRejection('The gate code remains active this season and works fine.')).toBeNull();
     // possessive EPA approval forms, straight and smart apostrophes (r75)
     expect(reportCopyRejection("This treatment has the EPA's approval.")).toMatch(/^banned:/);
     expect(reportCopyRejection('This treatment has the EPA’s formal approval.')).toMatch(/^banned:/);
