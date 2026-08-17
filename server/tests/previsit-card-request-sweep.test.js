@@ -200,6 +200,31 @@ describe('previsitCardInviteEligible', () => {
     expect(fixTiersBody).toContain("await trx('customers').where({ id: c.id }).update({ waveguard_tier: newTier });");
     expect(fixTiersBody).not.toContain("await db('customers').where({ id: c.id }).update");
   });
+
+  test('Intelligence Bar membership writers join the customer-comms lock — single, bulk-scalar, bulk-per-row (codex #3426 r6)', () => {
+    const tools = require('fs').readFileSync(
+      require.resolve('../services/intelligence-bar/tools'), 'utf8',
+    );
+    // The IB exposes waveguard_tier and monthly_rate as updatable fields
+    // through three write paths: updateCustomer's transaction, the bulk
+    // single-statement scalar branch, and the bulk per-row address/email
+    // branch. Every one must hold `customer-comms:<id>` before its
+    // customers row lock, or an operator's membership-making write lands
+    // between the sweep's in-lock recheck and the SMS send.
+    expect(tools).toContain("require('../../utils/customer-comms-lock')");
+    // Two per-customer acquisition sites (single edit + bulk per-row),
+    // each gated on the membership fields:
+    const perRowAcquisitions = tools.split('await lockCustomerComms(trx, customerId);').length - 1;
+    expect(perRowAcquisitions).toBe(2);
+    // The bulk scalar branch locks every id in STABLE sorted order before
+    // its whereIn(...).forUpdate() — concurrent bulk writers over
+    // overlapping sets must acquire in the same sequence.
+    const bulkLoopIdx = tools.indexOf('for (const cid of [...customerIds].map(String).sort()) {');
+    expect(bulkLoopIdx).toBeGreaterThan(-1);
+    expect(tools.indexOf('await lockCustomerComms(trx, cid);')).toBeGreaterThan(bulkLoopIdx);
+    const bulkForUpdateIdx = tools.indexOf(".whereIn('id', customerIds)\n          .forUpdate()");
+    expect(bulkForUpdateIdx).toBeGreaterThan(bulkLoopIdx);
+  });
 });
 
 describe('sweep gating', () => {
