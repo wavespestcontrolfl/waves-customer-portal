@@ -989,7 +989,7 @@ describe('classifyAddOnAcceptContext', () => {
       estimate: TS_ESTIMATE,
       estimateData: TS_DATA,
       customer: LIVE,
-    })).resolves.toEqual({ addOnBase: 31.81, hadOtherLiveFamilies: true });
+    })).resolves.toEqual({ addOnBase: 31.81, hadOtherLiveFamilies: true, sameFamilyAtOtherProperty: false });
   });
 
   test('same-family single-plan re-quote: replace, no review signal', async () => {
@@ -999,7 +999,7 @@ describe('classifyAddOnAcceptContext', () => {
       estimate: TS_ESTIMATE,
       estimateData: TS_DATA,
       customer: LIVE,
-    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: false });
+    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: false });
   });
 
   test('same-family re-quote with ANOTHER live plan: replace + review signal (the hand-fix case)', async () => {
@@ -1009,7 +1009,7 @@ describe('classifyAddOnAcceptContext', () => {
       estimate: TS_ESTIMATE,
       estimateData: TS_DATA,
       customer: LIVE,
-    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: true });
+    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: true, sameFamilyAtOtherProperty: false });
   });
 
   test('unclassifiable rows: replace (fail closed) but still counted as other-family evidence', async () => {
@@ -1019,7 +1019,7 @@ describe('classifyAddOnAcceptContext', () => {
       estimate: TS_ESTIMATE,
       estimateData: TS_DATA,
       customer: LIVE,
-    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: true });
+    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: true, sameFamilyAtOtherProperty: false });
   });
 
   test('non-live stage / no rate yields the empty context', async () => {
@@ -1029,6 +1029,8 @@ describe('classifyAddOnAcceptContext', () => {
       estimate: TS_ESTIMATE,
       estimateData: TS_DATA,
       customer: { ...LIVE, pipeline_stage: 'churned' },
-    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: false });
+      // The empty context reports sameFamilyAtOtherProperty null — UNKNOWN,
+      // so the converter keeps the conservative attribution bypass.
+    })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null });
   });
 });

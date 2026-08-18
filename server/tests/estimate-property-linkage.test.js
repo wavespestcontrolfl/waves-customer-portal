@@ -45,6 +45,32 @@ describe('parseEstimateAddress', () => {
     });
   });
 
+  test('parses the ONE-comma shape "street, City ST ZIP" (codex #3431 r1)', () => {
+    // Without this, the whole trailing segment collapsed into a partial
+    // street token embedding the locality — scope keys built from it could
+    // never equal a structured key for the SAME property, so adoption and
+    // the duplicate-series guard mis-compared.
+    expect(parseEstimateAddress('1 Test St, Bradenton FL 34208')).toEqual({
+      address_line1: '1 Test St',
+      address_line2: null,
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34208',
+      partial: false,
+    });
+  });
+
+  test('one-comma shape keeps multi-word cities intact', () => {
+    expect(parseEstimateAddress('2 Oak Ave, North Port FL 34287')).toEqual({
+      address_line1: '2 Oak Ave',
+      address_line2: null,
+      city: 'North Port',
+      state: 'FL',
+      zip: '34287',
+      partial: false,
+    });
+  });
+
   test('unparseable text falls back to partial with the whole line as street', () => {
     expect(parseEstimateAddress('the yellow house behind the marina')).toEqual({
       address_line1: 'the yellow house behind the marina',

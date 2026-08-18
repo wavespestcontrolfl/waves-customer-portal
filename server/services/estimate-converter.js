@@ -1402,7 +1402,14 @@ async function classifyAddOnAcceptContext({
   database, estimateId, estimate, estimateData, customer,
   adoptedExistingAppointmentId = null,
 } = {}) {
-  const none = { addOnBase: 0, hadOtherLiveFamilies: false };
+  // sameFamilyAtOtherProperty: does a live same-family plan row provably sit
+  // at ANOTHER property? Feeds the ledger-attribution bypass decision (codex
+  // #3431 r2 P1) — same-family plans at different properties share one
+  // (customer, family) component key, so attribution must be bypassed; when
+  // the answer is a proven FALSE the accept goes through applyAcceptToLedger,
+  // which preserves unrelated families' slices. null = unknown (classifier
+  // didn't run / errored) → conservative bypass.
+  const none = { addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null };
   const existingMonthlyRate = Number(customer?.monthly_rate);
   if (!['active_customer', 'won', 'at_risk'].includes(customer?.pipeline_stage)
     || !Number.isFinite(existingMonthlyRate) || !(existingMonthlyRate > 0)) {
@@ -1462,6 +1469,7 @@ async function classifyAddOnAcceptContext({
       .select(
         'scheduled_services.service_type',
         'scheduled_services.is_callback',
+        'scheduled_services.property_id',
         'scheduled_services.service_address_line1',
         'scheduled_services.service_address_line2',
         'scheduled_services.service_address_city',
@@ -1506,45 +1514,180 @@ async function classifyAddOnAcceptContext({
     // monthly_rate with just this property's price. The fail-closed
     // classifiability bar then applies only to rows that could actually be
     // replacement evidence (this property's).
+    const droppedOtherPropertyRows = [];
     planRows = await scopePlanRowsToEstimateProperty(planRows);
-    if (planRows.length === 0) return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies };
+    // Only rows PROVABLY at another property land in dropped (locatable-but-
+    // elsewhere; unlocatable rows are kept, fail closed) — so a same-family
+    // hit here is proof of the merged-component hazard, and its absence is
+    // proof the accept is safe to attribute through the ledger.
+    const sameFamilyAtOtherProperty = droppedOtherPropertyRows
+      .some((row) => appointmentMatchesEstimateFamily(row, familyKeys));
+    if (planRows.length === 0) return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies, sameFamilyAtOtherProperty };
     const everyRowClassifiable = planRows.every(rowFamilyFor);
     if (!everyRowClassifiable) {
-      return { addOnBase: 0, hadOtherLiveFamilies };
+      return { addOnBase: 0, hadOtherLiveFamilies, sameFamilyAtOtherProperty };
     }
-    // Grouped accept (codex #3244 r2): a same-family plan at ANOTHER property
-    // is a true ADD-ON — property #1's pest plan must not classify property
-    // #2's pest plan as a re-quote (which would REPLACE monthly_rate with
-    // one property's rate and under-bill a monthly member). Replace evidence
-    // is scoped to rows at THIS estimate's address: stamped rows compare by
+    // Property-scoped replace evidence (codex #3244 r2; widened to EVERY
+    // addressed estimate on codex #3431 r1 P1): a same-family plan at
+    // ANOTHER property is a true ADD-ON — property #1's pest plan must not
+    // classify property #2's pest plan as a re-quote (which would REPLACE
+    // monthly_rate with one property's rate and under-bill a monthly
+    // member). Ungrouped new-property accepts hit the identical shape now
+    // that the adoption/series scope admits them. Replace evidence is
+    // scoped to rows at THIS estimate's address: stamped rows compare by
     // service_address_line1, unstamped rows resolve via their creating
     // estimate's address, then the customer's primary street; rows that
-    // still can't be located keep their replace vote (fail closed). Only
-    // grouped estimates take this path — ungrouped accepts are byte-identical.
+    // still can't be located keep their replace vote (fail closed).
+    // Single-property accepts are unaffected: every row resolves to the
+    // estimate's own street and is kept.
     async function scopePlanRowsToEstimateProperty(rows) {
-      if (!(estimate?.estimate_group_id && estimate.address)) return rows;
-      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
-      const estimateStreet = normalizedEstimateStreet(estimate.address);
-      if (!estimateStreet) return rows;
+      // property_id is authoritative when BOTH sides carry it (codex #3431
+      // r4 P1): an estimate whose address is blank or rejected as
+      // non-address evidence but which is LINKED to a property must still
+      // scope — otherwise the old property's same-family plan reads as
+      // replacement evidence and the accepted property's series never
+      // seeds, the exact cascade this lane fixes.
+      const estimatePid = estimate?.property_id ? String(estimate.property_id) : '';
+      if (!estimate?.address && !estimatePid) return rows;
+      // Unit-aware keys (codex #3431 r2 P1): the estimate's unit
+      // discriminates only when it supplies one — a unitless legacy estimate
+      // at the customer's unit-bearing primary is the SAME property, and
+      // mis-classifying it as another property's money would double
+      // monthly_rate on a plain re-quote.
+      const { makeEstimateScopeKeys, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+      const scopeKeys = estimate?.address ? makeEstimateScopeKeys(estimate.address) : null;
+      const estimateStreet = scopeKeys ? scopeKeys.estimateKey : '';
+      if (!estimateStreet && !estimatePid) return rows;
       return database.transaction(async (sp) => {
-        const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip);
+        // primaryKey (unitless-compat vs the customer's own primary) for
+        // the retained-key compares; BLIND keys for street-IDENTITY
+        // questions — a unit token is not street identity, so borrow/
+        // different-street proofs must not read "Apt 4" as a different
+        // street (codex #3431 r9).
+        const customerPrimaryStreet = scopeKeys
+          ? scopeKeys.primaryKey(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip)
+          : '';
+        const primaryBlind = scopeKeys
+          ? scopeKeys.blindKey(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip)
+          : '';
+        // RETAINED (unit-bearing) primary key: the unit-only-mismatch
+        // fallback below must prove the row is the PRIMARY's own unit
+        // (codex #3431 r11) — a unitless estimate means the primary, so
+        // only the primary's stamped unit is compatible; any OTHER unit
+        // at the street is another property.
+        const customerPrimaryRetained = scopeKeys
+          ? scopeKeys.candidateKey(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip)
+          : '';
+        const streetSegment = (key) => String(key || '').split('|')[0];
+        // Street-only ESTIMATE key (codex #3431 r4): borrow the primary's
+        // locality when the streets agree, so a same-named street stamped
+        // in another city can't wildcard-match through sameScopeKey.
+        let effectiveEstimateStreet = estimateStreet;
+        let effectiveEstimateBlind = scopeKeys ? scopeKeys.blindEstimateKey : '';
+        if (estimateStreet && scopeKeyLacksLocality(estimateStreet)
+          && customerPrimaryStreet && streetSegment(effectiveEstimateBlind) === streetSegment(primaryBlind)) {
+          effectiveEstimateStreet = customerPrimaryStreet;
+          effectiveEstimateBlind = primaryBlind;
+        }
         const kept = [];
         for (const row of rows) {
-          let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
-          if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
-            const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
-            street = normalizedEstimateStreet(src?.address);
+          // One source-estimate read per row, shared by the pid recovery
+          // and the address recovery below (codex #3431 r10: the creating
+          // estimate's property_id distinguishes an unstamped legacy row
+          // when the accepting estimate is pid-linked with no usable
+          // address — neither the both-ids branch nor the address branch
+          // could).
+          let srcEstimateRow = null;
+          const loadSourceEstimate = async () => {
+            if (srcEstimateRow === null && row.source_estimate_id) {
+              srcEstimateRow = (await sp('estimates').where({ id: row.source_estimate_id }).first('address', 'property_id')) || false;
+            }
+            return srcEstimateRow || null;
+          };
+          if (estimatePid) {
+            let rowPid = row.property_id ? String(row.property_id) : '';
+            if (!rowPid) {
+              const src = await loadSourceEstimate();
+              if (src?.property_id) rowPid = String(src.property_id);
+            }
+            if (rowPid) {
+              if (rowPid === estimatePid) kept.push(row);
+              else droppedOtherPropertyRows.push(row);
+              continue;
+            }
           }
-          street = street || customerPrimaryStreet;
-          if (!street || sameScopeKey(street, estimateStreet)) kept.push(row);
+          if (!estimateStreet) {
+            // Linked-estimate scope with an unlocated row: cannot prove the
+            // row is elsewhere — fail closed (replace vote).
+            kept.push(row);
+            continue;
+          }
+          let street = scopeKeys.candidateKey(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+          let rowBlind = scopeKeys.blindKey(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+          if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
+            const src = await loadSourceEstimate();
+            const recovered = scopeKeys.candidateKeyFromRaw(src?.address);
+            if (recovered) {
+              street = recovered;
+              rowBlind = scopeKeys.blindKeyFromRaw(src?.address);
+            }
+          }
+          // Locality-less ROW key after recovery (codex #3431 r4/r5):
+          // borrow the primary's locality when the (unit-blind) streets
+          // agree; a PLAINLY DIFFERENT street token is itself property
+          // proof (r5 — a legacy line1-only secondary-property row must
+          // not read as replace evidence just because its city is
+          // unrecorded); only an equal street token with unprovable
+          // locality fails closed (kept, and never counted as "provably
+          // elsewhere").
+          if (street && scopeKeyLacksLocality(street)) {
+            if (customerPrimaryStreet && streetSegment(rowBlind) === streetSegment(primaryBlind)) {
+              street = customerPrimaryStreet;
+              rowBlind = primaryBlind;
+            } else if (streetSegment(rowBlind) !== streetSegment(effectiveEstimateBlind)) {
+              droppedOtherPropertyRows.push(row);
+              continue;
+            } else {
+              kept.push(row);
+              continue;
+            }
+          }
+          if (!street) {
+            street = customerPrimaryStreet;
+            rowBlind = primaryBlind;
+          }
+          // DELIBERATE divergence from the adoption predicate's shared-
+          // locality requirement (codex #3431 r6): a street match on
+          // disjoint locality evidence (city-only vs zip-only) stays KEPT
+          // here. Kept = replace evidence = this module's documented
+          // doubt-direction (#3241: any classification doubt → replace);
+          // dropping on non-proof would instead SUM the old rate onto a
+          // same-property re-quote (doubling monthly_rate — the exact r2
+          // harm) and falsely count the row as provably-elsewhere for the
+          // attribution bypass. Adoption can afford to refuse (the slot
+          // picker recovers); rate classification cannot.
+          //
+          // UNIT-ONLY mismatch is unprovable ONLY for the PRIMARY's own
+          // unit (codex #3431 r9/r11): candidate keys retain unit
+          // identity, so a unitless estimate (which means the primary) at
+          // the customer's own stamped "Apt 4" row mismatches on the
+          // retained keys — the blind keys agree AND the row's retained
+          // key equals the unit-bearing primary key, so dropping it would
+          // double the rate on a plain re-quote. Kept (fail closed). Any
+          // OTHER unit at the street (retained key ≠ primary's) is
+          // another property and stays dropped.
+          if (!street || sameScopeKey(street, effectiveEstimateStreet)) kept.push(row);
+          else if (rowBlind && effectiveEstimateBlind && sameScopeKey(rowBlind, effectiveEstimateBlind)
+            && customerPrimaryRetained && sameScopeKey(street, customerPrimaryRetained)) kept.push(row);
+          else droppedOtherPropertyRows.push(row);
         }
         return kept;
       });
     }
     if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
-      return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies };
+      return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies, sameFamilyAtOtherProperty };
     }
-    return { addOnBase: 0, hadOtherLiveFamilies };
+    return { addOnBase: 0, hadOtherLiveFamilies, sameFamilyAtOtherProperty };
   } catch (addOnErr) {
     logger.warn(`[estimate-converter] add-on rate classification failed for customer ${customer?.id} (monthly_rate keeps replace semantics): ${addOnErr.message}`);
     return none;
@@ -3466,7 +3609,7 @@ const EstimateConverter = {
       if (lockedCustomerRow) effectiveCustomer = lockedCustomerRow;
     }
     const addOnContext = suppressRecurringConversion
-      ? { addOnBase: 0, hadOtherLiveFamilies: false }
+      ? { addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null }
       : await classifyAddOnAcceptContext({
         database, estimateId, estimate, estimateData, customer: effectiveCustomer,
         adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
@@ -3492,7 +3635,46 @@ const EstimateConverter = {
     // matching the committed scalar after the update below, with the
     // review alert when attribution existed. Per-property components are
     // the follow-up build gated on multi-property going live.
-    const groupedEstimateAccept = !!estimate?.estimate_group_id;
+    // Cross-property detection for UNGROUPED accepts (codex #3431 r1 P1):
+    // the widened adoption/series scope means an ordinary estimate can now
+    // legitimately accept a second same-family plan at another property —
+    // the same shape that made grouped accepts bypass ledger attribution
+    // (same-family plans at different properties share one
+    // (customer, family) component key). Detected by the same
+    // unit-aware locality-qualified street compare the other property-scope
+    // consumers use (codex #3431 r2: a unitless estimate at the customer's
+    // unit-bearing primary is NOT cross-property), against the LOCKED
+    // customer snapshot; unknown either side → not cross-property (legacy
+    // single-property semantics).
+    const { makeEstimateScopeKeys: acceptScopeKeysOf, sameScopeKey: acceptSameScope } = require('./estimate-property-linkage');
+    const acceptScopeKeys = estimate?.address ? acceptScopeKeysOf(estimate.address) : null;
+    const acceptEstimateStreet = acceptScopeKeys ? acceptScopeKeys.estimateKey : '';
+    const acceptPrimaryStreet = acceptScopeKeys
+      ? acceptScopeKeys.primaryKey(
+        effectiveCustomer?.address_line1, effectiveCustomer?.address_line2,
+        effectiveCustomer?.city, effectiveCustomer?.zip,
+      )
+      : '';
+    const crossPropertyAccept = !!(acceptEstimateStreet && acceptPrimaryStreet
+      && !acceptSameScope(acceptEstimateStreet, acceptPrimaryStreet));
+    // The attribution bypass is only for the MERGED-COMPONENT hazard —
+    // same-family plans at different properties sharing one (customer,
+    // family) key. A cross-property accept whose families are provably
+    // disjoint from every other property's live plans goes THROUGH
+    // applyAcceptToLedger instead (codex #3431 r2 P1): the sliced apply
+    // touches only this accept's own family slices, so an unrelated
+    // family's slice at another property survives — the bypass's
+    // scalar-reset below would collapse the ledger to just this accept's
+    // math and drop it. Unknown classification (null) keeps the
+    // conservative bypass.
+    // PROVEN same-family-elsewhere is the hazard by itself (codex #3431 r4:
+    // a property_id-linked estimate with a blank/rejected address never
+    // sets crossPropertyAccept, but the pid-aware classifier can still
+    // prove the merged-component shape) — bypass on proof, and on a
+    // cross-property accept whose classification is unknown.
+    const groupedEstimateAccept = !!estimate?.estimate_group_id
+      || addOnContext.sameFamilyAtOtherProperty === true
+      || (crossPropertyAccept && addOnContext.sameFamilyAtOtherProperty !== false);
     if (!suppressRecurringConversion && !groupedEstimateAccept) {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
@@ -3800,24 +3982,56 @@ const EstimateConverter = {
     let termStartDate = null;
     let firstScheduledServiceId = null;
     const deferredFollowUpReminderRows = [];
-    // Per-property duplicate-series scope (codex #3244 r1): a grouped
-    // estimate's accept resolves to the same customer as its siblings, so the
-    // customer+family guard alone would read the FIRST property's series as a
-    // duplicate and skip seeding the second property's schedule. Scoped to
-    // grouped estimates only — ungrouped accepts keep the exact legacy guard.
+    // Per-property duplicate-series scope (codex #3244 r1): an accept that
+    // resolves to a customer who already runs a series would read that
+    // series as a duplicate under the customer+family guard alone and skip
+    // seeding this estimate's schedule. Armed for EVERY estimate with an
+    // address (originally grouped-only; widened after the 08-15
+    // cross-property accept incident — an ungrouped new-property accept
+    // matched the OLD property's series and the new property's series never
+    // seeded). Single-property accepts are unaffected: the existing series
+    // resolves to the customer's primary street, the estimate address is
+    // that same street, and the duplicate still suppresses. An unparseable
+    // address leaves the scope null — the exact legacy customer+family
+    // guard. Keys are unit-aware (codex #3431 r2): the scope carries its
+    // own candidate-key builders so the seeder compares parents in the
+    // same mode the estimate key was built in.
     let seriesAddressScope = null;
-    if (estimate?.estimate_group_id && estimate.address) {
-      // normalizedEstimateStreet keeps the whole street portion (unit lines
+    if (estimate?.address || estimate?.property_id) {
+      // makeEstimateScopeKeys keeps the whole street portion (unit lines
       // survive) — a naive split(',')[0] mis-scoped "Unit 4, 100 Beach Rd"
-      // (codex #3244 r5).
-      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
-      const estimateStreet = normalizedEstimateStreet(estimate.address);
+      // (codex #3244 r5) — and drops the unit from BOTH sides when the
+      // estimate itself is unitless. A property_id-linked estimate scopes
+      // even when its address is blank or rejected as non-address evidence
+      // (codex #3431 r4): the seeder compares parent property ids first.
+      const { makeEstimateScopeKeys } = require('./estimate-property-linkage');
+      const scopeKeys = estimate?.address ? makeEstimateScopeKeys(estimate.address) : null;
+      const estimateStreet = scopeKeys ? scopeKeys.estimateKey : '';
       let customerPrimaryStreet = '';
-      try {
-        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
-        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
-      } catch { /* scope falls back to stamped addresses only */ }
-      if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
+      let customerPrimaryBlind = '';
+      let customerPrimaryRetained = '';
+      if (scopeKeys) {
+        try {
+          const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+          customerPrimaryStreet = scopeKeys.primaryKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+          customerPrimaryBlind = scopeKeys.blindKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+          customerPrimaryRetained = scopeKeys.candidateKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+        } catch { /* scope falls back to stamped addresses only */ }
+      }
+      if (estimateStreet || estimate?.property_id) {
+        seriesAddressScope = {
+          estimateStreet,
+          customerPrimaryStreet,
+          customerPrimaryBlind,
+          customerPrimaryRetained,
+          blindEstimateKey: scopeKeys ? scopeKeys.blindEstimateKey : '',
+          estimatePropertyId: estimate?.property_id ? String(estimate.property_id) : null,
+          candidateKey: scopeKeys ? scopeKeys.candidateKey : null,
+          candidateKeyFromRaw: scopeKeys ? scopeKeys.candidateKeyFromRaw : null,
+          blindKey: scopeKeys ? scopeKeys.blindKey : null,
+          blindKeyFromRaw: scopeKeys ? scopeKeys.blindKeyFromRaw : null,
+        };
+      }
     }
     // Series-seeding transaction wrapper (P0: check-then-insert race). Every
     // converter path that can CREATE a recurring series runs its duplicate-
