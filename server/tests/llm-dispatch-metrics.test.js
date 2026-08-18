@@ -47,7 +47,7 @@ function load() {
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
 function makeChain(rows, delCount = 0, { insertError = null, first = null, selectError = null } = {}) {
   const chain = {};
-  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum', 'max']) {
+  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum', 'max', 'countDistinct']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
@@ -255,6 +255,33 @@ describe('llm-dispatch-metrics', () => {
       expect(out[0]).toMatchObject({ policy: 'contentDraft', kind: 'gone_silent' });
     });
 
+    it('gives bursty policies a quiet-days grace: no alarm while the recent window shows activity', () => {
+      // visionAnalysis pattern (2026-08-17 false alarm): 10 calls in ONE day,
+      // then legitimately nothing. One zero day is not news for a lane that
+      // only ran 1 of 7 days — it must be silent for the whole recent window.
+      const { detectExceptions, SILENT_MIN_WEEKLY, DAILY_CADENCE_MIN_DAYS } = load();
+      const priorWeek = [
+        { policy: 'visionAnalysis', total: SILENT_MIN_WEEKLY, activeDays: 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      // Active within the recent window -> grace period, no alarm.
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['visionAnalysis', 'report'])))
+        .toHaveLength(0);
+      // Silent for the whole recent window -> the alarm finally fires.
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ policy: 'visionAnalysis', kind: 'gone_silent' });
+      expect(out[0].detail).toMatch(/silent for \d\+ days/);
+      // Near-daily cadence keeps the immediate one-day alarm even when the
+      // recent window still shows earlier-in-window activity.
+      const daily = [{ policy: 'visitBrief', total: 700, activeDays: DAILY_CADENCE_MIN_DAYS }];
+      const outDaily = detectExceptions(live, daily, null, true, new Set(['visitBrief']));
+      expect(outDaily).toHaveLength(1);
+      expect(outDaily[0]).toMatchObject({ policy: 'visitBrief', kind: 'gone_silent' });
+      expect(outDaily[0].detail).toMatch(/ZERO calls yesterday/);
+    });
+
     it('never flags episodic lanes (:sealed/:backfill/:replay) as gone silent — they burst then quiet by design', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       // Live traffic present, so the recorder is provably alive and the
@@ -393,7 +420,7 @@ describe('llm-dispatch-metrics', () => {
     // the heartbeat count for the day being summarized. `heartbeats` defaults
     // to a healthy day; 0 means the recorder was dead during that day.
     function armDb({
-      yesterdayRows, priorRows, delCount = 3,
+      yesterdayRows, priorRows, recentRows = null, delCount = 3,
       heartbeats = 24, priorHeartbeats = 168, pruneError = null, statsError = null,
     }) {
       const prune = makeChain([], delCount);
@@ -402,6 +429,9 @@ describe('llm-dispatch-metrics', () => {
         .mockReturnValueOnce(prune)
         .mockReturnValueOnce(makeChain(yesterdayRows, 0, { selectError: statsError }))
         .mockReturnValueOnce(makeChain(priorRows))
+        // Recent-window stats for the bursty gone-silent check; defaults to
+        // yesterday's rows (a policy active yesterday is active recently).
+        .mockReturnValueOnce(makeChain(recentRows || yesterdayRows))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(priorHeartbeats) } }));
       return { prune };
@@ -482,6 +512,7 @@ describe('llm-dispatch-metrics', () => {
         .mockReturnValueOnce(makeChain([], 1))
         .mockReturnValueOnce(makeChain([]))
         .mockReturnValueOnce(makeChain([{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }]))
+        .mockReturnValueOnce(makeChain([])) // recent-window stats
         .mockReturnValueOnce(hb)
         .mockReturnValueOnce(makeChain([], 0, { first: { n: '168' } }));
       const { runLlmDispatchDigest } = load();

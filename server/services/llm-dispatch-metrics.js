@@ -42,6 +42,15 @@ const FALLBACK_MIN_VOLUME = 5;       // ...but only with enough calls to mean it
 const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
                                      // ...and ZERO yesterday => "gone silent"
 
+// One quiet day only means something for policies that run essentially every
+// day. Event-driven lanes are bursty — visionAnalysis did 10 calls in one day
+// then legitimately nothing, and the weekly-average check emailed "may have
+// stopped running" every quiet day after (2026-08-17). A policy active on
+// fewer than DAILY_CADENCE_MIN_DAYS of the prior 7 must instead be silent for
+// SILENT_CONSECUTIVE_DAYS full ET days (yesterday inclusive) before alarming.
+const DAILY_CADENCE_MIN_DAYS = 5;
+const SILENT_CONSECUTIVE_DAYS = 3;
+
 // Episodic one-shot workloads (sealed exams burst >=10 items then
 // intentionally no-op until the prompt/profile changes; backfill drains a
 // finite backlog; eval harnesses replay a fixed fixture weekly) — expected
@@ -310,7 +319,7 @@ function etDayWindow(daysAgo) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
-function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, absenceJudgeable = true) {
+function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, absenceJudgeable = true, recentActivePolicies = null) {
   const exceptions = [];
 
   // Recording health FIRST — without it, "no email" is ambiguous between
@@ -360,11 +369,24 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
   for (const w of (recorderIssue || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
-    if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
+    if (w.total < SILENT_MIN_WEEKLY || yesterdayByPolicy.has(w.policy)) continue;
+    // Cadence split: near-daily policies (or legacy stats without activeDays)
+    // alarm on one zero day; bursty ones need the whole recent window silent.
+    // `recentActivePolicies` = policies with >=1 call in the last
+    // SILENT_CONSECUTIVE_DAYS ET days; null (legacy caller/tests) means no
+    // recent-window evidence, which falls back to the immediate alarm.
+    const nearDaily = w.activeDays == null || w.activeDays >= DAILY_CADENCE_MIN_DAYS;
+    if (nearDaily) {
       exceptions.push({
         policy: w.policy,
         kind: 'gone_silent',
         detail: `averaged ${Math.round(w.total / 7)} calls/day over the prior week but made ZERO calls yesterday — the feature may have stopped running`,
+      });
+    } else if (!recentActivePolicies || !recentActivePolicies.has(w.policy)) {
+      exceptions.push({
+        policy: w.policy,
+        kind: 'gone_silent',
+        detail: `made ${w.total} calls across ${w.activeDays} day(s) of the prior week but has now been silent for ${SILENT_CONSECUTIVE_DAYS}+ days — the feature may have stopped running`,
       });
     }
   }
@@ -386,13 +408,17 @@ async function loadStats(db, start, end) {
     // A's exam can't be graded on provider B's draft) record exactly one
     // failure entry, and the digest must not report their misses as "failed
     // on BOTH providers".
-    .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") });
+    .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") })
+    // Distinct ET days the policy actually ran — the cadence evidence the
+    // gone-silent check splits on. Window bounds are already ET-day-aligned.
+    .countDistinct({ active_days: db.raw("(created_at AT TIME ZONE 'America/New_York')::date") });
   return rows.map((r) => ({
     policy: r.policy,
     total: Number(r.total),
     fallbacks: Number(r.fallbacks || 0),
     failed: Number(r.failed || 0),
     singleLeg: Number(r.failed || 0) > 0 && Number(r.max_failure_legs) === 1,
+    activeDays: Number(r.active_days || 0),
   }));
 }
 
@@ -417,6 +443,7 @@ async function runLlmDispatchDigest() {
   let pruneError = null;
   let yesterdayStats;
   let priorWeekStats;
+  let recentStats;
   let heartbeats = 0;
   let priorHeartbeats = 0;
 
@@ -439,9 +466,15 @@ async function runLlmDispatchDigest() {
   try {
     const yesterday = etDayWindow(1);
     const weekBefore = etDayWindow(8);
-    [yesterdayStats, priorWeekStats, heartbeats, priorHeartbeats] = await Promise.all([
+    // Recent window for the bursty-policy silence check: the last
+    // SILENT_CONSECUTIVE_DAYS full ET days, yesterday inclusive. A partial-
+    // coverage day inside it can only read as MORE silence (alarm-leaning),
+    // and such days already send their own partial-coverage notice.
+    const recent = etDayWindow(SILENT_CONSECUTIVE_DAYS);
+    [yesterdayStats, priorWeekStats, recentStats, heartbeats, priorHeartbeats] = await Promise.all([
       loadStats(db, yesterday.start, yesterday.end),
       loadStats(db, weekBefore.start, yesterday.start),
+      loadStats(db, recent.start, yesterday.end),
       countHeartbeats(db, yesterday.start, yesterday.end),
       countHeartbeats(db, weekBefore.start, yesterday.start),
     ]);
@@ -500,6 +533,7 @@ async function runLlmDispatchDigest() {
   // and with zero heartbeats it is meaningless.
   const exceptions = detectExceptions(
     yesterdayStats, priorWeekStats, recorderIssue, heartbeats >= MIN_DAY_COVERAGE,
+    new Set(recentStats.map((s) => s.policy)),
   );
   let sendError = null;
   if (exceptions.length) {
@@ -532,4 +566,6 @@ module.exports = {
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,
+  DAILY_CADENCE_MIN_DAYS,
+  SILENT_CONSECUTIVE_DAYS,
 };
