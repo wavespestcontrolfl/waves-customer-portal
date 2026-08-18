@@ -692,3 +692,67 @@ describe('termite bait per-application billing (owner 2026-07-20)', () => {
     expect(converterFollowUpSeedingPattern({ name: 'Quarterly Pest Control' }, { service_type: 'Quarterly Pest Control' }, 'quarterly')).toBe('quarterly');
   });
 });
+
+describe('acceptedPestSelectionVisits — accepted cadence outranks stale pest-line visits (incident 2026-08-18)', () => {
+  const { acceptedPestSelectionVisits, riderAwareSingleRecurringUnit } = EstimateConverter;
+  // Real accepted-line shape from the incident: a quarterly-built engine
+  // estimate whose customer picked Monthly on the v2 view. The accept flow
+  // rewrote the plan totals + customerSelection but left the pest line at
+  // its quote-time cadence.
+  const staleQuarterlyPestLine = {
+    name: 'Pest Control', service: 'pest_control', visitsPerYear: 4,
+    mo: 38.33, monthly: 38.33, perTreatment: 115,
+  };
+
+  test('monthly accept on a quarterly-built pest line divides the plan annual by 12, not the stale 4', () => {
+    expect(acceptedPestSelectionVisits(staleQuarterlyPestLine, 'monthly')).toBe(12);
+    const cadence = resolveBillingCadence({ monthlyRate: 89.70, annualRate: 1076.40, frequencyKey: 'monthly' });
+    const amount = perApplicationChargeAmount({
+      billingCadence: cadence,
+      annualRate: 1076.40,
+      monthlyRate: 89.70,
+      visitsPerYear: acceptedPestSelectionVisits(staleQuarterlyPestLine, 'monthly'),
+    });
+    // The stale-line derivation stamped 1076.40 / 4 = 269.10 — a 3× fee.
+    expect(amount).toBe(89.70);
+  });
+
+  test('quarterly accept on a monthly-built pest line divides by 4 (reverse direction undercharged before)', () => {
+    const staleMonthlyLine = { name: 'Pest Control', service: 'pest_control', visitsPerYear: 12 };
+    expect(acceptedPestSelectionVisits(staleMonthlyLine, 'quarterly')).toBe(4);
+    const cadence = resolveBillingCadence({ monthlyRate: 38.33, annualRate: 460, frequencyKey: 'quarterly' });
+    const amount = perApplicationChargeAmount({
+      billingCadence: cadence,
+      annualRate: 460,
+      monthlyRate: 38.33,
+      visitsPerYear: acceptedPestSelectionVisits(staleMonthlyLine, 'quarterly'),
+    });
+    expect(amount).toBe(115);
+  });
+
+  test('cadence-matched accepts are byte-identical to the line derivation', () => {
+    expect(acceptedPestSelectionVisits(staleQuarterlyPestLine, 'quarterly')).toBe(4);
+    expect(acceptedPestSelectionVisits({ name: 'Pest Control', service: 'pest_control', visitsPerYear: 6 }, 'bi_monthly')).toBe(6);
+  });
+
+  test('no selection, no unit, or an unrecognized cadence falls back to the line count (returns null)', () => {
+    expect(acceptedPestSelectionVisits(staleQuarterlyPestLine, null)).toBeNull();
+    expect(acceptedPestSelectionVisits(null, 'monthly')).toBeNull();
+    expect(acceptedPestSelectionVisits(staleQuarterlyPestLine, 'every_6_weeks')).toBeNull();
+  });
+
+  test('tier plans and commercial pest never take the override — their selection stores the BILLING cadence', () => {
+    // T&S standard: billed monthly, delivers 6 visits — 12 would halve the fee.
+    expect(acceptedPestSelectionVisits({ name: 'Tree & Shrub', service: 'tree_shrub', visitsPerYear: 6 }, 'monthly')).toBeNull();
+    expect(acceptedPestSelectionVisits({ name: 'Monthly Lawn Care Service', service: 'lawn_care', visitsPerYear: 12 }, 'monthly')).toBeNull();
+    expect(acceptedPestSelectionVisits({ name: 'Commercial Pest Program', service: 'commercial_pest', visitsPerYear: 12 }, 'monthly')).toBeNull();
+  });
+
+  test('riderAwareSingleRecurringUnit returns the line the visits derive from, rider-exempt', () => {
+    expect(riderAwareSingleRecurringUnit([staleQuarterlyPestLine], 0)).toBe(staleQuarterlyPestLine);
+    expect(riderAwareSingleRecurringUnit([staleQuarterlyPestLine, { name: 'Lawn Care', service: 'lawn_care' }], 0)).toBeNull();
+    expect(riderAwareSingleRecurringUnit([staleQuarterlyPestLine], 1)).toBeNull();
+    // Behavior parity with the visits wrapper it now backs.
+    expect(EstimateConverter.riderAwareSingleUnitVisits([staleQuarterlyPestLine], 0)).toBe(4);
+  });
+});
