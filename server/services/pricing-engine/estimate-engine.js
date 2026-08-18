@@ -510,6 +510,13 @@ function generateEstimate(input) {
   // apps/year for the commercial turf program. Not risk-typed — lawn cadence is
   // agronomic, not business-type-driven. Unset → the pricer's programVisits (8).
   const commercialLawnVisits = resolveCommercialLawnCadenceOverride(input.commercialLawnCadence);
+  // Saved-estimate floor replay, PER SERVICE (savedFloorReplayOverrides /
+  // serverRecomputeFromEstimateData): re-arms the disarmed commercial minimum
+  // only for services whose stored row shows floor-bound evidence — a
+  // whole-estimate boolean would let one line's coincidental exact-minimum
+  // price re-arm and RAISE a different line on replay (codex #3432 r3 P0).
+  const commercialFloorArmedFor = (serviceKey) => Array.isArray(input.commercialFloorsArmedServices)
+    && input.commercialFloorsArmedServices.includes(serviceKey);
   const hasExplicitCommercialFlag = hasCommercialFlagInput(input.isCommercial);
   const inputIsCommercial = normalizeCommercialFlag(input.isCommercial);
   const commercialContext = {
@@ -704,6 +711,10 @@ function generateEstimate(input) {
         buildingSizeMeasured: input.buildingSizeMeasured,
         // Risk-type cadence override (null → program default 12).
         pestVisits: commercialPestVisits,
+        // Interior service selection ('excluded' → exterior-only base price;
+        // anything else keeps interior included, the default).
+        interiorService: input.commercialInteriorService,
+        floorsArmed: commercialFloorArmedFor('commercial_pest'),
       });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest
@@ -777,6 +788,9 @@ function generateEstimate(input) {
         commercialSubtype,
         // Admin apps/year override (null → program default 8).
         lawnVisits: commercialLawnVisits,
+        // Saved-estimate replay only (savedFloorReplayOverrides): re-arms the
+        // disarmed commercial minimum so a pre-disarm quote keeps its price.
+        floorsArmed: commercialFloorArmedFor('commercial_lawn'),
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
@@ -834,6 +848,7 @@ function generateEstimate(input) {
         treeCount: commercialTreeCount > 0 ? commercialTreeCount : services.treeShrub.treeCount,
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
+        floorsArmed: commercialFloorArmedFor('commercial_tree_shrub'),
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
@@ -906,6 +921,7 @@ function generateEstimate(input) {
         lotSizeMeasured: input.lotSizeMeasured,
         // Rep-set mosquito-pressure multiplier (severe → manual); admin-set.
         mosquitoPressure: input.mosquitoPressure,
+        floorsArmed: commercialFloorArmedFor('commercial_mosquito'),
       });
       // Push the pricer's OWN line — priced or its service-specific manual quote.
       // The manual line keeps service=commercial_mosquito / originalRequestedService=
@@ -948,6 +964,7 @@ function generateEstimate(input) {
         perimeterLF: termiteMeasurements.perimeterLF,
         // Liability scope-split (bond/warranty/install → manual quote); admin-set.
         termiteScope: serviceOptions(termiteBaitService).scope,
+        floorsArmed: commercialFloorArmedFor('commercial_termite_bait'),
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_termite_bait / originalRequestedService=
@@ -1070,6 +1087,7 @@ function generateEstimate(input) {
         buildingSizeMeasured: input.buildingSizeMeasured,
         // Risk-type cadence override (null → program default 4).
         rodentVisits: commercialRodentVisits,
+        floorsArmed: commercialFloorArmedFor('commercial_rodent_bait'),
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_rodent_bait / originalRequestedService=

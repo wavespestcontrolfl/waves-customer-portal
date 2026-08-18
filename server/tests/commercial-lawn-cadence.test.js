@@ -63,11 +63,14 @@ describe('priceCommercialLawn honors the visits override', () => {
     expect(priceCommercialLawn(PROPERTY, { lawnVisits: NaN }).visitsPerYear).toBe(8);
   });
 
-  test('the commercial annual minimum still applies at low cadence on small turf', () => {
+  test('low cadence on small turf prices below the default — floor disarmed', () => {
+    // Floors disarmed (owner 2026-08-17): fewer visits now genuinely price
+    // lower; minApplied stays as the report-only under-reference flag.
     const small = priceCommercialLawn({ turfSf: 1500 }, { lawnVisits: 4 });
     const defSmall = priceCommercialLawn({ turfSf: 1500 });
-    // Both land on the same account minimum — cadence never prices below it.
-    expect(small.annual).toBe(defSmall.annual);
+    expect(small.annual).toBeCloseTo(520.76, 2);
+    expect(defSmall.annual).toBeCloseTo(700.61, 2);
+    expect(small.annual).toBeLessThan(defSmall.annual);
     expect(small.minApplied).toBe(true);
   });
 

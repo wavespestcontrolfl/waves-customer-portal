@@ -854,6 +854,15 @@ function mapV1ToLegacyShape(v1Result) {
       estimatedPricing: true,
       commercialSubtype: li.commercialSubtype || null,
       pricingConfidence: li.pricingConfidence || null,
+      // Interior-service option snapshot (commercial pest only) — must survive
+      // the mapper or the public page can't offer the toggle. interiorScope is
+      // the sold-scope marker (present even snapshot-less) that acceptance
+      // reads for the tech EXTERIOR ONLY preference.
+      interiorOption: li.interiorOption || null,
+      interiorScope: li.interiorScope || null,
+      // Durable floor-replay provenance (codex #3432 r6 P0) — must survive
+      // the mapper so a persisted armed replay keeps arming.
+      ...(li.legacyFloorArmed === true ? { legacyFloorArmed: true } : {}),
       taxable: li.taxable === true,
       taxCategory: li.taxCategory || null,
       discountable: false,

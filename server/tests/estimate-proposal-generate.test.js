@@ -104,7 +104,7 @@ describe('deriveProposalDraft', () => {
     // Pest carries the owner-stated commercial terms; the cadence line is
     // derived from the priced row.
     expect(pest.inclusions[0]).toBe('4 scheduled applications per year');
-    expect(pest.inclusions).toContain('Interior treatment included on request — no extra charge, no surprise fees');
+    expect(pest.inclusions).toContain('Interior treatment available on every visit — priced from your building, no surprise fees');
     expect(pest.exclusions.join(' ')).toMatch(/Termite/);
     // Non-pest families stay factual — documentation line only, no
     // pest-plan claims.

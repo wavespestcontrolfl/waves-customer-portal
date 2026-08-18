@@ -2949,8 +2949,13 @@ function priceCommercialLawn(property = {}, options = {}) {
   });
 
   const computedAnnual = floor.minimumCollectedAnnualPrice;
+  // Floors are disarmed (owner 2026-08-17, extends the 2026-07-17 no-floors
+  // ruling to commercial) — minApplied is a report-only signal, never a clamp
+  // for NEW pricing. options.floorsArmed re-arms the clamp for saved-estimate
+  // replays only (savedFloorReplayOverrides): an outstanding tokenized
+  // estimate quoted at the minimum must keep its quoted price.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(options.floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - floor.annualCost) / annual) : 0;
@@ -2991,6 +2996,11 @@ function priceCommercialLawn(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable provenance for the floor replay (codex #3432 r6 P0): an armed
+    // replay's output may be persisted back over the stored rows, so the
+    // stamp — not the (replay-added) post-split fields — carries the legacy
+    // evidence forward. Once legacy, always legacy.
+    ...(options.floorsArmed === true ? { legacyFloorArmed: true } : {}),
     // The app-mix breakdown describes the default 8-visit program; at an
     // overridden cadence the mix shifts on-site, so claiming the default
     // split would be wrong — omit it rather than misstate it.
@@ -3029,12 +3039,14 @@ function resolveCommercialPestFootprint(property = {}) {
   // from the footprint (a square's perimeter = 4·√area) so a missing perimeter
   // never zeroes the exterior-barrier labor.
   const explicitPerimeter = Number(property.perimeter ?? property.perimeterLF ?? property.perimeterLf);
-  const perimeter = Number.isFinite(explicitPerimeter) && explicitPerimeter > 0
+  const perimeterExplicit = Number.isFinite(explicitPerimeter) && explicitPerimeter > 0;
+  const perimeter = perimeterExplicit
     ? explicitPerimeter
     : (footprint > 0 ? 4 * Math.sqrt(footprint) : 0);
   return {
     footprint,
     perimeter,
+    perimeterExplicit,
     footprintSource: res.source,
     // True when resolvePestFootprint fell back to its 2,000 sqft default — i.e.
     // NO usable building size was supplied. Commercial pest prices off the
@@ -3046,9 +3058,14 @@ function resolveCommercialPestFootprint(property = {}) {
 
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
-  const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  const { footprint, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
   // Risk-type cadence override (office 4/yr … restaurant 12/yr); default 12.
   const visits = Number.isFinite(options.pestVisits) && options.pestVisits > 0 ? options.pestVisits : cfg.programVisits;
+  // Interior service is customer-selectable (on by default, owner 2026-08-17).
+  // Resolved BEFORE the size guard: exterior-only pricing is perimeter-driven,
+  // so an explicit measured perimeter can auto-price it without a building
+  // footprint (codex #3432 r3 P2).
+  const interiorSelected = options.interiorService !== 'excluded';
 
   // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
   // fallback, which is unrelated to the actual building. Fall back to a manual
@@ -3056,8 +3073,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // lot-derivable so they still auto-price; pest is not.) A caller can also force
   // this via buildingSizeMeasured:false — the public wizard sets it when the
   // building size is its synthetic confirm-step default, which would otherwise
-  // resolve as a real footprint.
-  if (defaulted || options.buildingSizeMeasured === false) {
+  // resolve as a real footprint (and could equally taint a profile-computed
+  // perimeter, so that override stays absolute). The one auto-priceable
+  // exception: an EXTERIOR-ONLY program with an explicit measured perimeter —
+  // its buildup never reads the footprint.
+  if (options.buildingSizeMeasured === false || (defaulted && (interiorSelected || !perimeterExplicit))) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',
@@ -3082,26 +3102,91 @@ function priceCommercialPest(property = {}, options = {}) {
     };
   }
 
-  const materialPerVisit = cfg.materialPerVisitBase
-    + cfg.materialPerKSqFtPerVisit * (footprint / 1000);
-  const onSiteMin = cfg.laborMinutesBase
-    + cfg.laborMinutesPerKSqFt * (footprint / 1000)
-    + cfg.laborMinutesPerimeterPer100Lf * (perimeter / 100);
-  const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
+  // Exterior base component: perimeter barrier + monitoring. Carries the
+  // per-visit overhead, drive, and annual admin — they're incurred whether or
+  // not interior is selected.
+  const extMaterialPerVisit = cfg.exterior.materialPerVisitBase;
+  const extOnSiteMin = cfg.exterior.laborMinutesBase
+    + cfg.exterior.laborMinutesPerimeterPer100Lf * (perimeter / 100);
+  const extLaborPerVisit = GLOBAL.LABOR_RATE * ((extOnSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
   const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
 
-  const annualMaterial = materialPerVisit * visits;
-  const annualLabor = laborPerVisit * visits;
-  const annualDrive = drivePerVisit * visits;
-  const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
+  // Interior service component: footprint-driven treatment time + product.
+  // No overhead/drive/admin share — those ride the exterior base.
+  const intMaterialPerVisit = cfg.interior.materialPerVisitBase
+    + cfg.interior.materialPerKSqFtPerVisit * (footprint / 1000);
+  const intOnSiteMin = cfg.interior.laborMinutesBase
+    + cfg.interior.laborMinutesPerKSqFt * (footprint / 1000);
+  const intLaborPerVisit = GLOBAL.LABOR_RATE * (intOnSiteMin / 60);
 
-  const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  const materialPerVisit = extMaterialPerVisit + intMaterialPerVisit;
+  const onSiteMinCombined = extOnSiteMin + intOnSiteMin;
+
+  const extAnnualCost = (extMaterialPerVisit + extLaborPerVisit + drivePerVisit) * visits + cfg.adminAnnual;
+  const intAnnualCost = (intMaterialPerVisit + intLaborPerVisit) * visits;
+  const combinedAnnualCost = extAnnualCost + intAnnualCost;
+
+  const computedExteriorAnnual = extAnnualCost / (1 - cfg.targetGrossMargin);
+  const computedCombinedAnnual = combinedAnnualCost / (1 - cfg.targetGrossMargin);
+  // floorsArmed: saved-estimate replay of a pre-disarm floored quote
+  // (savedFloorReplayOverrides) — clamp both variants so the replayed price
+  // matches what was quoted. Never set for new pricing.
+  const floorsArmed = options.floorsArmed === true;
+  const exteriorOnlyAnnual = roundMoney(floorsArmed ? Math.max(cfg.minAnnual, computedExteriorAnnual) : computedExteriorAnnual);
+  const combinedAnnual = roundMoney(floorsArmed ? Math.max(cfg.minAnnual, computedCombinedAnnual) : computedCombinedAnnual);
+
+  // Both variants rounded once, deltas taken between the rounded values so the
+  // customer-visible arithmetic is exact: exteriorOnly + add === combined.
+  const variantFigures = (annualR, mins, detail) => ({
+    annual: annualR,
+    monthly: roundMoney(annualR / 12),
+    perApp: roundMoney(annualR / visits),
+    onSiteMin: roundMoney(mins),
+    // Scope description travels with the variant so the toggle endpoint can
+    // rewrite the stored row's customer-facing detail to match the sold scope.
+    detail,
+  });
+  const combinedFigures = variantFigures(
+    combinedAnnual,
+    onSiteMinCombined,
+    'Commercial pest program (interior service + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.',
+  );
+  const exteriorFigures = variantFigures(
+    exteriorOnlyAnnual,
+    extOnSiteMin,
+    'Commercial pest program (exterior barrier + monitoring; interior service available as an add-on). Estimated from property data — final price confirmed on site.',
+  );
+  // No snapshot on a defaulted footprint (exterior-only priced off an explicit
+  // perimeter): the interior component would be priced off the 2,000 sqft
+  // fallback, so the toggle must not offer it — adding interior goes through
+  // the office with a real building size.
+  const interiorOption = defaulted ? null : {
+    key: 'interior_service',
+    label: 'Interior service',
+    selected: interiorSelected,
+    annualAdd: roundMoney(combinedFigures.annual - exteriorFigures.annual),
+    monthlyAdd: roundMoney(combinedFigures.monthly - exteriorFigures.monthly),
+    perAppAdd: roundMoney(combinedFigures.perApp - exteriorFigures.perApp),
+    combined: combinedFigures,
+    exteriorOnly: exteriorFigures,
+  };
+
+  // All headline figures reflect the SELECTED scope — downstream margin checks
+  // (IB estimate tools) and tech-time comparisons (pricing-reality-check,
+  // estimate-actuals) read these and must see what was actually sold.
+  const selected = interiorSelected ? combinedFigures : exteriorFigures;
+  const annualCost = interiorSelected ? combinedAnnualCost : extAnnualCost;
+  const computedAnnual = interiorSelected ? computedCombinedAnnual : computedExteriorAnnual;
+  const annualMaterial = (interiorSelected ? materialPerVisit : extMaterialPerVisit) * visits;
+  const annualLabor = (interiorSelected ? extLaborPerVisit + intLaborPerVisit : extLaborPerVisit) * visits;
+  const annualDrive = drivePerVisit * visits;
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
-  const monthly = roundMoney(annual / 12);
-  const perApp = roundMoney(annual / visits);
+  const { annual, monthly, perApp } = selected;
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
-  const pricingConfidence = footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM';
+  // A defaulted footprint (exterior-only priced off an explicit perimeter)
+  // is always LOW confidence — the building size itself is unverified.
+  const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf) ? 'LOW' : 'MEDIUM';
 
   return {
     service: 'commercial_pest',
@@ -3119,24 +3204,32 @@ function priceCommercialPest(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: 'Commercial pest program (interior treatment + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.',
+    detail: selected.detail,
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     footprint,
     footprintUsed: footprint,
     footprintSource,
-    footprintEstimated: false,
+    footprintEstimated: defaulted,
     perimeter: roundMoney(perimeter),
     frequency: visits,
     visitsPerYear: visits,
-    onSiteMin: roundMoney(onSiteMin),
+    onSiteMin: selected.onSiteMin,
     monthly,
     annual,
     perApp,
     internalPerVisitRevenue: perApp,
     perVisit: perApp,
+    // Sold-scope marker, present even when no interiorOption snapshot can be
+    // offered (defaulted footprint + explicit perimeter): acceptance derives
+    // the tech EXTERIOR ONLY preference from this, never from the optional
+    // snapshot alone (codex #3432 r4 P1).
+    interiorScope: interiorSelected ? 'included' : 'excluded',
+    interiorOption,
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(floorsArmed ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {
@@ -3146,6 +3239,10 @@ function priceCommercialPest(property = {}, options = {}) {
       adminCost: cfg.adminAnnual,
       directCost: roundMoney(annualMaterial + annualLabor + annualDrive),
       total: roundMoney(annualCost),
+      componentCosts: {
+        exteriorAnnualCost: roundMoney(extAnnualCost),
+        interiorAnnualCost: roundMoney(intAnnualCost),
+      },
     },
     margin,
     marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
@@ -3164,7 +3261,7 @@ function priceCommercialPest(property = {}, options = {}) {
 
 // Build a priced commercial pest-family line from the supplied per-visit
 // material $ and on-site minutes. Identical buildup/margin/shape across the
-// three services (45% target margin, account minimum, FL-taxed).
+// three services (45% target margin, FL-taxed; floors report-only).
 // Cadence word for a commercial visit count — used in customer-facing detail copy
 // so a monthly program isn't described as quarterly after a risk-type override.
 function commercialCadenceLabel(visits) {
@@ -3175,7 +3272,7 @@ function commercialCadenceLabel(visits) {
   return null;
 }
 
-function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride, priceMultiplier = 1 }) {
+function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride, priceMultiplier = 1, floorsArmed = false }) {
   // Risk-type cadence override (commercial pest/rodent visits-per-year vary by
   // business type). Falls back to the program default when not supplied.
   const visits = Number.isFinite(visitsOverride) && visitsOverride > 0 ? visitsOverride : cfg.programVisits;
@@ -3189,8 +3286,11 @@ function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, servi
   const annualDrive = drivePerVisit * visits * mult;
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a
+  // clamp for new pricing; floorsArmed re-arms it for saved-estimate replays
+  // only (savedFloorReplayOverrides — quoted prices must not drift).
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
@@ -3219,6 +3319,8 @@ function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, servi
     perVisit: perApp,
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(floorsArmed === true ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {
@@ -3324,6 +3426,7 @@ function priceCommercialMosquito(property = {}, options = {}) {
   return buildCommercialPestFamilyLine({
     cfg,
     priceMultiplier: pressure.multiplier,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (treatableSqFt / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (treatableSqFt / 1000),
     service: 'commercial_mosquito',
@@ -3426,6 +3529,7 @@ function priceCommercialTermiteBait(property = {}, options = {}) {
   }
   return buildCommercialPestFamilyLine({
     cfg,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPer100LfPerVisit * (perimeter / 100),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPer100Lf * (perimeter / 100),
     service: 'commercial_termite_bait',
@@ -3467,6 +3571,7 @@ function priceCommercialRodentBait(property = {}, options = {}) {
   return buildCommercialPestFamilyLine({
     cfg,
     visits: rodentVisits,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
     service: 'commercial_rodent_bait',
@@ -3494,9 +3599,10 @@ function resolveCommercialBedArea(property = {}) {
   // measured as absent) — NOT an inferred/estimated zero. The admin V2 form
   // sends estimatedBedAreaSf: 0 as its blank default, which
   // calculatePropertyProfile resolves to bedArea: 0 with bedAreaSource:
-  // 'estimated'; honoring that as "no beds" would underquote a real commercial
-  // property at the $900 minimum, so an estimated/lot_based zero falls through
-  // to the lot-density estimate instead. (A positive value is always honored.)
+  // 'estimated'; honoring that as "no beds" would misprice a real commercial
+  // property, so an estimated/lot_based zero falls through to the lot-density
+  // estimate instead. (A positive value is always honored; an explicit zero
+  // routes to a manual quote in priceCommercialTreeShrub.)
   if (property.bedArea !== null && property.bedArea !== undefined && property.bedArea !== '') {
     const explicit = Number(property.bedArea);
     const src = property.bedAreaSource;
@@ -3528,6 +3634,25 @@ function resolveCommercialBedArea(property = {}) {
 function priceCommercialTreeShrub(property = {}, options = {}) {
   const cfg = COMMERCIAL_TREE_SHRUB;
   const { bedArea, bedBasis, estimated } = resolveCommercialBedArea(property);
+  // An explicit measured-zero bed area (all-hardscape lot) used to price at the
+  // $900 minimum; with floors disarmed it would price at the admin-only buildup
+  // (~$220/yr), which is not a sellable ornamental program — manual quote.
+  // FRESH pricing only (codex #3432 r6 P0): a floors-armed replay of a
+  // pre-disarm zero-bed estimate must reproduce its quoted $900 line, not
+  // demote an outstanding tokenized quote to a manual-quote block.
+  // Only the explicit path can surface zero here (the resolver routes
+  // estimated/lot-based zeros to the lot-density estimate).
+  if (bedArea === 0 && !estimated && options.floorsArmed !== true) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_tree_shrub',
+      name: 'Commercial Tree & Shrub',
+      originalRequestedService: 'tree_shrub',
+      cfg,
+      reason: 'commercial_tree_shrub_explicit_zero_bed_manual_quote',
+      detail: 'No plant beds on file for this property — your Waves account manager will confirm the ornamental program and quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
   // Tree count resolution (mirrors residential priceTreeShrub):
   //  1. Only a POSITIVE count is authoritative — callers (e.g. the public quote
   //     adapter) may pass treeCount: 0 to mean "omitted", which must NOT
@@ -3584,8 +3709,11 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
 
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a
+  // clamp for new pricing; options.floorsArmed re-arms it for saved-estimate
+  // replays only (savedFloorReplayOverrides — quoted prices must not drift).
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(options.floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
@@ -3626,6 +3754,8 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
+    // Durable floor-replay provenance (r6 P0) — see priceCommercialLawn.
+    ...(options.floorsArmed === true ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {

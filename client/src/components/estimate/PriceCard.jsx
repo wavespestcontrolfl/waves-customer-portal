@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -207,7 +207,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -704,11 +704,22 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 // semantics) but serviceKey checks 'lawn' first — the glass
                 // stack must match the priced service (codex rd2). Null
                 // slug → baseline list, unchanged.
-                items={(glass && glassRowInclusions(
-                  glassServiceSlug(String(row.service || row.key || row.label || '')),
-                  row.visitsPerYear,
-                  glassSetupBullet,
-                )) || serviceInclusions(row)}
+                // Scope-aware commercial interior bullets (codex #3432 r8/r9):
+                // classified off the RAW row key, not the glass slug — the
+                // slug resolves commercial_pest to pest_control while
+                // GATE_ESTIMATE_COMMERCIAL_GLASS is off, and the swap must
+                // hold on every stack (glass, residential-slug glass,
+                // baseline non-glass alike).
+                items={applyCommercialExteriorScope(
+                  (glass && glassRowInclusions(
+                    glassServiceSlug(String(row.service || row.key || row.label || '')),
+                    row.visitsPerYear,
+                    glassSetupBullet,
+                  )) || serviceInclusions(row),
+                  /commercial/.test(String(row.service || row.key || '').toLowerCase())
+                    && /pest/.test(String(row.service || row.key || '').toLowerCase()),
+                  commercialInteriorSelected,
+                )}
                 collapsible={glass}
               />
             </div>

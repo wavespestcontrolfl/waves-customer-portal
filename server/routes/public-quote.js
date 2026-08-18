@@ -1429,6 +1429,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             lawnSqFt: item.lawnSqFt ?? undefined,
             turfSf: item.turfSf ?? undefined,
             turfBasis: item.turfBasis ?? undefined,
+            // Commercial pest interior-service option (owner 2026-08-17):
+            // the quote-time snapshot + sold-scope marker must survive this
+            // thin mirror or a wizard-created commercial quote can never
+            // offer the customer selector, and acceptance can't derive the
+            // tech EXTERIOR ONLY scope (codex #3432 r7).
+            interiorOption: item.interiorOption ?? undefined,
+            interiorScope: item.interiorScope ?? undefined,
           })),
           waveGuard: estimate?.waveGuard || null,
         },

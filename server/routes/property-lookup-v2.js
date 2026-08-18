@@ -3585,6 +3585,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Direct lawn-cadence override (apps/year for the commercial turf program).
   // Admin-set; same options/profile ride-along → replays on re-price.
   const commercialLawnCadence = commercialProfile ? (o.commercialLawnCadence || p.commercialLawnCadence || null) : null;
+  // Interior-service selection for commercial pest ('excluded' → exterior-only
+  // base). Rep- or customer-set; same options/profile ride-along → replays on
+  // re-price (a replay missing this would silently re-add the interior charge).
+  const commercialInteriorService = commercialProfile ? (o.commercialInteriorService || p.commercialInteriorService || null) : null;
   // Rep-set commercial multipliers (T&S plant density, mosquito pressure). Admin-
   // set; ride the raw engineRequest options/profile → replay on re-price.
   const treeShrubDensity = commercialProfile ? (o.treeShrubDensity || p.treeShrubDensity || null) : null;
@@ -4148,6 +4152,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     commercialRiskType,
     commercialPestCadence,
     commercialLawnCadence,
+    commercialInteriorService,
     treeShrubDensity,
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,

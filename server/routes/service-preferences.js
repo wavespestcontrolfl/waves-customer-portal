@@ -63,11 +63,46 @@ async function readPrefs(customerId) {
   return normalize(raw);
 }
 
+// Commercial exterior-only plans price interior service OUT of the plan
+// (owner 2026-08-17). The re-enable lock keys off the DISTINCT sold-scope
+// marker estimate acceptance stamps into the blob
+// (commercial_interior_scope: 'excluded') — never off the mutable
+// interior_spray value, which any commercial customer may legitimately
+// disable as a preference and later restore (codex #3432 r10 P2 + r11 P2).
+// The marker is server-only: the PUT schema can't set it, the write below
+// preserves it, and accepting a later interior-included commercial estimate
+// clears it (the office-reprice path back). This helper feeds GET's
+// editability signal; the PUT trust boundary re-checks the marker from the
+// FOR UPDATE row inside its transaction (codex #3432 r12 P2).
+const COMMERCIAL_SCOPE_KEY = 'commercial_interior_scope';
+
+async function readRawPrefsBlob(customerId) {
+  if (!(await db.schema.hasColumn('customers', 'service_preferences'))) return {};
+  const row = await db('customers').select('service_preferences').where({ id: customerId }).first();
+  if (!row) return {};
+  const raw = typeof row.service_preferences === 'string'
+    ? JSON.parse(row.service_preferences || '{}')
+    : (row.service_preferences || {});
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+async function commercialInteriorReEnableLocked(customerId) {
+  const raw = await readRawPrefsBlob(customerId);
+  return raw[COMMERCIAL_SCOPE_KEY] === 'excluded';
+}
+
 // GET /api/service-preferences
 router.get('/', async (req, res, next) => {
   try {
     const prefs = await readPrefs(req.customerId);
-    res.json({ preferences: prefs });
+    const interiorLocked = await commercialInteriorReEnableLocked(req.customerId);
+    res.json({
+      preferences: prefs,
+      // Per-key editability for the portal UI (codex #3432 r6 P2): a locked
+      // key renders disabled with the office-reprice explanation instead of
+      // an optimistic flip that bounces off the PUT rejection.
+      editable: { interior_spray: !interiorLocked, exterior_sweep: true },
+    });
   } catch (err) { next(err); }
 });
 
@@ -91,6 +126,7 @@ router.put('/', async (req, res, next) => {
     // instructions. FOR UPDATE serializes them on the customer row.
     let previous;
     let next;
+    let interiorReEnableRejected = false;
     await db.transaction(async (trx) => {
       const row = await trx('customers')
         .select('service_preferences')
@@ -100,13 +136,40 @@ router.put('/', async (req, res, next) => {
       const raw = typeof row?.service_preferences === 'string'
         ? JSON.parse(row.service_preferences || '{}')
         : (row?.service_preferences || {});
+      // A commercial customer whose sold scope is exterior-only cannot
+      // RE-ENABLE interior here — that would restore routine interior work
+      // without the priced component; scope changes go through the office and
+      // a reprice (codex #3432 r3 P1, narrowed r10 P2). The check reads the
+      // FOR UPDATE row: a pre-transaction read could pass just before an
+      // exterior-only acceptance stamps the marker, then write
+      // interior_spray: true while preserving the stamp it never saw
+      // (codex #3432 r12 P2). Disabling stays available to everyone, and
+      // accounts without the stamp keep the preference exactly as before.
+      if (patch.interior_spray === true
+          && raw && typeof raw === 'object'
+          && raw[COMMERCIAL_SCOPE_KEY] === 'excluded') {
+        interiorReEnableRejected = true;
+        return; // nothing written — the transaction commits empty
+      }
       previous = normalize(raw);
       next = normalize({ ...previous, ...patch });
+      // The sold-scope marker survives every customer write — it is set and
+      // cleared only by estimate acceptance (server-side), and normalize()
+      // would otherwise strip it (codex #3432 r11 P2).
+      const stored = raw && typeof raw === 'object' && raw.commercial_interior_scope
+        ? { ...next, commercial_interior_scope: raw.commercial_interior_scope }
+        : next;
       await trx('customers').where({ id: req.customerId }).update({
-        service_preferences: JSON.stringify(next),
+        service_preferences: JSON.stringify(stored),
         updated_at: new Date(),
       });
     });
+
+    if (interiorReEnableRejected) {
+      return res.status(400).json({
+        error: 'Interior service on your commercial plan is priced by scope — contact our office to add it to your program.',
+      });
+    }
 
     // Figure out which keys actually flipped (for the admin notification body)
     const changed = Object.keys(patch).filter((k) => previous[k] !== next[k]);

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  applyCommercialExteriorScope,
   commercialGlassActive,
   glassCopyActive,
   glassCtaMicroFor,
@@ -277,11 +278,34 @@ describe('commercial glass release', () => {
     expect(glassServiceSlug('commercial_rodent_bait')).toBe('rodent_bait');
   });
 
+  it('applyCommercialExteriorScope swaps interior bullets on every stack, only for explicit exterior-only', () => {
+    // codex #3432 r8 + r9: the swap must hold on the commercial glass stack,
+    // the residential-pest stack the slug falls to while commercial glass is
+    // off, and the baseline non-glass list — "available on every visit" (or
+    // "Interior treatment included") contradicts the sold exterior-only
+    // scope on all of them.
+    for (const stack of [
+      glassRowInclusions('commercial_pest'),
+      glassRowInclusions('pest_control', 4, false),
+      ['Interior treatment included — no awkward upsell, no surprise charge', 'Exterior perimeter protection'],
+    ]) {
+      const swapped = applyCommercialExteriorScope(stack, true, false);
+      const joined = swapped.join(' ');
+      expect(joined).not.toMatch(/interior treatment (available|included)/i);
+      expect(joined).toContain('Exterior-only program — interior service can be added through our office');
+    }
+    // true / null keep every stack untouched; non-commercial rows never swap.
+    const commercial = glassRowInclusions('commercial_pest');
+    expect(applyCommercialExteriorScope(commercial, true, true)).toEqual(commercial);
+    expect(applyCommercialExteriorScope(commercial, true, null)).toEqual(commercial);
+    expect(applyCommercialExteriorScope(commercial, false, false)).toEqual(commercial);
+  });
+
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {
     const stack = glassRowInclusions('commercial_pest');
     expect(Array.isArray(stack)).toBe(true);
     const joined = stack.join(' ');
-    expect(joined).toContain('Interior treatment included on request');
+    expect(joined).toContain('Interior treatment available on every visit');
     expect(joined).toContain('No long-term contract');
     expect(joined).not.toMatch(/auto pay|in the app/i);
     expect(joined).not.toMatch(/90-day/i);

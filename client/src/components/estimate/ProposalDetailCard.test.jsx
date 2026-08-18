@@ -43,7 +43,7 @@ describe('ProposalDetailCard', () => {
     expect(screen.getByText('Sales tax')).toBeTruthy();
     expect(screen.getByText('$513.60')).toBeTruthy();
     expect(screen.getByText('What your commercial pest service includes')).toBeTruthy();
-    expect(screen.getByText(/Interior treatment included on request/)).toBeTruthy();
+    expect(screen.getByText(/Interior treatment available on every visit/)).toBeTruthy();
   });
 
   it('makes no residential guarantee claims', () => {

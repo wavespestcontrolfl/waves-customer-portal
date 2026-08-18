@@ -151,9 +151,11 @@ const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · App
 const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
 
 // Commercial pack — every claim is grounded in standing owner statements or
-// an already-shipped surface: interior treatment included on request, tenant
-// re-services included in the plan, tenants can join the portal/app for
-// notifications, no-contract + Auto Pay + cancel-in-app terms, and
+// an already-shipped surface: interior treatment available on every visit
+// (a customer-selectable priced component since owner 2026-08-17 — worded
+// "available", not "included", so the claim stays true whether the customer
+// keeps or removes it), tenant re-services included in the plan, tenants can
+// join the portal/app for notifications, no-contract terms, and
 // satellite/county-records pricing (the same methodology the residential
 // aiBody claims). The residential-only promises (90-day money-back, waived
 // setup, "unlimited callbacks 100% guaranteed") are deliberately absent —
@@ -166,7 +168,7 @@ const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No p
 const GLASS_COMMERCIAL_CTA_MICRO = 'No long-term contract · Licensed & insured · Satisfaction guaranteed';
 const GLASS_COMMERCIAL = {
   heroH1: 'Hello {first}, your commercial service plan is ready!',
-  heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service included on request, tenant-reported pests handled between visits, and no long-term contract.',
+  heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service available on every visit, tenant-reported pests handled between visits, and no long-term contract.',
   eyebrow: 'Your commercial service plan',
   aiTitle: 'Your price was built from your property — not somebody else’s',
   aiBody: 'We measured your building, lot, and grounds from satellite imagery and county property records before pricing this plan — the price fits your actual property, not a generic average.',
@@ -478,6 +480,14 @@ export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
 }
 
 // ── Technical offer stacks (non-pest rows) ──────────────────────────────────
+// Commercial interior bullet + its exterior-only replacement: with the
+// selector set to exterior-only, "available on every visit" would contradict
+// the sold scope (the tech is instructed EXTERIOR ONLY), so the swapped
+// bullet states the real path back — the office and a reprice (codex #3432
+// r8). glassRowInclusions performs the swap off opts.interiorSelected.
+const COMMERCIAL_PEST_INTERIOR_BULLET = 'Interior treatment available on every visit — priced from your building, no surprise fees';
+const COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET = 'Exterior-only program — interior service can be added through our office, priced from your building';
+
 // Glass rewrites of PriceCard's SERVICE_INCLUSIONS, keyed by the same
 // serviceKey() slugs. Same facts as the baseline lists (what each program
 // actually does) plus guarantee lines already shipped elsewhere on the page
@@ -529,7 +539,7 @@ const GLASS_SERVICE_INCLUSIONS = {
   // claims. "Products applied" is what the service report already documents.
   commercial_pest: [
     'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
-    'Interior treatment included on request — no extra charge, no surprise fees',
+    COMMERCIAL_PEST_INTERIOR_BULLET,
     'Tenant-reported pests handled between visits — re-service requests are included in the plan',
     'Tenants can be added to the Waves app for arrival alerts and service reports',
     'Every visit documented — time on site, areas treated, and products applied',
@@ -546,6 +556,28 @@ export function glassRowInclusions(rowServiceKey, visitsPerYear, includeSetupBul
     return glassPestInclusions(visitsPerYear, includeSetupBullet);
   }
   return GLASS_SERVICE_INCLUSIONS[rowServiceKey] || null;
+}
+
+// Scope-aware commercial inclusions (codex #3432 r8 + r9): on an explicit
+// exterior-only selection, ANY interior-claiming bullet must give way to the
+// office-reprice line — applied by PriceCard AFTER stack selection so it
+// covers every gate combination (commercial glass stack, the residential
+// pest stack the slug falls to while GATE_ESTIMATE_COMMERCIAL_GLASS is off,
+// and the baseline non-glass list). Only interiorSelected === false on a
+// commercial pest row transforms; anything else returns the stack untouched.
+export function applyCommercialExteriorScope(items, isCommercialPestRow, interiorSelected) {
+  if (!isCommercialPestRow || interiorSelected !== false || !Array.isArray(items)) return items;
+  const out = [];
+  let swapped = false;
+  for (const line of items) {
+    if (/interior/i.test(String(line))) {
+      if (!swapped) { out.push(COMMERCIAL_PEST_EXTERIOR_ONLY_BULLET); swapped = true; }
+      // Additional interior-claiming lines collapse into the single swap.
+    } else {
+      out.push(line);
+    }
+  }
+  return out;
 }
 
 // ── Per-day value line ──────────────────────────────────────────────────────
@@ -570,6 +602,9 @@ const GLASS_SERVICE_DAY_LINES = {
   palm_injection: 'That’s about {amount}/day — less than one replacement palm, to keep the ones you have healthy.',
   rodent_bait: 'That’s about {amount}/day for round-the-clock rodent monitoring.',
   foam_recurring: 'That’s about {amount}/day for targeted termite treatment that keeps the pressure down.',
+  // Commercial pest (slug active once commercial glass is released): the
+  // residential fallback said "home protection" on a business property.
+  commercial_pest: 'That’s about {amount}/day for always-on protection for your business.',
 };
 
 const DAY_LINE_CADENCE_KEYS = ['quarterly', 'bi_monthly', 'monthly'];
