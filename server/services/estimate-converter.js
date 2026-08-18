@@ -16,8 +16,10 @@ const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pr
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
 const {
+  billingIntervalMonthsForFrequencyKey,
   customerPreservesMonthlyMembership,
   inferFrequencyKeyFromEstimateData,
+  normalizeFrequencyKey,
   perApplicationChargeAmount,
   resolveBillingCadence,
 } = require('./billing-cadence');
@@ -2748,11 +2750,39 @@ function termiteStationsRentedUpdate(recurringServices = [], { suppressRecurring
 // visit count. Termite riders are unit-count-exempt, so the single unit is
 // the non-rider line set (codex #2915 r6) — bait+bond derives 4 from the
 // bait line; true multi-unit plans still return null.
-function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
+function riderAwareSingleRecurringUnit(recurringLines = [], supplementUnitCount = 0) {
   const nonRider = (Array.isArray(recurringLines) ? recurringLines : [])
     .filter((svc) => !isTermiteBillingRiderLine(svc));
   if (nonRider.length !== 1 || supplementUnitCount !== 0) return null;
-  return visitsPerYearForRecurringService(nonRider[0]);
+  return nonRider[0];
+}
+
+function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
+  const unit = riderAwareSingleRecurringUnit(recurringLines, supplementUnitCount);
+  return unit ? visitsPerYearForRecurringService(unit) : null;
+}
+
+// Stale-debris doctrine at the FEE choke point — the same pest-primary rule
+// combineRecurringServicesForScheduling applies to cadence: the accepted plan
+// selection (customerSelection.frequency, written only inside the accept
+// transaction) is the customer's FINAL visit-cadence choice for a PEST plan,
+// and the persisted line can carry stale quote-time visitsPerYear. The accept
+// flow rewrites the plan totals to the selected cadence but not the pest
+// line, so a quarterly-built quote switched to monthly at accept kept
+// `visitsPerYear: 4` — plan-annual ÷ 4 then stamped a 3× per_application_fee
+// and the membership email quoted it (incident 2026-08-18). RESIDENTIAL PEST
+// ONLY: pest bills per visit at the accepted billing cadence, so billing
+// interval == visit interval (12/6/4). Tier plans (T&S/lawn/mosquito) store
+// the BILLING cadence in customerSelection.frequency while delivering a
+// different visit count, and commercial pest programs are flat/office-managed
+// — both keep the line-count derivation. Returns null whenever the doctrine
+// doesn't apply so the caller falls back to the line's own count.
+function acceptedPestSelectionVisits(singleUnit, acceptedPlanFrequency) {
+  if (!singleUnit || !acceptedPlanFrequency) return null;
+  if (recurringServiceKey(singleUnit) !== 'pest_control') return null;
+  const key = normalizeFrequencyKey(acceptedPlanFrequency);
+  if (!key) return null;
+  return 12 / billingIntervalMonthsForFrequencyKey(key);
 }
 
 // A recurring line (or its parent row) that reads as COMMERCIAL — the
@@ -3557,10 +3587,14 @@ const EstimateConverter = {
     // bait+bond accept (no recurring.services for the cadence inference to
     // read → monthly fallback) would stamp the monthly total as the
     // per-visit fee ($50) instead of plan-annual ÷ visits ($600/4 = $150).
-    const singleRecurringUnitVisits = riderAwareSingleUnitVisits(
+    const singleRecurringUnit = riderAwareSingleRecurringUnit(
       recurringServicesForConversion,
       supplementStandaloneUnits.length,
     );
+    // Pest single-unit: the accepted selection's cadence outranks the line's
+    // stale quote-time count (acceptedPestSelectionVisits doctrine above).
+    const singleRecurringUnitVisits = acceptedPestSelectionVisits(singleRecurringUnit, acceptedPlanFrequency)
+      ?? (singleRecurringUnit ? visitsPerYearForRecurringService(singleRecurringUnit) : null);
     const perApplicationAmount = billingCadence
       ? perApplicationChargeAmount({
           billingCadence,
@@ -6145,6 +6179,8 @@ module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceFo
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
+module.exports.riderAwareSingleRecurringUnit = riderAwareSingleRecurringUnit;
+module.exports.acceptedPestSelectionVisits = acceptedPestSelectionVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
 module.exports.visitCountFieldsInvalid = visitCountFieldsInvalid;
