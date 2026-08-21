@@ -238,6 +238,20 @@ async function performPropertyLookup(address, options = {}) {
   return run;
 }
 
+// A cached stacked-association aggregate in which EVERY unit has its own
+// street number (buildingCount counts distinct unit street numbers, so it
+// equals the unit total exactly when no number is shared) — the shape the
+// live path now resolves to the typed number's own unit row instead of the
+// association. A shared-number condo building (buildingCount < units)
+// keeps its cached aggregate. Pure; cache rows are inputs, never mutated.
+function cachedAggregateResolvesToOwnUnit(record) {
+  const parcel = record?._parcel;
+  if (!parcel || parcel.aggregated !== true) return false;
+  const units = Number(parcel.residentialUnits);
+  const buildings = Number(parcel.buildingCount);
+  return Number.isFinite(units) && units > 1 && buildings === units;
+}
+
 async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
@@ -257,7 +271,17 @@ async function performPropertyLookupCore(address, options = {}) {
   // lookup (still re-applying verified overrides and re-saving at the end).
   const verifiedOverrides = await getVerifiedOverrides(address);
   if (!options.refresh) {
-    const cached = await getCachedLookup(address);
+    let cached = await getCachedLookup(address);
+    if (cached && !cacheOnly && cachedAggregateResolvesToOwnUnit(cached.property_record)) {
+      // Cached before own-numbered units could be resolved out of a stacked
+      // association: every unit in this aggregate carries its own street
+      // number, so the typed number names ONE home and the live path now
+      // returns that home's own roll row instead of the association sums.
+      // Serve the cache no further — re-run live once; the save at the end
+      // replaces the row. A verified-override re-apply still happens below.
+      logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — re-running live');
+      cached = null;
+    }
     if (cached) {
       // Flood-zone backfill (#1698 review): rows cached before the FEMA
       // provider shipped carry no _floodZone for up to the 180-day TTL.
@@ -1903,6 +1927,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // Stacked-parcel association aggregate: distinct unit street numbers on
     // the roll (1 when the whole association shares one address).
     buildingCount,
+    // One unit resolved out of a stacked association (its own street number
+    // on the shared polygon) — the association totals, for context only.
+    association: rc?._parcel?.association || null,
 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
@@ -3372,6 +3399,27 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     }
   }
 
+  // One home resolved out of a stacked condo/HOA association (own street
+  // number, shared county polygon — paired villas / townhomes): the unit's
+  // own roll row priced this lookup, and the association's land was
+  // withheld on purpose. Say so, and leave the HOA door open — commercial
+  // applies only when the association or its manager is the client.
+  const association = rc?._parcel?.association;
+  if (association && Number(association.residentialUnits) > 1) {
+    const units = Number(association.residentialUnits);
+    const totals = [
+      `${units} units`,
+      Number(association.buildingCount) > 1 ? `${Number(association.buildingCount)} buildings` : null,
+      Number(association.livingAreaSqft) > 0 ? `${Math.round(Number(association.livingAreaSqft)).toLocaleString()} sf living` : null,
+      Number(association.lotSqft) > 0 ? `${Math.round(Number(association.lotSqft)).toLocaleString()} sf land` : null,
+    ].filter(Boolean).join(' · ');
+    flags.push({
+      field: 'association',
+      reason: `This home is one unit of a ${units}-unit condo/HOA association — the county stacks every unit on one shared parcel. Sq ft, stories, and year built are this unit's own roll figures; lot is left blank because the land is the association's common ground. Price as residential. Commercial applies only if the association or its property manager is the client — then set Commercial to Yes with subtype multifamily_common_area_residential and quote the association totals (${totals}).`,
+      priority: 'MEDIUM',
+    });
+  }
+
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
@@ -4671,6 +4719,7 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
+  cachedAggregateResolvesToOwnUnit,
   inFlightLookups,
   lookupCoalesceKey,
   applyParcelTurfBound,
