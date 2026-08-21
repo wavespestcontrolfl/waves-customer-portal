@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { lookupCountyParcelByPoint, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
+const { lookupCountyParcelByPoint, unitParcelFromAggregate, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -1168,6 +1168,56 @@ function attachParcelMeta(merged, parcel) {
     // wins, so the profile can prefer the aggregate dimensions (codex P2 r2).
     livingAreaSqft: parcel.livingAreaSqft ?? undefined,
     situsLines: parcel.situsLines ?? undefined,
+    // Aggregates only: the house numbers whose row positively attests ONE
+    // dwelling (county-parcel-gis soleUnitRows) — the numbers a typed
+    // lookup resolves to the unit instead of the association. Persisted so
+    // the cache can tell a resolvable aggregate from one the live path
+    // deliberately kept (codex P1): an EMPTY list is a checked negative,
+    // absent means the row predates the check.
+    soleUnitHouseNumbers: parcel.soleUnitRows && typeof parcel.soleUnitRows === 'object'
+      ? Object.keys(parcel.soleUnitRows)
+      : undefined,
+    // One unit resolved out of a stacked association (unitParcelFromAggregate):
+    // the association totals, so the profile can explain why the lot is
+    // blank and the operator can still quote the HOA when it is the client.
+    association: parcel.association ?? undefined,
+  };
+  if (parcel.association) withholdAssociationLand(merged);
+  return merged;
+}
+
+// A unit resolved out of a stacked association owns no land: the only lot
+// any source can report for it is the association's common ground (the
+// county's shared polygon, the PAO detail page's land figure, a listing's
+// "lot" line). unitParcelFromAggregate nulls the cadastral lot, but the
+// by-parcel PAO record and the AI fallback merge AFTER it and a positive
+// lotSize from either outranks the null (codex P0) — so the FINAL merged
+// record withholds the lot outright, with evidence that says why. Runs
+// from attachParcelMeta, the last step of both county merge paths, so no
+// later source can restore it. A tech-verified lot still wins: the route
+// re-applies verified overrides after the lookup returns.
+function withholdAssociationLand(merged) {
+  if (!merged) return merged;
+  const prior = merged._fieldEvidence?.lotSize;
+  merged.lotSize = null;
+  if (merged._actuals && typeof merged._actuals === 'object') {
+    delete merged._actuals.lotSqft;
+    if (merged._actuals._sourceTypes) delete merged._actuals._sourceTypes.lotSqft;
+  }
+  merged._fieldEvidence = {
+    ...(merged._fieldEvidence || {}),
+    lotSize: {
+      value: null,
+      confidence: 'high',
+      sourceType: 'county',
+      sourceLabel: 'association common ground — withheld',
+      winningSource: null,
+      winningProvider: null,
+      score: 100,
+      fieldVerify: false,
+      withheld: 'association_common_ground',
+      evidence: Array.isArray(prior?.evidence) ? prior.evidence : [],
+    },
   };
   return merged;
 }
@@ -1807,6 +1857,7 @@ function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress
     });
     if (extendsAsUnit) return 'drop'; // unit-level lookup, not the HOA
     if (!lineMatches) return 'drop'; // wrong street or number for this association
+    if (aggregateSoleUnitRow(parcel, typedNumber)) return 'unit';
     return 'keep';
   }
 
@@ -1817,7 +1868,30 @@ function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress
   const inAssociation = Boolean(typedNumber) && buildingNumbers.includes(String(typedNumber));
   if (typedNumber && buildingNumbers.length && !inAssociation) return 'drop';
   if (gisPrecision === 'interpolated' && !inAssociation) return 'drop';
+  if (inAssociation && aggregateSoleUnitRow(parcel, typedNumber)) return 'unit';
   return 'keep';
+}
+
+// The typed house number names exactly ONE unit row in the stack — a
+// paired-villa / townhome association where every home has its own street
+// number but the county stacks all of them on one shared polygon. That
+// number is as unit-identifying as a Unit/Apt token: the customer at it is
+// ONE home, not the HOA, so the aggregate (association sums + the
+// Multifamily commercial verdict) must step aside for the unit's own roll
+// row. A building number shared by many "NUMBER STREET 101" units never
+// keys a sole row (county-parcel-gis buildStackedAggregate), so the
+// single-number condo building keeps today's association behavior.
+function aggregateSoleUnitRow(parcel, houseNumber) {
+  if (!parcel || !houseNumber) return null;
+  return parcel.soleUnitRows?.[String(houseNumber)] || null;
+}
+
+// The unit parcel for a 'unit' verdict — anchored to the typed number the
+// same way the verdict was, so a snapped canonical number can't pick a
+// neighbor's row.
+function resolveAggregateUnitParcel(parcel, searchAddress, typedAddress) {
+  const anchored = leadingHouseNumber(typedAddress) ? typedAddress : searchAddress;
+  return unitParcelFromAggregate(parcel, leadingHouseNumber(anchored));
 }
 
 // Positive confirmation — both sides expose a single clean leading house
@@ -2057,9 +2131,22 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
       });
       parcel = null;
     } else if (parcel && parcel.aggregated === true) {
-      if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address) === 'drop') {
+      const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
+      if (verdict === 'drop') {
         logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
         parcel = null;
+      } else if (verdict === 'unit') {
+        // The typed number is ONE home in a stacked association (own street
+        // number, shared polygon): resolve its own unit row — by-parcel PAO
+        // detail, a residential cadastral record, no association land — and
+        // keep the association totals as context. A missing row (defensive)
+        // degrades to the address search rather than pricing the HOA.
+        const unitParcel = resolveAggregateUnitParcel(parcel, searchAddress, address);
+        logger.info('[county-property] association aggregate resolved to the typed house number\'s own unit parcel', {
+          resolved: Boolean(unitParcel),
+          associationUnits: parcel.residentialUnits ?? null,
+        });
+        parcel = unitParcel;
       }
     } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
       // The rooftop point landed inside a parcel whose situs is a different
@@ -5104,6 +5191,8 @@ module.exports = {
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
     addressHasSubpremise,
+    resolveAggregateUnitParcel,
+    withholdAssociationLand,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
     slugAddressLine,

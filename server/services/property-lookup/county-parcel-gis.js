@@ -233,6 +233,35 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   }
   const buildingCount = Math.max(1, buildingKeys.size);
 
+  // House numbers that identify exactly ONE unit row. In a paired-villa /
+  // townhome association every home carries its own street number while
+  // the county still stacks all of them on the shared polygon, so a typed
+  // number singles out that unit the way a Unit/Apt token does in a
+  // single-number building. Only those numbers are keyed (a building
+  // number shared by dozens of "NUMBER STREET 101" units stays out), and
+  // ONLY when the row positively attests ONE dwelling (residentialUnits
+  // === 1): a uniquely-numbered row is not proof of a single home — a
+  // multi-unit building with its own street number, or a layer that omits
+  // the unit count (Charlotte), must keep the aggregate rather than price
+  // a whole building's dimensions as one residence (codex P0). The parsed
+  // roll row rides along so the caller can resolve the unit's own parcel
+  // without a second GIS round-trip. Rings are NOT copied — the shared
+  // polygon is the association's land, never the unit's lot.
+  const rowsByHouseNumber = new Map();
+  for (const row of unitRows) {
+    const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
+    if (!m) continue;
+    const list = rowsByHouseNumber.get(m[1]) || [];
+    list.push(row.parsed);
+    rowsByHouseNumber.set(m[1], list);
+  }
+  const soleUnitRows = {};
+  for (const [number, list] of rowsByHouseNumber) {
+    if (list.length === 1 && list[0].parcelId && list[0].residentialUnits === 1) {
+      soleUnitRows[number] = list[0];
+    }
+  }
+
   // Land: a stacked master/common row carrying a roll land figure wins; else
   // the shared polygon's own area (units all carry lsqft 0 by design). Only a
   // GENUINE common row may key PAO detail fetches — advertising an arbitrary
@@ -292,6 +321,7 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
     aggregated: true,
     aggregateUnitParcels: unitRows.length,
     buildingCount,
+    soleUnitRows,
     _masterRings: masterRow.rings,
     _polyArea: polyArea,
   };
@@ -607,6 +637,42 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
   }
 }
 
+// The ONE unit an association aggregate stacks under a typed house number,
+// as a single-parcel shape (same contract as the matched-parcel path above)
+// so by-parcel PAO detail, buildCadastralRecord, and attachParcelMeta consume
+// it unchanged. The unit's own roll facts (living area, stories, year built,
+// land-use description, unit count) replace the association sums; land and
+// polygon are deliberately NULL — a stacked unit owns no land, the shared
+// polygon is the association's common ground, and carrying it would put the
+// whole complex's acreage (and parcel outline) on one villa. The association
+// totals ride on `association` so the profile can explain the context and
+// the operator can still quote the HOA when the association IS the client.
+// Returns null when the aggregate has no sole unit row for that number.
+function unitParcelFromAggregate(aggregate, houseNumber) {
+  const row = aggregate?.aggregated === true
+    ? aggregate.soleUnitRows?.[String(houseNumber || '').trim()]
+    : null;
+  if (!row || !row.parcelId) return null;
+  return {
+    ...row,
+    county: aggregate.county,
+    paoParcelId: paoParcelIdFrom(row.parcelId),
+    lotSqft: null,
+    polygon: null,
+    polygonAreaSqft: null,
+    assessmentYear: row.rollYear || aggregate.assessmentYear || null,
+    sourceUrl: aggregate.sourceUrl,
+    gisProvider: aggregate.gisProvider,
+    association: {
+      residentialUnits: aggregate.residentialUnits ?? null,
+      buildingCount: aggregate.buildingCount ?? null,
+      livingAreaSqft: aggregate.livingAreaSqft ?? null,
+      lotSqft: aggregate.lotSqft ?? null,
+      aggregateUnitParcels: aggregate.aggregateUnitParcels ?? null,
+    },
+  };
+}
+
 // Don't start a county query with less than this much budget left — too little
 // time to land a result, and the caller needs the remainder for the FDOR
 // statewide layer and the PAO address search.
@@ -882,6 +948,7 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
 
 module.exports = {
   lookupCountyParcelByPoint,
+  unitParcelFromAggregate,
   lookupCountyParcelAttributesById,
   queryStreetSitusAddresses,
   countyUseDescToPropertyType,

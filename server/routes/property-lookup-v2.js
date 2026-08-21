@@ -238,6 +238,30 @@ async function performPropertyLookup(address, options = {}) {
   return run;
 }
 
+// A cached stacked-association aggregate that the live path would now
+// resolve to the typed number's own unit row instead of the association.
+// Rows saved since the check shipped carry `_parcel.soleUnitHouseNumbers`
+// (attachParcelMeta): the verdict is exact — only a typed number in that
+// list resolves, and an empty list is a checked negative that keeps the
+// cache (a shared-number condo building, or rows without unit counts).
+// Rows from BEFORE the check (key absent) can't say, so the
+// every-unit-has-its-own-number shape (buildingCount counts distinct unit
+// street numbers, so it equals the unit total exactly when none is shared)
+// migrates once: the live re-run re-saves the row in the new format, with
+// its list, so it is never re-invalidated (codex P1). Pure; cache rows are
+// inputs, never mutated.
+function cachedAggregateResolvesToOwnUnit(record, address) {
+  const parcel = record?._parcel;
+  if (!parcel || parcel.aggregated !== true) return false;
+  if (Array.isArray(parcel.soleUnitHouseNumbers)) {
+    const typed = String(address || '').trim().match(/^(\d+)[A-Za-z]?\s/);
+    return Boolean(typed) && parcel.soleUnitHouseNumbers.map(String).includes(typed[1]);
+  }
+  const units = Number(parcel.residentialUnits);
+  const buildings = Number(parcel.buildingCount);
+  return Number.isFinite(units) && units > 1 && buildings === units;
+}
+
 async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
@@ -257,7 +281,20 @@ async function performPropertyLookupCore(address, options = {}) {
   // lookup (still re-applying verified overrides and re-saving at the end).
   const verifiedOverrides = await getVerifiedOverrides(address);
   if (!options.refresh) {
-    const cached = await getCachedLookup(address);
+    let cached = await getCachedLookup(address);
+    if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record, address)) {
+      // Cached before own-numbered units could be resolved out of a stacked
+      // association: every unit in this aggregate carries its own street
+      // number, so the typed number names ONE home and the live path now
+      // returns that home's own roll row instead of the association sums.
+      // Serve the cache no further: default callers re-run live once (the
+      // save at the end replaces the row; verified overrides still re-apply
+      // below), and cacheOnly callers take the ordinary miss (null) below —
+      // a known-superseded classification must not reach report/portal
+      // pricing either (codex P1).
+      logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
+      cached = null;
+    }
     if (cached) {
       // Flood-zone backfill (#1698 review): rows cached before the FEMA
       // provider shipped carry no _floodZone for up to the 180-day TTL.
@@ -1903,6 +1940,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // Stacked-parcel association aggregate: distinct unit street numbers on
     // the roll (1 when the whole association shares one address).
     buildingCount,
+    // One unit resolved out of a stacked association (its own street number
+    // on the shared polygon) — the association totals, for context only.
+    association: rc?._parcel?.association || null,
 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
@@ -3147,7 +3187,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     }
   }
 
-  if (rc && !rc.lotSize && !/condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
+  // A unit resolved out of a stacked association has its lot WITHHELD on
+  // purpose (the land is the association's) — the 'association' flag above
+  // already explains it, so the generic missing-lot nudge stays quiet.
+  if (rc && !rc.lotSize && !rc._parcel?.association
+    && !/condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
     flags.push({
       field: 'lotSize',
       reason: 'Lot size missing from property sources — verify parcel/lot square footage before lawn, mosquito, or rodent pricing',
@@ -3370,6 +3414,27 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
         priority: 'HIGH',
       });
     }
+  }
+
+  // One home resolved out of a stacked condo/HOA association (own street
+  // number, shared county polygon — paired villas / townhomes): the unit's
+  // own roll row priced this lookup, and the association's land was
+  // withheld on purpose. Say so, and leave the HOA door open — commercial
+  // applies only when the association or its manager is the client.
+  const association = rc?._parcel?.association;
+  if (association && Number(association.residentialUnits) > 1) {
+    const units = Number(association.residentialUnits);
+    const totals = [
+      `${units} units`,
+      Number(association.buildingCount) > 1 ? `${Number(association.buildingCount)} buildings` : null,
+      Number(association.livingAreaSqft) > 0 ? `${Math.round(Number(association.livingAreaSqft)).toLocaleString()} sf living` : null,
+      Number(association.lotSqft) > 0 ? `${Math.round(Number(association.lotSqft)).toLocaleString()} sf land` : null,
+    ].filter(Boolean).join(' · ');
+    flags.push({
+      field: 'association',
+      reason: `This home is one unit of a ${units}-unit condo/HOA association — the county stacks every unit on one shared parcel. Sq ft, stories, and year built are this unit's own roll figures; lot is left blank because the land is the association's common ground. Price as residential. Commercial applies only if the association or its property manager is the client — then set Commercial to Yes with subtype multifamily_common_area_residential and quote the association totals (${totals}).`,
+      priority: 'MEDIUM',
+    });
   }
 
   // Home sq ft has no source (client + lead automation fall back to a flat
@@ -4671,6 +4736,7 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
+  cachedAggregateResolvesToOwnUnit,
   inFlightLookups,
   lookupCoalesceKey,
   applyParcelTurfBound,
