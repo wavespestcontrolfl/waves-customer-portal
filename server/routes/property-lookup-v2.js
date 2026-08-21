@@ -3187,7 +3187,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     }
   }
 
-  if (rc && !rc.lotSize && !/condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
+  // A unit resolved out of a stacked association has its lot WITHHELD on
+  // purpose (the land is the association's) — the 'association' flag above
+  // already explains it, so the generic missing-lot nudge stays quiet.
+  if (rc && !rc.lotSize && !rc._parcel?.association
+    && !/condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
     flags.push({
       field: 'lotSize',
       reason: 'Lot size missing from property sources — verify parcel/lot square footage before lawn, mosquito, or rodent pricing',

@@ -1182,6 +1182,43 @@ function attachParcelMeta(merged, parcel) {
     // blank and the operator can still quote the HOA when it is the client.
     association: parcel.association ?? undefined,
   };
+  if (parcel.association) withholdAssociationLand(merged);
+  return merged;
+}
+
+// A unit resolved out of a stacked association owns no land: the only lot
+// any source can report for it is the association's common ground (the
+// county's shared polygon, the PAO detail page's land figure, a listing's
+// "lot" line). unitParcelFromAggregate nulls the cadastral lot, but the
+// by-parcel PAO record and the AI fallback merge AFTER it and a positive
+// lotSize from either outranks the null (codex P0) — so the FINAL merged
+// record withholds the lot outright, with evidence that says why. Runs
+// from attachParcelMeta, the last step of both county merge paths, so no
+// later source can restore it. A tech-verified lot still wins: the route
+// re-applies verified overrides after the lookup returns.
+function withholdAssociationLand(merged) {
+  if (!merged) return merged;
+  const prior = merged._fieldEvidence?.lotSize;
+  merged.lotSize = null;
+  if (merged._actuals && typeof merged._actuals === 'object') {
+    delete merged._actuals.lotSqft;
+    if (merged._actuals._sourceTypes) delete merged._actuals._sourceTypes.lotSqft;
+  }
+  merged._fieldEvidence = {
+    ...(merged._fieldEvidence || {}),
+    lotSize: {
+      value: null,
+      confidence: 'high',
+      sourceType: 'county',
+      sourceLabel: 'association common ground — withheld',
+      winningSource: null,
+      winningProvider: null,
+      score: 100,
+      fieldVerify: false,
+      withheld: 'association_common_ground',
+      evidence: Array.isArray(prior?.evidence) ? prior.evidence : [],
+    },
+  };
   return merged;
 }
 
@@ -5155,6 +5192,7 @@ module.exports = {
     aggregateSitusVerdict,
     addressHasSubpremise,
     resolveAggregateUnitParcel,
+    withholdAssociationLand,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
     slugAddressLine,

@@ -28,6 +28,7 @@ const { buildEnrichedProfile, _private: routePrivate } = require('../routes/prop
 
 const {
   buildCadastralRecord, attachParcelMeta, aggregateSitusVerdict, resolveAggregateUnitParcel,
+  mergePropertyRecords,
 } = aiPrivate;
 
 const PT = { lat: 27.44, lng: -82.52 };
@@ -265,6 +266,84 @@ describe('unit parcel → cadastral record → enriched profile', () => {
     expect(profile.category).toBe('COMMERCIAL');
     expect(profile.association).toBeNull();
     expect(profile.fieldVerifyFlags.find((f) => f.field === 'association')).toBeUndefined();
+  });
+});
+
+describe('association land cannot re-enter through a later merge (codex P0)', () => {
+  const ADDR = '4105 Pebblewalk Ct, Bradenton, FL 34203';
+
+  async function unitCadastral() {
+    const parcel = await villaAggregate();
+    const unit = resolveAggregateUnitParcel(parcel, ADDR, ADDR);
+    return { unit, cadastral: buildCadastralRecord(unit, ADDR) };
+  }
+
+  // The by-parcel PAO detail record for the unit — the roll page lists the
+  // association's land against every unit (LAND 200,000), plus the unit's
+  // own building facts.
+  function paoUnitRecord() {
+    return {
+      formattedAddress: ADDR,
+      addressLine1: '4105 PEBBLEWALK CT',
+      propertyType: 'Condominium',
+      squareFootage: 1630,
+      lotSize: 200000,
+      stories: 1,
+      yearBuilt: 1993,
+      unitCount: 1,
+      _source: 'county',
+      _aiProviders: ['manatee_pao'],
+      _fieldEvidence: {
+        lotSize: { value: 200000, confidence: 'high', sourceType: 'county', score: 100, fieldVerify: false },
+        squareFootage: { value: 1630, confidence: 'high', sourceType: 'county', score: 100, fieldVerify: false },
+      },
+      _actuals: { lotSqft: 200000 },
+    };
+  }
+
+  test('the county merge path (PAO by-parcel + cadastral unit) withholds the lot', async () => {
+    const { unit, cadastral } = await unitCadastral();
+    const merged = attachParcelMeta(mergePropertyRecords([paoUnitRecord(), cadastral], ADDR), unit);
+
+    expect(merged.lotSize).toBeNull();
+    expect(merged._actuals?.lotSqft).toBeUndefined();
+    expect(merged._fieldEvidence.lotSize).toMatchObject({
+      value: null, sourceType: 'county', withheld: 'association_common_ground', fieldVerify: false,
+    });
+    expect(merged.squareFootage).toBe(1630);
+    expect(merged._parcel.association.lotSqft).toBe(200000);
+
+    const profile = buildEnrichedProfile(merged, { estimatedTurfSf: 900, propertyUse: 'RESIDENTIAL' }, PT.lat, PT.lng);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.lotSqFt).toBe(0);
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'association')).toBeDefined();
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('the AI-fallback merge path (listing lot + cadastral unit) withholds it too', async () => {
+    const { unit, cadastral } = await unitCadastral();
+    const listing = {
+      formattedAddress: ADDR,
+      propertyType: 'Villa',
+      squareFootage: 1630,
+      lotSize: 200000,
+      _source: 'ai',
+      _aiProviders: ['gemini'],
+      _fieldEvidence: {
+        lotSize: { value: 200000, confidence: 'medium', sourceType: 'listing', score: 70, fieldVerify: false },
+      },
+    };
+    const merged = attachParcelMeta(mergePropertyRecords([listing, cadastral], ADDR), unit);
+
+    expect(merged.lotSize).toBeNull();
+    expect(merged._fieldEvidence.lotSize.withheld).toBe('association_common_ground');
+  });
+
+  test('a plain (non-association) parcel is untouched', () => {
+    const merged = attachParcelMeta({ lotSize: 7200, _fieldEvidence: { lotSize: { value: 7200, sourceType: 'county' } } },
+      { parcelId: '1', lotSqft: 7200 });
+    expect(merged.lotSize).toBe(7200);
+    expect(merged._fieldEvidence.lotSize.withheld).toBeUndefined();
   });
 });
 
