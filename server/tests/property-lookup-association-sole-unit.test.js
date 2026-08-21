@@ -114,6 +114,25 @@ describe('sole-unit rows on a stacked aggregate', () => {
     expect(parcel.soleUnitRows['0']).toBeUndefined();
   });
 
+  test('a uniquely-numbered row must ATTEST one dwelling — multi-unit or unknown counts stay aggregate (codex P0)', async () => {
+    mockArcgis([
+      COMMON_FEATURE,
+      villaFeature(4101), villaFeature(4103), villaFeature(4105), villaFeature(4107),
+      // A 4-unit building with its own street number — unique row, not one home.
+      villaFeature(4113, { BLDGS_LIVINGUNITS: 4, BLDGS_SQFT_LIVING: 6400 }),
+      // A layer row that omits the unit count entirely.
+      villaFeature(4115, { BLDGS_LIVINGUNITS: null }),
+    ]);
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(Object.keys(parcel.soleUnitRows).sort()).toEqual(['4101', '4103', '4105', '4107']);
+    expect(unitParcelFromAggregate(parcel, '4113')).toBeNull();
+    expect(unitParcelFromAggregate(parcel, '4115')).toBeNull();
+    expect(aggregateSitusVerdict(parcel, '4113 Pebblewalk Ct, Bradenton, FL 34203', 'rooftop',
+      '4113 Pebblewalk Ct, Bradenton, FL 34203')).toBe('keep');
+  });
+
   test('a single-number condo building keys NO sole row (association behavior unchanged)', async () => {
     mockArcgis([COMMON_FEATURE, ...[101, 102, 103, 104, 105, 106].map(stackedUnitFeature)]);
     const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' });

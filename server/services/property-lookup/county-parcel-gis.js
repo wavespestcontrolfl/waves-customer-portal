@@ -239,9 +239,14 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   // number singles out that unit the way a Unit/Apt token does in a
   // single-number building. Only those numbers are keyed (a building
   // number shared by dozens of "NUMBER STREET 101" units stays out), and
-  // the parsed roll row rides along so the caller can resolve the unit's
-  // own parcel without a second GIS round-trip. Rings are NOT copied — the
-  // shared polygon is the association's land, never the unit's lot.
+  // ONLY when the row positively attests ONE dwelling (residentialUnits
+  // === 1): a uniquely-numbered row is not proof of a single home — a
+  // multi-unit building with its own street number, or a layer that omits
+  // the unit count (Charlotte), must keep the aggregate rather than price
+  // a whole building's dimensions as one residence (codex P0). The parsed
+  // roll row rides along so the caller can resolve the unit's own parcel
+  // without a second GIS round-trip. Rings are NOT copied — the shared
+  // polygon is the association's land, never the unit's lot.
   const rowsByHouseNumber = new Map();
   for (const row of unitRows) {
     const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
@@ -252,7 +257,9 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   }
   const soleUnitRows = {};
   for (const [number, list] of rowsByHouseNumber) {
-    if (list.length === 1 && list[0].parcelId) soleUnitRows[number] = list[0];
+    if (list.length === 1 && list[0].parcelId && list[0].residentialUnits === 1) {
+      soleUnitRows[number] = list[0];
+    }
   }
 
   // Land: a stacked master/common row carrying a roll land figure wins; else

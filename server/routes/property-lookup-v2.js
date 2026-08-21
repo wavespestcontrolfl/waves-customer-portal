@@ -272,14 +272,17 @@ async function performPropertyLookupCore(address, options = {}) {
   const verifiedOverrides = await getVerifiedOverrides(address);
   if (!options.refresh) {
     let cached = await getCachedLookup(address);
-    if (cached && !cacheOnly && cachedAggregateResolvesToOwnUnit(cached.property_record)) {
+    if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record)) {
       // Cached before own-numbered units could be resolved out of a stacked
       // association: every unit in this aggregate carries its own street
       // number, so the typed number names ONE home and the live path now
       // returns that home's own roll row instead of the association sums.
-      // Serve the cache no further — re-run live once; the save at the end
-      // replaces the row. A verified-override re-apply still happens below.
-      logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — re-running live');
+      // Serve the cache no further: default callers re-run live once (the
+      // save at the end replaces the row; verified overrides still re-apply
+      // below), and cacheOnly callers take the ordinary miss (null) below —
+      // a known-superseded classification must not reach report/portal
+      // pricing either (codex P1).
+      logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
       cached = null;
     }
     if (cached) {
