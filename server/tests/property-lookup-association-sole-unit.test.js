@@ -268,25 +268,46 @@ describe('unit parcel → cadastral record → enriched profile', () => {
   });
 });
 
-describe('cached aggregates from before own-unit resolution', () => {
+describe('cached aggregates vs own-unit resolution', () => {
   const { cachedAggregateResolvesToOwnUnit } = routePrivate;
+  const ADDR = '4105 Pebblewalk Ct, Bradenton, FL 34203';
 
-  test('an own-numbered association (buildings === units) is re-run live', () => {
-    expect(cachedAggregateResolvesToOwnUnit({
-      _parcel: { aggregated: true, residentialUnits: 33, buildingCount: 33 },
-    })).toBe(true);
+  test('the aggregate persists its sole-unit house numbers (empty = checked negative)', async () => {
+    const villas = attachParcelMeta({ propertyType: 'Multifamily' }, await villaAggregate());
+    expect(villas._parcel.soleUnitHouseNumbers.sort()).toEqual(VILLA_NUMBERS.map(String).sort());
+
+    mockArcgis([COMMON_FEATURE, ...[101, 102, 103, 104, 105, 106].map(stackedUnitFeature)]);
+    const building = attachParcelMeta({ propertyType: 'Multifamily' },
+      await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' }));
+    expect(building._parcel.soleUnitHouseNumbers).toEqual([]);
   });
 
-  test('a shared-number condo building keeps its cached aggregate', () => {
+  test('new-format rows: exact — only a typed number in the list resolves', () => {
+    const row = { _parcel: { aggregated: true, residentialUnits: 6, buildingCount: 6, soleUnitHouseNumbers: ['4101', '4105'] } };
+    expect(cachedAggregateResolvesToOwnUnit(row, ADDR)).toBe(true);
+    expect(cachedAggregateResolvesToOwnUnit(row, '4107 Pebblewalk Ct, Bradenton, FL 34203')).toBe(false);
+    expect(cachedAggregateResolvesToOwnUnit(row, 'Pebblewalk Ct, Bradenton, FL 34203')).toBe(false);
+    // A checked negative (every unique number lacked a unit count, or a
+    // shared-number building) is never re-invalidated — even when
+    // buildings === units (codex P1).
+    expect(cachedAggregateResolvesToOwnUnit(
+      { _parcel: { aggregated: true, residentialUnits: 6, buildingCount: 6, soleUnitHouseNumbers: [] } }, ADDR,
+    )).toBe(false);
+  });
+
+  test('legacy rows (no list): the every-unit-own-number shape migrates once', () => {
+    expect(cachedAggregateResolvesToOwnUnit({
+      _parcel: { aggregated: true, residentialUnits: 33, buildingCount: 33 },
+    }, ADDR)).toBe(true);
     expect(cachedAggregateResolvesToOwnUnit({
       _parcel: { aggregated: true, residentialUnits: 118, buildingCount: 3 },
-    })).toBe(false);
+    }, ADDR)).toBe(false);
   });
 
   test('non-aggregate, missing, and malformed rows are untouched', () => {
-    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { residentialUnits: 1, buildingCount: 1 } })).toBe(false);
-    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { aggregated: true, residentialUnits: 1, buildingCount: 1 } })).toBe(false);
-    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { aggregated: true } })).toBe(false);
-    expect(cachedAggregateResolvesToOwnUnit(null)).toBe(false);
+    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { residentialUnits: 1, buildingCount: 1 } }, ADDR)).toBe(false);
+    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { aggregated: true, residentialUnits: 1, buildingCount: 1 } }, ADDR)).toBe(false);
+    expect(cachedAggregateResolvesToOwnUnit({ _parcel: { aggregated: true } }, ADDR)).toBe(false);
+    expect(cachedAggregateResolvesToOwnUnit(null, ADDR)).toBe(false);
   });
 });

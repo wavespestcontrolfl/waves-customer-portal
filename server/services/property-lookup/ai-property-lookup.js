@@ -1168,6 +1168,15 @@ function attachParcelMeta(merged, parcel) {
     // wins, so the profile can prefer the aggregate dimensions (codex P2 r2).
     livingAreaSqft: parcel.livingAreaSqft ?? undefined,
     situsLines: parcel.situsLines ?? undefined,
+    // Aggregates only: the house numbers whose row positively attests ONE
+    // dwelling (county-parcel-gis soleUnitRows) — the numbers a typed
+    // lookup resolves to the unit instead of the association. Persisted so
+    // the cache can tell a resolvable aggregate from one the live path
+    // deliberately kept (codex P1): an EMPTY list is a checked negative,
+    // absent means the row predates the check.
+    soleUnitHouseNumbers: parcel.soleUnitRows && typeof parcel.soleUnitRows === 'object'
+      ? Object.keys(parcel.soleUnitRows)
+      : undefined,
     // One unit resolved out of a stacked association (unitParcelFromAggregate):
     // the association totals, so the profile can explain why the lot is
     // blank and the operator can still quote the HOA when it is the client.

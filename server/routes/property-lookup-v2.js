@@ -238,15 +238,25 @@ async function performPropertyLookup(address, options = {}) {
   return run;
 }
 
-// A cached stacked-association aggregate in which EVERY unit has its own
-// street number (buildingCount counts distinct unit street numbers, so it
-// equals the unit total exactly when no number is shared) — the shape the
-// live path now resolves to the typed number's own unit row instead of the
-// association. A shared-number condo building (buildingCount < units)
-// keeps its cached aggregate. Pure; cache rows are inputs, never mutated.
-function cachedAggregateResolvesToOwnUnit(record) {
+// A cached stacked-association aggregate that the live path would now
+// resolve to the typed number's own unit row instead of the association.
+// Rows saved since the check shipped carry `_parcel.soleUnitHouseNumbers`
+// (attachParcelMeta): the verdict is exact — only a typed number in that
+// list resolves, and an empty list is a checked negative that keeps the
+// cache (a shared-number condo building, or rows without unit counts).
+// Rows from BEFORE the check (key absent) can't say, so the
+// every-unit-has-its-own-number shape (buildingCount counts distinct unit
+// street numbers, so it equals the unit total exactly when none is shared)
+// migrates once: the live re-run re-saves the row in the new format, with
+// its list, so it is never re-invalidated (codex P1). Pure; cache rows are
+// inputs, never mutated.
+function cachedAggregateResolvesToOwnUnit(record, address) {
   const parcel = record?._parcel;
   if (!parcel || parcel.aggregated !== true) return false;
+  if (Array.isArray(parcel.soleUnitHouseNumbers)) {
+    const typed = String(address || '').trim().match(/^(\d+)[A-Za-z]?\s/);
+    return Boolean(typed) && parcel.soleUnitHouseNumbers.map(String).includes(typed[1]);
+  }
   const units = Number(parcel.residentialUnits);
   const buildings = Number(parcel.buildingCount);
   return Number.isFinite(units) && units > 1 && buildings === units;
@@ -272,7 +282,7 @@ async function performPropertyLookupCore(address, options = {}) {
   const verifiedOverrides = await getVerifiedOverrides(address);
   if (!options.refresh) {
     let cached = await getCachedLookup(address);
-    if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record)) {
+    if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record, address)) {
       // Cached before own-numbered units could be resolved out of a stacked
       // association: every unit in this aggregate carries its own street
       // number, so the typed number names ONE home and the live path now
