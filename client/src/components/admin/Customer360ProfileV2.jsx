@@ -4615,8 +4615,9 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
     if (!amountValid || running) return;
     setRunning(true);
     setErr("");
+    let updatedRow = null;
     try {
-      await adminFetch(`/admin/customers/${customer.id}/refund`, {
+      updatedRow = await adminFetch(`/admin/customers/${customer.id}/refund`, {
         method: "POST",
         body: JSON.stringify({
           paymentId: payment.id,
@@ -4629,7 +4630,22 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
       setRunning(false);
       return;
     }
-    const doneState = { refundedNow: enteredCents / 100, refreshErr: "" };
+    // Report what Stripe actually issued, not the entered base: partials on
+    // surcharged payments are grossed up server-side by the prorated
+    // surcharge share, so the issued amount is the response's cumulative
+    // refund_amount minus what was refunded before this attempt.
+    const newCumulativeCents = Math.round(
+      parseFloat(updatedRow?.refund_amount || 0) * 100,
+    );
+    const grossNowCents =
+      newCumulativeCents > refundedCents
+        ? newCumulativeCents - refundedCents
+        : enteredCents;
+    const doneState = {
+      refundedNow: grossNowCents / 100,
+      includesSurcharge: grossNowCents > enteredCents,
+      refreshErr: "",
+    };
     try {
       await onDone?.();
     } catch (refreshError) {
@@ -4663,7 +4679,11 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
             <div>
               <div className="mb-2 font-medium">
                 Refund issued: <span className="u-nums">{fmtCurrency(done.refundedNow)}</span> to{" "}
-                {customer.firstName} {customer.lastName}.
+                {customer.firstName} {customer.lastName}
+                {done.includesSurcharge
+                  ? " (includes the returned card-surcharge share)"
+                  : ""}
+                .
               </div>
               <div className="text-12 text-ink-secondary">
                 Issued through Stripe — it typically lands in 5–10 business days.

@@ -274,6 +274,29 @@ describe('Customer360ProfileV2 profile state', () => {
       });
     });
 
+    it('reports the gross issued amount when the server grosses a partial up by the surcharge share', async () => {
+      // Entering $50 on a surcharged payment issues $50 + the prorated
+      // surcharge share; the success state must report what Stripe actually
+      // issued (cumulative refund_amount delta), not the entered base.
+      vi.stubGlobal('fetch', vi.fn(() => response({ id: 'pay-1', refund_amount: '51.50' })));
+
+      render(
+        <RefundPaymentModal
+          customer={{ id: 'customer-a', firstName: 'Avery', lastName: 'Customer' }}
+          payment={stripePayment({ surcharge_amount_cents: 600 })}
+          onClose={vi.fn()}
+          onDone={vi.fn().mockResolvedValue()}
+        />,
+      );
+
+      fireEvent.change(screen.getByLabelText('Refund amount'), { target: { value: '50.00' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Refund $50.00' }));
+
+      expect(await screen.findByText(/Refund issued:/)).toBeInTheDocument();
+      expect(screen.getByText('$51.50')).toBeInTheDocument();
+      expect(screen.getByText(/includes the returned card-surcharge share/)).toBeInTheDocument();
+    });
+
     it('caps the entry at the remaining balance of a partially refunded payment', async () => {
       const fetchMock = vi.fn(() => response({}));
       vi.stubGlobal('fetch', fetchMock);
