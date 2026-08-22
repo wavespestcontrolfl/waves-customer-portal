@@ -578,6 +578,7 @@ function buildCompactCustomerServiceInterest(parts = []) {
 function buildPublicQuoteServiceInterest(services = {}) {
   return [
     services.pest ? publicQuotePestLabel(services.pest) : null,
+    services.oneTimePest ? 'One-Time Pest Treatment' : null,
     services.lawn ? 'Recurring Lawn Care' : null,
     services.mosquito ? 'Recurring Mosquito Control' : null,
     services.termite ? 'Termite Monitoring' : null,
@@ -603,6 +604,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
 function buildCompactPublicQuoteServiceInterest(services = {}) {
   return buildCompactCustomerServiceInterest([
     services.pest ? publicQuoteCompactPestLabel(services.pest) : null,
+    services.oneTimePest ? 'One-Time Pest' : null,
     services.lawn ? 'Lawn Care' : null,
     services.mosquito ? 'Mosquito' : null,
     services.termite ? 'Termite' : null,
@@ -675,7 +677,7 @@ async function sendQuoteRequestEmail({
 // module scope (and exported) so the public MCP `how_to_request_quote` tool
 // documents the exact same list instead of a divergent copy.
 const PUBLIC_QUOTE_SERVICE_KEYS = [
-  'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
+  'pest', 'oneTimePest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
   'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
   'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
   'lawnPestControl', 'bedBug',
@@ -877,6 +879,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // engine normalizes aliases and defaults invalid values to 'none'
         // with a warning.
         ...(services.pest.roachType ? { roachType: services.pest.roachType } : {}),
+      };
+    }
+    if (services.oneTimePest) {
+      // The website quote form's one-time pest shopper (intake frequency
+      // "One-Time"): a single treatment priced off the quarterly anchor
+      // (priceOneTimePest), never a recurring program. Urgency / after-hours
+      // surcharges are FORCED off — this route mints quotes from an
+      // unauthenticated body, and those premiums are staff-set on a real
+      // schedule, not self-selected for a cheaper or dearer number.
+      engineInput.services.oneTimePest = {
+        urgency: 'NONE',
+        afterHours: false,
+        ...(services.oneTimePest.roachType ? { roachType: services.oneTimePest.roachType } : {}),
       };
     }
     if (services.lawn) {
