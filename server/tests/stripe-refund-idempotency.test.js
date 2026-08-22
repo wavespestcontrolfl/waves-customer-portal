@@ -28,7 +28,7 @@ describe('StripeService.refund', () => {
   let updatePayments;
 
   function loadService() {
-    // eslint-disable-next-line global-require
+     
     return require('../services/stripe');
   }
 
@@ -94,7 +94,12 @@ describe('StripeService.refund', () => {
 
   test('partial refund persists the attempt key before Stripe and accumulates refund_amount', async () => {
     const StripeService = loadService();
-    await StripeService.refund('pay-1', { amount: 40 });
+    const result = await StripeService.refund('pay-1', { amount: 40 });
+
+    // Response-only field: the gross THIS attempt issued, for caller
+    // confirmation UIs — cumulative refund_amount can absorb a concurrent
+    // refund that landed mid-request.
+    expect(result.refund_issued_amount).toBe(40);
 
     const [params, opts] = stripeClient.refunds.create.mock.calls[0];
     expect(params).toEqual(expect.objectContaining({ payment_intent: 'pi_abc', amount: 4000 }));

@@ -3096,7 +3096,13 @@ const StripeService = {
       logger.warn(`[stripe] Refund issued email failed for payment ${paymentId}: ${emailErr.message}`);
     });
     logger.info(`[stripe] Refund processed: $${refundAmountDollars} for payment ${paymentId}, refund ${refund.id}`);
-    return updated || { ...payment, status: isFullRefund ? 'refunded' : 'paid', refund_amount: totalRefundedCents / 100, stripe_refund_id: refund.id };
+    const responseRow = updated || { ...payment, status: isFullRefund ? 'refunded' : 'paid', refund_amount: totalRefundedCents / 100, stripe_refund_id: refund.id };
+    // refund_issued_amount is the gross THIS attempt sent to Stripe
+    // (refund.amount) — callers confirming "what did I just refund?" must use
+    // it rather than diffing cumulative refund_amount snapshots, which absorb
+    // any concurrent refund (another admin, Stripe dashboard) that landed
+    // mid-request. Not a payments column; response-only.
+    return { ...responseRow, refund_issued_amount: refundAmountDollars };
   },
 
   // =========================================================================

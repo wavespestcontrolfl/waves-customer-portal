@@ -4611,6 +4611,22 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
     enteredCents <= remainingCents;
   const isPartial = amountValid && enteredCents < remainingCents;
 
+  // The profile-level Escape handler closes the ENTIRE profile
+  // unconditionally; while a refund is in flight, swallow Escape in the
+  // capture phase so the operator can't unmount the modal mid-request and
+  // lose the outcome (the request itself would still complete server-side).
+  useEffect(() => {
+    if (!running) return undefined;
+    const swallow = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", swallow, true);
+    return () => window.removeEventListener("keydown", swallow, true);
+  }, [running]);
+
   const confirm = async () => {
     if (!amountValid || running) return;
     setRunning(true);
@@ -4632,15 +4648,22 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
     }
     // Report what Stripe actually issued, not the entered base: partials on
     // surcharged payments are grossed up server-side by the prorated
-    // surcharge share, so the issued amount is the response's cumulative
-    // refund_amount minus what was refunded before this attempt.
+    // surcharge share. Prefer the response's attempt-specific
+    // refund_issued_amount — diffing cumulative refund_amount snapshots
+    // absorbs any concurrent refund that landed mid-request — and keep the
+    // delta only as a fallback for a response without the field.
+    const issuedCents = Math.round(
+      parseFloat(updatedRow?.refund_issued_amount || 0) * 100,
+    );
     const newCumulativeCents = Math.round(
       parseFloat(updatedRow?.refund_amount || 0) * 100,
     );
     const grossNowCents =
-      newCumulativeCents > refundedCents
-        ? newCumulativeCents - refundedCents
-        : enteredCents;
+      issuedCents > 0
+        ? issuedCents
+        : newCumulativeCents > refundedCents
+          ? newCumulativeCents - refundedCents
+          : enteredCents;
     const doneState = {
       refundedNow: grossNowCents / 100,
       includesSurcharge: grossNowCents > enteredCents,
@@ -6154,8 +6177,11 @@ export default function Customer360ProfileV2({
                     {payments.length > 0 ? (
                       payments.slice(0, 3).map((p, i) => {
                         // Grey only FULLY refunded rows — a partial refund
-                        // still holds collected money (status stays 'paid').
-                        const isRefund = paymentRefundState(p).full;
+                        // still holds collected money (status stays 'paid') —
+                        // but flag partials with a chip so the gross amount
+                        // doesn't read as fully collected.
+                        const rowRefund = paymentRefundState(p);
+                        const isRefund = rowRefund.full;
                         // Non-collected rows (upcoming/processing/failed) were
                         // indistinguishable from paid ones, so the list read as
                         // more collected revenue than Lifetime Rev counts.
@@ -6176,9 +6202,12 @@ export default function Customer360ProfileV2({
                             >
                               {fmtCurrency(p.amount)}
                             </span>{" "}
-                            {!isCollected && !isRefund && (
+                            {(rowRefund.partial ||
+                              (!isCollected && !isRefund)) && (
                               <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
-                                {p.status}
+                                {rowRefund.partial
+                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
+                                  : p.status}
                               </span>
                             )}{" "}
                             <span className="text-ink-secondary truncate">

@@ -100,6 +100,27 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.getAllByText(/On by default/i).length).toBeGreaterThanOrEqual(2);
   });
 
+  it('flags partially refunded payments in overview Recent Transactions', async () => {
+    // A partial refund must not render like an untouched paid row — the
+    // gross amount would read as fully collected while Lifetime Rev drops.
+    const detail = customerDetail('customer-a', 'Avery');
+    detail.payments = [{
+      id: 'pay-1', amount: '100.00', refund_amount: '40.00', refund_status: 'partial',
+      status: 'paid', processor: 'stripe', card_brand: 'VISA', last_four: '4242',
+      payment_date: '2026-08-01',
+    }];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(detail);
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findByText('$40.00 refunded')).toBeInTheDocument();
+  });
+
   it('never renders stale customer actions when a customer switch fails', async () => {
     let failSecond = false;
     vi.stubGlobal('fetch', vi.fn((url) => {
@@ -274,11 +295,15 @@ describe('Customer360ProfileV2 profile state', () => {
       });
     });
 
-    it('reports the gross issued amount when the server grosses a partial up by the surcharge share', async () => {
+    it('reports the attempt-specific gross even when a concurrent refund inflated the cumulative total', async () => {
       // Entering $50 on a surcharged payment issues $50 + the prorated
-      // surcharge share; the success state must report what Stripe actually
-      // issued (cumulative refund_amount delta), not the entered base.
-      vi.stubGlobal('fetch', vi.fn(() => response({ id: 'pay-1', refund_amount: '51.50' })));
+      // surcharge share; the success state must report what THIS attempt
+      // issued (refund_issued_amount). The cumulative refund_amount here
+      // includes a concurrent $20 refund that landed mid-request — a
+      // snapshot diff would wrongly report $71.50.
+      vi.stubGlobal('fetch', vi.fn(() => response({
+        id: 'pay-1', refund_amount: '71.50', refund_issued_amount: '51.50',
+      })));
 
       render(
         <RefundPaymentModal
@@ -341,6 +366,44 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(onClose).not.toHaveBeenCalled();
       // Still re-attemptable after the error.
       expect(screen.getByRole('button', { name: 'Refund $202.00' })).toBeEnabled();
+    });
+
+    it('swallows Escape while a refund is in flight so the profile-level handler cannot unmount it', async () => {
+      const pending = deferred();
+      vi.stubGlobal('fetch', vi.fn(() => pending.promise));
+      // Stand-in for the profile-level window keydown handler that closes
+      // the whole Customer 360 on Escape unconditionally.
+      const profileEsc = vi.fn();
+      const profileHandler = (e) => { if (e.key === 'Escape') profileEsc(); };
+      window.addEventListener('keydown', profileHandler);
+      try {
+        render(
+          <RefundPaymentModal
+            customer={{ id: 'customer-a', firstName: 'Avery', lastName: 'Customer' }}
+            payment={stripePayment()}
+            onClose={vi.fn()}
+            onDone={vi.fn().mockResolvedValue()}
+          />,
+        );
+
+        fireEvent.click(screen.getByRole('button', { name: 'Refund $202.00' }));
+        fireEvent.keyDown(document.body, { key: 'Escape' });
+        expect(profileEsc).not.toHaveBeenCalled();
+
+        await act(async () => {
+          pending.resolve(new Response(JSON.stringify({ id: 'pay-1', refund_issued_amount: '202.00' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }));
+          await pending.promise;
+        });
+        expect(await screen.findByText(/Refund issued:/)).toBeInTheDocument();
+
+        fireEvent.keyDown(document.body, { key: 'Escape' });
+        expect(profileEsc).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener('keydown', profileHandler);
+      }
     });
 
     it('surfaces a failed refresh after a successful refund', async () => {
