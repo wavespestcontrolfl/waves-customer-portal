@@ -4598,7 +4598,31 @@ function paymentRefundState(p) {
 
 export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
   const { refundedCents, remainingCents } = paymentRefundState(payment);
-  const [amountStr, setAmountStr] = useState((remainingCents / 100).toFixed(2));
+  // The entered amount is BASE dollars: the server adds the prorated share
+  // of the recorded card surcharge on top and caps the gross at the
+  // remaining balance. The entry must therefore be capped at the remaining
+  // BASE balance — an entry between remaining-base and remaining-gross
+  // would silently issue more than the button says (e.g. entering $102 on
+  // a $100 + $2.90-surcharge charge fully refunds $102.90). Derived purely
+  // from stored cents columns; the surcharge-rate math itself stays in
+  // stripe-pricing (one-authority rule).
+  const surchargeCents = Math.max(
+    0,
+    Number(payment.surcharge_amount_cents) || 0,
+  );
+  const refundedSurchargeCents = Math.min(
+    surchargeCents,
+    Math.max(0, Number(payment.refunded_surcharge_cents) || 0),
+  );
+  const remainingSurchargeCents = Math.min(
+    surchargeCents - refundedSurchargeCents,
+    remainingCents,
+  );
+  const remainingBaseCents = Math.max(0, remainingCents - remainingSurchargeCents);
+  // Degenerate ledger (base consumed, share still outstanding): fall back
+  // to the gross cap so the remainder stays refundable at all.
+  const maxEntryCents = remainingBaseCents > 0 ? remainingBaseCents : remainingCents;
+  const [amountStr, setAmountStr] = useState((maxEntryCents / 100).toFixed(2));
   const [running, setRunning] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState(null);
@@ -4608,8 +4632,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
   const amountValid =
     Number.isFinite(enteredCents) &&
     enteredCents > 0 &&
-    enteredCents <= remainingCents;
-  const isPartial = amountValid && enteredCents < remainingCents;
+    enteredCents <= maxEntryCents;
 
   // The profile-level Escape handler closes the ENTIRE profile
   // unconditionally; while a refund is in flight, swallow Escape in the
@@ -4737,7 +4760,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
               )}
               <div className="mb-3 flex justify-between gap-3">
                 <span className="text-ink-secondary">Refundable</span>
-                <span className="u-nums font-medium">{fmtCurrency(remainingCents / 100)}</span>
+                <span className="u-nums font-medium">{fmtCurrency(maxEntryCents / 100)}</span>
               </div>
               <label
                 htmlFor="refund-amount"
@@ -4750,7 +4773,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                 type="number"
                 inputMode="decimal"
                 min="0.01"
-                max={(remainingCents / 100).toFixed(2)}
+                max={(maxEntryCents / 100).toFixed(2)}
                 step="0.01"
                 value={amountStr}
                 disabled={running}
@@ -4759,13 +4782,14 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
               {amountStr !== "" && !amountValid && (
                 <div className="mt-1.5 text-12 text-alert-fg">
                   Enter an amount between $0.01 and{" "}
-                  {fmtCurrency(remainingCents / 100)}.
+                  {fmtCurrency(maxEntryCents / 100)}.
                 </div>
               )}
-              {isPartial && Number(payment.surcharge_amount_cents) > 0 && (
+              {remainingSurchargeCents > 0 && (
                 <div className="mt-2 text-12 text-ink-secondary">
-                  The matching share of the recorded card surcharge is returned
-                  automatically on top of this amount.
+                  The {fmtCurrency(remainingSurchargeCents / 100)} card-surcharge
+                  share is returned automatically on top — in full with a full
+                  refund, prorated with a partial amount.
                 </div>
               )}
               <div className="mt-2 text-12 text-ink-secondary">

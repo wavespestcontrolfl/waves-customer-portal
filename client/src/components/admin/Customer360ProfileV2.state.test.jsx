@@ -322,6 +322,36 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(screen.getByText(/includes the returned card-surcharge share/)).toBeInTheDocument();
     });
 
+    it('caps the entry at the remaining BASE balance on a surcharged payment', async () => {
+      // The entered amount is base dollars and the server grosses it up by
+      // the surcharge share, capped at the gross remaining — so on a
+      // $102.90 charge ($100 base + $2.90 surcharge) an entry of $102 would
+      // say "Refund $102.00" while actually fully refunding $102.90. The
+      // cap and default must be the remaining base.
+      const fetchMock = vi.fn(() => response({}));
+      vi.stubGlobal('fetch', fetchMock);
+
+      render(
+        <RefundPaymentModal
+          customer={{ id: 'customer-a', firstName: 'Avery', lastName: 'Customer' }}
+          payment={stripePayment({ amount: '102.90', surcharge_amount_cents: 290 })}
+          onClose={vi.fn()}
+          onDone={vi.fn()}
+        />,
+      );
+
+      const input = screen.getByLabelText('Refund amount');
+      expect(input).toHaveValue(100);
+      expect(screen.getByText(/The \$2\.90 card-surcharge share is returned automatically/)).toBeInTheDocument();
+
+      fireEvent.change(input, { target: { value: '102.00' } });
+      expect(screen.getByText(/Enter an amount between \$0\.01 and \$100\.00/)).toBeInTheDocument();
+      const confirmButton = screen.getByRole('button', { name: 'Refund' });
+      expect(confirmButton).toBeDisabled();
+      fireEvent.click(confirmButton);
+      expect(fetchMock.mock.calls.some(([, opts]) => opts?.method === 'POST')).toBe(false);
+    });
+
     it('caps the entry at the remaining balance of a partially refunded payment', async () => {
       const fetchMock = vi.fn(() => response({}));
       vi.stubGlobal('fetch', fetchMock);
