@@ -2807,8 +2807,23 @@ const StripeService = {
     // $40 would otherwise wedge here).
     const assertNewAttemptRefundable = () => {
       if (remainingCents <= 0) throw new Error('Payment is already fully refunded');
-      if (requestCents !== null && (requestCents <= 0 || requestCents > remainingCents)) {
-        throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
+      if (requestCents === null) return;
+      // The entered amount is BASE dollars and gets grossed up by the
+      // prorated surcharge share, so a NEW attempt's ceiling is the
+      // remaining BASE — validating against the gross remaining would let a
+      // stale client (balance moved under it) submit between the two and be
+      // silently capped into a larger refund than its operator confirmed.
+      // Degenerate ledgers (base consumed, share still outstanding) keep the
+      // gross ceiling so the remainder stays refundable. Replays skip this
+      // entirely (they resend the original attempt verbatim).
+      const newAttemptRemainingSurchargeCents = Math.min(
+        Math.max(0, surchargeCents - alreadyRefundedSurchargeCents),
+        remainingCents,
+      );
+      const remainingBaseCents = remainingCents - newAttemptRemainingSurchargeCents;
+      const maxBaseCents = remainingBaseCents > 0 ? remainingBaseCents : remainingCents;
+      if (requestCents <= 0 || requestCents > maxBaseCents) {
+        throw new Error(`Refund amount must be between $0.01 and the remaining $${(maxBaseCents / 100).toFixed(2)}`);
       }
     };
     let idempotencyKey;

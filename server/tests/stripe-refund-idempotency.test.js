@@ -547,17 +547,33 @@ describe('StripeService.refund', () => {
     expect(finalArgs.refunded_surcharge_cents).toBe(290);
   });
 
-  test('gross-up is capped at the remaining balance (never over-refunds)', async () => {
+  test('a NEW attempt beyond the remaining BASE is rejected (stale-client fence)', async () => {
     // A prior $60 refund recorded with no surcharge tracking (legacy):
-    // remaining = 10290−6000 = 4290¢; $42 base + full remaining share (290¢)
-    // would be 4490¢ → capped to 4290¢.
+    // remaining gross = 4290¢ but remaining BASE = 4290−290 = 4000¢. A $42
+    // base entry (e.g. from a stale modal that missed the prior refund)
+    // must be rejected — the old gross ceiling accepted it and silently
+    // capped the grossed amount to 4290¢, refunding more than the operator
+    // confirmed.
     paymentRow.amount = '102.90';
     paymentRow.surcharge_amount_cents = 290;
     paymentRow.refund_amount = '60.00';
     const StripeService = loadService();
-    await StripeService.refund('pay-1', { amount: 42 });
+    await expect(StripeService.refund('pay-1', { amount: 42 }))
+      .rejects.toThrow(/between \$0\.01 and the remaining \$40\.00/);
+    expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+  });
 
-    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(4290);
+  test('degenerate ledger (base consumed, share outstanding) keeps the gross ceiling and the cap holds', async () => {
+    // Base fully refunded but the surcharge share never returned: remaining
+    // base is 0, so the fallback ceiling is the gross remainder (290¢) —
+    // and the gross-up cap keeps the issued amount at exactly that.
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.refund_amount = '100.00';
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 2.90 });
+
+    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(290);
   });
 
   test('LEGACY marker replay on a surcharged payment resends the ORIGINAL ungrossed amount', async () => {
