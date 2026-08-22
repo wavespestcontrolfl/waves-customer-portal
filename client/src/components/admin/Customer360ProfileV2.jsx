@@ -73,6 +73,7 @@ import {
   CardBody,
   Badge,
   Button,
+  Input,
   Switch,
   Table,
   THead,
@@ -4569,6 +4570,264 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
 }
 
 // ============================================================================
+// REFUND PAYMENT
+// Full or partial refund of a Stripe payment row. The server accumulates
+// partials (POST /admin/customers/:id/refund → StripeService.refund), so the
+// modal caps the entry at the remaining balance, not the original amount.
+// ============================================================================
+
+// Refund state derived from a payments row. refund_status alone can't answer
+// "fully refunded?": the app refund path stamps Stripe's own status
+// ('succeeded'/'pending') and the charge.refunded webhook later normalizes it
+// to 'partial'/'full' — so full is derived from status + amounts too.
+function paymentRefundState(p) {
+  const amountCents = Math.round(parseFloat(p.amount || 0) * 100);
+  const refundedCents = Math.round(parseFloat(p.refund_amount || 0) * 100);
+  const full =
+    p.status === "refunded" ||
+    p.refund_status === "full" ||
+    (amountCents > 0 && refundedCents >= amountCents);
+  const partial = !full && (refundedCents > 0 || !!p.refund_status);
+  return {
+    full,
+    partial,
+    refundedCents,
+    remainingCents: Math.max(0, amountCents - refundedCents),
+  };
+}
+
+export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
+  const { refundedCents, remainingCents } = paymentRefundState(payment);
+  // The entered amount is BASE dollars: the server adds the prorated share
+  // of the recorded card surcharge on top and caps the gross at the
+  // remaining balance. The entry must therefore be capped at the remaining
+  // BASE balance — an entry between remaining-base and remaining-gross
+  // would silently issue more than the button says (e.g. entering $102 on
+  // a $100 + $2.90-surcharge charge fully refunds $102.90). Derived purely
+  // from stored cents columns; the surcharge-rate math itself stays in
+  // stripe-pricing (one-authority rule).
+  const surchargeCents = Math.max(
+    0,
+    Number(payment.surcharge_amount_cents) || 0,
+  );
+  const refundedSurchargeCents = Math.min(
+    surchargeCents,
+    Math.max(0, Number(payment.refunded_surcharge_cents) || 0),
+  );
+  const remainingSurchargeCents = Math.min(
+    surchargeCents - refundedSurchargeCents,
+    remainingCents,
+  );
+  const remainingBaseCents = Math.max(0, remainingCents - remainingSurchargeCents);
+  // Degenerate ledger (base consumed, share still outstanding): fall back
+  // to the gross cap so the remainder stays refundable at all.
+  const maxEntryCents = remainingBaseCents > 0 ? remainingBaseCents : remainingCents;
+  const [amountStr, setAmountStr] = useState((maxEntryCents / 100).toFixed(2));
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(null);
+
+  const parsed = parseFloat(amountStr);
+  const enteredCents = Number.isFinite(parsed) ? Math.round(parsed * 100) : NaN;
+  const amountValid =
+    Number.isFinite(enteredCents) &&
+    enteredCents > 0 &&
+    enteredCents <= maxEntryCents;
+
+  // The profile-level Escape handler closes the ENTIRE profile
+  // unconditionally; while a refund is in flight, swallow Escape in the
+  // capture phase so the operator can't unmount the modal mid-request and
+  // lose the outcome (the request itself would still complete server-side).
+  useEffect(() => {
+    if (!running) return undefined;
+    const swallow = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", swallow, true);
+    return () => window.removeEventListener("keydown", swallow, true);
+  }, [running]);
+
+  const confirm = async () => {
+    if (!amountValid || running) return;
+    setRunning(true);
+    setErr("");
+    let updatedRow = null;
+    try {
+      updatedRow = await adminFetch(`/admin/customers/${customer.id}/refund`, {
+        method: "POST",
+        body: JSON.stringify({
+          paymentId: payment.id,
+          amount: enteredCents / 100,
+          reason: "requested_by_customer",
+        }),
+      });
+    } catch (e) {
+      setErr(e.message || "Refund failed");
+      setRunning(false);
+      return;
+    }
+    // Report what Stripe actually issued, not the entered base: partials on
+    // surcharged payments are grossed up server-side by the prorated
+    // surcharge share. Prefer the response's attempt-specific
+    // refund_issued_amount — diffing cumulative refund_amount snapshots
+    // absorbs any concurrent refund that landed mid-request — and keep the
+    // delta only as a fallback for a response without the field.
+    const issuedCents = Math.round(
+      parseFloat(updatedRow?.refund_issued_amount || 0) * 100,
+    );
+    const newCumulativeCents = Math.round(
+      parseFloat(updatedRow?.refund_amount || 0) * 100,
+    );
+    const grossNowCents =
+      issuedCents > 0
+        ? issuedCents
+        : newCumulativeCents > refundedCents
+          ? newCumulativeCents - refundedCents
+          : enteredCents;
+    const doneState = {
+      refundedNow: grossNowCents / 100,
+      includesSurcharge: grossNowCents > enteredCents,
+      refreshErr: "",
+    };
+    try {
+      await onDone?.();
+    } catch (refreshError) {
+      doneState.refreshErr = `The refund went through, but the customer profile could not refresh: ${refreshError.message || "Refresh failed"}`;
+    }
+    setDone(doneState);
+    setRunning(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      onClick={() => !running && onClose()}
+    >
+      <div
+        className="bg-white w-full max-w-[440px] rounded-sm border-hairline border-zinc-300 my-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="text-15 font-medium text-zinc-900">Refund payment</div>
+          <button
+            onClick={() => !running && onClose()}
+            aria-label="Close"
+            className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 text-13 text-zinc-900">
+          {done ? (
+            <div>
+              <div className="mb-2 font-medium">
+                Refund issued: <span className="u-nums">{fmtCurrency(done.refundedNow)}</span> to{" "}
+                {customer.firstName} {customer.lastName}
+                {done.includesSurcharge
+                  ? " (includes the returned card-surcharge share)"
+                  : ""}
+                .
+              </div>
+              <div className="text-12 text-ink-secondary">
+                Issued through Stripe — it typically lands in 5–10 business days.
+              </div>
+              {done.refreshErr && (
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {done.refreshErr}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div>
+              <div className="mb-1 flex justify-between gap-3">
+                <span className="text-ink-secondary">Payment</span>
+                <span className="u-nums">
+                  {fmtCurrency(payment.amount)}
+                  {payment.card_brand
+                    ? ` · ${payment.card_brand} …${payment.last_four}`
+                    : ""}{" "}
+                  · {fmtDate(payment.payment_date)}
+                </span>
+              </div>
+              {refundedCents > 0 && (
+                <div className="mb-1 flex justify-between gap-3">
+                  <span className="text-ink-secondary">Already refunded</span>
+                  <span className="u-nums">{fmtCurrency(refundedCents / 100)}</span>
+                </div>
+              )}
+              <div className="mb-3 flex justify-between gap-3">
+                <span className="text-ink-secondary">Refundable</span>
+                <span className="u-nums font-medium">{fmtCurrency(maxEntryCents / 100)}</span>
+              </div>
+              <label
+                htmlFor="refund-amount"
+                className="block text-12 text-ink-secondary mb-1"
+              >
+                Refund amount
+              </label>
+              <Input
+                id="refund-amount"
+                type="number"
+                inputMode="decimal"
+                min="0.01"
+                max={(maxEntryCents / 100).toFixed(2)}
+                step="0.01"
+                value={amountStr}
+                disabled={running}
+                onChange={(e) => setAmountStr(e.target.value)}
+              />
+              {amountStr !== "" && !amountValid && (
+                <div className="mt-1.5 text-12 text-alert-fg">
+                  Enter an amount between $0.01 and{" "}
+                  {fmtCurrency(maxEntryCents / 100)}.
+                </div>
+              )}
+              {remainingSurchargeCents > 0 && (
+                <div className="mt-2 text-12 text-ink-secondary">
+                  The {fmtCurrency(remainingSurchargeCents / 100)} card-surcharge
+                  share is returned automatically on top — in full with a full
+                  refund, prorated with a partial amount.
+                </div>
+              )}
+              <div className="mt-2 text-12 text-ink-secondary">
+                Issued through Stripe — refunds typically land in 5–10 business
+                days.
+              </div>
+              {err && (
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {err}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+          <Button variant="secondary" onClick={onClose} disabled={running}>
+            {done ? "Close" : "Cancel"}
+          </Button>
+          {!done && (
+            <Button
+              variant="danger"
+              onClick={confirm}
+              disabled={running || !amountValid}
+            >
+              {running
+                ? "Refunding…"
+                : amountValid
+                  ? `Refund ${fmtCurrency(enteredCents / 100)}`
+                  : "Refund"}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // MAIN COMPONENT
 // ============================================================================
 export default function Customer360ProfileV2({
@@ -4599,6 +4858,7 @@ export default function Customer360ProfileV2({
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
   const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
   const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
+  const [refundPayment, setRefundPayment] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
@@ -4823,6 +5083,7 @@ export default function Customer360ProfileV2({
     setAnnualPrepayOpen(false);
     setAnnualPrepayInvoiceOpen(false);
     setCancelSignupOpen(false);
+    setRefundPayment(null);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
       adminFetch(`/admin/customers/${customerId}/timeline`, {
@@ -5939,7 +6200,12 @@ export default function Customer360ProfileV2({
                     </SectionTitle>
                     {payments.length > 0 ? (
                       payments.slice(0, 3).map((p, i) => {
-                        const isRefund = !!p.refund_status;
+                        // Grey only FULLY refunded rows — a partial refund
+                        // still holds collected money (status stays 'paid') —
+                        // but flag partials with a chip so the gross amount
+                        // doesn't read as fully collected.
+                        const rowRefund = paymentRefundState(p);
+                        const isRefund = rowRefund.full;
                         // Non-collected rows (upcoming/processing/failed) were
                         // indistinguishable from paid ones, so the list read as
                         // more collected revenue than Lifetime Rev counts.
@@ -5960,9 +6226,12 @@ export default function Customer360ProfileV2({
                             >
                               {fmtCurrency(p.amount)}
                             </span>{" "}
-                            {!isCollected && !isRefund && (
+                            {(rowRefund.partial ||
+                              (!isCollected && !isRefund)) && (
                               <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
-                                {p.status}
+                                {rowRefund.partial
+                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
+                                  : p.status}
                               </span>
                             )}{" "}
                             <span className="text-ink-secondary truncate">
@@ -6343,7 +6612,7 @@ export default function Customer360ProfileV2({
               )}
               <SectionTitle>Payment History ({payments.length})</SectionTitle>
               {payments.slice(0, 10).map((p, i) => {
-                const isRefund = !!p.refund_status;
+                const refundState = paymentRefundState(p);
                 const isFailed = p.status === "failed";
                 return (
                   <div
@@ -6354,7 +6623,7 @@ export default function Customer360ProfileV2({
                     <span
                       className={cn(
                         "u-nums",
-                        isRefund ? "text-ink-secondary" : "text-zinc-900",
+                        refundState.full ? "text-ink-secondary" : "text-zinc-900",
                       )}
                     >
                       {fmtCurrency(p.amount)}
@@ -6365,43 +6634,28 @@ export default function Customer360ProfileV2({
                     <span className="text-ink-secondary">
                       {fmtDate(p.payment_date)}
                     </span>{" "}
-                    <Badge tone={isRefund || isFailed ? "alert" : "neutral"}>
-                      {isRefund ? "Refunded" : (p.status || "").toUpperCase()}
+                    <Badge
+                      tone={
+                        refundState.full || refundState.partial || isFailed
+                          ? "alert"
+                          : "neutral"
+                      }
+                    >
+                      {refundState.full
+                        ? "Refunded"
+                        : refundState.partial
+                          ? "Partial refund"
+                          : (p.status || "").toUpperCase()}
                     </Badge>
                     {isAdmin &&
                       p.processor === "stripe" &&
                       p.status === "paid" &&
-                      !isRefund && (
+                      !refundState.full &&
+                      refundState.remainingCents > 0 && (
                         <Button
                           size="sm"
                           variant="danger"
-                          onClick={async () => {
-                            if (
-                              !window.confirm(
-                                `Refund $${parseFloat(p.amount).toFixed(2)} to ${c.firstName} ${c.lastName}?`,
-                              )
-                            )
-                              return;
-                            try {
-                              await adminFetch(
-                                `/admin/customers/${c.id}/refund`,
-                                {
-                                  method: "POST",
-                                  body: JSON.stringify({
-                                    paymentId: p.id,
-                                    amount: parseFloat(p.amount),
-                                    reason: "requested_by_customer",
-                                  }),
-                                },
-                              );
-                              const fresh = await adminFetch(
-                                `/admin/customers/${customerId}`,
-                              );
-                              setData(fresh);
-                            } catch (err) {
-                              alert("Refund failed: " + err.message);
-                            }
-                          }}
+                          onClick={() => setRefundPayment(p)}
                         >
                           Refund
                         </Button>
@@ -7503,6 +7757,14 @@ export default function Customer360ProfileV2({
         <CancelSignupModal
           customer={c}
           onClose={() => setCancelSignupOpen(false)}
+          onDone={reloadCustomer}
+        />
+      )}
+      {refundPayment && (
+        <RefundPaymentModal
+          customer={c}
+          payment={refundPayment}
+          onClose={() => setRefundPayment(null)}
           onDone={reloadCustomer}
         />
       )}
