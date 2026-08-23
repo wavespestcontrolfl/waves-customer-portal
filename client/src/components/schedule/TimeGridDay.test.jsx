@@ -129,3 +129,38 @@ describe('TimeGridDay day-end fit', () => {
     expect(row(18 * 60).getAttribute('aria-disabled')).toBeNull();
   });
 });
+
+describe('TimeGridDay bulk move (date-only)', () => {
+  it('sends newWindow: null for a windowless visit (stays windowless) and the own window for a timed one', async () => {
+    const calls = [];
+    global.fetch = vi.fn(async (url, opts) => { calls.push({ url, body: JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; });
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[
+          SERVICES[0],
+          {
+            id: 'svc-anytime', customerName: 'Anytime Customer', status: 'confirmed',
+            // Unassigned + windowless: renders in the unassigned rail, where
+            // shift-click adds it to the bulk selection.
+            windowStart: null, windowEnd: null, windowDisplay: 'Anytime',
+            technicianId: null, technicianName: null,
+          },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTitle(/First Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Anytime Customer/), { shiftKey: true });
+    const dateInput = screen.getByLabelText(/Move to/);
+    fireEvent.change(dateInput, { target: { value: '2026-07-20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(calls).toHaveLength(2));
+    const byId = Object.fromEntries(calls.map((c) => [c.url.split('/').slice(-2)[0], c.body]));
+    expect(byId['svc-anytime']).toMatchObject({ newDate: '2026-07-20', newWindow: null });
+    expect(byId['svc-1']).toMatchObject({ newDate: '2026-07-20', newWindow: '08:00-09:00' });
+    expect(window.alert).not.toHaveBeenCalled();
+  });
+});

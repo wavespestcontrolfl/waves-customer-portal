@@ -1225,10 +1225,15 @@ export default function TimeGridDay({
     try {
       const results = await Promise.allSettled(
         toMove.map((svc) => {
-          const startMin = parseHHMM(svc.windowStart) ?? DAY_START_HOUR * 60;
-          const dur = effectiveDuration(svc);
-          const endMin = parseHHMM(svc.windowEnd) ?? (startMin + dur);
-          const newWindow = `${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`;
+          // Date-only move: a WINDOWLESS visit stays windowless (newWindow
+          // null — the server moves the date and keeps both bounds null).
+          // Synthesizing a grid-start window here used to book 06:00, which
+          // the resolver refuses (< 08:00) — windowless visits could not be
+          // bulk-moved at all. A timed visit carries its own window.
+          const startMin = parseHHMM(svc.windowStart);
+          const newWindow = startMin == null
+            ? null
+            : `${minutesToHHMM(startMin)}-${minutesToHHMM(parseHHMM(svc.windowEnd) ?? (startMin + effectiveDuration(svc)))}`;
           return adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
             method: 'POST',
             body: JSON.stringify({
@@ -1320,10 +1325,10 @@ export default function TimeGridDay({
             .filter((s) => selection.has(s.id))
             .map((s) => {
               // Mirror handleBulkMove's submit derivation exactly: a
-              // windowless visit lands at DAY_START_HOUR and a missing end
-              // becomes start + duration, so the hint checks the window the
-              // move will actually book (not the stored nulls).
-              const startMin = parseHHMM(s.windowStart) ?? DAY_START_HOUR * 60;
+              // windowless visit moves date-only (no window → the conflict
+              // hint skips it); a missing end becomes start + duration.
+              const startMin = parseHHMM(s.windowStart);
+              if (startMin == null) return { id: s.id, windowStart: null, windowEnd: null };
               const endMin = parseHHMM(s.windowEnd) ?? (startMin + effectiveDuration(s));
               return { id: s.id, windowStart: minutesToHHMM(startMin), windowEnd: minutesToHHMM(endMin) };
             })}

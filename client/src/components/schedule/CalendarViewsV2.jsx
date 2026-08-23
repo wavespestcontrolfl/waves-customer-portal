@@ -453,9 +453,12 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
 
     const startMin = parseHHMM(svc.windowStart);
     const dur = svc.duration || 30;
+    // A windowless visit stays windowless on a date-only drop (newWindow
+    // null) — synthesizing a window here would invent a booking time the
+    // operator never chose.
     const newWindow = startMin != null
       ? `${minutesToHHMM(startMin)}-${minutesToHHMM(startMin + dur)}`
-      : '08:00-09:00';
+      : null;
 
     const source = optimistic || data;
     const nextWeeks = source.weeks.map((w) => w.map((d) => {

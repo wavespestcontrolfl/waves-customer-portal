@@ -185,3 +185,10 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
     expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', { allowLive: true, adminWindowRules: true },
   );
 });
+
+test('an explicit newWindow: null on a WINDOWLESS row is a 200 date-only move (the Day grid bulk move shape)', async () => {
+  mockVisitRow = { window_start: null, window_end: null, estimated_duration_minutes: null };
+  const { status } = await reschedule({ newDate: TARGET, newWindow: null });
+  expect(status).toBe(200);
+  expect(SmartRebooker.reschedule).toHaveBeenCalledWith(expect.any(String), TARGET, null, 'admin', 'admin', expect.any(Object));
+});

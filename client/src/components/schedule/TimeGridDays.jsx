@@ -13,6 +13,7 @@ import {
   useSensors,
   useDraggable,
   useDroppable,
+  useDndContext,
   pointerWithin,
 } from '@dnd-kit/core';
 import { ChevronLeft, ChevronRight, CloudRain, Leaf } from 'lucide-react';
@@ -22,7 +23,11 @@ import { etStartOfWeek } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// DISPLAY from 6 (existing early rows render); CREATION / MOVES from 8, on
+// the hour, ending by DAY_END_HOUR — same rules as TimeGridDay and the
+// server's window validator (scheduling/window-rules.js).
 const DAY_START_HOUR = 6;
+const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -285,18 +290,41 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   );
 }
 
+// A drop on a half-hour visual row snaps DOWN to its hour.
+export function snapSlotIdxToHourMin(slotIdx) {
+  return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
+}
+
+// Bookable only from 8 AM and only if a `durationMin` visit ends by 8 PM.
+export function isBookableSlotIdx(slotIdx, durationMin = 60) {
+  const startMin = snapSlotIdxToHourMin(slotIdx);
+  const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
+  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
+}
+
 function SlotDroppable({ date, slotIdx, onCreateStart }) {
-  const slotMin = DAY_START_HOUR * 60 + slotIdx * SLOT_MIN;
+  const slotMin = snapSlotIdxToHourMin(slotIdx);
+  const { active } = useDndContext();
+  const activeSvc = active?.data?.current?.service;
+  const bookable = isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${date}-${slotIdx}`,
     data: { date, slotMin },
+    disabled: !bookable,
   });
   const isHour = slotIdx % 2 === 0;
   return (
     <div
-      ref={setNodeRef}
-      onPointerDown={onCreateStart ? (e) => onCreateStart(e, slotIdx) : undefined}
-      className={cn('transition-colors', isOver && 'bg-zinc-100', onCreateStart && 'cursor-crosshair')}
+      ref={bookable ? setNodeRef : undefined}
+      onPointerDown={onCreateStart && bookable ? (e) => onCreateStart(e, slotIdx) : undefined}
+      aria-disabled={bookable ? undefined : true}
+      data-slot-min={slotMin}
+      className={cn(
+        'transition-colors',
+        bookable && isOver && 'bg-zinc-100',
+        bookable && onCreateStart && 'cursor-crosshair',
+        !bookable && 'bg-zinc-50 cursor-not-allowed',
+      )}
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
@@ -362,8 +390,13 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
       if (!cur) return;
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
-      const startMin = DAY_START_HOUR * 60 + lo * SLOT_MIN;
-      const endMin = DAY_START_HOUR * 60 + (hi + 1) * SLOT_MIN;
+      // Hour-aligned block clamped to the bookable day (8 AM – 8 PM).
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
+      const endMin = Math.min(
+        DAY_END_HOUR * 60,
+        Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
+      );
+      if (endMin - startMin < 60) return;
       onCreateSlot({
         date: day.date,
         windowStart: minutesToHHMM(startMin),
@@ -816,10 +849,13 @@ export default function TimeGridDays({
     // Case B: drop onto a date slot → reschedule (existing behavior,
     // also works when source is from the rail — tech stays unchanged).
     const toDate = drop.date;
-    const toMin = drop.slotMin;
+    const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : drop.slotMin;
     if (fromDate === toDate && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);
+    // Pre-opening / past-day-end landings are disabled droppables; belt and
+    // braces for a stale drop payload (the server would 422 it anyway).
+    if (toMin == null || toMin < BOOKABLE_START_HOUR * 60 || toMin + dur > DAY_END_HOUR * 60) return;
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
     const updatedSvc = {
