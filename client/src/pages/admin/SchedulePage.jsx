@@ -50,6 +50,7 @@ import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
+import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 import BestTimeHint from "../../components/schedule/BestTimeHint";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import {
@@ -550,6 +551,15 @@ function lawnAreaForProtocol(service) {
 // Total product for an area-based application: rate (per 1,000 sq ft) × sq ft
 // treated, in the rate's own unit. Empty string when either side is unusable
 // so the field stays blank rather than showing NaN/0.
+// Appointment-panel history: the selected visit + nearest upcoming, then the
+// most recent past visits. Delegates to the shared schedule helper so the
+// server's proximity-capped `scheduled` list is never re-sorted DESC and
+// sliced (which surfaces a fixed series' farthest-future rows).
+export const PANEL_HISTORY_LIMIT = 6;
+export function customerPanelHistory(customerData, currentId) {
+  return buildAppointmentHistory(customerData, PANEL_HISTORY_LIMIT, { currentId });
+}
+
 export function derivedTotalAmount(rate, areaSqft) {
   const r = Number(rate);
   const a = Number(areaSqft);
@@ -2235,13 +2245,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         : Number(discountAmount)
       : 0;
   const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
-  const appointmentHistory = Array.isArray(customerData?.scheduled)
-    ? [...customerData.scheduled]
-        .sort((a, b) =>
-          String(b.scheduled_date).localeCompare(String(a.scheduled_date)),
-        )
-        .slice(0, 6)
-    : [];
+  const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
   const formatHistoryDate = (value, time) => {
