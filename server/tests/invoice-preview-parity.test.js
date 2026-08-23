@@ -172,6 +172,17 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     expect(TaxCalculator.calculateTax).not.toHaveBeenCalled();
   });
 
+  test('business customer without explicit taxRate: tax goes through TaxCalculator', async () => {
+    const business = { ...COMMERCIAL_CUSTOMER, property_type: 'business' };
+    const inserted = mockCreateDb({ customer: business });
+    await runCreate();
+    const stored = inserted[inserted.length - 1];
+
+    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith('cust-1', 'Commercial Pest Control', FEE);
+    expect(stored.tax_rate).toBe(0.065);
+    expect(stored.tax_amount).toBe(Math.round(FEE * 0.065 * 100) / 100);
+  });
+
   test('preview keys on the linked service record before the scheduled service', async () => {
     db.mockImplementation((table) => {
       const q = {};

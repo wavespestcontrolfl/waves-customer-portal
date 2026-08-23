@@ -501,7 +501,11 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         database: trx,
         amount: price,
         description: visit.service_type,
-        taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
+        // No taxRate override: an explicit rate (even 0) pre-empts
+        // TaxCalculator in InvoiceService.create (tax_exemptions,
+        // service_taxability, county tax_rates) and mis-billed `business`
+        // property_type at 0%. Leave the key ABSENT so the replay mint
+        // resolves tax the same way a fresh invoice does.
         useScheduledReplay: true,
         // The row price this amount derived from — lets the locked replay
         // rebuild 409 instead of silently minting a since-repriced visit at
