@@ -117,7 +117,12 @@ function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
         {formatETDate(visit.completed_at)}
         {ago != null && <span className="text-zinc-400"> · {ago}d ago</span>}
       </TD>
-      <TD>{visit.service_type || "—"}</TD>
+      <TD>
+        {visit.service_type || "—"}
+        {visit.leak_kind === "completed_no_service_record" && (
+          <div className="text-12 text-amber-700 mt-0.5">Completed by status only — no service record yet</div>
+        )}
+      </TD>
       <TD nums>{formatMoney(visit.price)}</TD>
       <TD align="right">
         <div className="flex gap-2 justify-end">
@@ -126,7 +131,11 @@ function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
             variant={confirmBill ? "secondary" : "primary"}
             disabled={busy || !visit.billable}
             onClick={() => onBill(visit)}
-            title={!visit.billable ? "No completion record — cannot invoice" : undefined}
+            title={
+              visit.leak_kind === "completed_no_service_record"
+                ? "Completed by status only — run the completion flow on this visit to mint the service record, then bill"
+                : !visit.billable ? "No completion record — cannot invoice" : undefined
+            }
           >
             Bill
           </Button>

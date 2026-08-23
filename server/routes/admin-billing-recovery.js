@@ -123,7 +123,14 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     .whereRaw("ss.completed_at >= now() - (? * interval '1 day')", [days])
     .whereRaw(`${effectivePriceSql} > 0`)
     .whereNull('d.id')                                   // not already dispositioned
-    .whereRaw("sr.status = 'completed'")                 // completed record only (excludes office-handoff 'incomplete' + missing)
+    // Completed record only (excludes office-handoff 'incomplete'), PLUS the
+    // status-only leak: a scheduled_services row flipped to 'completed' with
+    // NO service_records row at all (historical PUT /status completions —
+    // now refused with USE_COMPLETION_FLOW). Those are real finished work
+    // with nothing minted; they surface as leak_kind
+    // 'completed_no_service_record' and stay un-billable here until the
+    // completion flow mints the record (the bill route 422s without one).
+    .whereRaw("(sr.status = 'completed' OR (sr.id IS NULL AND ss.status = 'completed'))")
     .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')
@@ -227,6 +234,9 @@ router.get('/leaks', async (req, res) => {
       waveguard_tier: r.waveguard_tier || null,
       billing_mode: r.billing_mode || null,
       billable: !!r.service_record_id, // cannot invoice without a service record
+      // 'completed_no_service_record' = status-only completion; the
+      // completion flow must run before Bill works.
+      leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
     });
 
     // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type

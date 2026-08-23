@@ -8532,6 +8532,20 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // ⛔ 'completed' is NOT a bare status here. Only POST /:serviceId/complete
+    // mints the service_records row + invoice; flipping the row to completed
+    // through this route finishes the visit with NO completion record, and
+    // Billing Recovery's leak query keys on service_records — silent unbilled
+    // work. Refuse before any write (the completed branches below stay only
+    // for the shared lifecycle/takeover predicates; this entry never reaches
+    // them).
+    if (toStatus === 'completed') {
+      return res.status(409).json({
+        error: 'Use the completion flow to complete a visit (it mints the service record and invoice).',
+        code: 'USE_COMPLETION_FLOW',
+      });
+    }
+
     // A no-show is terminal. The V2 dispatch board routes row actions
     // (Skip, etc.) through here, and the flip below reads fromStatus from
     // the current row — so without this, a just-no-showed visit could be
