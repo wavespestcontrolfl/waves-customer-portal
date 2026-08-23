@@ -6223,7 +6223,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               rowEnd = `${String(Math.floor(rowMin / 60)).padStart(2, '0')}:${String(rowMin % 60).padStart(2, '0')}`;
             }
             const slotUnchanged = occDate === dateOnly(occRow.scheduled_date) && occStart === rowStart && occEnd === rowEnd;
-            if (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined) {
+            // The end this save would leave stored; an end at/before the
+            // start is invalid (a submitted 08:00 end on a 09:00 start, or a
+            // legacy row already stored that way) and must never persist —
+            // findConflictingVisits falls back to the duration only for a
+            // NULL end, so an inverted stored end hides the visit from every
+            // later overlap check (pre-push audit P1).
+            const storedEndAfterSave = normalizeHHMM(updates.window_end !== undefined ? updates.window_end : occRow.window_end);
+            const storedEndInvalid = !!occStart && !!storedEndAfterSave && storedEndAfterSave <= occStart;
+            if (occEnd && (storedEndInvalid || (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined))) {
               // Persist the block that was probed: a start-only edit used
               // to keep the OLD end (09:00-10:00 moved to 13:00 stored
               // 13:00-10:00), which every later overlap query read as a

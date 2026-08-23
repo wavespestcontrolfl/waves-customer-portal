@@ -195,6 +195,25 @@ describe('PUT /:id/update-details — date/window move', () => {
     expect(rowUpdate.window_end).toBe('14:00');
   });
 
+  test('an end at/before the start never persists — the duration-derived end is stored instead', async () => {
+    const updateCalls = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC } : undefined);
+      if (table === 'scheduled_services') c.update = jest.fn(async (data) => { updateCalls.push(data); return 1; });
+      return c;
+    });
+
+    // Derived block 09:00-10:00 equals the stored one, so nothing moves and
+    // no probe runs — but the inverted 08:00 end must not land either.
+    const { status } = await put('svc-1', { windowEnd: '08:00' });
+
+    expect(status).not.toBe(409);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+    const rowUpdate = updateCalls.find((d) => d && d.window_end !== undefined);
+    expect(rowUpdate).toBeTruthy();
+    expect(rowUpdate.window_end).toBe('10:00');
+  });
+
   test('a duration-only edit on an end-less row widens occupancy — locks and probes', async () => {
     trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...SVC, window_end: null } : undefined));
 
