@@ -1035,6 +1035,10 @@ function CallLogTab() {
   };
 
   const handleDisposition = async (callId, value) => {
+    // One in-flight save per row: the select is disabled while saving, and
+    // this guard covers programmatic/keyboard paths, so optimistic state,
+    // confirmed state, and rollback never interleave for the same row.
+    if (savingDisp === callId) return;
     if (
       value === "spam" &&
       !confirm(
@@ -1688,6 +1692,7 @@ function CallLogTab() {
                       {/* Disposition tag */}
                       <select
                         value={currentDisp}
+                        disabled={savingDisp === c.id}
                         onChange={(e) =>
                           handleDisposition(c.id, e.target.value)
                         }
