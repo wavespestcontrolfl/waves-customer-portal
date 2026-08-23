@@ -1690,9 +1690,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
   } catch (err) {
-    if (err.code === 'EMAIL_MATCH_CONFIRM' || err.code === 'PHONE_MATCH_CONFIRM') {
+    if (err.code === 'EMAIL_MATCH_CONFIRM' || err.code === 'PHONE_MATCH_CONFIRM' || err.code === 'EMAIL_MATCH_AMBIGUOUS') {
       if (req.techRole !== 'admin') {
         return res.status(409).json({ error: "An existing customer matches this lead's email — an admin must book it.", code: 'EMAIL_MATCH_ADMIN_REQUIRED' });
+      }
+      if (err.code === 'EMAIL_MATCH_AMBIGUOUS') {
+        return res.status(409).json({ error: err.message, code: err.code, candidates: err.candidates || [] });
       }
       return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
     }

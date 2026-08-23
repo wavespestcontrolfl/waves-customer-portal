@@ -343,18 +343,77 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
-  it('attachToAccountId supplied but email now multi-account → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+  const multiAccountKnex = (calls) => makeKnex(makeResolver({
+    preLead: baseLead(),
+    lockedLead: { customer_id: null, converted_at: null },
+    emailMatch: [existingEmailCustomer, { ...existingEmailCustomer, id: 'cust-other', account_id: 'acct-other', first_name: 'Other', last_name: 'Household' }],
+  }), calls);
+
+  it('attachToAccountId that is NOT one of the candidate accounts → 409 EMAIL_MATCH_CONFIRM (matchChanged), zero writes', async () => {
     const calls = [];
-    install(makeKnex(makeResolver({
-      preLead: baseLead(),
-      lockedLead: { customer_id: null, converted_at: null },
-      emailMatch: [existingEmailCustomer, { ...existingEmailCustomer, id: 'cust-other', account_id: 'acct-other' }],
-    }), calls));
+    install(multiAccountKnex(calls));
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      const res = await post(baseUrl, { attachToAccountId: 'acct-nope' });
       expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('EMAIL_MATCH_CONFIRM');
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.match).toBeNull();
       expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('admin, email across multiple accounts, no id → 409 EMAIL_MATCH_AMBIGUOUS with trimmed candidates, zero writes', async () => {
+    const calls = [];
+    install(multiAccountKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_AMBIGUOUS');
+      expect(body.error).toMatch(/several accounts/i);
+      expect(body.candidates).toEqual([
+        { accountId: 'acct-existing', name: 'Existing Person', emailMasked: 'l***@example.com' },
+        { accountId: 'acct-other', name: 'Other Household', emailMasked: 'l***@example.com' },
+      ]);
+      expect(body).not.toHaveProperty('match');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('technician, email across multiple accounts → 409 EMAIL_MATCH_ADMIN_REQUIRED, no candidates, zero writes', async () => {
+    const calls = [];
+    install(multiAccountKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, {}, { role: 'technician' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_ADMIN_REQUIRED');
+      expect(body).not.toHaveProperty('candidates');
+      expect(body).not.toHaveProperty('match');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('admin resolves ambiguity with attachToAccountId = a candidate → attaches there as Additional property', async () => {
+    const calls = [];
+    install(multiAccountKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-other' });
+      expect(res.status).toBe(200);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(0);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0]).toMatchObject({ account_id: 'acct-other', is_primary_profile: false, profile_label: 'Additional property' });
+    });
+  });
+
+  it('admin resolves ambiguity with createSeparateAccount → fresh account (phone fail-closed still applies)', async () => {
+    const calls = [];
+    install(multiAccountKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: null, createSeparateAccount: true });
+      expect(res.status).toBe(200);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(1);
+      expect(calls.some((c) => c.table === 'customers' && c.op === 'chain')).toBe(false);
     });
   });
 
@@ -939,8 +998,31 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c2', account_id: 'a2', email: 'shared@example.com', is_primary_profile: true },
     ], calls);
     const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
-    expect(out).toBeNull();
+    expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, ambiguous: true, match: null });
+    expect(out.candidates).toEqual([
+      { accountId: 'a1', name: '', emailMasked: 's***@example.com' },
+      { accountId: 'a2', name: '', emailMasked: 's***@example.com' },
+    ]);
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+  });
+
+  it('ambiguous: candidates are one per account, trimmed, capped at 5', async () => {
+    const rows = Array.from({ length: 7 }, (_, i) => ({ id: `c${i}`, account_id: `a${i}`, email: 'shared@example.com', first_name: `N${i}`, address_line1: 'secret' }));
+    rows.push({ id: 'c0b', account_id: 'a0', email: 'shared@example.com' });
+    const out = await findAccountByContact(emailKnex(rows, []), { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
+    expect(out.candidates).toHaveLength(5);
+    expect(out.candidates.map((c) => c.accountId)).toEqual(['a0', 'a1', 'a2', 'a3', 'a4']);
+    expect(Object.keys(out.candidates[0]).sort()).toEqual(['accountId', 'emailMasked', 'name']);
+  });
+
+  it('ambiguous + confirm id equal to one candidate → attaches to that account', async () => {
+    const calls = [];
+    const knex = emailKnex([
+      { id: 'c1', account_id: 'a1', email: 'shared@example.com', is_primary_profile: true },
+      { id: 'c2', account_id: 'a2', email: 'shared@example.com', is_primary_profile: true },
+    ], calls);
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a2' });
+    expect(out).toMatchObject({ accountId: 'a2', matchType: 'email', existingCustomer: { id: 'c2' } });
   });
 
   it('shared email across multiple rows of the SAME account → match that account', async () => {
@@ -1011,7 +1093,7 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c1', account_id: 'a1', email: 'shared@example.com' },
       { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
     ], calls);
-    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'zz-not-a-candidate' });
     expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
   });
 
@@ -1022,7 +1104,8 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
     ], calls);
     const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
-    expect(out).toBeNull();
+    expect(out).toMatchObject({ requiresConfirmation: true, ambiguous: true });
+    expect(out.candidates.map((c) => c.accountId)).toEqual(['c1', 'a2']);
   });
 
   it('forceNewAccount: skips email matching; phone match → phoneMatch confirmation; ignorePhoneMatch → null (create)', async () => {

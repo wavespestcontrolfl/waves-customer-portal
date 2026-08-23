@@ -36,6 +36,7 @@ function adminFetch(path, opts = {}) {
       err.status = r.status;
       err.code = body?.code || null;
       err.match = body?.match || null;
+      err.candidates = body?.candidates || null;
       throw err;
     }
     return r.json();
@@ -2975,12 +2976,34 @@ export function LeadsSection() {
                                                 setApptSaving(false);
                                                 return;
                                               }
-                                              if (e?.code !== "EMAIL_MATCH_CONFIRM")
+                                              if (
+                                                e?.code !== "EMAIL_MATCH_CONFIRM" &&
+                                                e?.code !== "EMAIL_MATCH_AMBIGUOUS"
+                                              )
                                                 throw e;
+                                              const ambiguous =
+                                                e.code === "EMAIL_MATCH_AMBIGUOUS";
+                                              if (ambiguous) {
+                                                // Several accounts share this
+                                                // email: list them; attaching
+                                                // is done from the customer's
+                                                // own record, not here.
+                                                const list = (e.candidates || [])
+                                                  .map(
+                                                    (c) =>
+                                                      `${c.name || "(unnamed)"} (${c.emailMasked || "email hidden"})`,
+                                                  )
+                                                  .join("\n");
+                                                alert(
+                                                  `This lead's email matches customers in several accounts:\n${list}`,
+                                                );
+                                              }
                                               const m = e.match || {};
-                                              const attach = window.confirm(
-                                                `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account?`,
-                                              );
+                                              const attach =
+                                                !ambiguous &&
+                                                window.confirm(
+                                                  `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account?`,
+                                                );
                                               if (attach) {
                                                 await submitAppt({
                                                   attachToAccountId: m.accountId,
@@ -2991,7 +3014,9 @@ export function LeadsSection() {
                                                 // separate customer is its own
                                                 // explicit OK.
                                                 window.confirm(
-                                                  "Create a SEPARATE new customer for this lead instead? (Cancel = do nothing, lead stays unbooked)",
+                                                  ambiguous
+                                                    ? "Create a SEPARATE new customer instead? (Cancel = nothing booked; to attach to one of them, book from that customer's record)"
+                                                    : "Create a SEPARATE new customer for this lead instead? (Cancel = do nothing, lead stays unbooked)",
                                                 )
                                               ) {
                                                 try {

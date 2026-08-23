@@ -1644,81 +1644,93 @@ async function findAccountByContact(trx, {
       return { rows: rows || [], keys };
     };
     const { rows: byCustomerEmail, keys: accountKeys } = await resolveEmailAccountSet();
-    if (confirmEmailAccountId && !(byCustomerEmail?.length && accountKeys.size === 1)) {
-      // The admin explicitly chose to ATTACH, but the email no longer
-      // revalidates to exactly one account (row deleted/edited, or a second
-      // household now shares it). Never let an explicit attach silently
-      // become a fresh account — surface the change instead.
+    const keyOf = (row) => String(row.account_id || row.id);
+    const trimmed = (row) => ({
+      // Trimmed to what the confirm dialog shows — no customer id, label,
+      // or street address (this payload can reach a tech-scoped caller).
+      accountId: keyOf(row),
+      name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+      emailMasked: maskEmail(row.email),
+    });
+    const sameKeySet = (a, b) => a.size === b.size && [...a].every((k) => b.has(k));
+    const changedResult = (extra = {}) => ({
+      accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null, ...extra,
+    });
+
+    let match = null;
+    let resolvedAccountId = null;
+    if (confirmEmailAccountId) {
+      // The admin explicitly chose to ATTACH. The chosen account must be one
+      // the email resolves to RIGHT NOW (the unique match, or one of the
+      // ambiguous candidates); anything else — row deleted/edited, account
+      // no longer in the set — is a changed world. Never let an explicit
+      // attach silently become a fresh account.
+      const chosen = String(confirmEmailAccountId);
+      match = byCustomerEmail.find((row) => keyOf(row) === chosen) || null;
+      if (!match) return changedResult();
+      resolvedAccountId = chosen;
+    } else if (byCustomerEmail.length && accountKeys.size === 1) {
       return {
         accountId: null,
         existingCustomer: null,
         matchType: 'email',
         requiresConfirmation: true,
-        matchChanged: true,
+        match: trimmed(byCustomerEmail[0]),
+      };
+    } else if (byCustomerEmail.length) {
+      // Shared household/business emails are a supported shape (migration
+      // 20260417000010_allow_duplicate_customer_emails). Ambiguity is NOT
+      // "no match": surface one trimmed candidate per account (max 5) for
+      // an admin to pick from, or to create a separate customer explicitly.
+      const seen = new Set();
+      const candidates = [];
+      for (const row of byCustomerEmail) {
+        const k = keyOf(row);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        candidates.push(trimmed(row));
+        if (candidates.length >= 5) break;
+      }
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'email',
+        requiresConfirmation: true,
+        ambiguous: true,
         match: null,
+        candidates,
       };
     }
-    if (byCustomerEmail?.length && accountKeys.size === 1) {
-      const match = byCustomerEmail[0];
-      const resolvedAccountId = String(match.account_id || match.id);
-      if (!confirmEmailAccountId || String(confirmEmailAccountId) !== resolvedAccountId) {
-        return {
-          accountId: null,
-          existingCustomer: null,
-          matchType: 'email',
-          requiresConfirmation: true,
-          // Trimmed to what the confirm dialog shows — no customer id, label,
-          // or street address (this payload can reach a tech-scoped caller).
-          match: {
-            accountId: resolvedAccountId,
-            name: [match.first_name, match.last_name].filter(Boolean).join(' '),
-            emailMasked: maskEmail(match.email),
-          },
-        };
-      }
-      if (confirmEmailAccountId) {
-        // Confirmed retry: the admin chose the EMAIL-selected account. A
-        // phone match that now points at a DIFFERENT account (appeared
-        // between the first request and the confirmation) means the world
-        // changed under the admin — never attach to either; re-confirm.
-        const byCustomerPhone = await lookupByPhone();
-        if (byCustomerPhone && String(byCustomerPhone.account_id || byCustomerPhone.id) !== resolvedAccountId) {
-          return {
-            accountId: null,
-            existingCustomer: null,
-            matchType: 'email',
-            requiresConfirmation: true,
-            matchChanged: true,
-            phoneConflict: true,
-            match: null,
-          };
-        }
+
+    if (match) {
+      // Confirmed retry: the admin chose the EMAIL-selected account. A
+      // phone match that now points at a DIFFERENT account (appeared
+      // between the first request and the confirmation) means the world
+      // changed under the admin — never attach to either; re-confirm.
+      const byCustomerPhone = await lookupByPhone();
+      if (byCustomerPhone && keyOf(byCustomerPhone) !== resolvedAccountId) {
+        return changedResult({ phoneConflict: true });
       }
       let freshMatch = match;
       if (fenceAttach) {
         if (!(await fenceMatchedCustomer(trx, match))) {
-          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, busy: true, match: null };
+          return changedResult({ busy: true });
         }
         // resolve → lock → RE-RESOLVE (comms-lock contract): re-run the whole
         // live-email account-set resolution (and the phone-conflict check)
-        // under the fence. The set must still collapse to the SAME account and
-        // the SAME winning row; otherwise the world moved between read and
-        // fence — reject with zero writes.
+        // under the fence. The account set must be IDENTICAL and the chosen
+        // account's winning row unchanged; otherwise the world moved between
+        // read and fence — reject with zero writes.
         const again = await resolveEmailAccountSet();
-        freshMatch = again.rows[0];
+        freshMatch = again.rows.find((row) => keyOf(row) === resolvedAccountId) || null;
         const changed = !freshMatch
-          || again.keys.size !== 1
-          || String(freshMatch.account_id || freshMatch.id) !== resolvedAccountId
+          || !sameKeySet(again.keys, accountKeys)
           || String(freshMatch.id) !== String(match.id)
           || String(freshMatch.account_id || '') !== String(match.account_id || '');
-        if (changed) {
-          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
-        }
-        if (confirmEmailAccountId) {
-          const phoneAgain = await lookupByPhone();
-          if (phoneAgain && String(phoneAgain.account_id || phoneAgain.id) !== resolvedAccountId) {
-            return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null };
-          }
+        if (changed) return changedResult();
+        const phoneAgain = await lookupByPhone();
+        if (phoneAgain && keyOf(phoneAgain) !== resolvedAccountId) {
+          return changedResult({ phoneConflict: true });
         }
       }
       const accountId = await attachMatchedCustomerToAccount(trx, freshMatch);
@@ -1739,6 +1751,15 @@ async function ensureCustomerAccount(trx, input) {
     err.isOperational = true;
     err.code = 'PHONE_MATCH_CONFIRM';
     err.match = existing.match;
+    throw err;
+  }
+  if (existing?.requiresConfirmation && existing.ambiguous) {
+    const err = new Error("This lead's email matches customers in several accounts — pick one or create a separate customer.");
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'EMAIL_MATCH_AMBIGUOUS';
+    err.candidates = existing.candidates || [];
     throw err;
   }
   if (existing?.requiresConfirmation) {
