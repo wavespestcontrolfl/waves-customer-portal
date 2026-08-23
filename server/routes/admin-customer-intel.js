@@ -21,6 +21,7 @@ router.get('/', async (req, res, next) => {
       .join('customers as c', 'h.customer_id', 'c.id')
       .where('h.scored_at', today)
       .where('c.active', true)
+      .whereNull('c.deleted_at')
       .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
 
     // If no scores for today, get most recent
@@ -29,6 +30,7 @@ router.get('/', async (req, res, next) => {
       scores = await db('customer_health_scores as h')
         .join('customers as c', 'h.customer_id', 'c.id')
         .where('c.active', true)
+        .whereNull('c.deleted_at')
         .whereRaw('h.scored_at = (SELECT MAX(scored_at) FROM customer_health_scores WHERE customer_id = h.customer_id)')
         .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
     }
@@ -78,6 +80,7 @@ router.get('/', async (req, res, next) => {
       .join('customers as c', 'u.customer_id', 'c.id')
       .where('u.status', 'identified')
       .where('c.active', true)
+      .whereNull('c.deleted_at')
       .select('u.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate')
       .orderBy('u.confidence', 'desc');
 

@@ -85,15 +85,27 @@ function excludeGloballySuppressed(query) {
 // Archived (soft-deleted) customers keep active=true and the archive route
 // never touches newsletter_subscribers, so a linked row can sit at
 // status='active' (earlier import-customers runs, pre-scope). Fail closed at
-// send time: exclude any subscriber whose linked customer has deleted_at set.
-// Unlinked rows (customer_id NULL) are untouched. Shared by buildSubscriberQuery
-// AND the resume/retry refetch, like excludeGloballySuppressed.
+// send time: exclude a subscriber whose linked customer has deleted_at set —
+// UNLESS a live customer (deleted_at IS NULL) shares the subscriber's
+// normalized email. One email may span several customer profiles
+// (migration 20260417000010) and linkToCustomer pins ONE of them and never
+// refreshes a non-null link, so a multi-property customer who archives one
+// property must keep receiving. Unlinked rows (customer_id NULL) are
+// untouched. Shared by buildSubscriberQuery, the retry refetch and the
+// resume precheck, like excludeGloballySuppressed.
 function excludeArchivedCustomers(query) {
-  return query.whereNotExists(function () {
-    this.select(db.raw('1'))
-      .from('customers as ac')
-      .whereRaw('ac.id = newsletter_subscribers.customer_id')
-      .whereNotNull('ac.deleted_at');
+  return query.where(function () {
+    this.whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('customers as ac')
+        .whereRaw('ac.id = newsletter_subscribers.customer_id')
+        .whereNotNull('ac.deleted_at');
+    }).orWhereExists(function () {
+      this.select(db.raw('1'))
+        .from('customers as lc')
+        .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))')
+        .whereNull('lc.deleted_at');
+    });
   });
 }
 

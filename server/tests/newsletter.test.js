@@ -118,17 +118,39 @@ describe('newsletter buildSubscriberQuery', () => {
   // touches newsletter_subscribers, so the send path must fail closed on the
   // linked customer's deleted_at — for fresh sends AND the resume/retry
   // refetch (both go through excludeArchivedCustomers).
-  test('always anti-joins archived (deleted_at) linked customers', () => {
+  // Exact shape: (NOT EXISTS archived-linked OR EXISTS live same-email). A
+  // shared email can span several customer profiles (20260417000010) and the
+  // link pins ONE, so archiving one property must not silence the household.
+  const ARCHIVED_PAIR = /\(not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\) or exists \(select 1 from "customers" as "lc" where LOWER\(TRIM\(lc\.email\)\) = LOWER\(TRIM\(newsletter_subscribers\.email\)\) and "lc"\."deleted_at" is null\)\)/i;
+
+  test('always guards archived linked customers, rescued by a live same-email profile', () => {
     const { sql } = shapeOf(null);
-    expect(sql).toMatch(/not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\)/i);
+    expect(sql).toMatch(ARCHIVED_PAIR);
   });
 
-  test('excludeArchivedCustomers emits the same anti-join for the retry refetch', () => {
+  test('excludeArchivedCustomers emits the same pair for the retry refetch / resume precheck', () => {
     const { sql } = excludeArchivedCustomers(
       db('newsletter_subscribers').where({ status: 'active' }),
     ).toSQL();
-    expect(sql).toMatch(/"customers" as "ac"/);
-    expect(sql).toMatch(/"ac"\."deleted_at" is not null/);
+    expect(sql).toMatch(ARCHIVED_PAIR);
+  });
+
+  // Row-level semantics, evaluated with the predicate logic the SQL encodes.
+  test('linked-archived subscriber with another LIVE profile on the same email is NOT excluded', () => {
+    const customers = [
+      { id: 1, email: ' Shared@Example.com', deleted_at: '2026-08-01' }, // archived, linked
+      { id: 2, email: 'shared@example.com ', deleted_at: null },         // live, same email
+      { id: 3, email: 'solo@example.com', deleted_at: '2026-08-01' },    // archived, no twin
+    ];
+    const norm = (e) => String(e).trim().toLowerCase();
+    const keep = (sub) => {
+      const archivedLinked = customers.some((c) => c.id === sub.customer_id && c.deleted_at != null);
+      const liveTwin = customers.some((c) => norm(c.email) === norm(sub.email) && c.deleted_at == null);
+      return !archivedLinked || liveTwin;
+    };
+    expect(keep({ customer_id: 1, email: 'SHARED@example.com' })).toBe(true);
+    expect(keep({ customer_id: 3, email: 'solo@example.com' })).toBe(false);
+    expect(keep({ customer_id: null, email: 'lead@example.com' })).toBe(true);
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {

@@ -7,6 +7,20 @@ const healthService = require('../services/customer-health');
 const alertService = require('../services/health-alerts');
 const { LAST_TOUCH_SQL, resolveQuietDays, mapQuietRow } = require('../services/customer-intelligence/quiet-customers');
 
+// Health-score rows outlive an archive (soft-delete stamps customers.deleted_at
+// only, active stays true), so dashboard aggregates over customer_health_scores
+// must drop rows whose customer is archived — same scope as whereLiveCustomer
+// (services/customer-stages.js), expressed as an anti-join because these
+// queries don't join customers.
+function liveScoresOnly(q) {
+  return q.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('customers as ac')
+      .whereRaw('ac.id = customer_health_scores.customer_id')
+      .whereNotNull('ac.deleted_at');
+  });
+}
+
 router.use(adminAuthenticate);
 
 // Auto-create health tables if missing
@@ -89,7 +103,7 @@ router.use(async (req, res, next) => {
 router.get('/dashboard', async (req, res) => {
   try {
     // Fleet health average
-    const avgResult = await db('customer_health_scores')
+    const avgResult = await liveScoresOnly(db('customer_health_scores'))
       .avg('overall_score as avg')
       .first().catch(() => null);
     const fleetHealthAvg = Math.round(parseFloat(avgResult?.avg || 50));
@@ -100,13 +114,13 @@ router.get('/dashboard', async (req, res) => {
     // only for the auto-created-table edge case where churn_risk is absent.)
     let atRiskCount = 0;
     try {
-      const atRiskResult = await db('customer_health_scores')
+      const atRiskResult = await liveScoresOnly(db('customer_health_scores'))
         .whereIn('churn_risk', ['high', 'critical'])
         .count('* as count').first();
       atRiskCount = parseInt(atRiskResult?.count || 0);
     } catch {
       try {
-        const atRiskResult = await db('customer_health_scores')
+        const atRiskResult = await liveScoresOnly(db('customer_health_scores'))
           .whereIn('churn_risk_level', ['high', 'critical'])
           .count('* as count').first();
         atRiskCount = parseInt(atRiskResult?.count || 0);
@@ -114,7 +128,7 @@ router.get('/dashboard', async (req, res) => {
     }
 
     // Healthy count (score >= 65)
-    const healthyResult = await db('customer_health_scores')
+    const healthyResult = await liveScoresOnly(db('customer_health_scores'))
       .where('overall_score', '>=', 65)
       .count('* as count')
       .first().catch(() => ({ count: 0 }));
@@ -123,7 +137,7 @@ router.get('/dashboard', async (req, res) => {
     // 30-day churn forecast
     let predictedChurns = 0;
     try {
-      const churnForecast = await db('customer_health_scores')
+      const churnForecast = await liveScoresOnly(db('customer_health_scores'))
         .whereNotNull('churn_probability')
         .sum('churn_probability as total').first();
       predictedChurns = Math.round(parseFloat(churnForecast?.total || 0));
@@ -132,12 +146,12 @@ router.get('/dashboard', async (req, res) => {
     // Grade distribution — score_grade may not exist, derive from health_score
     let gradeDistribution = [];
     try {
-      gradeDistribution = await db('customer_health_scores')
+      gradeDistribution = await liveScoresOnly(db('customer_health_scores'))
         .select('score_grade').count('* as count').groupBy('score_grade').orderBy('score_grade');
     } catch {
       // Derive grades from health_score
       try {
-        const all = await db('customer_health_scores').select('overall_score');
+        const all = await liveScoresOnly(db('customer_health_scores')).select('overall_score');
         const grades = { A: 0, B: 0, C: 0, D: 0, F: 0 };
         all.forEach(r => {
           const s = r.overall_score || 0;
@@ -150,10 +164,10 @@ router.get('/dashboard', async (req, res) => {
     // Churn risk breakdown
     let riskBreakdown = [];
     try {
-      riskBreakdown = await db('customer_health_scores').select('churn_risk').count('* as count').groupBy('churn_risk');
+      riskBreakdown = await liveScoresOnly(db('customer_health_scores')).select('churn_risk').count('* as count').groupBy('churn_risk');
     } catch {
       try {
-        riskBreakdown = await db('customer_health_scores').select('churn_risk_level as churn_risk').count('* as count').groupBy('churn_risk_level');
+        riskBreakdown = await liveScoresOnly(db('customer_health_scores')).select('churn_risk_level as churn_risk').count('* as count').groupBy('churn_risk_level');
       } catch { /* neither column exists */ }
     }
 
@@ -162,6 +176,7 @@ router.get('/dashboard', async (req, res) => {
     try {
       atRiskCustomers = await db('customer_health_scores')
         .join('customers', 'customer_health_scores.customer_id', 'customers.id')
+        .whereNull('customers.deleted_at')
         .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.overall_score', 'customer_health_scores.score_grade', 'customer_health_scores.churn_risk', 'customer_health_scores.days_until_predicted_churn')
         .orderBy('customer_health_scores.overall_score', 'asc')
         .limit(10);
