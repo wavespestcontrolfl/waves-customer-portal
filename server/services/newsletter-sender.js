@@ -332,6 +332,38 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
     .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
 }
 
+/**
+ * THE terminal-skip write. A recipient that fails the eligibility predicate
+ * (status active + not globally suppressed + no archived customer link)
+ * after selection must never be mailed AND must never stay retryable — a
+ * resume would otherwise re-queue it, and prepareResumeCampaign would keep
+ * counting it as outstanding. Both eligibility gates land here: the
+ * pre-dispatch resume sweep (rows still queued/failed) and the per-chunk
+ * re-check right before SendGrid (resume rows already claimed to 'sending').
+ * `claimed` selects the claimed-row variant (match by delivery id, filter on
+ * 'sending' + no success signal); otherwise rows are matched by subscriber id
+ * or delivery id under the retryable filter. Returns rows moved to 'skipped'.
+ */
+async function skipIneligibleDeliveries(sendId, { deliveryIds = null, subscriberIds = null, claimed = false } = {}) {
+  const q = db('newsletter_send_deliveries').where({ send_id: sendId });
+  if (deliveryIds) {
+    if (!deliveryIds.length) return 0;
+    if (claimed) q.where({ status: 'sending' });
+    q.whereIn('id', deliveryIds);
+  } else {
+    if (!subscriberIds || !subscriberIds.length) return 0;
+    q.whereIn('subscriber_id', subscriberIds);
+  }
+  const updated = await (claimed ? applyDeliveryNoSuccessFilter(q) : applyRetryableDeliveryFilter(q))
+    .update({
+      status: SKIPPED_DELIVERY_STATUS,
+      bounce_reason: 'ineligible_at_dispatch',
+      send_attempt_token: null,
+      updated_at: new Date(),
+    });
+  return Number(updated || 0);
+}
+
 async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
   if (!subscriberIds.length) return [];
   const attemptToken = crypto.randomUUID();
@@ -502,6 +534,13 @@ async function sendCampaign(sendId, opts = {}) {
   }
 
   let subscribers = [];
+  // Recipients dropped for ineligibility: the pre-dispatch resume sweep plus
+  // the per-chunk re-check. Subtracted from recipientCount before
+  // finalization. skippedAtDispatch is the chunk-loop share only (those
+  // recipients ARE inside subscribersToSend, so the all-failed maths needs
+  // them separately).
+  let skippedIneligible = 0;
+  let skippedAtDispatch = 0;
   const useAb = !!send.subject_b;
 
   // Pre-seed per-recipient deliveries with A/B assignment. The onConflict
@@ -539,6 +578,24 @@ async function sendCampaign(sendId, opts = {}) {
       )).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
+
+    // The refetch above drops recipients that became ineligible since the
+    // original send (unsubscribed, globally suppressed, customer archived
+    // with no live twin) — but dropping them from the JS array alone leaves
+    // their delivery rows queued/failed: retryable forever, still inside
+    // recipient_count, re-mailed by the next resume (and prepareResume can
+    // report NOTHING_TO_RESUME while those rows still sit in the ledger).
+    // Terminalize them BEFORE subscribersToSend is built, through the same
+    // skip write the per-chunk re-check uses.
+    const eligibleIds = new Set(subscribers.map((s) => s.id));
+    const ineligibleRows = existingDeliveries.filter((d) => isRetryableDelivery(d)
+      && d.subscriber_id !== null && d.subscriber_id !== undefined
+      && !eligibleIds.has(d.subscriber_id));
+    if (ineligibleRows.length) {
+      await skipIneligibleDeliveries(send.id, { deliveryIds: ineligibleRows.map((d) => d.id) });
+      skippedIneligible += ineligibleRows.length;
+      logger.info(`[newsletter] send ${send.id} skipped ${ineligibleRows.length} retryable ledger row(s) whose recipient is no longer eligible (archived customer / suppressed / not active)`);
+    }
   }
 
   const deliveryBySub = new Map(existingDeliveries.map((d) => [d.subscriber_id, d]));
@@ -552,10 +609,9 @@ async function sendCampaign(sendId, opts = {}) {
     return !d || isRetryableDelivery(d);
   });
   let recipientCount = opts.existingDeliveriesOnly ? existingDeliveries.length : subscribers.length;
-  const skippedAlreadySent = recipientCount - subscribersToSend.length;
-  // Recipients dropped by the per-chunk eligibility re-check (see the chunk
-  // loop). Subtracted from recipientCount before finalization.
-  let skippedIneligible = 0;
+  // Ledger rows already terminalized by the sweep above are not "already
+  // sent" — they are ineligible, and counted as such.
+  const skippedAlreadySent = recipientCount - skippedIneligible - subscribersToSend.length;
   if (skippedAlreadySent > 0) {
     logger.info(`[newsletter] send ${send.id} skipping ${skippedAlreadySent} recipient(s) already in non-retryable state (resume)`);
   }
@@ -670,15 +726,11 @@ async function sendCampaign(sendId, opts = {}) {
       ).select('id'))).map((r) => r.id));
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
-        const skipQuery = db('newsletter_send_deliveries').where({ send_id: send.id });
-        if (opts.existingDeliveriesOnly) {
-          skipQuery.where({ status: 'sending' }).whereIn('id', ineligible.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean));
-        } else {
-          skipQuery.whereIn('subscriber_id', ineligible.map((s) => s.id));
-        }
-        await (opts.existingDeliveriesOnly ? applyDeliveryNoSuccessFilter(skipQuery) : applyRetryableDeliveryFilter(skipQuery))
-          .update({ status: SKIPPED_DELIVERY_STATUS, bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null, updated_at: new Date() });
+        await skipIneligibleDeliveries(send.id, opts.existingDeliveriesOnly
+          ? { deliveryIds: ineligible.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean), claimed: true }
+          : { subscriberIds: ineligible.map((s) => s.id) });
         skippedIneligible += ineligible.length;
+        skippedAtDispatch += ineligible.length;
         logger.info(`[newsletter] send ${send.id} skipped ${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active)`);
         chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
@@ -841,7 +893,7 @@ async function sendCampaign(sendId, opts = {}) {
   )
     .count('* as c')
     .first();
-  const attemptedCount = subscribersToSend.length - skippedIneligible;
+  const attemptedCount = subscribersToSend.length - skippedAtDispatch;
   const allFailed = Number(retryableRemaining?.c || 0) > 0
     && failed === attemptedCount
     && attemptedCount > 0

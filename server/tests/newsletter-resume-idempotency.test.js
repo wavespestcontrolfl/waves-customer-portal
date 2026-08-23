@@ -627,6 +627,74 @@ describe('resumeCampaign — preconditions', () => {
     });
   });
 
+  test('resume preflight: a retryable ledger row whose recipient is no longer eligible is terminalized before dispatch', async () => {
+    let finalUpdate = null;
+    let sweepUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                           // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 2 }),                                  // two outstanding
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
+        ] }),
+        // Pre-dispatch sweep: d-2's subscriber is gone from the eligible
+        // refetch, so its retryable row is terminalized here — NOT left
+        // queued/failed for the next resume to pick up.
+        chain({ updated: 1, onUpdate: (payload) => { sweepUpdate = payload; } }),
+        chain({ returning: [{ id: 'd-1', subscriber_id: 1, send_attempt_token: 'attempt-1' }] }), // claim
+        chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
+      ],
+      newsletter_subscribers: [
+        // Eligible refetch (status active + suppression + archived-customer
+        // anti-join): subscriber 2's customer was archived after the send.
+        chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-live' }] }),
+        // Per-chunk eligibility re-check right before SendGrid.
+        chain({ result: [{ id: 1 }] }),
+      ],
+    };
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
+    queues.newsletter_sends.push(chain({ first: null }));
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(sweepUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(result.skipped_ineligible).toBe(1);
+    // Ineligible, not "already sent" — and out of recipient_count.
+    expect(result.skipped_already_sent).toBe(0);
+    expect(result.recipients).toBe(1);
+    expect(finalUpdate.recipient_count).toBe(1);
+  });
+
   test('resume: a subscriber archived since the original send is skipped terminally, not re-sent', async () => {
     let finalUpdate = null;
     let skipUpdate = null;

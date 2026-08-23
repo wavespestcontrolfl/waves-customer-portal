@@ -17,14 +17,22 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../services/newsletter-sender', () => ({}));
 jest.mock('../services/event-freshness', () => ({ cityToZone: jest.fn(() => null) }));
-jest.mock('../services/newsletter-subscribers', () => ({
-  subscribeOrResubscribe: jest.fn(async ({ email }) => ({ action: 'created', subscriber: { id: `sub-${email}` } })),
-}));
+jest.mock('../services/newsletter-subscribers', () => {
+  // EMAIL_RE is a PRODUCTION export the import route validates with — take it
+  // from the real module, never re-declare it in the mock.
+  const actual = jest.requireActual('../services/newsletter-subscribers');
+  return {
+    EMAIL_RE: actual.EMAIL_RE,
+    subscribeOrResubscribe: jest.fn(async ({ email }) => ({ action: 'created', subscriber: { id: `sub-${email}` } })),
+    linkToCustomer: jest.fn(async () => {}),
+    linkManyToCustomers: jest.fn(async () => 1),
+  };
+});
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 
 const express = require('express');
 const db = require('../models/db');
-const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, linkManyToCustomers } = require('../services/newsletter-subscribers');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
 
 // Archive (DELETE /api/admin/customers/:id) sets deleted_at only — active stays
@@ -92,5 +100,43 @@ describe('POST /subscribers/import-customers archived-customer scope', () => {
     expect(subscribeOrResubscribe).toHaveBeenCalledWith(expect.objectContaining({ email: 'live@example.com' }));
     const emails = subscribeOrResubscribe.mock.calls.map(([args]) => args.email);
     expect(emails).not.toContain('archived@example.com');
+  });
+});
+
+describe('POST /subscribers/import routes the bulk first-link through the canonical picker', () => {
+  let rawCalls;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    rawCalls = [];
+    db.raw = jest.fn(async (...args) => { rawCalls.push(args); return { rowCount: 0 }; });
+    db.mockImplementation((table) => {
+      if (table !== 'newsletter_subscribers') throw new Error(`Unexpected table ${table}`);
+      const q = {};
+      ['insert', 'onConflict', 'ignore'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.returning = jest.fn(async () => [{ id: 1 }, { id: 2 }]);
+      return q;
+    });
+  });
+
+  test('imported emails go to linkManyToCustomers (live-scoped) — no ad-hoc UPDATE ... FROM customers', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter/subscribers/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preConsented: true,
+          subscribers: [{ email: ' Shared@Example.com ' }, { email: 'archived-only@example.com' }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual(expect.objectContaining({ inserted: 2 }));
+    });
+
+    expect(linkManyToCustomers).toHaveBeenCalledTimes(1);
+    expect(linkManyToCustomers.mock.calls[0][0]).toEqual(['shared@example.com', 'archived-only@example.com']);
+    // The unscoped bulk link is gone: nothing in this route may pin a profile
+    // without the live-customer scope (an archived one would be silenced by
+    // the sender's anti-join forever).
+    expect(rawCalls).toEqual([]);
   });
 });

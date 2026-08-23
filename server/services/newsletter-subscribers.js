@@ -346,6 +346,44 @@ async function linkToCustomer(email) {
 }
 
 /**
+ * Set-based first-link for a batch of emails (the CSV bulk import). Same
+ * decision as linkToCustomer / liveTwinSubselect — identical live-customer
+ * scope (active = true, deleted_at IS NULL, pipeline_stage IN CUSTOMER_STAGES)
+ * and identical ordering (is_primary_profile DESC NULLS LAST, created_at ASC,
+ * id ASC) — expressed once per email with DISTINCT ON instead of a correlated
+ * LIMIT 1, so a 25k-row import stays one query. An email whose only profiles
+ * are archived matches no candidate and the row stays unlinked (the sender's
+ * anti-join would suppress an archived link anyway). Idempotent: only rows
+ * with customer_id IS NULL move. Returns the number of rows linked.
+ */
+async function linkManyToCustomers(emails, conn = db) {
+  const { CUSTOMER_STAGES } = require('./customer-stages');
+  const keys = Array.from(new Set((emails || [])
+    .map((e) => String(e || '').trim().toLowerCase())
+    .filter(Boolean)));
+  if (!keys.length) return 0;
+  const stagePlaceholders = CUSTOMER_STAGES.map(() => '?').join(', ');
+  const res = await conn.raw(
+    `UPDATE newsletter_subscribers ns
+        SET customer_id = t.twin_id, updated_at = NOW()
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE LOWER(TRIM(c.email)) = ANY(?)
+            AND c.active = true
+            AND c.deleted_at IS NULL
+            AND c.pipeline_stage IN (${stagePlaceholders})
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
+      WHERE LOWER(TRIM(ns.email)) = t.email_key
+        AND ns.customer_id IS NULL
+        AND LOWER(TRIM(ns.email)) = ANY(?)`,
+    [keys, ...CUSTOMER_STAGES, keys],
+  );
+  return Number(res?.rowCount || 0);
+}
+
+/**
  * Symmetric relink for one email, used by BOTH the archive route (after
  * deleted_at is set) and the restore route (after it is cleared), inside
  * their transaction. Re-runs the canonical twin picker (liveTwinSubselect)
@@ -376,4 +414,4 @@ async function relinkSubscribersForEmail(trx, email) {
   return { winnerId, relinked: Number(relinked || 0) };
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, liveTwinSubselect, relinkSubscribersForEmail, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

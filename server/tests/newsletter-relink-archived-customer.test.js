@@ -6,7 +6,7 @@ jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(async (
 jest.mock('../services/newsletter-sunset', () => ({ REENGAGEMENT_TAG: 'reengagement_due' }));
 
 const db = require('../models/db');
-const { liveTwinSubselect, linkToCustomer, relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
+const { liveTwinSubselect, linkToCustomer, linkManyToCustomers, relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 const SCOPE = /c\.active = true\s+AND c\.deleted_at IS NULL\s+AND c\.pipeline_stage IN \((\?, )*\?\)/;
@@ -48,6 +48,40 @@ describe('linkToCustomer picks the LIVE twin', () => {
 
   test('empty email is a no-op', async () => {
     await linkToCustomer('');
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+});
+
+describe('linkManyToCustomers (CSV bulk import) uses the same picker, set-based', () => {
+  test('archived + live profile for an imported email → the LIVE one wins; only-archived → row left unlinked', async () => {
+    db.raw.mockResolvedValueOnce({ rowCount: 2 });
+    const linked = await linkManyToCustomers([' Live@Example.com ', 'archived-only@example.com', 'live@example.com']);
+    expect(linked).toBe(2);
+    expect(db.raw).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = db.raw.mock.calls[0];
+    // One winner per normalized email, chosen by the canonical scope + order:
+    // an archived (deleted_at) or non-customer-stage profile is not a
+    // candidate at all, so an email whose only profile is archived matches
+    // nothing and its subscriber row keeps customer_id NULL.
+    expect(sql).toMatch(/DISTINCT ON \(LOWER\(TRIM\(c\.email\)\)\)/);
+    expect(sql).toMatch(/c\.active = true/);
+    expect(sql).toMatch(/c\.deleted_at IS NULL/);
+    expect(sql).toMatch(/c\.pipeline_stage IN \((\?, )*\?\)/);
+    expect(sql).toMatch(/ORDER BY LOWER\(TRIM\(c\.email\)\), c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC/);
+    expect(sql).toMatch(/WHERE LOWER\(TRIM\(ns\.email\)\) = t\.email_key/);
+    // First link only — never re-points an already-linked subscriber.
+    expect(sql).toMatch(/ns\.customer_id IS NULL/);
+    // Emails normalized + deduped, and bound (never interpolated).
+    expect(bindings).toEqual([
+      ['live@example.com', 'archived-only@example.com'],
+      ...CUSTOMER_STAGES,
+      ['live@example.com', 'archived-only@example.com'],
+    ]);
+  });
+
+  test('no usable emails → no query', async () => {
+    expect(await linkManyToCustomers([])).toBe(0);
+    expect(await linkManyToCustomers([null, '   '])).toBe(0);
     expect(db.raw).not.toHaveBeenCalled();
   });
 });
