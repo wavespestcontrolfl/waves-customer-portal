@@ -105,15 +105,25 @@ const InsightsPanel = lazy(
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(["en_route", "on_site"]);
 const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);
 
+// A completed visit may reopen CompletionPanel ONLY when it still owes the
+// completion itself: (a) the invoice-mint resume marker (503
+// backfill_invoice_mint_failed), or (b) a status-only completion — the
+// day payload says has_service_record === false (strict: a legacy payload
+// without the flag stays closed). The server's /complete accepts
+// completed→completed (evaluateTerminalTransition same-status) and mints
+// the service record + invoice from the tech's completion data; Billing
+// Recovery deep-links these rows here via ?completeService=.
+export function completedVisitOwesCompletion(service) {
+  if (String(service?.status || "").toLowerCase() !== "completed") return false;
+  return service?.has_service_record === false || completionResumeOwed(service?.id);
+}
+
 function shouldOpenMobileCompletion(service) {
   const status = String(service?.status || "").toLowerCase();
   return (
     ACTIVE_MOBILE_COMPLETION_STATUSES.has(status) ||
     PRE_SERVICE_STATUSES.has(status) ||
-    // A completed visit still owing its invoice-mint resume (503
-    // backfill_invoice_mint_failed marked it) reopens completion so the
-    // re-submit can replay through the server's resume claim.
-    (status === "completed" && completionResumeOwed(service?.id))
+    completedVisitOwesCompletion(service)
   );
 }
 
@@ -1608,7 +1618,7 @@ export default function DispatchPageV2({
       alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
     } else if (
       ["completed", "cancelled", "skipped", "no_show"].includes(String(svc.status || "")) &&
-      !(String(svc.status || "") === "completed" && completionResumeOwed(svc.id))
+      !completedVisitOwesCompletion(svc)
     ) {
       // Defense in depth for the /tech deep-link (Codex P1): a stale or
       // re-tapped URL must never reopen completion on a terminal visit —

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { taxPeriodFor } = require('../utils/tax-period');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
   prorateAssetDepreciation, annotateMidQuarter, outflowTransactionsQuery,
@@ -465,9 +466,9 @@ router.post('/expenses', async (req, res, next) => {
   try {
     let { categoryId, description, amount, deductibleAmount, expenseDate, vendorName,
       paymentMethod, isRecurring, recurrencePeriod, notes } = req.body;
-    const date = new Date(expenseDate);
-    const taxYear = String(date.getFullYear());
-    const quarter = `Q${Math.ceil((date.getMonth() + 1) / 3)}`;
+    const period = taxPeriodFor(expenseDate);
+    if (!period) return res.status(400).json({ error: 'expenseDate must be a valid YYYY-MM-DD date' });
+    const { tax_year: taxYear, quarter } = period;
 
     // Auto-categorize with Claude if no category provided
     let aiCategory = null;
@@ -507,7 +508,7 @@ router.post('/expenses', async (req, res, next) => {
     const [inserted] = await db('expenses').insert({
       category_id: categoryId, description, amount,
       tax_deductible_amount: deductible,
-      expense_date: expenseDate, vendor_name: vendorName,
+      expense_date: period.date, vendor_name: vendorName,
       payment_method: paymentMethod, is_recurring: isRecurring || false,
       recurrence_period: recurrencePeriod, tax_year: taxYear, quarter, notes,
     }).returning('*');
@@ -1978,7 +1979,9 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
       if (partial !== null) deductible = partial;
     }
     const txnDate = dateCellStr(row.txn_date);
-    const quarter = `Q${Math.ceil(Number(txnDate.slice(5, 7)) / 3)}`;
+    const txnPeriod = taxPeriodFor(txnDate);
+    if (!txnPeriod) return res.status(400).json({ error: 'bank row has no usable txn_date' });
+    const { tax_year: txnTaxYear, quarter } = txnPeriod;
     let expense;
     try {
       expense = await db.transaction(async trx => {
@@ -1987,11 +1990,11 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
           description: row.description.slice(0, 300),
           amount: row.amount,
           tax_deductible_amount: deductible,
-          expense_date: txnDate,
+          expense_date: txnPeriod.date,
           vendor_name: row.description.slice(0, 200),
           // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
           payment_method: row.account_type === 'card' ? 'card' : 'ach',
-          tax_year: txnDate.slice(0, 4),
+          tax_year: txnTaxYear,
           quarter,
           notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
         }).returning('*');

@@ -98,70 +98,75 @@ test('START-only pre-8am / half-hour edits → 422', async () => {
 });
 
 describe('rung-1 wiring (source-pattern guards)', () => {
-  test('POST / locks the FULL planned date set (anchor + children + boosters) before the comms lock', () => {
+  test('POST / locks the FULL planned date set (anchor + children + boosters) before the comms lock; the spawn loops consume the pre-trx plan', () => {
     const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
-    const lockIdx = post.indexOf('acquireAdminSlotLocks({ trx, dates: [...seriesDates] })');
+    const lockIdx = post.indexOf('await acquireOccupancyLocks(trx, [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates])');
     const commsIdx = post.indexOf('await lockCustomerComms(trx, customerId)');
     expect(lockIdx).toBeGreaterThan(-1);
     expect(lockIdx).toBeLessThan(commsIdx);
-    // The spawn loops consume the pre-trx plan — no in-trx re-derivation.
     expect(post).toMatch(/for \(const nextDateStr of plannedChildDates\)/);
     expect(post).toMatch(/for \(const boosterDate of plannedBoosterDates\)/);
     expect(post.slice(post.indexOf('await db.transaction'))).not.toMatch(/nextRecurringDate\(/);
   });
 
-  test('update-details pre-locks the re-seed date plan first and probes each spawned child under it', () => {
+  test('the update-details move probe excludes every cadence-rewrite participant, not just the parent', () => {
     const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
-    const trxIdx = ud.indexOf('await db.transaction(async (trx) => {');
-    const lockIdx = ud.indexOf('acquireAdminSlotLocks({ trx, dates: lockedSpawnDates })');
-    const commsIdx = ud.indexOf('await lockCustomerComms(trx, commsPeek.customer_id)');
-    expect(lockIdx).toBeGreaterThan(trxIdx);
-    expect(lockIdx).toBeLessThan(commsIdx);
-    expect(ud).toMatch(/SERIES_ANCHOR_MOVED_RETRY/);
-    const probeIdx = ud.indexOf("assertNoSlotOverlap({ trx, date: nextDateStr, windowStart: childStart");
-    const insertIdx = ud.indexOf("trx('scheduled_services').insert(childData)");
-    expect(probeIdx).toBeGreaterThan(-1);
-    expect(probeIdx).toBeLessThan(insertIdx);
+    const probe = ud.slice(ud.indexOf('const adminMoveClash = await findConflictingVisits({'), ud.indexOf('if (adminMoveClash.length)'));
+    expect(probe).toMatch(/excludeServiceIds: await adminMoveProbeExcludeIds\(trx, \{/);
+    expect(probe).toMatch(/parentBefore: recurringParentBefore/);
+    // The rewrite's own per-row probes already exclude the whole participant set.
+    expect(ud).toMatch(/const rewriteProbeExcludeIds = \[parent\.id, \.\.\.pendingRewriteIds\]/);
   });
 });
 
-test('recurringChildDateCandidates reproduces the inline derivation the spawn loops used', () => {
-  const { recurringChildDateCandidates } = adminScheduleRouter._test;
-  const weekly = recurringChildDateCandidates({
-    baseDateStr: '2099-01-05', recurringPattern: 'weekly', rOpts: {}, skipWeekends: false, shiftDir: 'forward', maxAttempts: 4,
+describe('adminMoveProbeExcludeIds — batch-move exclusion for the admin move probe', () => {
+  const { adminMoveProbeExcludeIds } = adminScheduleRouter._test;
+  // Weekly parent with two pending children a week apart.
+  const PARENT = {
+    id: 'parent-1', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'weekly',
+    scheduled_date: '2099-01-05', skip_weekends: false, weekend_shift: null,
+  };
+  function fakeTrx(rows) {
+    const q = {
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue(rows),
+    };
+    const trx = jest.fn(() => q);
+    trx.q = q;
+    return trx;
+  }
+
+  test("weekly parent moved onto its own child's slot: the parent AND every pending child/booster are excluded", async () => {
+    const trx = fakeTrx([{ id: 'child-jan12' }, { id: 'child-jan19' }, { id: 'booster-1' }]);
+    const ids = await adminMoveProbeExcludeIds(trx, {
+      id: 'parent-1', parentBefore: PARENT, updates: { scheduled_date: '2099-01-12' },
+    });
+    expect(ids).toEqual(['parent-1', 'child-jan12', 'child-jan19', 'booster-1']);
+    expect(trx.q.where).toHaveBeenCalledWith({ recurring_parent_id: 'parent-1' });
+    expect(trx.q.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
   });
-  expect(weekly).toEqual(['2099-01-12', '2099-01-19', '2099-01-26']);
-});
 
-describe('rung-1 follow-ups (source-pattern guards)', () => {
-  const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
-
-  test('the locked row is compared with the unlocked pre-read before the write; drift fails closed (VISIT_CHANGED_RETRY)', () => {
-    const driftIdx = ud.indexOf("code: 'VISIT_CHANGED_RETRY'");
-    const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
-    expect(driftIdx).toBeGreaterThan(-1);
-    expect(driftIdx).toBeLessThan(writeIdx);
-    const check = ud.slice(ud.indexOf('const lockedRow = preTupleRow'), driftIdx);
-    expect(check).toMatch(/forUpdate\(\)/);
-    for (const col of ['scheduled_date', 'window_start', 'window_end']) expect(check).toContain(`lockedRow.${col}`);
+  test('an unrelated visit is never excluded: only rows under this parent are read, so a clash with it still 409s', async () => {
+    const trx = fakeTrx([{ id: 'child-jan12' }]);
+    const ids = await adminMoveProbeExcludeIds(trx, {
+      id: 'parent-1', parentBefore: PARENT, updates: { scheduled_date: '2099-01-12' },
+    });
+    expect(ids).not.toContain('unrelated-visit');
+    expect(ids).toEqual(['parent-1', 'child-jan12']);
   });
 
-  test('cadence-rewrite destinations are planned into the rung-1 lock set and every re-dated child/booster is fenced before its CAS update', () => {
-    expect(ud).toMatch(/const mayRewriteSeries = isRecurring && spawnRecurringChildren === false/);
-    expect(ud).toMatch(/\(willSpawnChildren \|\| mayRewriteSeries\) && currentRow/);
-    // Booster destinations cover both derivations the rewrite chooses from.
-    expect(ud).toMatch(/computeBoosterDates\(probeDate, normalizeBoosterMonths\(currentRow\.booster_months\), 12\)/);
-    const rewrite = ud.slice(ud.indexOf('shouldRewritePendingRecurringRows(recurringParentBefore, parent)'));
-    const childFence = rewrite.indexOf('await fenceRewriteDestination(child, nextDateStr)');
-    const childCas = rewrite.indexOf('const childUpdated = await');
-    const boosterFence = rewrite.indexOf('await fenceRewriteDestination(booster, nextDateStr)');
-    const boosterCas = rewrite.indexOf('const boosterUpdated = await');
-    expect(childFence).toBeGreaterThan(-1);
-    expect(childFence).toBeLessThan(childCas);
-    expect(boosterFence).toBeGreaterThan(childCas);
-    expect(boosterFence).toBeLessThan(boosterCas);
-    const fence = rewrite.slice(rewrite.indexOf('const fenceRewriteDestination'), rewrite.indexOf('const pendingRewriteIds'));
-    expect(fence).toMatch(/SERIES_ANCHOR_MOVED_RETRY/);
-    expect(fence).toMatch(/assertNoSlotOverlap\(\{ trx, date: nextDateStr/);
+  test('no cadence change (notes-only save) → children keep their slots, so only the row itself is excluded', async () => {
+    const trx = fakeTrx([{ id: 'child-jan12' }]);
+    const ids = await adminMoveProbeExcludeIds(trx, { id: 'parent-1', parentBefore: PARENT, updates: { notes: 'x' } });
+    expect(ids).toEqual(['parent-1']);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('a child row / non-recurring row / no before-row → only itself', async () => {
+    const trx = fakeTrx([]);
+    expect(await adminMoveProbeExcludeIds(trx, { id: 'c1', parentBefore: { ...PARENT, id: 'c1', recurring_parent_id: 'parent-1' }, updates: { scheduled_date: '2099-02-01' } })).toEqual(['c1']);
+    expect(await adminMoveProbeExcludeIds(trx, { id: 'x', parentBefore: null, updates: { scheduled_date: '2099-02-01' } })).toEqual(['x']);
+    expect(trx).not.toHaveBeenCalled();
   });
 });

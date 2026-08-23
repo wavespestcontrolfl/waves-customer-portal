@@ -27,6 +27,7 @@ const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString, deriveWindowEnd } = require('../utils/datetime-et');
+const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
@@ -439,9 +440,6 @@ function composeEfficacyClause({ reasonCode, serviceType }) {
 // live-override sets; terminal rows are never touched.
 const MOVABLE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 
-// Same-day options stop offering starts after this ET hour — a slot
-// starting later than 5 PM runs past a reasonable service day.
-const LAST_SAME_DAY_START_HOUR = 17;
 const SAME_DAY_OFFSETS_MINUTES = [120, 240];
 
 // Reschedule slots are booked as a 1-hour, on-the-hour block — the internal
@@ -452,6 +450,14 @@ const SAME_DAY_OFFSETS_MINUTES = [120, 240];
 // used to offer 2-hour windows here, which drifted from the rest of the
 // schedule; on-the-hour keeps dispatch times clean.
 const RESCHEDULE_WINDOW_MINUTES = 60;
+
+// Same-day presets live inside the service day the slot engine uses
+// (find-time DAY_START_HOUR..DAY_END_HOUR, ET): no client appointment before
+// 8 AM, and the last allowed start must leave a full slot before day close
+// (17:00 close → 16:00 is the last start; the old 17:00 cap let a slot run
+// past close).
+const SAME_DAY_FIRST_START_MINUTES = DAY_START_HOUR * 60;
+const SAME_DAY_LAST_START_MINUTES = DAY_END_HOUR * 60 - RESCHEDULE_WINDOW_MINUTES;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -587,18 +593,24 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
 }
 
 // "Later today" candidates: now + 2h and now + 4h, snapped to the nearest
-// hour, 1-hour on-the-hour windows, none starting after LAST_SAME_DAY_START_HOUR.
+// hour, 1-hour on-the-hour windows, clamped to the service day: never before
+// SAME_DAY_FIRST_START_MINUTES, none starting after SAME_DAY_LAST_START_MINUTES.
 function sameDayOptions(now = new Date()) {
   const parts = etParts(now);
   const nowMinutes = parts.hour * 60 + parts.minute;
   const todayStr = etDateString(now);
 
   const options = [];
+  const seenStarts = new Set();
   for (const offset of SAME_DAY_OFFSETS_MINUTES) {
     // Snap to the nearest hour so same-day slots land on the hour like the
     // rest of the schedule; the 2h/4h offset keeps them safely in the future.
-    const start = Math.round((nowMinutes + offset) / 60) * 60;
-    if (start > LAST_SAME_DAY_START_HOUR * 60) continue;
+    // A pre-dawn rain-out floors both offsets to day open — dedupe so the
+    // sheet doesn't show the same 8 AM slot twice.
+    const start = Math.max(Math.round((nowMinutes + offset) / 60) * 60, SAME_DAY_FIRST_START_MINUTES);
+    if (start > SAME_DAY_LAST_START_MINUTES) continue;
+    if (seenStarts.has(start)) continue;
+    seenStarts.add(start);
     const window = {
       start: minutesToHHMM(start),
       end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES),

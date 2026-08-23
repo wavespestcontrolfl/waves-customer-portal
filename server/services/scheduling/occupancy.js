@@ -164,6 +164,16 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   services/rebooker.js series sweep ........... 1 (all target dates, sorted,
 //     up front, BEFORE the loop's per-sibling rung-3 locks) -> 3 per sibling
 //     + probe per occurrence (excludes every sibling moving in the sweep).
+//   routes/admin-schedule.js POST / (admin create)  1 -> 6
+//     Rung 1 is the txn's FIRST statement, keyed off the requested date,
+//     before the comms lock and the customers row lock. + probe on the
+//     timed PARENT row right before its insert (cancelled + completed
+//     excluded). Recurring children/boosters ride the parent's lock.
+//   routes/admin-schedule.js PUT /:id/update-details (date/window move)
+//     1 (target date — requested date, else an unlocked peek of the row's
+//     own date, re-checked on the locked row) -> 6 -> 3 (tech-day fence)
+//     + probe on the locked row, excluding itself, when the date or window
+//     changes; terminal rows (record corrections) skip it.
 //   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
 //     Rung 1 is the txn's FIRST statement — keyed off the slotId, before
 //     the estimate FOR UPDATE (the row-lock rule above; the FK deadlock).

@@ -1221,3 +1221,78 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
     expect(sites.length).toBe(2);
   });
 });
+
+describe('customerScheduledHistoryQuery (customer-detail `scheduled`)', () => {
+  const { customerScheduledHistoryQuery, SCHEDULED_HISTORY_LIMIT } = adminCustomersRoute._private;
+
+  test('returns the rows NEAREST ET-today (ties newest first) under a cap wide enough for long-tenured customers', () => {
+    const calls = [];
+    const builder = {
+      where: (...a) => { calls.push(['where', ...a]); return builder; },
+      orderByRaw: (...a) => { calls.push(['orderByRaw', ...a]); return builder; },
+      orderBy: (...a) => { calls.push(['orderBy', ...a]); return builder; },
+      limit: (...a) => { calls.push(['limit', ...a]); return builder; },
+    };
+    const fakeDb = jest.fn((table) => { calls.push(['from', table]); return builder; });
+    customerScheduledHistoryQuery(fakeDb, 'cust-1', '2026-08-23');
+    expect(calls).toEqual([
+      ['from', 'scheduled_services'],
+      ['where', { customer_id: 'cust-1' }],
+      // Proximity to the ET date (bound, never interpolated) comes FIRST so
+      // the cap keeps the current visit + recent past, not a 24-visit
+      // fixed series' farthest-future rows or a long tenure's oldest rows.
+      ['orderByRaw', 'abs(scheduled_date - ?::date) asc', ['2026-08-23']],
+      ['orderBy', 'scheduled_date', 'desc'],
+      ['orderBy', 'window_start', 'desc'],
+      ['limit', SCHEDULED_HISTORY_LIMIT],
+    ]);
+    // No date floor: past AND future rows, all statuses, so history views work.
+    expect(calls.some(([op, col, cmp]) => op === 'where' && col === 'scheduled_date' && cmp)).toBe(false);
+    expect(SCHEDULED_HISTORY_LIMIT).toBeGreaterThanOrEqual(50);
+  });
+
+  test('focusServiceId beyond the proximity cap is fetched (same customer) and appended; inside the cap nothing extra runs', async () => {
+    const { customerScheduledHistory } = adminCustomersRoute._private;
+    const windowRows = [{ id: 'near-1', scheduled_date: '2026-08-24' }, { id: 'near-2', scheduled_date: '2026-08-22' }];
+    const lookups = [];
+    const fakeDb = (table) => {
+      const b = {
+        _where: null,
+        where(w) { b._where = w; return b; },
+        orderByRaw: () => b, orderBy: () => b, limit: () => b,
+        then: (res) => Promise.resolve(windowRows).then(res),
+        async first() {
+          lookups.push([table, b._where]);
+          return b._where.id === 'far-99' && b._where.customer_id === 'cust-1'
+            ? { id: 'far-99', scheduled_date: '2027-06-01' } : undefined;
+        },
+      };
+      return b;
+    };
+    const rows = await customerScheduledHistory(fakeDb, 'cust-1', { today: '2026-08-23', focusServiceId: 'far-99' });
+    expect(rows.map((r) => r.id)).toEqual(['near-1', 'near-2', 'far-99']);
+    expect(lookups).toEqual([['scheduled_services', { id: 'far-99', customer_id: 'cust-1' }]]);
+
+    // Already in the window — no second lookup, no duplicate.
+    lookups.length = 0;
+    const inWindow = await customerScheduledHistory(fakeDb, 'cust-1', { today: '2026-08-23', focusServiceId: 'near-2' });
+    expect(inWindow.map((r) => r.id)).toEqual(['near-1', 'near-2']);
+    expect(lookups).toEqual([]);
+
+    // Another customer's visit id never leaks into this payload.
+    const foreign = await customerScheduledHistory(fakeDb, 'cust-2', { today: '2026-08-23', focusServiceId: 'far-99' });
+    expect(foreign.map((r) => r.id)).toEqual(['near-1', 'near-2']);
+  });
+
+  test('defaults `today` to the ET calendar date', () => {
+    const calls = [];
+    const builder = {
+      where: () => builder,
+      orderByRaw: (...a) => { calls.push(a); return builder; },
+      orderBy: () => builder,
+      limit: () => builder,
+    };
+    customerScheduledHistoryQuery(() => builder, 'cust-1');
+    expect(calls[0][1]).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)]);
+  });
+});

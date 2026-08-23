@@ -134,6 +134,35 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Appointment history for the customer-detail payload (`scheduled`): past +
+// future, all statuses, capped to the rows NEAREST ET-today (ties: newest
+// first). Consumers (ScheduleCustomerSidebar, MobileCustomerDetailSheet,
+// SchedulePage history) sort client-side; upcoming lists read
+// `upcomingScheduled` instead. A plain ASC/DESC order under a cap returned
+// only the oldest rows (long-tenured customers) or only the farthest-future
+// rows (24-visit fixed series) — proximity keeps the current visit and the
+// recent past in every case.
+const SCHEDULED_HISTORY_LIMIT = 50;
+function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString()) {
+  return dbConn('scheduled_services')
+    .where({ customer_id: customerId })
+    .orderByRaw('abs(scheduled_date - ?::date) asc', [today])
+    .orderBy('scheduled_date', 'desc')
+    .orderBy('window_start', 'desc')
+    .limit(SCHEDULED_HISTORY_LIMIT);
+}
+
+// `?focusServiceId=` — the visit the admin has open. A customer with more
+// than the cap's worth of nearer rows would otherwise drop it from
+// `scheduled` and the drawer loses its "Current" row, so it is fetched
+// explicitly (same customer only) and appended when the window missed it.
+async function customerScheduledHistory(dbConn, customerId, { today = etDateString(), focusServiceId = null } = {}) {
+  const rows = await customerScheduledHistoryQuery(dbConn, customerId, today);
+  if (!focusServiceId || rows.some((r) => String(r.id) === String(focusServiceId))) return rows;
+  const focus = await dbConn('scheduled_services').where({ id: focusServiceId, customer_id: customerId }).first();
+  return focus ? [...rows, focus] : rows;
+}
+
 function techSafe360Payload(payload) {
   const out = { ...payload };
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
@@ -2484,6 +2513,7 @@ router.get('/:id', async (req, res, next) => {
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
     const currentYear = Number(etDateString().slice(0, 4));
+    const focusServiceId = typeof req.query.focusServiceId === 'string' && req.query.focusServiceId.trim() ? req.query.focusServiceId.trim() : null;
     const annualPrepayTermsPromise = db.schema.hasTable('annual_prepay_terms')
       .then((exists) => exists
         ? db('annual_prepay_terms as apt')
@@ -2516,11 +2546,7 @@ router.get('/:id', async (req, res, next) => {
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
-      // Full appointment history (past + future, all statuses). Schedule-side
-      // customer drawers (ScheduleCustomerSidebar / MobileCustomerDetailSheet)
-      // consume data.scheduled and split it into upcoming vs previous, so this
-      // must stay unfiltered.
-      db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
+      customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's "next service" selection.
       db('scheduled_services')
         .where({ customer_id: c.id })
@@ -4675,6 +4701,9 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  SCHEDULED_HISTORY_LIMIT,
+  customerScheduledHistoryQuery,
+  customerScheduledHistory,
   technicianServicesCustomer,
   techSafeListRow,
   techSafeListFilters,

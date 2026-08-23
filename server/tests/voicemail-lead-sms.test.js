@@ -18,7 +18,7 @@ jest.mock('../models/db', () => {
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550000') }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' })),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`),
@@ -106,7 +106,8 @@ beforeEach(() => {
   mintLeadPrefillToken.mockReturnValue('1760000000.test-signature');
   createShortCode.mockResolvedValue({ code: 'k3j9x', shortUrl: SHORT_URL });
   renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
-  sendCustomerMessage.mockResolvedValue({ sent: true });
+  // A REAL provider id — sent:true alone is a suppression sentinel (isRealProviderSend).
+  sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
 });
 
 function args(overrides = {}) {
@@ -329,6 +330,21 @@ describe('voicemail lead text-back send outcomes', () => {
       first_name: 'there',
       service_label: 'pest control',
     }), expect.any(Object));
+  });
+
+  test('suppression sentinel (sent:true, gate-blocked sid) is NOT a send — claims released, lead not stamped texted', async () => {
+    // twilio.js returns success with a sentinel sid while the SMS gate is
+    // off / template disabled; stamping 'sent' here would wedge the lead as
+    // "texted" forever. Same handling as the dropped-call lane.
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'gate-blocked' });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'send_suppressed', code: 'gate-blocked' });
+
+    expect(stampsFor()).not.toContain('sent');
+    expect(phoneClaimOutcomes()).not.toContain('sent');
+    expect(leadClaimCleared()).toBe(true);
+    expect(phoneClaimReleased()).toBe(true);
+    expect(state.inserts.find((i) => i.table === 'lead_activities')).toBeUndefined();
   });
 
   test('retryable provider failure re-queues onto the scheduled-SMS rail for the next allowed time', async () => {

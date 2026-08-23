@@ -158,8 +158,16 @@ function etWeekStart(date = new Date()) {
 // the normalized YYYY-MM-DD string, or null for garbage / impossible / past
 // input so callers surface a clear tool error instead of a Postgres failure
 // or a visit no "upcoming" query ever finds.
-function validScheduleDate(value) {
-  const dateStr = String(value == null ? '' : value).split('T')[0];
+// Strict calendar-date check shared by validScheduleDate and tax-period:
+// accepts 'YYYY-MM-DD' exactly, round-trips Y/M/D through Date.UTC so
+// impossible dates (2026-02-31, 2023-02-29) are rejected. With
+// `allowTimeSuffix` (validScheduleDate's historical behavior) an ISO 'T…'
+// tail is dropped before the check; by default ANY tail rejects, so a caller
+// persisting the result to a DATE column never hands Postgres '…T99:99'.
+// Returns the normalized 'YYYY-MM-DD' string or null.
+function validCalendarDate(value, { allowTimeSuffix = false } = {}) {
+  const raw = String(value == null ? '' : value);
+  const dateStr = allowTimeSuffix ? raw.split('T')[0] : raw;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
   if (!m) return null;
   const y = Number(m[1]);
@@ -169,6 +177,12 @@ function validScheduleDate(value) {
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) {
     return null;
   }
+  return dateStr;
+}
+
+function validScheduleDate(value) {
+  const dateStr = validCalendarDate(value, { allowTimeSuffix: true });
+  if (!dateStr) return null;
   if (dateStr < etDateString()) return null;
   return dateStr;
 }
@@ -247,6 +261,6 @@ function etCalendarDayOf(value) {
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
-  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
+  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

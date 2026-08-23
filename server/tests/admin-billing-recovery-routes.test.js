@@ -142,6 +142,11 @@ describe('admin billing-recovery routes', () => {
       // un-threaded replay mint requests the same lock on a second
       // connection and self-deadlocks until timeout.
       expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ useScheduledReplay: true, dueDate: '2026-04-14', database: expect.anything() }));
+      // Tax is the calculator's call (exemptions / service taxability /
+      // county rates), not a flat per-property_type override: the key must
+      // be ABSENT (an explicit 0 would pre-empt TaxCalculator in create()).
+      const mintOpts = InvoiceService.createFromService.mock.calls[0][1];
+      expect(Object.prototype.hasOwnProperty.call(mintOpts, 'taxRate')).toBe(false);
       expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({
         scheduled_service_id: 'ss-1', disposition: 'billed', invoice_id: 'inv-1', actor_user_id: 'admin-1',
       }));
@@ -381,6 +386,36 @@ describe('admin billing-recovery routes', () => {
       expect(perApp.billing_mode).toBe('per_application');
     });
     delete db.schema;
+  });
+
+  test('GET /leaks includes a status-only completion (no service_records row) as completed_no_service_record, not billable', async () => {
+    const rows = [
+      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
+      { scheduled_service_id: 'ss-9', service_record_id: null, service_type: 'Pest Control', estimated_price: '99.00', prepaid_amount: '0', completed_at: '2026-06-17', scheduled_date: '2026-06-17', customer_id: 'cust-9', first_name: 'Nora', last_name: 'Quill', monthly_rate: '0', waveguard_tier: null },
+    ];
+    let qb;
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) { qb = makeQB({ rows }); return qb; }
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // The SQL predicate admits sr-less rows whose scheduled_services row is completed.
+      const predicates = qb.whereRaw.mock.calls.map((c) => c[0]);
+      expect(predicates).toEqual(expect.arrayContaining([
+        expect.stringContaining("sr.id IS NULL AND ss.status = 'completed'"),
+      ]));
+      expect(predicates).not.toEqual(expect.arrayContaining(["sr.status = 'completed'"]));
+      const statusOnly = body.leaks.find((r) => r.scheduled_service_id === 'ss-9');
+      expect(statusOnly).toBeDefined();
+      expect(statusOnly.leak_kind).toBe('completed_no_service_record');
+      expect(statusOnly.billable).toBe(false);
+      expect(statusOnly.scheduled_date).toBe('2026-06-17');
+      expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-1').leak_kind).toBe('uninvoiced');
+      expect(body.summary.leak_visits).toBe(2);
+    });
   });
 
   test('GET /aging proxies the dashboard outstanding-balances tool', async () => {
