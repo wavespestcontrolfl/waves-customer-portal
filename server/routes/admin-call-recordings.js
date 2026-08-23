@@ -7,6 +7,7 @@ const {
   requireTechOrAdmin,
 } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
@@ -180,6 +181,20 @@ const DISPOSITION_LABELS = {
   spam: 'Spam / Wrong Number',
 };
 
+// Live-customer ownership of the caller number: the call's own customer link,
+// else the shared known-caller identity lookup (same mechanism + column set
+// the pre-connect voice screen uses — utils/known-caller-phone.js).
+async function findLiveCustomerForCall(call) {
+  if (call.customer_id) {
+    const linked = await db('customers')
+      .where({ id: call.customer_id })
+      .whereNull('deleted_at')
+      .first('id', 'first_name', 'last_name');
+    if (linked) return linked;
+  }
+  return findKnownCallerCustomer(db, call.from_phone);
+}
+
 // PUT /calls/:id/disposition — tag a call
 router.put('/calls/:id/disposition', async (req, res, next) => {
   try {
@@ -200,6 +215,30 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
       // SPAM: hard-block the number + delete call from log.
       // Schema is owned by migration 20260418000006 (PR 1):
       //   number / block_type / blocked_by(uuid FK technicians) / reason
+      //
+      // Guard: a number that belongs to a LIVE customer can never be tagged
+      // spam from here. A hard_block silently kills every future inbound call
+      // and text from a paying customer, and the operator has no way to see
+      // that from the call row. Refuse with 409 so the UI can explain.
+      // Only INBOUND rows carry the caller in from_phone; on an outbound row
+      // from_phone is OUR Twilio number. `direction` is nullable/unconstrained,
+      // so fail closed: anything other than an explicit 'inbound' is refused
+      // rather than risk hard-blocking a Waves number.
+      if (String(call.direction || '').toLowerCase() !== 'inbound') {
+        return res.status(409).json({
+          error: 'Spam can only be tagged on inbound calls.',
+          code: 'NOT_INBOUND_CALL',
+        });
+      }
+      const owner = await findLiveCustomerForCall(call);
+      if (owner) {
+        return res.status(409).json({
+          error: 'This number belongs to an existing customer and cannot be tagged spam. Archive or edit the customer record instead.',
+          code: 'CUSTOMER_NUMBER',
+          customer_id: owner.id,
+          customer_name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') || null,
+        });
+      }
       if (call.from_phone) {
         await db('blocked_numbers').insert({
           number: call.from_phone,
@@ -210,12 +249,10 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
         }).onConflict('number').ignore();
         logger.info(`[calls] Blocked spam number: ${call.from_phone}`);
       }
-      // Delete the call log entry
+      // Delete the call log entry. sms_log rows are deliberately KEPT: they are
+      // the A2P/consent audit trail for every text we ever sent to that number
+      // and must survive a block (the block itself stops future sends).
       await db('call_log').where({ id: call.id }).del();
-      // Delete any SMS sent to this number (missed call follow-up etc.)
-      if (call.from_phone) {
-        await db('sms_log').where({ to_phone: call.from_phone }).del().catch(() => {});
-      }
       res.json({ success: true, disposition, deleted: true });
     } else {
       // NON-SPAM: save disposition + attach to customer timeline

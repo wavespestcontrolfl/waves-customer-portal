@@ -50,12 +50,8 @@ function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
-function customerPhoneLookupKey(value) {
-  const normalized = toE164(value);
-  const digits = phoneDigits(normalized || value);
-  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
-  return digits;
-}
+// Shared with the admin spam-disposition guard (utils/known-caller-phone).
+const { customerPhoneLookupKey, knownCallerPhoneExists } = require('../utils/known-caller-phone');
 
 function maskPhone(value) {
   const digits = phoneDigits(value);
@@ -94,30 +90,10 @@ async function findSingleCustomerByPhone(dbLike, phone) {
   return null;
 }
 
-// Screen-bypass identity check: does ANY customer record know this number —
-// the customer's own phone OR one of the three service-contact slot phones?
-// Mirrors CONTACT_MATCH_PHONE_COLS in call-recording-processor.js (the
-// canonical inbound identity set: the pipeline itself records spouses and
-// tenants into those slots). Used ONLY for the pre-connect screen exemption:
-// call_log linking stays primary-phone-only via findSingleCustomerByPhone,
-// and slot roles that must never auto-link (lender/agent) still bypass here
-// — whoever they are, they are a known caller, not a spoofed robocall.
-const KNOWN_CALLER_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
-
-async function knownCallerPhoneExists(dbLike, phone) {
-  const key = customerPhoneLookupKey(phone);
-  if (!key) return false;
-  const keys = key.length === 10 ? [key, `1${key}`] : [key];
-  const placeholder = keys.map(() => '?').join(', ');
-  const frag = KNOWN_CALLER_PHONE_COLS
-    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
-    .join(' OR ');
-  const rows = await dbLike('customers')
-    .whereNull('deleted_at')
-    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
-    .limit(1);
-  return rows.length > 0;
-}
+// Screen-bypass identity check lives in utils/known-caller-phone.js —
+// ONE mechanism shared with the admin spam-disposition guard, so the set of
+// numbers the screen lets through and the set we refuse to hard-block can
+// never drift apart. Column set = pipeline identity cols + secondary_phone.
 
 // Builds the spoken caller name stamped into call_log at /voice time and read
 // back in the post-accept connect announcement. A matched customer/lead yields a

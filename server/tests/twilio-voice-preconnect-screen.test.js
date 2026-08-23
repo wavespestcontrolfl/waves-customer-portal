@@ -25,6 +25,7 @@ const { preconnectScreenDecision, buildPreconnectChallengeTwiML, knownCallerPhon
 function makeDbLike(rows) {
   const calls = { whereRaw: [] };
   const builder = {
+    select: jest.fn(() => builder),
     whereNull: jest.fn(() => builder),
     whereRaw: jest.fn((sql, bindings) => {
       calls.whereRaw.push({ sql, bindings });
@@ -92,7 +93,7 @@ describe('knownCallerPhoneExists (screen-bypass identity set)', () => {
     const dbLike = makeDbLike([{ id: 'c1' }]);
     await expect(knownCallerPhoneExists(dbLike, '+19415551234')).resolves.toBe(true);
     const { sql } = dbLike._calls.whereRaw[0];
-    for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+    for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone']) {
       expect(sql).toContain(col);
     }
   });

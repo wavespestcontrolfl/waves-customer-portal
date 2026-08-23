@@ -31,7 +31,7 @@
 // - Attach endpoint (POST /attach): multipart upload then sms POST.
 //   Confirm partial upload failure cancels the send (no half-sent
 //   MMS with broken media URL).
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
 import CallRecordingsPanel from "./CallRecordingsPanel";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
@@ -62,8 +62,21 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's reason (e.g. 409 CUSTOMER_NUMBER names the
+      // customer) instead of a bare status code.
+      const body = await r.json().catch(() => null);
+      // 409 CUSTOMER_NUMBER names the matched record — keep it in the
+      // message so the operator knows WHICH customer to review.
+      let message = (body && body.error) || `HTTP ${r.status}`;
+      if (body && body.customer_name) message += ` (${body.customer_name})`;
+      const err = new Error(message);
+      err.status = r.status;
+      err.code = body && body.code;
+      err.customerId = body && body.customer_id;
+      throw err;
+    }
     return r.json();
   });
 }
@@ -976,7 +989,10 @@ function CallLogTab() {
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
   const [dispositions, setDispositions] = useState({}); // { callId: value }
-  const [savingDisp, setSavingDisp] = useState(null);
+  const confirmedDispositions = useRef({});
+  // Per-row pending set: several rows can save at once, but each row has at
+  // most one in-flight save.
+  const [savingDisp, setSavingDisp] = useState(() => new Set());
   const [callFilter, setCallFilter] = useState("all");
   const [callLogSearch, setCallLogSearch] = useState("");
 
@@ -1026,6 +1042,10 @@ function CallLogTab() {
   };
 
   const handleDisposition = async (callId, value) => {
+    // One in-flight save per row: the select is disabled while saving, and
+    // this guard covers programmatic/keyboard paths, so optimistic state,
+    // confirmed state, and rollback never interleave for the same row.
+    if (savingDisp.has(callId)) return;
     if (
       value === "spam" &&
       !confirm(
@@ -1033,8 +1053,11 @@ function CallLogTab() {
       )
     )
       return;
+    // `dispositions` is optimistic state; `confirmedDispositions` holds only
+    // values the server accepted. A rejected save rolls back to the confirmed
+    // value, never to an earlier optimistic one that also failed.
     setDispositions((prev) => ({ ...prev, [callId]: value }));
-    setSavingDisp(callId);
+    setSavingDisp((prev) => new Set(prev).add(callId));
     try {
       const r = await adminFetch(
         `/admin/call-recordings/calls/${callId}/disposition`,
@@ -1046,11 +1069,24 @@ function CallLogTab() {
       if (r.deleted) {
         // Spam — remove from call list
         setCalls((prev) => prev.filter((c) => c.id !== callId));
+      } else {
+        confirmedDispositions.current[callId] = value;
       }
     } catch (e) {
+      // Server refuses spam on a live customer's number (409 CUSTOMER_NUMBER);
+      // roll the dropdown back so the row doesn't read as tagged.
+      setDispositions((prev) => {
+        // A newer change on this row already superseded us — leave it alone.
+        if (prev[callId] !== value) return prev;
+        const next = { ...prev };
+        const confirmed = confirmedDispositions.current[callId];
+        if (confirmed === undefined) delete next[callId];
+        else next[callId] = confirmed;
+        return next;
+      });
       alert("Tag failed: " + e.message);
     } finally {
-      setSavingDisp(null);
+      setSavingDisp((prev) => { const next = new Set(prev); next.delete(callId); return next; });
     }
   };
 
@@ -1663,6 +1699,7 @@ function CallLogTab() {
                       {/* Disposition tag */}
                       <select
                         value={currentDisp}
+                        disabled={savingDisp.has(c.id)}
                         onChange={(e) =>
                           handleDisposition(c.id, e.target.value)
                         }
@@ -1675,7 +1712,7 @@ function CallLogTab() {
                           padding: "4px 8px",
                           fontFamily: "Roboto, Arial, sans-serif",
                           outline: "none",
-                          opacity: savingDisp === c.id ? 0.5 : 1,
+                          opacity: savingDisp.has(c.id) ? 0.5 : 1,
                           cursor: "pointer",
                         }}
                       >
