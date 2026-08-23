@@ -229,8 +229,9 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     // Action boundary re-check: the candidate list is scoped to live customers,
     // but a stale UI row (or a direct id) must never text an archived/inactive
-    // customer. Archive only sets deleted_at, never active — check both.
-    if (customer.deleted_at || customer.active === false) {
+    // customer. Archive only sets deleted_at, never active — require BOTH
+    // deleted_at IS NULL and active === true (active is nullable on legacy rows).
+    if (customer.deleted_at || customer.active !== true) {
       return res.status(409).json({ error: 'Customer is archived or inactive — no outreach.', code: 'CUSTOMER_NOT_LIVE' });
     }
     if (!customer.phone) return res.status(400).json({ error: 'Customer has no phone number' });

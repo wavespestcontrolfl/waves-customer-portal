@@ -10,7 +10,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const mockFindBestUpsell = jest.fn();
 jest.mock('../services/pricing-intelligence', () => ({ findBestUpsell: (...a) => mockFindBestUpsell(...a) }));
 const mockSend = jest.fn();
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }), { virtual: true });
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -44,6 +44,7 @@ describe('POST /trigger-upsell/:customerId lifecycle re-check', () => {
   test.each([
     ['archived', { id: 'c1', phone: '+15550000001', deleted_at: '2026-08-01T00:00:00Z', active: true }],
     ['inactive', { id: 'c1', phone: '+15550000001', deleted_at: null, active: false }],
+    ['null-active legacy', { id: 'c1', phone: '+15550000001', deleted_at: null, active: null }],
   ])('%s customer → 409 and no upsell lookup / send', async (_label, row) => {
     setupCustomer(row);
     await withServer(async (base) => {
