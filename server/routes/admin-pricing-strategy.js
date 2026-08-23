@@ -227,6 +227,12 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
   try {
     const customer = await db('customers').where('id', req.params.customerId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    // Action boundary re-check: the candidate list is scoped to live customers,
+    // but a stale UI row (or a direct id) must never text an archived/inactive
+    // customer. Archive only sets deleted_at, never active — check both.
+    if (customer.deleted_at || customer.active === false) {
+      return res.status(409).json({ error: 'Customer is archived or inactive — no outreach.', code: 'CUSTOMER_NOT_LIVE' });
+    }
     if (!customer.phone) return res.status(400).json({ error: 'Customer has no phone number' });
 
     const upsell = await PricingIntelligence.findBestUpsell(customer.id);
