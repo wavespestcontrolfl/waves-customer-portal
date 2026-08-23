@@ -508,7 +508,7 @@ router.post('/expenses', async (req, res, next) => {
     const [inserted] = await db('expenses').insert({
       category_id: categoryId, description, amount,
       tax_deductible_amount: deductible,
-      expense_date: expenseDate, vendor_name: vendorName,
+      expense_date: period.date, vendor_name: vendorName,
       payment_method: paymentMethod, is_recurring: isRecurring || false,
       recurrence_period: recurrencePeriod, tax_year: taxYear, quarter, notes,
     }).returning('*');
@@ -1990,7 +1990,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
           description: row.description.slice(0, 300),
           amount: row.amount,
           tax_deductible_amount: deductible,
-          expense_date: txnDate,
+          expense_date: txnPeriod.date,
           vendor_name: row.description.slice(0, 200),
           // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
           payment_method: row.account_type === 'card' ? 'card' : 'ach',

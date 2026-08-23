@@ -47,7 +47,7 @@ const send = (method, path, body) => fetch(`${baseUrl}${path}`, {
 
 describe('POST /admin/job-expenses', () => {
   test('derives tax_year/quarter from expense_date', async () => {
-    const res = await send('POST', '/admin/job-expenses', { scheduled_service_id: 'ss-1', amount: 12.5, expense_date: '2026-04-01' });
+    const res = await send('POST', '/admin/job-expenses', { scheduled_service_id: 'ss-1', amount: 12.5, expense_date: ' 2026-04-01 ' });
     expect(res.status).toBe(200);
     expect(state.inserted[0]).toMatchObject({ expense_date: '2026-04-01', tax_year: '2026', quarter: 'Q2' });
   });
@@ -61,7 +61,7 @@ describe('POST /admin/job-expenses', () => {
     expect(row.quarter).toMatch(/^Q[1-4]$/);
   });
 
-  test.each(['garbage', '2026-02-31', '2026-01-01garbage'])('400 on invalid expense_date %s', async (expense_date) => {
+  test.each(['garbage', '2026-02-31', '2026-01-01garbage', '2026-01-01Tgarbage', '2026-01-01T99:99', '2026-01-01T10:00:00Z'])('400 on invalid expense_date %s', async (expense_date) => {
     const res = await send('POST', '/admin/job-expenses', { scheduled_service_id: 'ss-1', amount: 5, expense_date });
     expect(res.status).toBe(400);
     expect(state.inserted).toHaveLength(0);
@@ -70,7 +70,7 @@ describe('POST /admin/job-expenses', () => {
 
 describe('PUT /admin/job-expenses/:id', () => {
   test('re-derives the period when expense_date changes', async () => {
-    const res = await send('PUT', '/admin/job-expenses/exp-1', { expense_date: '2025-12-31', notes: 'x' });
+    const res = await send('PUT', '/admin/job-expenses/exp-1', { expense_date: ' 2025-12-31 ', notes: 'x' });
     expect(res.status).toBe(200);
     expect(state.updates[0]).toEqual({ expense_date: '2025-12-31', tax_year: '2025', quarter: 'Q4', notes: 'x' });
   });
@@ -81,7 +81,7 @@ describe('PUT /admin/job-expenses/:id', () => {
     expect(state.updates[0]).toEqual({ amount: 9, tax_deductible_amount: 9 });
   });
 
-  test.each(['2026-13-40', '2026-02-31', '2026-01-01garbage'])('400 on invalid expense_date %s', async (expense_date) => {
+  test.each(['2026-13-40', '2026-02-31', '2026-01-01garbage', '2026-01-01Tgarbage', '2026-01-01T99:99', '2026-01-01T10:00:00Z'])('400 on invalid expense_date %s', async (expense_date) => {
     const res = await send('PUT', '/admin/job-expenses/exp-1', { expense_date });
     expect(res.status).toBe(400);
     expect(state.updates).toHaveLength(0);

@@ -73,7 +73,7 @@ router.post('/', async (req, res, next) => {
       tax_deductible_amount: Number(amount),
       vendor_name: vendor_name || null,
       payment_method: payment_method || null,
-      expense_date: expenseDate,
+      expense_date: period.date,
       tax_year: period.tax_year,
       quarter: period.quarter,
       receipt_s3_key: receipt_s3_key || null,
@@ -100,6 +100,7 @@ router.put('/:id', async (req, res, next) => {
     if (updates.expense_date !== undefined) {
       const period = taxPeriodFor(updates.expense_date);
       if (!period) return res.status(400).json({ error: 'expense_date must be a valid YYYY-MM-DD date' });
+      updates.expense_date = period.date;
       updates.tax_year = period.tax_year;
       updates.quarter = period.quarter;
     }

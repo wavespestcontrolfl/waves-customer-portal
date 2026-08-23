@@ -14,11 +14,12 @@
 const { etDateString, validCalendarDate } = require('./datetime-et');
 
 /**
- * @param {string|Date} expenseDate strict 'YYYY-MM-DD' (an ISO 'T…' time
- *   suffix is tolerated and ignored; anything else trailing is rejected), or a
- *   Date. Impossible calendar dates (2026-02-31) are rejected via the shared
+ * @param {string|Date} expenseDate exactly 'YYYY-MM-DD' (no time suffix —
+ *   anything trailing is rejected), or a Date (rendered as its ET calendar
+ *   day). Impossible calendar dates (2026-02-31) are rejected via the shared
  *   validCalendarDate round-trip so callers can 400 before Postgres sees it.
- * @returns {{ tax_year: string, quarter: string } | null} null when invalid
+ * @returns {{ tax_year: string, quarter: string, date: string } | null}
+ *   `date` is the normalized 'YYYY-MM-DD' — persist THAT, never the raw input.
  */
 function taxPeriodFor(expenseDate) {
   let ymd = expenseDate;
@@ -27,10 +28,10 @@ function taxPeriodFor(expenseDate) {
     ymd = etDateString(expenseDate);
   }
   if (typeof ymd !== 'string') return null;
-  const dateStr = validCalendarDate(ymd.trim());
-  if (!dateStr) return null;
-  const month = Number(dateStr.slice(5, 7));
-  return { tax_year: dateStr.slice(0, 4), quarter: `Q${Math.ceil(month / 3)}` };
+  const date = validCalendarDate(ymd.trim());
+  if (!date) return null;
+  const month = Number(date.slice(5, 7));
+  return { tax_year: date.slice(0, 4), quarter: `Q${Math.ceil(month / 3)}`, date };
 }
 
 module.exports = { taxPeriodFor };
