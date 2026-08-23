@@ -18,6 +18,13 @@ export default function ReviewPage() {
   const [phase, setPhase] = useState('rate'); // rate, submitting, thankyou, feedback, redirecting
   const [feedbackText, setFeedbackText] = useState('');
   const [submittingFeedback, setSubmittingFeedback] = useState(false);
+  // Plain inline error for a failed POST; the rating buttons / Send button
+  // stay on screen as the retry.
+  const [submitError, setSubmitError] = useState(null);
+  // "Something wasn't right?" opens the feedback form with no rating picked.
+  // The server requires a 1-10 rating, so feedback-only submissions ride the
+  // lowest detractor score (<= 4 routes to the owner, never to Google).
+  const FEEDBACK_ONLY_RATING = 1;
 
   useEffect(() => {
     fetch(`${API_BASE}/review/${token}`)
@@ -28,6 +35,7 @@ export default function ReviewPage() {
 
   const handleRate = async (rating) => {
     setSelectedRating(rating);
+    setSubmitError(null);
     setPhase('submitting');
 
     try {
@@ -36,6 +44,8 @@ export default function ReviewPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating }),
       });
+      if (res.status === 409) { setPhase('thankyou'); return; } // already rated
+      if (!res.ok) throw new Error('save_failed');
       const result = await res.json();
 
       if (result.action === 'review' && result.googleReviewUrl) {
@@ -49,20 +59,27 @@ export default function ReviewPage() {
         setPhase('feedback');
       }
     } catch {
+      setSubmitError("We couldn't save your rating. Please try again.");
       setPhase('rate'); // retry
     }
   };
 
   const handleFeedback = async () => {
     setSubmittingFeedback(true);
+    setSubmitError(null);
     try {
-      await fetch(`${API_BASE}/review/${token}`, {
+      const res = await fetch(`${API_BASE}/review/${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating: selectedRating, feedbackText }),
+        body: JSON.stringify({ rating: selectedRating ?? FEEDBACK_ONLY_RATING, feedbackText }),
       });
-    } catch { /* already rated, that's fine */ }
-    setPhase('thankyou');
+      // 409 = rating already recorded (handleRate's POST landed); the text
+      // can't be attached again, so thank them rather than loop.
+      if (!res.ok && res.status !== 409) throw new Error('save_failed');
+      setPhase('thankyou');
+    } catch {
+      setSubmitError("We couldn't send your feedback. Please try again.");
+    }
     setSubmittingFeedback(false);
   };
 
@@ -185,6 +202,9 @@ export default function ReviewPage() {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
+            {submitError && (
+              <div role="alert" style={{ fontSize: 14, color: COLORS.red, marginTop: 14 }}>{submitError}</div>
+            )}
           </div>
         )}
 
@@ -235,6 +255,9 @@ export default function ReviewPage() {
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
+            {submitError && (
+              <div role="alert" style={{ fontSize: 14, color: COLORS.red, marginTop: 12 }}>{submitError}</div>
+            )}
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
               <Button
                 variant="primary"

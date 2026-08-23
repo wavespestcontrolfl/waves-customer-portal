@@ -273,3 +273,43 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
     });
   });
 });
+
+describe('PublicBookingPage contact phone normalization', () => {
+  const walkToContactStep = async () => {
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+    fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
+  };
+
+  it('an autofilled E.164 number (11 digits) is accepted and submitted as 10 digits', async () => {
+    // The gate step already stripped the leading country code; the contact
+    // step disabled Confirm on the same input and sent 11 digits elsewhere.
+    const fetchMock = stubFetch();
+    await walkToContactStep();
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+1 (941) 555-0101' } });
+    expect(screen.queryByText('Enter a 10-digit phone number.')).not.toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm booking' });
+    expect(confirm).not.toBeDisabled();
+    fireEvent.click(confirm);
+    await waitFor(() => {
+      const confirmCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/booking/confirm'));
+      expect(confirmCalls).toHaveLength(1);
+      expect(JSON.parse(confirmCalls[0][1].body).new_customer.phone).toBe('9415550101');
+    });
+  });
+
+  it('a short number shows an inline message instead of a silently disabled Confirm', async () => {
+    stubFetch();
+    await walkToContactStep();
+    const phone = screen.getByLabelText('Phone number');
+    fireEvent.change(phone, { target: { value: '941555' } });
+    expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
+    expect(phone).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+  });
+});
