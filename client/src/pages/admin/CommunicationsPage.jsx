@@ -1048,6 +1048,13 @@ function CallLogTab() {
         setCalls((prev) => prev.filter((c) => c.id !== callId));
       }
     } catch (e) {
+      // Server refuses spam on a live customer's number (409 CUSTOMER_NUMBER);
+      // roll the dropdown back so the row doesn't read as tagged.
+      setDispositions((prev) => {
+        const next = { ...prev };
+        delete next[callId];
+        return next;
+      });
       alert("Tag failed: " + e.message);
     } finally {
       setSavingDisp(null);
