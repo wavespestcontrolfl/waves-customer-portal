@@ -18,21 +18,25 @@ const byDateAsc = (a, b) => apptDateKey(a.scheduled_date).localeCompare(apptDate
   || String(a.window_start || '').localeCompare(String(b.window_start || ''));
 const byDateDesc = (a, b) => byDateAsc(b, a);
 
+const isUpcoming = (s, today) =>
+  apptDateKey(s.scheduled_date) >= today
+  && !HIDDEN_UPCOMING_STATUSES.includes(String(s.status || '').toLowerCase());
+
 // Upcoming: prefer the server's active-only list; fall back to filtering
 // `scheduled` by ET-today when an older payload lacks it.
 export function upcomingAppointments(data, today = etDateString()) {
   if (Array.isArray(data?.upcomingScheduled)) return [...data.upcomingScheduled].sort(byDateAsc);
   const scheduled = Array.isArray(data?.scheduled) ? data.scheduled : [];
-  return scheduled
-    .filter((s) => apptDateKey(s.scheduled_date) >= today && !HIDDEN_UPCOMING_STATUSES.includes(String(s.status || '').toLowerCase()))
-    .sort(byDateAsc);
+  return scheduled.filter((s) => isUpcoming(s, today)).sort(byDateAsc);
 }
 
-// Previous: everything in history that is not in the upcoming list, newest first.
+// Previous: history rows that are NOT upcoming by the same date/status
+// predicate, newest first. Classified per-row (not by membership in the
+// server's upcoming list) because that list is capped independently of
+// `scheduled` — an active future visit past its cap must not show as past.
 export function previousAppointments(data, today = etDateString()) {
-  const upcomingIds = new Set(upcomingAppointments(data, today).map((s) => s.id));
   const scheduled = Array.isArray(data?.scheduled) ? data.scheduled : [];
-  return scheduled.filter((s) => !upcomingIds.has(s.id)).sort(byDateDesc);
+  return scheduled.filter((s) => !isUpcoming(s, today)).sort(byDateDesc);
 }
 
 // Full history (past + future), newest first, optionally capped.

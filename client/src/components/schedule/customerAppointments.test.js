@@ -27,6 +27,14 @@ describe('customerAppointments', () => {
     expect(previousAppointments(data, TODAY).map((s) => s.id)).toEqual(['x1', 'h1', 'h2']);
   });
 
+  it('an active future row omitted from the capped server upcoming list never lands in previous', () => {
+    const data = {
+      scheduled: [...history, { id: 'u2', scheduled_date: '2026-12-01', status: 'pending' }],
+      upcomingScheduled: [{ id: 'u1' }, { id: 't1' }], // u2 beyond the server cap
+    };
+    expect(previousAppointments(data, TODAY).map((s) => s.id)).toEqual(['x1', 'h1', 'h2']);
+  });
+
   it('appointmentHistory is newest first and capped', () => {
     expect(appointmentHistory({ scheduled: history }, 2).map((s) => s.id)).toEqual(['x1', 'u1']);
     expect(appointmentHistory({}, 3)).toEqual([]);

@@ -3,7 +3,7 @@ import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import { TIMEZONE } from '../../lib/timezone';
-import { appointmentHistory } from './customerAppointments';
+import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
 function money(value) {
@@ -172,7 +172,7 @@ export default function ScheduleCustomerSidebar({
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;
-    return appointmentHistory(data, 8)
+    return buildAppointmentHistory(data, 8)
       .map((item) => ({ ...item, isCurrent: item.id === currentId }));
   }, [data, service?.id]);
 
