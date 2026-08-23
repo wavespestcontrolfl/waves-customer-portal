@@ -54,7 +54,7 @@ function setup({ call, linkedCustomer = null, phoneCustomer = null }) {
   return tables;
 }
 
-const CALL = { id: 'call-1', from_phone: '+19415551234', customer_id: null };
+const CALL = { id: 'call-1', direction: 'inbound', from_phone: '+19415551234', customer_id: null };
 
 describe('PUT /calls/:id/disposition spam guard', () => {
   beforeEach(() => db.mockReset());
@@ -85,6 +85,20 @@ describe('PUT /calls/:id/disposition spam guard', () => {
       expect((await res.json()).customer_name).toBe('Sam');
     });
     expect(tables.blocked_numbers).toBeUndefined();
+  });
+
+  test('refuses 409 on an unlinked OUTBOUND row (from_phone is our own number)', async () => {
+    const tables = setup({ call: { ...CALL, direction: 'outbound', from_phone: '+19415550000', to_phone: '+19415551234' } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('OUTBOUND_CALL');
+    });
+    expect(tables.blocked_numbers).toBeUndefined();
+    expect(tables.customers).toBeUndefined();
+    for (const q of tables.call_log) expect(q.del).not.toHaveBeenCalled();
   });
 
   test('true spam: blocks + deletes the call row, never touches sms_log', async () => {

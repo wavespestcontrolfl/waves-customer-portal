@@ -228,6 +228,15 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
       // spam from here. A hard_block silently kills every future inbound call
       // and text from a paying customer, and the operator has no way to see
       // that from the call row. Refuse with 409 so the UI can explain.
+      // Only inbound rows carry the caller in from_phone; on an outbound row
+      // from_phone is OUR Twilio number and the contact is to_phone. Blocking
+      // our own number would be catastrophic, so spam is inbound-only.
+      if (String(call.direction || '').toLowerCase() === 'outbound') {
+        return res.status(409).json({
+          error: 'Spam can only be tagged on inbound calls.',
+          code: 'OUTBOUND_CALL',
+        });
+      }
       const owner = await findLiveCustomerForCall(call);
       if (owner) {
         return res.status(409).json({
