@@ -10,6 +10,10 @@
  *   - A recurring POST locks the parent AND every generated child/booster
  *     date (sorted, first statements of the trx) and probes each timed
  *     generated row before inserting it; any hit 409s the whole request.
+ *   - PUT /:id/update-details recurrence paths (cadence rewrite moves,
+ *     make-recurring spawn, visit-count top-up) lock the parent's date AND
+ *     every destination date up front (sorted) and probe each timed row
+ *     before its write; a hit 409s SLOT_TAKEN naming the date.
  *   - Terminal rows (record corrections) are not occupancy and skip the probe.
  *   - The moving row excludes itself; cancelled + completed don't occupy.
  *
@@ -331,6 +335,97 @@ describe('POST / — admin create', () => {
     // The trx threw, so the parent + 08-07 child inserts that ran before the
     // 09-04 probe roll back; nothing after the conflict was attempted.
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07']);
+    expect(trx.commit).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /:id/update-details — recurrence paths lock + probe every destination date', () => {
+  // Wed 2099-07-01 monthly (ordinal weekday) → first Wednesdays 08-05, 09-02.
+  const spawnDates = ['2099-08-05', '2099-09-02'];
+
+  test('a recurrence-only save that spawns children locks the parent + every child date, sorted, before any insert', async () => {
+    const inserts = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC, is_recurring: false } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+      if (table === 'scheduled_services') {
+        c.insert = jest.fn((data) => {
+          inserts.push(data);
+          callOrder.push(`insert:${data.scheduled_date}`);
+          return { returning: jest.fn().mockResolvedValue([{ ...SVC, ...data, id: `new-${inserts.length}` }]) };
+        });
+      }
+      return c;
+    });
+
+    // No date/window fields at all — the old gate took zero date locks here.
+    const { status } = await put('svc-1', { isRecurring: true, recurringPattern: 'monthly', recurringCount: 3 });
+
+    expect(status).toBe(200);
+    expect(acquireOccupancyLocks).toHaveBeenCalledTimes(1);
+    expect(acquireOccupancyLocks).toHaveBeenCalledWith(trx, ['2099-07-01', ...spawnDates]);
+    const lockSeq = callOrder.filter((c) => c.startsWith('occupancy:'));
+    expect(lockSeq).toEqual(['occupancy:2099-07-01', 'occupancy:2099-08-05', 'occupancy:2099-09-02']);
+    const lastLock = callOrder.lastIndexOf('occupancy:2099-09-02');
+    expect(lastLock).toBeLessThan(callOrder.indexOf('comms'));
+    expect(lastLock).toBeLessThan(callOrder.findIndex((c) => c.startsWith('insert:')));
+    // Each generated timed child probed on its own date, excluding the parent.
+    for (const d of spawnDates) {
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        db: trx, date: d, windowStart: '09:00', windowEnd: '10:00', excludeServiceIds: ['svc-1'], excludeStatuses: ['cancelled', 'completed'],
+      }));
+    }
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(spawnDates);
+  });
+
+  test('a cadence change that moves a child onto an occupied date 409s SLOT_TAKEN and writes nothing', async () => {
+    const parentRow = { ...SVC, is_recurring: true, recurring_pattern: 'monthly', recurring_parent_id: null };
+    const childRow = {
+      ...SVC, id: 'child-1', scheduled_date: '2099-08-05', status: 'pending', is_recurring: true, recurring_parent_id: 'svc-1',
+    };
+    const childWrites = [];
+    // Stateful series mock: the parent update lands (so the in-trx re-read
+    // sees the new cadence), children/boosters resolve by their where shape.
+    const seriesChain = (table) => {
+      if (table !== 'scheduled_services') return chain(table === 'customers' ? { id: 'cust-1' } : undefined);
+      const c = chain({ ...parentRow });
+      c.first = jest.fn(async () => ({ ...parentRow }));
+      c.then = (resolve, reject) => {
+        const wheres = c.where.mock.calls.map((args) => args[0]);
+        const wantsChildren = wheres.some((w) => w && typeof w === 'object' && w.recurring_parent_id === 'svc-1' && w.is_recurring === true);
+        const wantsBoosters = wheres.some((w) => w && typeof w === 'object' && w.recurring_parent_id === 'svc-1' && w.is_recurring === false);
+        const rows = wantsChildren ? [{ ...childRow }] : (wantsBoosters ? [] : [{ ...parentRow }]);
+        return Promise.resolve(rows).then(resolve, reject);
+      };
+      c.update = jest.fn(async (data) => {
+        const wheres = c.where.mock.calls.map((args) => args[0]);
+        if (wheres.some((w) => w && typeof w === 'object' && w.id === 'child-1')) childWrites.push(data);
+        else if (wheres.some((w) => w && typeof w === 'object' && w.id === 'svc-1')) Object.assign(parentRow, data);
+        return 1;
+      });
+      return c;
+    };
+    db.mockImplementation(seriesChain);
+    trx.mockImplementation(seriesChain);
+    // monthly → every 14 days from 07-01: the child is re-dated to 07-15.
+    findConflictingVisits.mockImplementation(async ({ date }) => (date === '2099-07-15' ? [{ id: 'svc-other' }] : []));
+
+    const { status, body } = await put('svc-1', {
+      isRecurring: true, spawnRecurringChildren: false, recurringPattern: 'custom', recurringIntervalDays: 14,
+    });
+
+    expect(status).toBe(409);
+    expect(body).toEqual({ error: expect.stringContaining('2099-07-15'), code: 'SLOT_TAKEN' });
+    // The destination date was in the up-front lock set, with the parent's own date.
+    expect(acquireOccupancyLocks).toHaveBeenCalledTimes(1);
+    expect(acquireOccupancyLocks.mock.calls[0][1]).toEqual(expect.arrayContaining(['2099-07-01', '2099-07-15']));
+    expect(callOrder.indexOf('occupancy:2099-07-01')).toBeLessThan(callOrder.indexOf('comms'));
+    // Probed on the child's own block, ignoring the parent and the row being moved.
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx, date: '2099-07-15', windowStart: '09:00', windowEnd: '10:00',
+      excludeServiceIds: expect.arrayContaining(['svc-1', 'child-1']),
+      excludeStatuses: ['cancelled', 'completed'],
+    }));
+    expect(childWrites).toEqual([]);
     expect(trx.commit).not.toHaveBeenCalled();
   });
 });
