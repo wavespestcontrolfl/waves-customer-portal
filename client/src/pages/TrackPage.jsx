@@ -580,10 +580,12 @@ function ScheduledCard({ data }) {
 function EnRouteCard({ data }) {
   const techFirst = data.tech?.firstName || 'Your technician';
   const v = data.vehicle;
-  const property = data.property?.lat != null
+  // Guard BOTH axes (partial geocodes exist): a null lng produced a NaN
+  // distance and threw in the map's bounds.extend. Matches StopsAheadHero.
+  const property = Number.isFinite(data.property?.lat) && Number.isFinite(data.property?.lng)
     ? { lat: data.property.lat, lng: data.property.lng }
     : null;
-  const techCoords = v?.lat != null ? { lat: v.lat, lng: v.lng } : null;
+  const techCoords = Number.isFinite(v?.lat) && Number.isFinite(v?.lng) ? { lat: v.lat, lng: v.lng } : null;
 
   const miles = techCoords && property ? distanceMiles(techCoords, property) : null;
   const status = statusFromDistance(miles);

@@ -11803,9 +11803,9 @@ function ServiceTracker() {
           {summary.recommendations && (
             <div style={{ fontSize: 15, color: B.textBody, fontStyle: 'italic' }}>{summary.recommendations}</div>
           )}
-          {summary.nextVisitDate && (
+          {summary.nextVisitDate && !Number.isNaN(parseDate(summary.nextVisitDate).getTime()) && (
             <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginTop: 8 }}>
-              Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              Next visit: {parseDate(summary.nextVisitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </div>
           )}
         </div>
@@ -12733,8 +12733,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
     const safeReportTitle = doc.title || 'WDO Inspection Report';
     const subject = encodeURIComponent(`WDO Inspection Report - ${safeAddress}`);
     const docLink = doc.viewUrl || doc.isProjectReport ? `\nReport link: ${absoluteUrl(doc.viewUrl || doc.downloadUrl)}\n` : '';
-    const validThrough = doc.expirationDate
-      ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
+    // parseDate handles both bare YYYY-MM-DD and full ISO timestamps; a raw
+    // `+ 'T12:00:00'` on the latter rendered "Valid through: Invalid Date".
+    const expiration = parseDate(doc.expirationDate);
+    const validThrough = !Number.isNaN(expiration.getTime())
+      ? `Valid through: ${expiration.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
       : '';
     const body = encodeURIComponent(
       `Hi,\n\nPlease find the WDO inspection report for ${safeAddress}.\n\nReport: ${safeReportTitle}\n${validThrough}${docLink}\nFor questions, contact Waves Pest Control at (941) 297-5749.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
@@ -12815,11 +12818,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   const getExpirationBadge = (expDate) => {
     if (!expDate) return null;
-    // expirationDate arrives as either a bare YYYY-MM-DD or a full ISO
-    // timestamp; concatenating a time onto the latter yields Invalid Date and
-    // rendered literally as "Valid through Invalid Date". Normalize to the
-    // date part, then bail if it still won't parse (same guard formatDate has).
-    const exp = new Date(String(expDate).slice(0, 10) + 'T12:00:00');
+    // Bare YYYY-MM-DD or full ISO timestamp — parseDate normalizes both; bail
+    // if it still won't parse.
+    const exp = parseDate(expDate);
     if (Number.isNaN(exp.getTime())) return null;
     const now = new Date();
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
@@ -12860,8 +12861,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const visibleDocsByDate = [...visibleDocs].sort((a, b) => documentDate(b) - documentDate(a));
   const ytdDocs = visibleDocs.filter(d => documentDate(d).getFullYear() === thisYear);
   const expiringDocs = visibleDocs.filter(d => {
-    if (!d.expirationDate) return false;
-    const days = Math.ceil((new Date(d.expirationDate + 'T12:00:00') - new Date()) / 86400000);
+    const exp = parseDate(d.expirationDate);
+    if (Number.isNaN(exp.getTime())) return false;
+    const days = Math.ceil((exp - new Date()) / 86400000);
     return days >= 0 && days <= 60;
   });
   const latestDoc = visibleDocsByDate[0];

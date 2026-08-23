@@ -15,6 +15,15 @@ import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// One phone normalizer for the whole funnel. A pasted/autofilled E.164 number
+// ("+1 (941) 555-1234") is 11 digits — drop the US country code so the same
+// input the gate accepts is also accepted by the contact step, the existing-
+// customer lookup, intent capture and confirm (they previously disagreed).
+const phoneDigits = (raw) => {
+  const d = String(raw || '').replace(/\D/g, '');
+  return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+};
+
 const SERVICES = [
   { id: 'pest_control', label: 'Pest Control', duration: 60, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
   { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
@@ -467,7 +476,7 @@ export default function PublicBookingPage() {
 
   // Detect existing customer by phone on step 3
   const checkExistingCustomer = useCallback(async (phone) => {
-    const digits = phone.replace(/\D/g, '');
+    const digits = phoneDigits(phone);
     if (digits.length !== 10) return;
     // The phone match depends on BOTH phone and address, so it's stale if
     // either changed while in flight.
@@ -499,7 +508,7 @@ export default function PublicBookingPage() {
   // a slot, record a booking_intent so the recovery cron can follow up if they
   // bail before confirming. keepalive so it survives the tab closing right after.
   const captureBookingIntent = () => {
-    const digits = (contact.phone || '').replace(/\D/g, '');
+    const digits = phoneDigits(contact.phone);
     if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
     try {
       fetch(`${API_BASE}/booking/capture-intent`, {
@@ -546,7 +555,7 @@ export default function PublicBookingPage() {
   // changed slot / service / address and abandoned without re-blurring would
   // otherwise leave a STALE intent (recovery would name the wrong appointment).
   useEffect(() => {
-    if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
+    if (phoneDigits(contact.phone).length === 10 && selectedSlot) captureBookingIntent();
     // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
@@ -631,7 +640,7 @@ export default function PublicBookingPage() {
           new_customer: {
             first_name: contact.firstName,
             last_name: contact.lastName,
-            phone: contact.phone.replace(/\D/g, ''),
+            phone: phoneDigits(contact.phone),
             email: contact.email,
             address_line1: address.line1,
             address_line2: address.line2 || undefined,
@@ -685,12 +694,13 @@ export default function PublicBookingPage() {
   // their existing rate limits and uniform anti-enumeration responses). A
   // successful verify flips isAuthenticated, the gate unmounts, and the
   // prefill effect binds the wizard to the verified account.
-  // A pasted/autofilled E.164 number ("+1 (941) 555-1234") is 11 digits —
-  // drop the US country code so autofill doesn't dead-end the gate.
-  const gateDigitsRaw = gatePhone.replace(/\D/g, '');
-  const gateDigits = gateDigitsRaw.length === 11 && gateDigitsRaw.startsWith('1')
-    ? gateDigitsRaw.slice(1)
-    : gateDigitsRaw;
+  // A pasted/autofilled E.164 number is 11 digits — phoneDigits drops the US
+  // country code so autofill doesn't dead-end the gate.
+  const gateDigits = phoneDigits(gatePhone);
+  const contactPhoneDigits = phoneDigits(contact.phone);
+  // Inline message instead of a silently disabled Confirm: only once the
+  // visitor has typed something, never on the empty field.
+  const contactPhoneInvalid = !existingCustomerId && contactPhoneDigits.length > 0 && contactPhoneDigits.length !== 10;
   const handleGateSendCode = async () => {
     if (gateDigits.length !== 10 || gateSending) return;
     setGateSending(true);
@@ -1475,7 +1485,14 @@ export default function PublicBookingPage() {
                   onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
                   className="waves-focus-ring" style={inputStyle}
                   disabled={!!existingCustomerId}
+                  aria-invalid={contactPhoneInvalid || undefined}
+                  aria-describedby={contactPhoneInvalid ? 'book-phone-error' : undefined}
                 />
+                {contactPhoneInvalid && (
+                  <div id="book-phone-error" style={{ fontSize: 12, color: '#991B1B', marginTop: 6 }}>
+                    Enter a 10-digit phone number.
+                  </div>
+                )}
               </div>}
               {!existingCustomerId && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
@@ -1585,7 +1602,7 @@ export default function PublicBookingPage() {
               <Button
                 variant="primary"
                 onClick={handleConfirm}
-                disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
+                disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contactPhoneDigits.length !== 10))}
                 data-glass-accent=""
                 style={{ flex: 1, color: COLORS.glassNavy }}
               >
