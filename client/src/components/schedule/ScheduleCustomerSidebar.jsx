@@ -3,6 +3,7 @@ import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import { TIMEZONE } from '../../lib/timezone';
+import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
 function money(value) {
@@ -114,7 +115,8 @@ export default function ScheduleCustomerSidebar({
     let cancelled = false;
     setLoading(true);
     setError('');
-    adminFetch(`/admin/customers/${service.customerId}`)
+    const focus = service.id ? `?focusServiceId=${encodeURIComponent(service.id)}` : '';
+    adminFetch(`/admin/customers/${service.customerId}${focus}`)
       .then(async (r) => {
         const json = await r.json();
         if (!r.ok) throw new Error(json?.error || `HTTP ${r.status}`);
@@ -123,7 +125,7 @@ export default function ScheduleCustomerSidebar({
       .catch((err) => { if (!cancelled) setError(err.message || 'Failed to load customer'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [service?.customerId]);
+  }, [service?.customerId, service?.id]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
@@ -132,7 +134,6 @@ export default function ScheduleCustomerSidebar({
   }, [onClose]);
 
   const c = data?.customer || {};
-  const scheduled = data?.scheduled || [];
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
@@ -172,11 +173,9 @@ export default function ScheduleCustomerSidebar({
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;
-    return [...scheduled]
-      .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)))
-      .slice(0, 8)
+    return buildAppointmentHistory(data, 8, { currentId })
       .map((item) => ({ ...item, isCurrent: item.id === currentId }));
-  }, [scheduled, service?.id]);
+  }, [data, service?.id]);
 
   const saveNote = async () => {
     if (!service?.id || !noteDirty) return;

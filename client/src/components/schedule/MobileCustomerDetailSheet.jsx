@@ -21,6 +21,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { adminFetch } from '../../lib/adminFetch';
 import CallBridgeLink from '../admin/CallBridgeLink';
+import { upcomingAppointments, previousAppointments } from './customerAppointments';
 
 function fmtMonthDay(d) {
   if (!d) return '';
@@ -49,7 +50,7 @@ function money(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export default function MobileCustomerDetailSheet({ customerId, onClose }) {
+export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, onClose }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -59,13 +60,14 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
   const load = useCallback(async () => {
     setLoading(true); setErr('');
     try {
-      const r = await adminFetch(`/admin/customers/${customerId}`);
+      const focus = focusServiceId ? `?focusServiceId=${encodeURIComponent(focusServiceId)}` : '';
+      const r = await adminFetch(`/admin/customers/${customerId}${focus}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setData(d);
     } catch (e) { setErr(e.message); }
     finally { setLoading(false); }
-  }, [customerId]);
+  }, [customerId, focusServiceId]);
 
   useEffect(() => { if (customerId) load(); }, [customerId, load]);
 
@@ -82,7 +84,6 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
   // payments, cards, ... } — note camelCase on customer + nested address.
   const c = data?.customer || null;
   const services = data?.services || [];
-  const scheduled = data?.scheduled || [];
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
@@ -95,12 +96,10 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
   const lastVisitAt = sortedDesc[0]?.service_date || null;
   const firstVisitAt = sortedAsc[0]?.service_date || null;
 
-  const now = new Date();
-  const upcomingAppts = scheduled.filter((s) => new Date(s.scheduled_date) >= new Date(now.toDateString()) && !['completed', 'cancelled'].includes(s.status));
-  const previousAppts = [...scheduled]
-    .filter((s) => !upcomingAppts.includes(s))
-    .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)));
-  upcomingAppts.sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)));
+  // Upcoming reads the server's active-only list (data.upcomingScheduled);
+  // data.scheduled is newest-first history and feeds the Previous tab.
+  const upcomingAppts = upcomingAppointments(data);
+  const previousAppts = previousAppointments(data);
   const apptList = apptTab === 'upcoming' ? upcomingAppts : previousAppts;
 
   // Transactions: sum payments with status paid/refunded, most recent first.
