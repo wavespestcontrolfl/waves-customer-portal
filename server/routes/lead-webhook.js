@@ -348,39 +348,29 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     if (existing) {
       customer = existing;
-      // Update attribution if missing
-      const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
-      if (!existing.lead_source) updates.lead_source = leadSource.source;
-      if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
-      if (!existing.email && email) updates.email = email;
-      if (!existing.address_line1 && address) {
-        updates.address_line1 = address;
-        if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
-      }
-      // No unit backfill onto an EXISTING address here: this public webhook
-      // resolves the customer from the submitted phone alone, so a
-      // street-matching post could write an arbitrary unit onto someone's
-      // service address (dispatch corruption). The submitted unit still
-      // reaches staff via leads.address / extracted_data for review.
-      if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
-      if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
-      if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
-      if (existing.lead_intake_status) updates.lead_intake_status = null;
-
-      // Email backfills serialize with a concurrent merge-undo's claim
-      // check via the shared normalized-email advisory lock (r16). Proceed-
-      // with-fresh-read: only the email column is ever dropped (filled
-      // concurrently / owned by another live customer) — the rest of this
-      // update always lands, and the lead row below still carries the
-      // submitted address for staff either way.
-      await require('../services/customer-email-fanout')
-        .applyCustomerUpdatesWithEmailClaimGuard({ customerId: existing.id, updates, source: 'lead-webhook' });
+      const updates = buildExistingCustomerLeadUpdates({ existing, leadSource });
+      await db('customers').where({ id: existing.id }).update(updates);
 
       await db('customer_interactions').insert({
         customer_id: existing.id, interaction_type: 'note',
         subject: 'Form submission (existing customer)',
-        body: `Submitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
-        metadata: JSON.stringify({ formId, formName, utmSource, utmMedium, utmCampaign }),
+        // Submitted contact details ride on the note body + metadata (NOT
+        // the customers row) so staff can reconcile a changed email/address
+        // by hand — existing customers return before the leads insert below.
+        // Contact line goes FIRST: Customer 360 previews the body truncated
+        // to 200 chars, and a long UTM-laden pageUrl would push it out of view.
+        body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
+          + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
+        metadata: JSON.stringify({
+          formId, formName, utmSource, utmMedium, utmCampaign,
+          submittedContact: {
+            email: email || null,
+            address: fullAddress || null,
+            city: normalizedAddress.city || zipCity || null,
+            state: normalizedAddress.state || null,
+            zip: normalizedAddress.zip || null,
+          },
+        }),
       });
 
       logger.info(`Lead webhook: existing customer ${existing.id} submitted form${isDuplicateSubmission ? ' (duplicate within 5min — skipping notifications)' : ''}`);
@@ -1877,8 +1867,27 @@ function cleanPhone(value) {
 // verbatim — see the import above). Re-exported through `_test` below so the
 // existing test surface and callers are unchanged.
 
+// Updates for an EXISTING customers row matched by the public lead webhook.
+// The match is by submitted phone alone from an unauthenticated form — NO
+// proven identity — so contact and location fields (email, address lines,
+// city/state/zip) are never backfilled here: anyone who knows a customer's
+// phone could otherwise point that customer's email at their own inbox and
+// receive invoices, pay links and reports. Only attribution / last-contact /
+// intake-status fields land. Existing customers return before the leads
+// insert, so the submitted contact details reach staff via the 'Form
+// submission (existing customer)' interaction note's metadata instead.
+// Same rule as /public/quote/calculate.
+function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
+  const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
+  if (!existing.lead_source) updates.lead_source = leadSource.source;
+  if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
+  if (existing.lead_intake_status) updates.lead_intake_status = null;
+  return updates;
+}
+
 module.exports = router;
 module.exports._test = {
+  buildExistingCustomerLeadUpdates,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
   scrubLeadAlertProviderError,
