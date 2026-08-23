@@ -354,10 +354,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       await db('customer_interactions').insert({
         customer_id: existing.id, interaction_type: 'note',
         subject: 'Form submission (existing customer)',
-        body: `Submitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
-        // Submitted contact details ride on the note (NOT the customers row)
-        // so staff can reconcile a changed email/address by hand — existing
-        // customers return before the leads insert below.
+        // Submitted contact details ride on the note body + metadata (NOT
+        // the customers row) so staff can reconcile a changed email/address
+        // by hand — existing customers return before the leads insert below.
+        body: `Submitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`
+          + `\nSubmitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
           submittedContact: {

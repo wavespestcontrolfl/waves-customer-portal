@@ -85,6 +85,7 @@ describe('route wiring', () => {
   test('the existing-customer interaction note carries the submitted contact details for staff', () => {
     const note = src.slice(src.indexOf("subject: 'Form submission (existing customer)'"));
     const metadata = note.slice(0, note.indexOf('logger.info('));
+    expect(metadata).toMatch(/Submitted contact \(not applied to profile\): email \$\{email \|\| '—'\}; address \$\{fullAddress \|\| '—'\}/);
     expect(metadata).toMatch(/submittedContact: \{/);
     expect(metadata).toMatch(/email: email \|\| null,/);
     expect(metadata).toMatch(/address: fullAddress \|\| null,/);
