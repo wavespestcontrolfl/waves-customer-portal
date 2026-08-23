@@ -98,3 +98,33 @@ describe('assertNoSlotOverlap gate', () => {
     expect(trx.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('acquireAdminSlotLocks (rung 1 for multi-date writers)', () => {
+  const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+    else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = saved;
+  });
+  const { acquireAdminSlotLocks } = require('../services/scheduling/window-rules');
+
+  test('gate ON: every date locked once, in ascending order (occupancy.js acquireOccupancyLocks), set returned', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const trx = jest.fn();
+    trx.raw = jest.fn().mockResolvedValue({});
+    const locked = await acquireAdminSlotLocks({
+      trx, dates: ['2099-03-01', '2099-01-15T10:00', '2099-02-01', '2099-01-15', null],
+    });
+    expect([...locked]).toEqual(['2099-03-01', '2099-01-15', '2099-02-01']);
+    expect(trx.raw.mock.calls.map(([, b]) => b[1])).toEqual([
+      'occupancy:2099-01-15', 'occupancy:2099-02-01', 'occupancy:2099-03-01',
+    ]);
+  });
+
+  test('gate OFF: nothing locked, empty set', async () => {
+    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+    const trx = jest.fn();
+    trx.raw = jest.fn();
+    expect((await acquireAdminSlotLocks({ trx, dates: ['2099-01-15'] })).size).toBe(0);
+    expect(trx.raw).not.toHaveBeenCalled();
+  });
+});

@@ -22,9 +22,13 @@ import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// No client appointments before 8am ET (owner rule) — the grid starts where
-// the server's window validator (scheduling/window-rules.js) does.
-const DAY_START_HOUR = 8;
+// DISPLAY range starts at 6 so existing earlier rows (legacy / lead-created)
+// still render on dispatch; CREATION and MOVES start at 8 — no client
+// appointments before 8am ET (owner rule; the server's window validator,
+// scheduling/window-rules.js, refuses them with a 422). Rows before
+// BOOKABLE_START_HOUR are muted, non-droppable, and not drag-creatable.
+const DAY_START_HOUR = 6;
+const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -471,18 +475,32 @@ export function snapSlotIdxToHourMin(slotIdx) {
   return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
 }
 
+// A row accepts drops / drag-create only from BOOKABLE_START_HOUR on.
+export function isBookableSlotIdx(slotIdx) {
+  return snapSlotIdxToHourMin(slotIdx) >= BOOKABLE_START_HOUR * 60;
+}
+
 function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   const slotMin = snapSlotIdxToHourMin(slotIdx);
+  const bookable = isBookableSlotIdx(slotIdx);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
+    disabled: !bookable,
   });
   const isHour = slotIdx % 2 === 0;
   return (
     <div
-      ref={setNodeRef}
-      onPointerDown={onCreateStart ? (e) => onCreateStart(e, slotIdx) : undefined}
-      className={cn('transition-colors', isOver && 'bg-zinc-100', onCreateStart && 'cursor-crosshair')}
+      ref={bookable ? setNodeRef : undefined}
+      onPointerDown={onCreateStart && bookable ? (e) => onCreateStart(e, slotIdx) : undefined}
+      aria-disabled={bookable ? undefined : true}
+      data-slot-min={slotMin}
+      className={cn(
+        'transition-colors',
+        bookable && isOver && 'bg-zinc-100',
+        bookable && onCreateStart && 'cursor-crosshair',
+        !bookable && 'bg-zinc-50 cursor-not-allowed',
+      )}
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
@@ -520,7 +538,8 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
       // Hour-aligned block: start floors, end ceils to the next hour mark.
-      const startMin = snapSlotIdxToHourMin(lo);
+      // A selection dragged up into the pre-opening rows is clamped to 8am.
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
       const endMin = Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60);
       onCreateSlot?.({
         techId: tech.id,
@@ -1047,6 +1066,9 @@ export default function TimeGridDay({
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
     const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
+    // Pre-opening rows are disabled droppables; belt-and-braces for a stale
+    // drop payload — the server would 422 it anyway.
+    if (drop.slotMin != null && toMin < BOOKABLE_START_HOUR * 60) return;
     if (fromTech === toTech && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);

@@ -66,25 +66,38 @@ describe('TimeGridDay bulk reconciliation', () => {
 });
 
 describe('TimeGridDay hour-aligned grid', () => {
-  it('starts at 8 AM (no pre-opening rows) and snaps every drop row to its hour', async () => {
-    const { snapSlotIdxToHourMin } = await import('./TimeGridDay');
-    render(
+  it('still DISPLAYS from 6 AM (existing early rows render) but only rows from 8 AM accept drops / drag-create, snapped to the hour', async () => {
+    const { snapSlotIdxToHourMin, isBookableSlotIdx } = await import('./TimeGridDay');
+    const { container } = render(
       <TimeGridDay
         date="2026-07-15"
-        services={SERVICES}
+        services={[...SERVICES, {
+          id: 'svc-early', customerName: 'Early Customer', status: 'confirmed',
+          windowStart: '07:00', windowEnd: '08:00', windowDisplay: '7–8 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={vi.fn()}
       />,
     );
-    expect(screen.queryByText('6 AM')).toBeNull();
-    expect(screen.queryByText('7 AM')).toBeNull();
+    expect(screen.getByText('6 AM')).toBeInTheDocument();
     expect(screen.getByText('8 AM')).toBeInTheDocument();
-    // 30-min visual rows: idx 0 = 08:00, idx 1 = 08:30 → snaps to 08:00,
-    // idx 5 = 10:30 → snaps to 10:00. Nothing can land on a :30 start.
-    expect(snapSlotIdxToHourMin(0)).toBe(8 * 60);
-    expect(snapSlotIdxToHourMin(1)).toBe(8 * 60);
-    expect(snapSlotIdxToHourMin(4)).toBe(10 * 60);
-    expect(snapSlotIdxToHourMin(5)).toBe(10 * 60);
-    for (let idx = 0; idx < 24; idx += 1) expect(snapSlotIdxToHourMin(idx) % 60).toBe(0);
+    // A legacy 7 AM visit is not hidden from dispatch.
+    expect(screen.getByTitle(/Early Customer/)).toBeInTheDocument();
+    // Rows before 8 AM are muted + disabled (no droppable, no drag-create).
+    const rows = container.querySelectorAll('[data-slot-min]');
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const min = Number(row.getAttribute('data-slot-min'));
+      expect(row.getAttribute('aria-disabled')).toBe(min < 8 * 60 ? 'true' : null);
+    }
+    // 30-min visual rows from 06:00: idx 0..3 (06:00–07:30) are not bookable;
+    // idx 4 = 08:00 and idx 5 = 08:30 both snap to 08:00. Nothing lands on :30.
+    expect(isBookableSlotIdx(3)).toBe(false);
+    expect(isBookableSlotIdx(4)).toBe(true);
+    expect(snapSlotIdxToHourMin(4)).toBe(8 * 60);
+    expect(snapSlotIdxToHourMin(5)).toBe(8 * 60);
+    expect(snapSlotIdxToHourMin(9)).toBe(10 * 60);
+    for (let idx = 0; idx < 28; idx += 1) expect(snapSlotIdxToHourMin(idx) % 60).toBe(0);
   });
 });

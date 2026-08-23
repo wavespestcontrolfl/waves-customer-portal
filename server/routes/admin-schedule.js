@@ -9,7 +9,9 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { assertAdminAppointmentWindow, assertNoSlotOverlap, adminSlotOverlapGuardEnabled } = require('../services/scheduling/window-rules');
+const {
+  assertAdminAppointmentWindow, assertNoSlotOverlap, acquireAdminSlotLocks, adminSlotOverlapGuardEnabled,
+} = require('../services/scheduling/window-rules');
 const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
@@ -454,6 +456,24 @@ function seasonalSafeShift(rawDate, pattern, skip, direction) {
 // pest + summer-month boosters). Returns YYYY-MM-DD strings within the
 // next `monthsAhead` months from the initial date, on the same day-of-
 // month as initial (clamped to each month's length).
+// The ordered recurring-child date candidates a spawn loop walks — the SAME
+// derivation (nextRecurringDate → seasonalSafeShift → too-close filter) the
+// POST seeder and the update-details re-seed used inline, pulled out so the
+// date set can be known BEFORE the transaction: rung 1 of occupancy.js's
+// ORDERING CONTRACT needs every date the trx will write locked up front, in
+// sorted order, before any row lock. Callers still dedupe against their own
+// seen-set and stop at their insert target, exactly as before.
+function recurringChildDateCandidates({ baseDateStr, recurringPattern, rOpts, skipWeekends, shiftDir, maxAttempts }) {
+  const out = [];
+  for (let attempt = 1; attempt < maxAttempts; attempt++) {
+    const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
+    const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
+    if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
+    out.push(nextDateStr);
+  }
+  return out;
+}
+
 function computeBoosterDates(initialDateStr, boosterMonths, monthsAhead = 12) {
   if (!Array.isArray(boosterMonths) || boosterMonths.length === 0) return [];
   const safe = dateOnly(initialDateStr) || '';
@@ -3534,12 +3554,64 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
+    // Every scheduled_date this trx will INSERT — parent, recurring children,
+    // boosters — planned here, before the transaction, with the exact
+    // dedupe/stop rules the spawn loops below apply, so rung 1 can lock the
+    // full sorted date set up front and probe each window before any row
+    // lock (a concurrent writer could otherwise overlap a child/booster date
+    // while only the anchor was fenced). The loops consume THESE arrays.
+    const seriesDates = new Set();
+    seriesDates.add(dateOnly(scheduledDate) || '');
+    const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+    const plannedCount = isRecurring
+      ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+      : 0;
+    const seriesShiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    const plannedChildDates = [];
+    if (isRecurring && recurringPattern && plannedCount > 1) {
+      const candidates = recurringChildDateCandidates({
+        baseDateStr: scheduledDate,
+        recurringPattern,
+        rOpts: { ...monthAnchorOpts, intervalDays: recurringIntervalDays },
+        skipWeekends,
+        shiftDir: seriesShiftDir,
+        // Iterate by inserts, not attempts (skip-weekends can collapse
+        // consecutive recurrences onto one shifted weekday); capped so a
+        // degenerate pattern can't loop forever.
+        maxAttempts: (plannedCount - 1) * 4 + 30,
+      });
+      for (const nextDateStr of candidates) {
+        if (plannedChildDates.length >= plannedCount - 1) break;
+        if (seriesDates.has(nextDateStr)) continue;
+        seriesDates.add(nextDateStr);
+        plannedChildDates.push(nextDateStr);
+      }
+    }
+    const plannedBoosterDates = [];
+    if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+      const cleanedBoosterMonths = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+      for (const rawDate of computeBoosterDates(scheduledDate, cleanedBoosterMonths, 12)) {
+        const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, seriesShiftDir);
+        // Monthly Jan 15 → child Apr 15 PLUS April booster → same date:
+        // the series row already owns it.
+        if (seriesDates.has(boosterDate)) continue;
+        seriesDates.add(boosterDate);
+        plannedBoosterDates.push(boosterDate);
+      }
+    }
+
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
-      // Rung 1 (occupancy.js ORDERING CONTRACT): date-wide occupancy lock +
-      // tech-blind overlap probe, FIRST — gated (GATE_ADMIN_SLOT_OVERLAP_GUARD).
+      // Rung 1 (occupancy.js ORDERING CONTRACT): EVERY date this trx inserts
+      // (anchor + children + boosters) locked in sorted order via
+      // acquireOccupancyLocks, then each window probed tech-blind — FIRST,
+      // before the comms lock and every row lock. Gated
+      // (GATE_ADMIN_SLOT_OVERLAP_GUARD); windowless bookings skip the probe.
       if (windowStart && computedEnd) {
-        await assertNoSlotOverlap({ trx, date: scheduledDate, windowStart, windowEnd: computedEnd });
+        await acquireAdminSlotLocks({ trx, dates: [...seriesDates] });
+        for (const d of [...seriesDates].sort()) {
+          await assertNoSlotOverlap({ trx, date: d, windowStart, windowEnd: computedEnd });
+        }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
       // customers row lock below: every scheduled_services insert in this
@@ -3705,37 +3777,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         source: 'admin_schedule',
       });
 
-      // Track all scheduled_date strings created for this parent series
-      // (parent itself, recurring children, AND boosters). Hoisted so the
-      // booster spawn block below can dedupe against base-series dates —
-      // certain cadence/month combos (e.g. monthly Jan 15 + April booster
-      // → Apr 15 already on the calendar) would otherwise double-book.
-      const seriesDates = new Set();
-      seriesDates.add(dateOnly(scheduledDate) || '');
-
-      // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-      const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-      const plannedCount = isRecurring
-        ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
-        : 0;
-      if (isRecurring && recurringPattern && plannedCount > 1) {
+      // Create recurring instances (Ongoing mode still pre-seeds a 4-visit
+      // rolling window for UX) — dates are the pre-trx plan above (locked +
+      // probed as rung 1); nothing is re-derived here.
+      if (plannedChildDates.length > 0) {
       const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
-      const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-      // Iterate by inserts, not by attempts: when skip-weekends collapses
-      // consecutive recurrences onto the same shifted weekday (e.g. custom
-      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
-      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
-      // infinite loop if the pattern is degenerate.
-      const maxAttempts = (plannedCount - 1) * 4 + 30;
-      let attempt = 1;
-      let inserted = 0;
-      while (inserted < plannedCount - 1 && attempt < maxAttempts) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
-        attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
-        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDates.has(nextDateStr)) continue;
-        seriesDates.add(nextDateStr);
+      const shiftDir = seriesShiftDir;
+      for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -3789,7 +3837,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // not ride every faster-cadence child.
         if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, childAddonLines, addonCols);
         createdAppointments.push({ id: childRow.id, date: nextDateStr, confirmation: false });
-        inserted++;
       }
       }
 
@@ -3799,17 +3846,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // are themselves is_recurring=false so the auto-extend path leaves
       // them alone. A future cron can refresh year-2 boosters from
       // parent.booster_months.
-      if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-        const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-        const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
-        const dates = computeBoosterDates(scheduledDate, cleaned, 12);
-        for (const rawDate of dates) {
-          const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
-          // Skip if this date already has a row on the series (parent or
-          // recurring child). Common case: monthly Jan 15 → child Apr 15
-          // PLUS April booster → Apr 15 collision.
-          if (seriesDates.has(boosterDate)) continue;
-          seriesDates.add(boosterDate);
+      if (plannedBoosterDates.length > 0) {
+        const shiftDir = seriesShiftDir;
+        // Dates are the pre-trx plan (already deduped against the parent +
+        // child dates, locked + probed as rung 1).
+        for (const boosterDate of plannedBoosterDates) {
           const boosterData = {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
@@ -5213,21 +5254,43 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
-    // Shared admin window rules (scheduling/window-rules.js) on a SUPPLIED
-    // start: on-the-hour, >= 08:00, end > start, end <= day end — the
-    // normalized pair persists (a start-only edit derives its end from the
-    // row's stored span, the bulk mover's convention, instead of keeping a
-    // stale end beside the new start). Date-only / clearing edits are
-    // untouched. The same read seeds the gated overlap probe below.
+    // Shared admin window rules (scheduling/window-rules.js) whenever EITHER
+    // endpoint is supplied, on the EFFECTIVE pair (supplied-or-stored start,
+    // supplied-or-stored end): on-the-hour, >= 08:00, end > start, end <=
+    // day end — the normalized pair persists. A start-only edit derives its
+    // end from the row's stored span (the bulk mover's convention) instead
+    // of keeping a stale end beside the new start; an end-only edit is
+    // judged against the stored start (an end before it, or past the day
+    // end, used to persist unchecked). Date-only / clearing edits are
+    // untouched. The same read seeds the gated overlap probe + the re-seed
+    // date plan below.
     let overlapProbe = null;
-    if (updates.window_start
-      || (adminSlotOverlapGuardEnabled() && (updates.scheduled_date !== undefined || updates.window_end))) {
-      const currentRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('scheduled_date', 'window_start', 'window_end');
+    // Gated re-seed fence: when this save will spawn recurring children
+    // (the fill-only re-seed path inside the trx), every candidate child
+    // date is locked as rung 1 up front (occupancy.js: multi-date writers
+    // take their rung-1 keys sorted, before any row lock) and each insert
+    // is probed under that lock. The in-trx loop derives its dates from the
+    // row-locked parent; a date outside this pre-locked set fails CLOSED.
+    const willSpawnChildren = isRecurring && spawnRecurringChildren !== false && recurringPattern
+      && ((recurringOngoing ? 4 : (recurringCount || 0)) > 1);
+    let lockedSpawnDates = null;
+    let currentRow = null;
+    if (updates.window_start || updates.window_end
+      || (adminSlotOverlapGuardEnabled() && (updates.scheduled_date !== undefined || willSpawnChildren))) {
+      currentRow = await db('scheduled_services').where({ id: req.params.id })
+        .first('scheduled_date', 'window_start', 'window_end', 'recurring_nth', 'recurring_weekday',
+          'recurring_interval_days', 'skip_weekends', 'weekend_shift');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
-      if (updates.window_start) {
+      if (updates.window_start || updates.window_end) {
+        const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
+        if (!effectiveStart) {
+          throw Object.assign(
+            httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+            { code: 'INVALID_APPOINTMENT_WINDOW' },
+          );
+        }
         const normalizedWindow = assertAdminAppointmentWindow({
-          windowStart: updates.window_start,
+          windowStart: effectiveStart,
           windowEnd: updates.window_end || null,
           durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end),
         });
@@ -5287,6 +5350,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
+    if (adminSlotOverlapGuardEnabled() && willSpawnChildren && currentRow) {
+      const probeDate = updates.scheduled_date !== undefined
+        ? String(updates.scheduled_date).split('T')[0]
+        : dateOnly(currentRow.scheduled_date);
+      // Superset of what the re-seed can insert: same derivation and
+      // attempt cap as the loop, from the same post-update base date.
+      const spawnCountPlan = recurringOngoing ? 4 : (recurringCount || 0);
+      const skipChildPlan = skipWeekends !== undefined ? !!skipWeekends
+        : (currentRow.skip_weekends != null ? !!currentRow.skip_weekends : false);
+      const dirChildPlan = (weekendShift !== undefined ? weekendShift
+        : (currentRow.weekend_shift === 'back' ? 'back' : 'forward')) === 'back' ? 'back' : 'forward';
+      lockedSpawnDates = probeDate ? [probeDate, ...recurringChildDateCandidates({
+        baseDateStr: probeDate,
+        recurringPattern,
+        rOpts: {
+          nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : currentRow.recurring_nth,
+          weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : currentRow.recurring_weekday,
+          intervalDays: recurringIntervalDays != null ? recurringIntervalDays : currentRow.recurring_interval_days,
+        },
+        skipWeekends: skipChildPlan,
+        shiftDir: dirChildPlan,
+        maxAttempts: (spawnCountPlan - 1) * 4 + 30,
+      })] : null;
+    }
     if (isRecurring) {
       updates.is_recurring = true;
       if (recurringPattern) updates.recurring_pattern = recurringPattern;
@@ -5643,6 +5730,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // tech-blind overlap probe FIRST, before the comms (rung 6) and
       // tech-day locks below — gated (GATE_ADMIN_SLOT_OVERLAP_GUARD); the
       // row being edited excludes itself.
+      const lockedSpawnDateSet = lockedSpawnDates
+        ? await acquireAdminSlotLocks({ trx, dates: lockedSpawnDates })
+        : null;
       if (overlapProbe) {
         await assertNoSlotOverlap({ trx, ...overlapProbe, excludeServiceIds: [req.params.id] });
       }
@@ -6499,6 +6589,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
+            // Gated overlap fence (rung 1 held since the top of this trx for
+            // the pre-planned date set). A child date the plan did not cover
+            // — the locked parent's anchor moved under us — fails CLOSED
+            // rather than taking a second date key mid-trx (occupancy.js).
+            if (lockedSpawnDateSet) {
+              if (!lockedSpawnDateSet.has(nextDateStr)) {
+                throw Object.assign(httpError(409, "The series anchor changed while saving — reload and save again."), { code: 'SERIES_ANCHOR_MOVED_RETRY' });
+              }
+              const childStart = normalizeHHMM(parent.window_start);
+              const childEnd = normalizeHHMM(parent.window_end);
+              if (childStart && childEnd) {
+                await assertNoSlotOverlap({ trx, date: nextDateStr, windowStart: childStart, windowEnd: childEnd });
+              }
+            }
             const childData = {
               customer_id: parent.customer_id,
               technician_id: recurringTemplateTechnicianId(parent),
@@ -13398,6 +13502,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  recurringChildDateCandidates,
   noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,

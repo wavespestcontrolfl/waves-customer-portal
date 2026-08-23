@@ -18,7 +18,7 @@
  * string 'true' enables — fail-closed parse); the hour rules above are NOT
  * gated.
  */
-const { findConflictingVisits, acquireOccupancyLock } = require('./occupancy');
+const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./occupancy');
 const { DAY_START_HOUR } = require('./find-time');
 
 // Admin day END is the dispatch grid's bound (TimeGridDay DAY_END_HOUR = 20),
@@ -95,6 +95,22 @@ function adminSlotOverlapGuardEnabled() {
 }
 
 /**
+ * Rung 1 for a writer that will insert/move rows on SEVERAL dates in one
+ * trx (series create / re-seed): every date's occupancy lock, deduped and
+ * sorted via occupancy.js acquireOccupancyLocks — taken up front, before any
+ * row lock. No-op when the gate is off. Returns the locked date set so the
+ * writer can fail CLOSED on a date it derives later that was not pre-locked.
+ */
+async function acquireAdminSlotLocks({ trx, dates = [] } = {}) {
+  const locked = new Set();
+  if (!adminSlotOverlapGuardEnabled() || !trx) return locked;
+  const clean = (dates || []).filter(Boolean).map((d) => String(d).split('T')[0]);
+  await acquireOccupancyLocks(trx, clean);
+  for (const d of clean) locked.add(d);
+  return locked;
+}
+
+/**
  * Gate-guarded overlap check for admin writes. Takes the date-wide occupancy
  * lock on `trx` first (rung 1 of occupancy.js's ORDERING CONTRACT — callers
  * must invoke this before any other lock in the transaction), then runs the
@@ -134,6 +150,7 @@ async function assertNoSlotOverlap({ trx, date, windowStart, windowEnd, excludeS
 module.exports = {
   assertAdminAppointmentWindow,
   assertNoSlotOverlap,
+  acquireAdminSlotLocks,
   adminSlotOverlapGuardEnabled,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,

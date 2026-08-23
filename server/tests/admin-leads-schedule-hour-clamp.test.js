@@ -84,3 +84,39 @@ describe('POST /admin/leads/:id/schedule-appointment on-the-hour clamp', () => {
     });
   });
 });
+
+describe('POST /admin/leads/:id/schedule-appointment shared window rules (scheduling/window-rules.js)', () => {
+  beforeEach(() => db.mockReset());
+
+  // Lead found; the shared validator runs after the lead/duration lookups
+  // and its 422 is mapped onto this route's 400 shape. No transaction opens.
+  function leadFound() {
+    const q = {
+      where: jest.fn(() => q),
+      whereNull: jest.fn(() => q),
+      first: jest.fn(async () => ({ id: 'lead-1', first_name: 'Test', customer_id: null })),
+    };
+    db.mockImplementation(() => q);
+    db.transaction = jest.fn(async () => { throw new Error('transaction must not open on a refused window'); });
+  }
+
+  it('rejects a pre-8am on-the-hour start with 400', async () => {
+    await withServer(async (baseUrl) => {
+      leadFound();
+      const res = await postAppointment(baseUrl, { time: '07:00' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/before 08:00/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects a duration that runs past the day end (and so can never wrap midnight) with 400', async () => {
+    await withServer(async (baseUrl) => {
+      leadFound();
+      const res = await postAppointment(baseUrl, { time: '19:00', durationMinutes: 120 });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/end by 20:00/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+});
