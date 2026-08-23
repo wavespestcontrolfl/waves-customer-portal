@@ -22,9 +22,8 @@ export default function ReviewPage() {
   // stay on screen as the retry.
   const [submitError, setSubmitError] = useState(null);
   // "Something wasn't right?" opens the feedback form with no rating picked.
-  // The server requires a 1-10 rating, so feedback-only submissions ride the
-  // lowest detractor score (<= 4 routes to the owner, never to Google).
-  const FEEDBACK_ONLY_RATING = 1;
+  // The server requires a 1-10 rating and records it permanently, so the form
+  // asks for one rather than inventing a score on the customer's behalf.
 
   useEffect(() => {
     fetch(`${API_BASE}/review/${token}`)
@@ -65,13 +64,14 @@ export default function ReviewPage() {
   };
 
   const handleFeedback = async () => {
+    if (selectedRating == null) return;
     setSubmittingFeedback(true);
     setSubmitError(null);
     try {
       const res = await fetch(`${API_BASE}/review/${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating: selectedRating ?? FEEDBACK_ONLY_RATING, feedbackText }),
+        body: JSON.stringify({ rating: selectedRating, feedbackText }),
       });
       // 409 = rating already recorded (handleRate's POST landed); the text
       // can't be attached again, so thank them rather than loop.
@@ -255,6 +255,30 @@ export default function ReviewPage() {
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
+            {selectedRating == null && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 8 }}>
+                  Tap a number first so we know how the visit went.
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, 1fr)', gap: 4 }}>
+                  {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                    <button key={n} type="button"
+                      aria-label={`Rate ${n}`}
+                      onClick={() => setSelectedRating(n)}
+                      style={{
+                        padding: '8px 0', borderRadius: 8, border: `1px solid ${COLORS.grayLight}`,
+                        background: COLORS.white, color: COLORS.textBody,
+                        fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                      }}>
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {selectedRating != null && (
+              <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 12 }}>Your rating: {selectedRating}/10</div>
+            )}
             {submitError && (
               <div role="alert" style={{ fontSize: 14, color: COLORS.red, marginTop: 12 }}>{submitError}</div>
             )}
@@ -262,7 +286,7 @@ export default function ReviewPage() {
               <Button
                 variant="primary"
                 onClick={handleFeedback}
-                disabled={submittingFeedback}
+                disabled={submittingFeedback || selectedRating == null}
                 data-glass-accent=""
                 style={{ flex: 1, cursor: submittingFeedback ? 'wait' : 'pointer' }}
               >
