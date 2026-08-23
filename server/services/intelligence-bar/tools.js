@@ -8,7 +8,9 @@
  */
 
 const db = require('../../models/db');
-const { lockCustomerComms, withCustomerCommsLock } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+// Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
+const { assertAdminAppointmentWindow, assertNoSlotOverlap } = require('../scheduling/window-rules');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1612,9 +1614,21 @@ async function createAppointment(input) {
   // deriveWindowEnd returns null when start+60 would cross midnight — the
   // old modulo wrap turned a 23:30 start into a 23:30–00:30 same-day block
   // no overlap predicate could see. Reject up front, before any DB read.
-  const windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
+  let windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
   if (win.start && !windowEnd) {
     return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
+  // Shared admin window rules on the EFFECTIVE window (start + flat-60 end):
+  // >= 08:00, end <= day end, on the hour. parseTimeWindowStart accepted
+  // 07:00 / 20:00 and this tool persisted them directly, bypassing every
+  // other creator's validator. Surfaced as the tool's error result.
+  if (win.start) {
+    try {
+      ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 }));
+    } catch (err) {
+      if (err?.status === 422) return { error: err.message };
+      throw err;
+    }
   }
 
   const customer = await db('customers').where('id', customer_id).first();
@@ -1652,26 +1666,41 @@ async function createAppointment(input) {
   // any open offer. The marker runs in a savepoint, so an evidence hiccup
   // still never blocks the booking.
   let appointment;
-  await withCustomerCommsLock(db, customer_id, async (trx) => {
-    const [created] = await trx('scheduled_services').insert({
-      customer_id,
-      scheduled_date: dateStr,
-      service_type,
-      technician_id,
-      status: 'pending',
-      window_start: win.start,
-      window_end: windowEnd,
-      notes: notes || null,
-      created_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    appointment = created;
-    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
-      customerId: customer_id,
-      scheduledServiceId: created.id,
-      source: 'intelligence_bar',
+  try {
+    await db.transaction(async (trx) => {
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock + tech-blind probe FIRST, before the comms key (rung
+      // 6) and the insert's row locks; mirrors the lead-booking route. Gated
+      // (GATE_ADMIN_SLOT_OVERLAP_GUARD): a no-op while the gate is off.
+      if (win.start && windowEnd) {
+        await assertNoSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      }
+      // Rung 6 — the same comms fence withCustomerCommsLock provided.
+      await lockCustomerComms(trx, customer_id);
+      const [created] = await trx('scheduled_services').insert({
+        customer_id,
+        scheduled_date: dateStr,
+        service_type,
+        technician_id,
+        status: 'pending',
+        window_start: win.start,
+        window_end: windowEnd,
+        notes: notes || null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }).returning('*');
+      appointment = created;
+      await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId: customer_id,
+        scheduledServiceId: created.id,
+        source: 'intelligence_bar',
+      });
     });
-  });
+  } catch (err) {
+    // Gated overlap refusal → the tool's error shape (no throw to the IB).
+    if (err?.code === 'SLOT_CONFLICT') return { error: err.message };
+    throw err;
+  }
 
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
@@ -1752,7 +1781,6 @@ async function rescheduleAppointment(input) {
   const win = parseTimeWindowStart(new_time_window);
   if (win.error) return { error: win.error };
 
-  const customer = await db('customers').where('id', appt.customer_id).first();
   const oldDate = appt.scheduled_date;
 
   // Preserve the original visit's window length when a new start is given.
@@ -1761,13 +1789,34 @@ async function rescheduleAppointment(input) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
-  const newWindowEnd = win.start
-    ? deriveWindowEnd(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
+  let newWindowEnd = win.start
+    ? deriveWindowEnd(win.start, apptDuration)
     : appt.window_end;
   if (win.start && !newWindowEnd) {
     return { error: 'That window would cross midnight — pick an earlier start.' };
   }
+  // Shared admin window rules on the EFFECTIVE window the move will persist
+  // (supplied-or-stored start, derived-or-stored end, stored duration for an
+  // end-less row): >= 08:00, end <= day end. A windowless row (both null)
+  // moves date-only. Surfaced as the tool's error result.
+  // TODO(occupancy): this path updates without a transaction (a bare
+  // advisory xact lock here would fence nothing), so the gated overlap
+  // probe is NOT run — the admin dispatch/schedule routes own that guard.
+  if (newStart || newWindowEnd) {
+    try {
+      const normalizedWindow = assertAdminAppointmentWindow({
+        windowStart: newStart, windowEnd: newWindowEnd, durationMinutes: apptDuration,
+      });
+      if (win.start) newWindowEnd = normalizedWindow.window_end;
+    } catch (err) {
+      if (err?.status === 422) return { error: err.message };
+      throw err;
+    }
+  }
+
+  const customer = await db('customers').where('id', appt.customer_id).first();
 
   // A today target whose effective window already elapsed in ET is unreachable
   // — moving into a past window strands the visit. Same cutoff logic as the

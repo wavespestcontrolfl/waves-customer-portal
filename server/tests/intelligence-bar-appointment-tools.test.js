@@ -315,6 +315,59 @@ describe('create_appointment', () => {
   });
 });
 
+describe('create_appointment — shared admin window rules (scheduling/window-rules.js)', () => {
+  test('a 7:00 AM start is refused before any DB call — no insert', async () => {
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '7:00 AM',
+    });
+    expect(result.error).toMatch(/before 08:00/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an 8:00 PM start (flat-60 end 21:00, past the day end) is refused — no insert', async () => {
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '8:00 PM',
+    });
+    expect(result.error).toMatch(/end by 20:00/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('10:00 AM passes and inserts the normalized 10:00-11:00 window', async () => {
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
+      scheduled_services: [insertChain],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM',
+    });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '11:00' });
+  });
+
+  test('GATE_ADMIN_SLOT_OVERLAP_GUARD=true: an overlapping visit refuses the create (rung 1 before the comms lock) — no insert', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    try {
+      const probe = chain({
+        whereNotIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]),
+      });
+      const insertChain = chain();
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
+        scheduled_services: [probe, insertChain],
+      });
+      const result = await executeTool('create_appointment', {
+        customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM',
+      });
+      expect(result.error).toMatch(/overlaps another visit/);
+      expect(insertChain.insert).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+    }
+  });
+});
+
 describe('reschedule_appointment', () => {
   const baseAppt = {
     id: 'svc-1',
@@ -676,5 +729,39 @@ describe('reschedule_appointment', () => {
       appointment_id: 'svc-1', new_date: '2099-01-15',
     });
     expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+  });
+});
+
+describe('reschedule_appointment — shared admin window rules', () => {
+  const appt = {
+    id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+    window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
+  };
+
+  test('a 7:00 AM new start is refused — nothing updated', async () => {
+    const updateChain = chain();
+    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), updateChain] });
+    const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '7:00 AM' });
+    expect(result.error).toMatch(/before 08:00/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an 8:00 PM new start on a 60-min visit (end 21:00) is refused — nothing updated', async () => {
+    const updateChain = chain();
+    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), updateChain] });
+    const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '8:00 PM' });
+    expect(result.error).toMatch(/end by 20:00/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a date-only move validates the STORED window (legacy 07:00 row refused); an end-less row uses its estimated duration', async () => {
+    const updateChain = chain();
+    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...appt, window_start: '07:00:00', window_end: '08:00:00' }) }), updateChain] });
+    let result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
+    expect(result.error).toMatch(/before 08:00/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...appt, window_start: '19:00:00', window_end: null, estimated_duration_minutes: 120 }) }), chain()] });
+    result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
+    expect(result.error).toMatch(/end by 20:00/);
   });
 });
