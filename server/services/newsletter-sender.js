@@ -27,6 +27,10 @@ const { wrapNewsletter, ensureLegalTextFooter, bodyIsDarkAware } = require('./em
 const { recordTouchpoint } = require('./conversations');
 const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
+// Canonical "live customer" scope (active=true AND deleted_at IS NULL AND
+// pipeline_stage IN CUSTOMER_STAGES) — a new_lead/churned/dormant row sharing an
+// email must never rescue or personalize an archived-link subscriber.
+const { whereLiveCustomer } = require('./customer-stages');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
@@ -101,10 +105,11 @@ function excludeArchivedCustomers(query) {
         .whereRaw('ac.id = newsletter_subscribers.customer_id')
         .whereNotNull('ac.deleted_at');
     }).orWhereExists(function () {
-      this.select(db.raw('1'))
+      // whereLiveCustomer's unqualified columns bind to the innermost FROM
+      // (customers as lc); newsletter_subscribers has none of those columns.
+      whereLiveCustomer(this.select(db.raw('1'))
         .from('customers as lc')
-        .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))')
-        .whereNull('lc.deleted_at');
+        .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))'));
     });
   });
 }
@@ -113,7 +118,8 @@ function excludeArchivedCustomers(query) {
 // archived customer_id in place (linkToCustomer never refreshes a non-null
 // link). Personalization + touchpoints must not read the archived profile, so
 // resolve an EFFECTIVE live customer at load time — no writes, no mid-send
-// relink: the LIVE customer sharing the normalized email, deterministic:
+// relink: the LIVE customer (whereLiveCustomer scope) sharing the normalized
+// email, deterministic:
 // primary profile first (customers.is_primary_profile, 20260504000008), then
 // oldest created_at. Subscribers whose link is live keep it; archived links
 // with no live twin are already excluded by excludeArchivedCustomers and fall
@@ -131,7 +137,7 @@ async function resolveEffectiveCustomerIds(subscribers) {
   if (!emails.length) return out;
   const live = await db('customers')
     .whereRaw('LOWER(TRIM(email)) IN (' + emails.map(() => '?').join(',') + ')', emails)
-    .whereNull('deleted_at')
+    .modify(whereLiveCustomer)
     .select('id', 'email', 'is_primary_profile', 'created_at')
     .orderByRaw('is_primary_profile DESC NULLS LAST, created_at ASC, id ASC');
   const firstLiveByEmail = new Map();
@@ -249,11 +255,16 @@ async function loadPersonalizationContext(subscribers) {
   // Archived link + live same-email twin → read the twin's city/grass, and
   // expose the substitution via map.effectiveCustomerId so the send loop keys
   // its lookups (and touchpoints) off the live profile.
-  let effective = new Map((subscribers || []).map((s) => [s.id, s.customer_id || null]));
+  // FAIL CLOSED: if the resolver breaks we cannot tell which links are
+  // archived, so never fall back to the raw customer_id — abort the send like
+  // the other pre-send guards in sendCampaign (they throw; the caller marks
+  // the send failed and nothing reaches SendGrid).
+  let effective;
   try {
     effective = await resolveEffectiveCustomerIds(subscribers);
   } catch (err) {
-    logger.warn(`[newsletter] effective-customer resolution failed: ${err.message}`);
+    logger.error(`[newsletter] effective-customer resolution failed — aborting send (fail closed): ${err.message}`);
+    throw new Error(`newsletter effective-customer resolution failed: ${err.message}`);
   }
   map.effectiveCustomerId = (s) => effective.get(s.id) ?? (s.customer_id || null);
   const customerIds = Array.from(new Set(Array.from(effective.values()).filter(Boolean)));
@@ -300,11 +311,10 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
               .whereRaw('ac.id = newsletter_subscribers.customer_id')
               .whereNotNull('ac.deleted_at');
           }).whereExists(function () {
-            this.select(db.raw('1'))
+            whereLiveCustomer(this.select(db.raw('1'))
               .from('customers as lc')
               .whereIn('lc.id', customerIds)
-              .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))')
-              .whereNull('lc.deleted_at');
+              .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))'));
           });
         });
     });

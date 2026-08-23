@@ -18,6 +18,7 @@
 
 const { buildSubscriberQuery, excludeGloballySuppressed, excludeArchivedCustomers, resolveEffectiveCustomerIds, loadPersonalizationContext, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
 const db = require('../models/db');
+const { CUSTOMER_STAGES } = require('../services/customer-stages');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const {
@@ -121,7 +122,8 @@ describe('newsletter buildSubscriberQuery', () => {
   // Exact shape: (NOT EXISTS archived-linked OR EXISTS live same-email). A
   // shared email can span several customer profiles (20260417000010) and the
   // link pins ONE, so archiving one property must not silence the household.
-  const ARCHIVED_PAIR = /\(not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\) or exists \(select 1 from "customers" as "lc" where LOWER\(TRIM\(lc\.email\)\) = LOWER\(TRIM\(newsletter_subscribers\.email\)\) and "lc"\."deleted_at" is null\)\)/i;
+  const LIVE_LC = '"active" = (?:\\$\\d+|\\?) and "deleted_at" is null and "pipeline_stage" in \\((?:(?:\\$\\d+|\\?), )*(?:\\$\\d+|\\?)\\)';
+  const ARCHIVED_PAIR = new RegExp('\\(not exists \\(select 1 from "customers" as "ac" where ac\\.id = newsletter_subscribers\\.customer_id and "ac"\\."deleted_at" is not null\\) or exists \\(select 1 from "customers" as "lc" where LOWER\\(TRIM\\(lc\\.email\\)\\) = LOWER\\(TRIM\\(newsletter_subscribers\\.email\\)\\) and ' + LIVE_LC + '\\)\\)', 'i');
 
   test('always guards archived linked customers, rescued by a live same-email profile', () => {
     const { sql } = shapeOf(null);
@@ -139,18 +141,22 @@ describe('newsletter buildSubscriberQuery', () => {
   test('linked-archived subscriber with another LIVE profile on the same email is NOT excluded', () => {
     const customers = [
       { id: 1, email: ' Shared@Example.com', deleted_at: '2026-08-01' }, // archived, linked
-      { id: 2, email: 'shared@example.com ', deleted_at: null },         // live, same email
+      { id: 2, email: 'shared@example.com ', deleted_at: null, active: true, pipeline_stage: 'active_customer' }, // live, same email
       { id: 3, email: 'solo@example.com', deleted_at: '2026-08-01' },    // archived, no twin
+      { id: 4, email: 'lead@example.com', deleted_at: '2026-08-01' },    // archived
+      { id: 5, email: 'lead@example.com', deleted_at: null, active: true, pipeline_stage: 'new_lead' }, // same email but NOT a customer
     ];
     const norm = (e) => String(e).trim().toLowerCase();
     const keep = (sub) => {
       const archivedLinked = customers.some((c) => c.id === sub.customer_id && c.deleted_at != null);
-      const liveTwin = customers.some((c) => norm(c.email) === norm(sub.email) && c.deleted_at == null);
+      const liveTwin = customers.some((c) => norm(c.email) === norm(sub.email) && c.deleted_at == null && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage));
       return !archivedLinked || liveTwin;
     };
     expect(keep({ customer_id: 1, email: 'SHARED@example.com' })).toBe(true);
     expect(keep({ customer_id: 3, email: 'solo@example.com' })).toBe(false);
     expect(keep({ customer_id: null, email: 'lead@example.com' })).toBe(true);
+    // Same-email row in a non-customer stage (new_lead) is NOT a rescue.
+    expect(keep({ customer_id: 4, email: 'lead@example.com' })).toBe(false);
   });
 
   // Service-line segmentation on a pre-resolved customer-id set: a subscriber
@@ -159,7 +165,8 @@ describe('newsletter buildSubscriberQuery', () => {
   // archived-link EXISTS first).
   test('service-line whereIn lets an archived link segment on its live same-email twin', () => {
     const { sql, bindings } = buildSubscriberQuery(null, ['cust-live']).toSQL();
-    expect(sql).toMatch(/\("customer_id" in \((?:\$\d+|\?)\) or \(exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\) and exists \(select 1 from "customers" as "lc" where "lc"\."id" in \((?:\$\d+|\?)\) and LOWER\(TRIM\(lc\.email\)\) = LOWER\(TRIM\(newsletter_subscribers\.email\)\) and "lc"\."deleted_at" is null\)\)\)/i);
+    expect(sql).toMatch(new RegExp('\\("customer_id" in \\((?:\\$\\d+|\\?)\\) or \\(exists \\(select 1 from "customers" as "ac" where ac\\.id = newsletter_subscribers\\.customer_id and "ac"\\."deleted_at" is not null\\) and exists \\(select 1 from "customers" as "lc" where "lc"\\."id" in \\((?:\\$\\d+|\\?)\\) and LOWER\\(TRIM\\(lc\\.email\\)\\) = LOWER\\(TRIM\\(newsletter_subscribers\\.email\\)\\) and ' + LIVE_LC + '\\)\\)\\)', 'i'));
+    expect(bindings).toEqual(expect.arrayContaining([true, ...CUSTOMER_STAGES]));
     expect(bindings.filter((b) => b === 'cust-live')).toHaveLength(2);
   });
 

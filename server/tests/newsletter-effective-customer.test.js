@@ -18,6 +18,7 @@ jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn() }));
 
 const db = require('../models/db');
 const { resolveEffectiveCustomerIds, loadPersonalizationContext } = require('../services/newsletter-sender');
+const { whereLiveCustomer, CUSTOMER_STAGES } = require('../services/customer-stages');
 
 const ARCHIVED = 'cust-archived';
 const LIVE_PRIMARY = 'cust-live-primary';
@@ -28,7 +29,7 @@ const LEAD_SUB = { id: 'sub-3', email: 'lead@example.com', customer_id: null };
 
 function chain(rows) {
   const q = {};
-  ['whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'select', 'orderByRaw', 'where'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'select', 'orderByRaw', 'where', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
   return q;
 }
@@ -61,7 +62,18 @@ describe('resolveEffectiveCustomerIds', () => {
     // Deterministic ordering + normalized-email match are pushed to SQL.
     expect(twins.orderByRaw).toHaveBeenCalledWith('is_primary_profile DESC NULLS LAST, created_at ASC, id ASC');
     expect(twins.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) IN (?)', ['household@example.com']);
-    expect(twins.whereNull).toHaveBeenCalledWith('deleted_at');
+    // Canonical live-customer scope (active + not deleted + customer stage),
+    // reused from customer-stages rather than a local copy.
+    expect(twins.modify).toHaveBeenCalledWith(whereLiveCustomer);
+  });
+
+  test('same-email row in a non-customer stage (new_lead) is not a rescue — scope is delegated to whereLiveCustomer', () => {
+    const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), whereIn: jest.fn(() => q) };
+    whereLiveCustomer(q);
+    expect(q.where).toHaveBeenCalledWith('active', true);
+    expect(q.whereNull).toHaveBeenCalledWith('deleted_at');
+    expect(q.whereIn).toHaveBeenCalledWith('pipeline_stage', CUSTOMER_STAGES);
+    expect(CUSTOMER_STAGES).not.toContain('new_lead');
   });
 
   test('archived link with no live twin resolves to null (anti-join already excludes it)', async () => {
@@ -75,6 +87,13 @@ describe('resolveEffectiveCustomerIds', () => {
     const map = await resolveEffectiveCustomerIds([SOLO_SUB]);
     expect(map.get('sub-2')).toBe('cust-solo');
     expect(db).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('loadPersonalizationContext fails closed', () => {
+  test('resolver failure aborts (rejects) instead of falling back to the archived customer_id', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(loadPersonalizationContext([SUB])).rejects.toThrow(/effective-customer resolution failed/);
   });
 });
 
