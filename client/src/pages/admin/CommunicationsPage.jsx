@@ -1033,6 +1033,9 @@ function CallLogTab() {
       )
     )
       return;
+    // Last successfully-saved value (if any) so a rejected update can roll
+    // back to it rather than to whatever the initial load had.
+    const priorOverride = dispositions[callId];
     setDispositions((prev) => ({ ...prev, [callId]: value }));
     setSavingDisp(callId);
     try {
@@ -1052,7 +1055,8 @@ function CallLogTab() {
       // roll the dropdown back so the row doesn't read as tagged.
       setDispositions((prev) => {
         const next = { ...prev };
-        delete next[callId];
+        if (priorOverride === undefined) delete next[callId];
+        else next[callId] = priorOverride;
         return next;
       });
       alert("Tag failed: " + e.message);
