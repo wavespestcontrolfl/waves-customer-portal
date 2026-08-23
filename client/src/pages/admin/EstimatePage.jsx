@@ -42,6 +42,18 @@ import { palmPrefillAllowed } from "../../lib/lookupPrefill";
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
 
+// Form keys that change WHO/HOW a saved estimate is delivered but never its
+// pricing — the only edits saveAndSend may re-save in place without a fresh
+// Generate Estimate.
+const SEND_ONLY_RESAVE_KEYS = new Set([
+  "customerName",
+  "customerPhone",
+  "customerEmail",
+  "notes",
+  "scheduleSend",
+  "scheduledAt",
+]);
+
 const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "dethatchingCleanupLevel",
   "dethatchingDebrisRemovalIncluded",
@@ -1103,6 +1115,11 @@ function EstimateToolView() {
   // the address the form holds NOW before anything applies.
   const formAddressRef = useRef("");
   const [savedId, setSavedId] = useState(null);
+  // Inputs the saved row was written from. Any form/contact/estimate change
+  // after a save (new object identity — every setter produces one) means the
+  // stored row is stale, so SMS/Email-only must re-save in place before
+  // sending instead of dispatching the OLD row to the OLD contact.
+  const savedSnapshotRef = useRef(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -2334,8 +2351,10 @@ function EstimateToolView() {
         manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
-      const r = await fetch("/api/admin/estimates", {
-        method: "POST",
+      // Re-save revises the existing row in place (same PUT contract the V2
+      // builder uses) — a second POST would create a duplicate estimate.
+      const r = await fetch(savedId ? `/api/admin/estimates/${savedId}` : "/api/admin/estimates", {
+        method: savedId ? "PUT" : "POST",
         headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
@@ -2355,6 +2374,7 @@ function EstimateToolView() {
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
+      savedSnapshotRef.current = { form, estimate: E, customerSearch, satelliteUrl: satelliteData?.imageUrl || null };
       return id;
     } catch (e) {
       alert(e.message);
@@ -2544,7 +2564,32 @@ function EstimateToolView() {
         return;
       }
     }
-    const id = savedId || (await doSave());
+    const snap = savedSnapshotRef.current;
+    let id = savedId;
+    if (savedId && snap) {
+      const savedIsCurrent = snap.form === form
+        && snap.estimate === estimate
+        && snap.customerSearch === customerSearch
+        && snap.satelliteUrl === (satelliteData?.imageUrl || null);
+      if (!savedIsCurrent) {
+        // Most setters keep the generated `estimate` mounted, so a
+        // pricing-input edit after Save would re-save the NEW inputs
+        // against the OLD result. Only contact/delivery edits may reuse
+        // the generated pricing; anything else needs a regenerate first.
+        const changedKeys = Object.keys({ ...snap.form, ...form })
+          .filter((k) => snap.form[k] !== form[k]);
+        const pricingChanged = snap.estimate !== estimate
+          || snap.satelliteUrl !== (satelliteData?.imageUrl || null)
+          || changedKeys.some((k) => !SEND_ONLY_RESAVE_KEYS.has(k));
+        if (pricingChanged) {
+          alert('Inputs changed since this estimate was saved. Click "Generate Estimate" again before sending.');
+          return;
+        }
+        id = await doSave();
+      }
+    } else if (!savedId) {
+      id = await doSave();
+    }
     if (id) await doSend(id, method);
   }
 
