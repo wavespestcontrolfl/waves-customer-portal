@@ -43,6 +43,9 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+15550009999') }));
+jest.mock('../services/stripe', () => ({
+  resolveFailedInvoiceSavedCardChargeAttempt: jest.fn(async () => true),
+}));
 jest.mock('../services/pay-combined', () => ({
   isCombinedPiMetadata: jest.fn(() => false),
   clearPaymentIntentStamps: jest.fn(async () => 0),
@@ -52,6 +55,7 @@ const mockState = {};
 function resetMockState() {
   Object.assign(mockState, {
     stampedInvoices: [],
+    attemptRow: null, // stripe_invoice_charge_attempts candidate (saved-card lane)
     updates: [], // { table, wheres, patch }
   });
 }
@@ -67,7 +71,7 @@ function mockMakeBuilder(table) {
   });
   b.whereNull = (col) => { b._wheres.push({ whereNull: col }); return b; };
   b.whereNotNull = (col) => { b._wheres.push({ whereNotNull: col }); return b; };
-  b.first = async () => null;
+  b.first = async () => (table === 'stripe_invoice_charge_attempts' ? mockState.attemptRow : null);
   b.update = async (patch) => {
     mockState.updates.push({ table, wheres: b._wheres, patch });
     return 1;
@@ -87,9 +91,13 @@ jest.mock('../models/db', () => {
 
 const { _handlePaymentIntentCanceled: handleCanceled } = require('../routes/stripe-webhook');
 const { isCombinedPiMetadata, clearPaymentIntentStamps } = require('../services/pay-combined');
+const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
+const { savedCardAttemptMatchesPaymentIntent } = require('../routes/stripe-webhook-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
-const STAMPED = { id: 'inv-1', status: 'processing', stripe_payment_intent_id: 'pi_ach_1', ach_processing_notified_at: new Date() };
+const STAMPED = {
+  id: 'inv-1', customer_id: 'cust-1', status: 'processing', stripe_payment_intent_id: 'pi_ach_1', ach_processing_notified_at: new Date(),
+};
 
 const invoiceReverts = () => mockState.updates.filter((u) => u.table === 'invoices' && u.patch.stripe_payment_intent_id === null);
 const paymentUpdates = () => mockState.updates.filter((u) => u.table === 'payments');
@@ -98,6 +106,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   resetMockState();
   isCombinedPiMetadata.mockReturnValue(false);
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
+  resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(true);
 });
 
 test('single-invoice ACH PI canceled after processing: payment canceled, invoice reopened and unstamped', async () => {
@@ -136,4 +146,33 @@ test('combined PI keeps its revert AND the stamp/residual cleanup', async () => 
   expect(invoiceReverts()).toHaveLength(2);
   expect(clearPaymentIntentStamps).toHaveBeenCalledTimes(1);
   expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test('saved-card PI canceled after processing: the attempt claim is released (credit returned) instead of the generic reopen', async () => {
+  // chargeInvoiceWithSavedCard leaves a claimed stripe_invoice_charge_attempts
+  // row; reopening the invoice around it would leave the claim fencing every
+  // later collection and strand any reserved credit. The resolver reopens +
+  // unbinds the invoice itself, so the generic revert must not double up.
+  mockState.stampedInvoices = [{ ...STAMPED }];
+  mockState.attemptRow = { id: 'att-1', invoice_id: 'inv-1', status: 'claimed', resolved_at: null, stripe_payment_intent_id: 'pi_ach_1' };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
+
+  await handleCanceled({ id: 'pi_ach_1', metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-1' } });
+
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+    attemptId: 'att-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi_ach_1',
+  }));
+  expect(invoiceReverts()).toHaveLength(0);
+  expect(paymentUpdates()).toHaveLength(1);
+});
+
+test('saved-card PI whose attempt was already resolved falls through to the generic reopen', async () => {
+  mockState.stampedInvoices = [{ ...STAMPED }];
+  mockState.attemptRow = { id: 'att-1', invoice_id: 'inv-1', status: 'claimed', resolved_at: null, stripe_payment_intent_id: 'pi_ach_1' };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
+  resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(false);
+
+  await handleCanceled({ id: 'pi_ach_1', metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-1' } });
+
+  expect(invoiceReverts()).toHaveLength(1);
 });

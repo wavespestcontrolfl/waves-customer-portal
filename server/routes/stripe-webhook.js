@@ -5860,6 +5860,27 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   const canceledStamped = await db('invoices')
     .where({ stripe_payment_intent_id: piId, status: 'processing' });
   for (const stampedRow of canceledStamped) {
+    // A saved-card (admin_card_on_file) PI holds an unresolved
+    // stripe_invoice_charge_attempts claim and may have reserved account
+    // credit — the generic reopen below would leave that claim fencing
+    // every later collection (assertNoInvoiceChargeReconciliationPending)
+    // and strand the credit. Same release as the failure path: the
+    // resolver reopens + unbinds the invoice itself.
+    const canceledSavedCardAttempt = await findMatchingSavedCardAttempt(db, stampedRow, paymentIntent);
+    if (canceledSavedCardAttempt) {
+      const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
+      const attemptResolved = await resolveFailedInvoiceSavedCardChargeAttempt({
+        attemptId: canceledSavedCardAttempt.id,
+        invoiceId: stampedRow.id,
+        customerId: stampedRow.customer_id,
+        stripePaymentIntentId: piId,
+        failureMessage: 'PaymentIntent canceled before settling',
+      });
+      if (attemptResolved) {
+        logger.info(`[stripe-webhook] Released saved-card attempt ${canceledSavedCardAttempt.id} for canceled PI ${piId}`);
+        continue;
+      }
+    }
     await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
       status: nextInvoiceStatusAfterFailedPayment(stampedRow),
       paid_at: null,
