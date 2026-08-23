@@ -3791,13 +3791,16 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // subscriber link must move to the live same-email twin (if any) in the
     // same commit that sets deleted_at, or the sender's archived-customer
     // anti-join silences the household between the two writes.
-    const { relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
+    // Keyed on the archived customer_id, not on customer.email: a subscriber's
+    // stored email is a signup-time snapshot that may no longer match the
+    // customer's current email, and those rows must move too (each to the
+    // twin of its OWN email).
+    const { relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
     const relink = await db.transaction(async (trx) => {
       await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
-      const result = await relinkSubscribersForEmail(trx, customer.email);
+      const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
       await auditCustomerMutation(req, 'customer.archive', req.params.id, {
         previousDeletedAt: customer.deleted_at || null,
-        newsletterRelinkedTo: result.winnerId,
         newsletterRelinked: result.relinked,
       }, true, trx);
       return result;

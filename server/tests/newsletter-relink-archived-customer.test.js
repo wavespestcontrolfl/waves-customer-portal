@@ -1,28 +1,44 @@
 /**
- * One twin picker (liveTwinSubselect) for first-link and archive-time relink:
- * normalized-email match, canonical live-customer scope, deterministic order.
+ * One twin picker (liveTwinSubselect) for first-link and archive/restore
+ * relink: normalized-email match, ARCHIVED-only scope (deleted_at IS NULL —
+ * deliberately not whereLiveCustomer, so link semantics stay exactly what they
+ * were minus archived rows), deterministic order.
  */
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(async () => ({ rowCount: 1 })); return db; });
 jest.mock('../services/newsletter-sunset', () => ({ REENGAGEMENT_TAG: 'reengagement_due' }));
 
 const db = require('../models/db');
-const { liveTwinSubselect, linkToCustomer, linkManyToCustomers, relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
-const { CUSTOMER_STAGES } = require('../services/customer-stages');
+const {
+  liveTwinSubselect, linkToCustomer, linkManyToCustomers,
+  relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer,
+} = require('../services/newsletter-subscribers');
 
-const SCOPE = /c\.active = true\s+AND c\.deleted_at IS NULL\s+AND c\.pipeline_stage IN \((\?, )*\?\)/;
+const SCOPE = /AND c\.deleted_at IS NULL/;
+// Lifecycle predicates must NOT appear: customer_id is a LINK, and lead-stage
+// profiles have always been valid link targets.
+const NO_LIFECYCLE = [/c\.active = true/, /c\.pipeline_stage/];
 const ORDER = /ORDER BY c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC\s+LIMIT 1\)/;
 
 beforeEach(() => jest.clearAllMocks());
 
 describe('liveTwinSubselect', () => {
-  test('normalized email match + canonical scope + deterministic order, stages bound from customer-stages', () => {
+  test('normalized email match + archived-only scope + deterministic order', () => {
     const { sql, bindings } = liveTwinSubselect('?', { excludeCustomerId: 'arch-1' });
     expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \?/);
     expect(sql).toMatch(/c\.id <> \?/);
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
-    expect(bindings).toEqual(['arch-1', ...CUSTOMER_STAGES]);
-    expect(CUSTOMER_STAGES).not.toContain('new_lead');
+    // Only the excludeCustomerId binding — no stage list to bind any more.
+    expect(bindings).toEqual(['arch-1']);
+  });
+
+  test('a lead-stage (new_lead / contacted) profile is STILL a valid link target — the picker filters archived rows only', () => {
+    const { sql, bindings } = liveTwinSubselect('?');
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
+    expect(bindings).toEqual([]);
+    // Every consumer of the picker inherits that: no lifecycle predicate
+    // anywhere in the link path, so buildSubscriberQuery's customers/leads
+    // audiences (customer_id IS [NOT] NULL) keep their pre-PR meaning.
   });
 });
 
@@ -36,7 +52,8 @@ describe('linkToCustomer picks the LIVE twin', () => {
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
     expect(sql).toMatch(/newsletter_subscribers\.email = \?\s+AND newsletter_subscribers\.customer_id IS NULL/);
-    expect(bindings).toEqual(['household@example.com', ...CUSTOMER_STAGES, 'household@example.com']);
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
+    expect(bindings).toEqual(['household@example.com', 'household@example.com']);
   });
 
   test('only an archived profile matches → subselect yields no row, UPDATE is a no-op (stays unlinked)', async () => {
@@ -64,9 +81,8 @@ describe('linkManyToCustomers (CSV bulk import) uses the same picker, set-based'
     // candidate at all, so an email whose only profile is archived matches
     // nothing and its subscriber row keeps customer_id NULL.
     expect(sql).toMatch(/DISTINCT ON \(LOWER\(TRIM\(c\.email\)\)\)/);
-    expect(sql).toMatch(/c\.active = true/);
     expect(sql).toMatch(/c\.deleted_at IS NULL/);
-    expect(sql).toMatch(/c\.pipeline_stage IN \((\?, )*\?\)/);
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
     expect(sql).toMatch(/ORDER BY LOWER\(TRIM\(c\.email\)\), c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC/);
     expect(sql).toMatch(/WHERE LOWER\(TRIM\(ns\.email\)\) = t\.email_key/);
     // First link only — never re-points an already-linked subscriber.
@@ -74,7 +90,6 @@ describe('linkManyToCustomers (CSV bulk import) uses the same picker, set-based'
     // Emails normalized + deduped, and bound (never interpolated).
     expect(bindings).toEqual([
       ['live@example.com', 'archived-only@example.com'],
-      ...CUSTOMER_STAGES,
       ['live@example.com', 'archived-only@example.com'],
     ]);
   });
@@ -83,6 +98,41 @@ describe('linkManyToCustomers (CSV bulk import) uses the same picker, set-based'
     expect(await linkManyToCustomers([])).toBe(0);
     expect(await linkManyToCustomers([null, '   '])).toBe(0);
     expect(db.raw).not.toHaveBeenCalled();
+  });
+});
+
+describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBSCRIBER email', () => {
+  function fakeTrx(rowCount) {
+    const trx = jest.fn();
+    trx.raw = jest.fn(async () => ({ rowCount }));
+    return trx;
+  }
+
+  test('a subscriber whose stored email no longer matches the archived customer email is still relinked — to the twin of ITS OWN email', async () => {
+    const trx = fakeTrx(1);
+    const out = await relinkSubscribersFromArchivedCustomer(trx, 'archived-1');
+    expect(out).toEqual({ relinked: 1 });
+    const [sql, bindings] = trx.raw.mock.calls[0];
+    // Rows are found by the archived LINK, never by the customer's current
+    // email — that is what catches the stale snapshot.
+    expect(sql).toMatch(/WHERE ns\.customer_id = \?/);
+    expect(sql).toMatch(/SELECT LOWER\(TRIM\(x\.email\)\) FROM newsletter_subscribers x WHERE x\.customer_id = \?/);
+    // …and each row moves to the winner for ITS OWN normalized email.
+    expect(sql).toMatch(/DISTINCT ON \(LOWER\(TRIM\(c\.email\)\)\)/);
+    expect(sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = t\.email_key/);
+    // Same scope + order as the picker; the archived profile is not a candidate.
+    expect(sql).toMatch(/c\.deleted_at IS NULL/);
+    expect(sql).toMatch(/c\.id <> \?/);
+    expect(sql).toMatch(/ORDER BY LOWER\(TRIM\(c\.email\)\), c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC/);
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
+    expect(bindings).toEqual(['archived-1', 'archived-1', 'archived-1']);
+  });
+
+  test('no non-archived profile for those emails → nothing moves; no id → no query', async () => {
+    const trx = fakeTrx(0);
+    expect(await relinkSubscribersFromArchivedCustomer(trx, 'archived-2')).toEqual({ relinked: 0 });
+    expect(await relinkSubscribersFromArchivedCustomer(trx, null)).toEqual({ relinked: 0 });
+    expect(trx.raw).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -105,7 +155,7 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \?/);
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
-    expect(bindings).toEqual(['household@example.com', ...CUSTOMER_STAGES]);
+    expect(bindings).toEqual(['household@example.com']);
     expect(subs.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['household@example.com']);
     expect(subs.whereNotNull).toHaveBeenCalledWith('customer_id');
     expect(subs.whereNot).toHaveBeenCalledWith('customer_id', 'secondary-1');
