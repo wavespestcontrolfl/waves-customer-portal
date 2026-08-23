@@ -1323,15 +1323,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (!existingCustomer) customerId = null;
     }
 
-    const needsCustomer = !customerId;
-    const fallbackName = needsCustomer
-      ? (lead.first_name && lead.first_name.trim()) ||
-        (lead.email ? String(lead.email).split('@')[0] : '') ||
-        'New Lead'
-      : null;
-    const code = needsCustomer
-      ? 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('')
-      : null;
+    // Provisional — re-derived from the row-locked re-read inside the
+    // transaction below (a concurrent convert can have created the customer
+    // between this read and the lock).
+    let needsCustomer = !customerId;
+    const fallbackName =
+      (lead.first_name && lead.first_name.trim()) ||
+      (lead.email ? String(lead.email).split('@')[0] : '') ||
+      'New Lead';
+    const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     // Workflow columns vary by environment — probe before the transaction so the
     // insert only sets columns the live schema actually has.
@@ -1343,6 +1343,36 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
+      // Row-lock the lead FIRST so two concurrent converts (double-submit /
+      // retry — the client guard is per-tab) serialize here. The second one
+      // sees the first's conversion under the lock and stops instead of
+      // inserting a second customer + visit that the lead can never point at.
+      const lockedLead = await trx('leads')
+        .where({ id: lead.id })
+        .whereNull('deleted_at')
+        .forUpdate()
+        .first('customer_id', 'converted_at');
+      if (!lockedLead) {
+        const gone = new Error('Lead was deleted while booking — appointment not created');
+        gone.status = 409;
+        throw gone;
+      }
+      if (!lead.converted_at && lockedLead.converted_at) {
+        const dup = new Error('This lead was already converted by a concurrent request — reload the lead.');
+        dup.statusCode = 409;
+        dup.status = 409;
+        dup.isOperational = true;
+        dup.code = 'LEAD_ALREADY_CONVERTED';
+        dup.customer_id = lockedLead.customer_id || null;
+        throw dup;
+      }
+      if (!customerId && lockedLead.customer_id) {
+        // Linked since the pre-transaction read — reuse, never re-create.
+        existingCustomer = await trx('customers').where({ id: lockedLead.customer_id }).whereNull('deleted_at').first();
+        if (existingCustomer) customerId = existingCustomer.id;
+      }
+      needsCustomer = !customerId;
+
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the appointment
       // insert below resolves comms recipients LIVE from the customer row —
       // serialize against a concurrent merge-undo BEFORE this trx's
@@ -1370,6 +1400,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           lastName: lead.last_name || '',
           phone: lead.phone || '',
           email: lead.email || null,
+          // Email-match opt-in: a lead whose email belongs to a live customer
+          // (different/blank phone) attaches as an additional property.
+          matchEmail: true,
         });
         const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
@@ -1452,8 +1485,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // same transaction so the conversion can't commit without the appointment).
       // Re-gated on deleted_at inside the transaction: the pre-transaction read
       // can race a concurrent soft delete, and a deleted lead must not book —
-      // 0 rows updated rolls the whole booking back.
-      const converted = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
+      // 0 rows updated rolls the whole booking back. Also gated on converted_at
+      // being unchanged since the locked read (belt-and-braces for the race
+      // guard above): a first-time conversion must still be unconverted.
+      let convertQuery = trx('leads').where('id', req.params.id).whereNull('deleted_at');
+      if (!lead.converted_at) convertQuery = convertQuery.whereNull('converted_at');
+      const converted = await convertQuery.update({
         status: 'won',
         customer_id: customerId,
         converted_at: new Date(),
@@ -1461,9 +1498,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         updated_at: new Date(),
       });
       if (!converted) {
-        const gone = new Error('Lead was deleted while booking — appointment not created');
-        gone.status = 409;
-        throw gone;
+        const dup = new Error('Lead was deleted or already converted while booking — appointment not created');
+        dup.statusCode = 409;
+        dup.status = 409;
+        dup.isOperational = true;
+        dup.code = 'LEAD_ALREADY_CONVERTED';
+        dup.customer_id = lockedLead.customer_id || null;
+        throw dup;
       }
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
@@ -1530,7 +1571,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'LEAD_ALREADY_CONVERTED') {
+      // Surface the winner's customer so the client can land on it instead of
+      // retrying (the generic operational handler drops extra fields).
+      return res.status(409).json({ error: err.message, code: err.code, customer_id: err.customer_id || null });
+    }
+    next(err);
+  }
 });
 
 // =========================================================================

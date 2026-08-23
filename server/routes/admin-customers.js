@@ -1502,7 +1502,13 @@ async function attachMatchedCustomerToAccount(trx, customer) {
   return accountId;
 }
 
-async function findAccountByContact(trx, { phone }) {
+// Phone-first account match (last-10 digits). `matchEmail` (default OFF —
+// every existing caller stays phone-only) additionally matches a normalized
+// email against live customers when the phone finds nothing; the lead→customer
+// conversion opts in so a lead whose email belongs to an existing account
+// attaches as an additional property instead of splitting history/autopay
+// across a second primary profile. Same return shape either way.
+async function findAccountByContact(trx, { phone, email, matchEmail = false }) {
   const digits = phoneLast10(phone);
   if (digits) {
     const byCustomerPhone = await trx('customers')
@@ -1514,6 +1520,20 @@ async function findAccountByContact(trx, { phone }) {
     if (byCustomerPhone) {
       const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
       return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
+    }
+  }
+
+  const normalizedEmail = matchEmail ? cleanEmail(email) : null;
+  if (normalizedEmail && isEmailLike(normalizedEmail)) {
+    const byCustomerEmail = await trx('customers')
+      .whereRaw('LOWER(TRIM(COALESCE(email, \'\'))) = ?', [normalizedEmail])
+      .whereNull('deleted_at')
+      .orderBy('is_primary_profile', 'desc')
+      .orderBy('created_at', 'asc')
+      .first();
+    if (byCustomerEmail) {
+      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerEmail);
+      return { accountId, existingCustomer: { ...byCustomerEmail, account_id: accountId }, matchType: 'email' };
     }
   }
 
@@ -4709,6 +4729,7 @@ router._private = {
 };
 
 router.ensureCustomerAccount = ensureCustomerAccount;
+router.findAccountByContact = findAccountByContact;
 router.createDefaultCustomerRows = createDefaultCustomerRows;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file
