@@ -377,11 +377,7 @@ function proofBannerText(recipientCount) {
 }
 
 async function countRecipients(send) {
-  const customerIds = await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter);
-  const row = await NewsletterSender.buildSubscriberQuery(send.segment_filter, customerIds)
-    .count('* as c')
-    .first();
-  return Number(row?.c || 0);
+  return NewsletterSender.countSegmentRecipients(send.segment_filter);
 }
 
 async function notifyProof(type, payload) {

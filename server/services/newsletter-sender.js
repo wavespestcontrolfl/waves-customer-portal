@@ -242,6 +242,57 @@ async function resolveSegmentCustomerIds(segmentFilter) {
   return profiles.map((p) => p.customer_id).filter(Boolean);
 }
 
+// Archival between recipient selection and payload build (or before a resume)
+// must not send. Re-resolves the effective customer for the batch and drops
+// every subscriber whose LINK is archived with no live twin (resolver null for
+// a linked row). Leads (customer_id NULL) pass through. Resolver failure
+// propagates — fail closed, same as loadPersonalizationContext.
+async function dropArchivedAfterSelection(subscribers) {
+  const effective = await resolveEffectiveCustomerIds(subscribers);
+  const dropped = [];
+  const kept = [];
+  for (const s of subscribers || []) {
+    const archivedNoTwin = !!s.customer_id && effective.has(s.id) && effective.get(s.id) === null;
+    (archivedNoTwin ? dropped : kept).push(s);
+  }
+  return { kept, dropped, effective };
+}
+
+/**
+ * The ONE audience mechanism for the send path and every recipient count:
+ * service-line segmentation runs against each subscriber's EFFECTIVE live
+ * customer (resolveEffectiveCustomerIds), never the pinned customer_id — so
+ * an archived link segments on its live same-email twin, and a twin that does
+ * not match the segment cannot ride in on the outer archive rescue. Live links
+ * behave exactly as before (effective id === customer_id).
+ *
+ * Returns the subscriber rows (select *). Malformed service-line intent →
+ * [] (fail closed, same contract as resolveSegmentCustomerIds).
+ */
+async function selectSegmentRecipients(segmentFilter) {
+  const segmentIds = await resolveSegmentCustomerIds(segmentFilter);
+  if (Array.isArray(segmentIds) && segmentIds.length === 0) return [];
+  const rows = await buildSubscriberQuery(segmentFilter);
+  if (segmentIds === null) return rows; // no service-line intent
+  const allowed = new Set(segmentIds);
+  const effective = await resolveEffectiveCustomerIds(rows);
+  return rows.filter((s) => {
+    const id = effective.has(s.id) ? effective.get(s.id) : (s.customer_id || null);
+    return !!id && allowed.has(id);
+  });
+}
+
+// Recipient count through the same mechanism. Without service-line intent the
+// count stays a single SQL COUNT (no row load).
+async function countSegmentRecipients(segmentFilter) {
+  const segmentIds = await resolveSegmentCustomerIds(segmentFilter);
+  if (segmentIds === null) {
+    const row = await buildSubscriberQuery(segmentFilter).count('* as c').first();
+    return Number(row?.c || 0);
+  }
+  return (await selectSegmentRecipients(segmentFilter)).length;
+}
+
 /**
  * Batch-load per-recipient personalization (city + grass-type label) for the
  * linked customers in a send. Reuses the canonical grass source
@@ -250,7 +301,7 @@ async function resolveSegmentCustomerIds(segmentFilter) {
  * Map<customer_id, { city, grassLabel }>. Never throws — missing data falls
  * back to defaults at substitution time.
  */
-async function loadPersonalizationContext(subscribers) {
+async function loadPersonalizationContext(subscribers, { effective: preResolved } = {}) {
   const map = new Map();
   // Archived link + live same-email twin → read the twin's city/grass, and
   // expose the substitution via map.effectiveCustomerId so the send loop keys
@@ -259,14 +310,16 @@ async function loadPersonalizationContext(subscribers) {
   // archived, so never fall back to the raw customer_id — abort the send like
   // the other pre-send guards in sendCampaign (they throw; the caller marks
   // the send failed and nothing reaches SendGrid).
-  let effective;
+  let effective = preResolved;
   try {
-    effective = await resolveEffectiveCustomerIds(subscribers);
+    if (!effective) effective = await resolveEffectiveCustomerIds(subscribers);
   } catch (err) {
     logger.error(`[newsletter] effective-customer resolution failed — aborting send (fail closed): ${err.message}`);
     throw new Error(`newsletter effective-customer resolution failed: ${err.message}`);
   }
-  map.effectiveCustomerId = (s) => effective.get(s.id) ?? (s.customer_id || null);
+  // has/get — the resolver's explicit null (archived, no live twin) must never
+  // collapse back to the archived customer_id.
+  map.effectiveCustomerId = (s) => (effective.has(s.id) ? effective.get(s.id) : (s.customer_id || null));
   const customerIds = Array.from(new Set(Array.from(effective.values()).filter(Boolean)));
   if (!customerIds.length) return map;
   try {
@@ -291,32 +344,20 @@ async function loadPersonalizationContext(subscribers) {
 
 /**
  * @param {object|null} segmentFilter
- * @param {string[]|null} [customerIds] pre-resolved set from
- *   resolveSegmentCustomerIds(); null = no service-line constraint.
+ * @param {string[]|null} [customerIds] OPTIONAL direct customer-id constraint.
+ *   The send path and recipient counts do NOT pass this — they segment on
+ *   effective ids in selectSegmentRecipients(). When passed, a row matches
+ *   only if its pinned customer_id is in the set AND that customer is live
+ *   (whereLiveCustomer) — an archived link never matches through SQL.
  */
 function buildSubscriberQuery(segmentFilter, customerIds = null) {
   let q = excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' })));
 
-  // Service-line / membership constraint, pre-resolved to customer ids.
   if (Array.isArray(customerIds)) {
-    q = q.where(function () {
-      this.whereIn('customer_id', customerIds)
-        // Archived link + live same-email twin: segment on the TWIN's service
-        // lines (the effective profile), never the archived one. Scoped to
-        // archived links only so a live link keeps exact legacy matching.
-        .orWhere(function () {
-          this.whereExists(function () {
-            this.select(db.raw('1'))
-              .from('customers as ac')
-              .whereRaw('ac.id = newsletter_subscribers.customer_id')
-              .whereNotNull('ac.deleted_at');
-          }).whereExists(function () {
-            whereLiveCustomer(this.select(db.raw('1'))
-              .from('customers as lc')
-              .whereIn('lc.id', customerIds)
-              .whereRaw('LOWER(TRIM(lc.email)) = LOWER(TRIM(newsletter_subscribers.email))'));
-          });
-        });
+    q = q.whereIn('customer_id', customerIds).whereExists(function () {
+      whereLiveCustomer(this.select(db.raw('1'))
+        .from('customers as lk')
+        .whereRaw('lk.id = newsletter_subscribers.customer_id'));
     });
   }
 
@@ -536,8 +577,8 @@ async function sendCampaign(sendId, opts = {}) {
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
   if (!opts.force) {
-    const c = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
-    if (Number(c?.c || 0) === 0) {
+    const c = await countSegmentRecipients(send.segment_filter);
+    if (c === 0) {
       const err = new Error('segment matches 0 active subscribers');
       err.code = 'EMPTY_SEGMENT';
       throw err;
@@ -592,7 +633,7 @@ async function sendCampaign(sendId, opts = {}) {
   // insert. Resume mode with existing rows skips this entirely so a changed
   // segment or new subscribers cannot expand an old campaign's audience.
   if (!opts.existingDeliveriesOnly) {
-    subscribers = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter));
+    subscribers = await selectSegmentRecipients(send.segment_filter);
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
     const deliveryRows = subscribers.map((s) => ({
       send_id: send.id,
@@ -629,11 +670,19 @@ async function sendCampaign(sendId, opts = {}) {
   // Per-recipient idempotency: first sends target newly queued rows; resume
   // sends only retry explicitly transient rows. Provider terminal rows like
   // bounced/complained are not re-mailed.
-  const subscribersToSend = subscribers.filter((s) => {
+  let subscribersToSend = subscribers.filter((s) => {
     const d = deliveryBySub.get(s.id);
     if (opts.existingDeliveriesOnly && !d) return false;
     return !d || isRetryableDelivery(d);
   });
+  // Archival after selection / before resume: never build a payload for a
+  // subscriber whose link is archived with no live twin. Their delivery rows
+  // stay queued (not attempted) and are re-evaluated by the same rule on resume.
+  const archivedCheck = await dropArchivedAfterSelection(subscribersToSend);
+  if (archivedCheck.dropped.length) {
+    logger.info(`[newsletter] send ${send.id} dropping ${archivedCheck.dropped.length} recipient(s) whose linked customer was archived after selection`);
+    subscribersToSend = archivedCheck.kept;
+  }
   const recipientCount = opts.existingDeliveriesOnly ? existingDeliveries.length : subscribers.length;
   const skippedAlreadySent = recipientCount - subscribersToSend.length;
   if (skippedAlreadySent > 0) {
@@ -687,7 +736,7 @@ async function sendCampaign(sendId, opts = {}) {
 
   // Per-recipient city + grass-type for the {{city}} / {{grass-type}} tokens.
   // Batch-loaded once; resolved per recipient in the substitutions map below.
-  const personalizationByCustomer = await loadPersonalizationContext(subscribersToSend);
+  const personalizationByCustomer = await loadPersonalizationContext(subscribersToSend, { effective: archivedCheck.effective });
   // Effective (live) customer per subscriber — see resolveEffectiveCustomerIds.
   const effectiveIdOf = typeof personalizationByCustomer.effectiveCustomerId === 'function'
     ? personalizationByCustomer.effectiveCustomerId
@@ -1143,7 +1192,7 @@ async function processScheduledSends() {
           ? row
           : { ...row, newsletter_type: FLAGSHIP_TYPE_KEY };
         const recipientCount = Number(
-          (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
+          await countSegmentRecipients(row.segment_filter)
         );
         const lockedPrices = await lockedPricesForSend(typedRow, db);
         const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
@@ -1259,4 +1308,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, resolveEffectiveCustomerIds, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, resolveEffectiveCustomerIds, selectSegmentRecipients, countSegmentRecipients, dropArchivedAfterSelection, markEventsFeatured, sendingClaimIsStale };

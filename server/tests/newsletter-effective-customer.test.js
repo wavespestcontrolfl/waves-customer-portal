@@ -15,9 +15,14 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: () => false, unsubscribeUrl: () => '', sendOne: jest.fn() }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn() }));
+jest.mock('../services/newsletter-audience-profiles', () => ({
+  selectAudience: jest.fn(async () => []),
+  SELLABLE_LINES: ['lawn', 'pest', 'mosquito', 'termite', 'irrigation', 'tree_shrub'],
+}));
 
 const db = require('../models/db');
-const { resolveEffectiveCustomerIds, loadPersonalizationContext } = require('../services/newsletter-sender');
+const { selectAudience } = require('../services/newsletter-audience-profiles');
+const { resolveEffectiveCustomerIds, loadPersonalizationContext, selectSegmentRecipients, dropArchivedAfterSelection } = require('../services/newsletter-sender');
 const { whereLiveCustomer, CUSTOMER_STAGES } = require('../services/customer-stages');
 
 const ARCHIVED = 'cust-archived';
@@ -36,11 +41,17 @@ function chain(rows) {
 
 // Ordered customers-table responses: 1) archived check, 2) live twins in the
 // DB's ORDER BY (primary first, then created_at ASC), 3) personalization rows.
-function routeCustomers(queries) {
+function routeCustomers(queries, { subscribers = null } = {}) {
   let n = 0;
   db.mockImplementation((table) => {
     if (table === 'customers') { const q = queries[n++] || chain([]); return q; }
     if (table === 'customer_turf_profiles') return chain([]);
+    if (table === 'newsletter_subscribers' && subscribers) {
+      const q = chain(subscribers);
+      q.whereNotExists = jest.fn(() => q);
+      q.whereExists = jest.fn(() => q);
+      return q;
+    }
     throw new Error(`unexpected table ${table}`);
   });
 }
@@ -115,5 +126,67 @@ describe('loadPersonalizationContext with an archived link', () => {
     expect(ctx.has(ARCHIVED)).toBe(false);
     expect(ctx.get(LIVE_PRIMARY)).toEqual(expect.objectContaining({ city: 'Bradenton' }));
     expect(ctx.get(LIVE_PRIMARY).grassLabel).toMatch(/zoysia/i);
+  });
+});
+
+// Segmentation runs on EFFECTIVE ids: resolve first, then match the
+// service-line audience. The pinned (archived) id never decides membership.
+describe('selectSegmentRecipients segments on the effective live customer', () => {
+  const SEG = { has_service: ['lawn'] };
+  const twins = () => chain([{ id: LIVE_PRIMARY, email: 'household@example.com', is_primary_profile: true, created_at: '2026-02-01' }]);
+
+  test('archived link whose live twin matches the segment → included', async () => {
+    selectAudience.mockResolvedValueOnce([{ customer_id: LIVE_PRIMARY }]);
+    routeCustomers([chain([{ id: ARCHIVED }]), twins()], { subscribers: [SUB] });
+    const rows = await selectSegmentRecipients(SEG);
+    expect(rows.map((r) => r.id)).toEqual(['sub-1']);
+  });
+
+  test('archived link whose live twin does NOT match the segment → excluded (even though the archived id would)', async () => {
+    selectAudience.mockResolvedValueOnce([{ customer_id: ARCHIVED }, { customer_id: 'cust-other' }]);
+    routeCustomers([chain([{ id: ARCHIVED }]), twins()], { subscribers: [SUB] });
+    const rows = await selectSegmentRecipients(SEG);
+    expect(rows).toEqual([]);
+  });
+
+  test('live link unchanged: in the audience → included, not in it → excluded; leads never match a service-line segment', async () => {
+    selectAudience.mockResolvedValueOnce([{ customer_id: 'cust-solo' }]);
+    routeCustomers([chain([])], { subscribers: [SOLO_SUB, LEAD_SUB, { id: 'sub-4', email: 'x@example.com', customer_id: 'cust-x' }] });
+    const rows = await selectSegmentRecipients(SEG);
+    expect(rows.map((r) => r.id)).toEqual(['sub-2']);
+  });
+
+  test('no service-line intent → plain query rows, no resolution', async () => {
+    routeCustomers([], { subscribers: [SUB, LEAD_SUB] });
+    const rows = await selectSegmentRecipients(null);
+    expect(rows.map((r) => r.id)).toEqual(['sub-1', 'sub-3']);
+    expect(selectAudience).not.toHaveBeenCalled();
+  });
+});
+
+// Archival AFTER recipient selection (or before a resume): the subscriber is
+// removed from the batch before any payload/personalization/touchpoint.
+describe('dropArchivedAfterSelection', () => {
+  test('archived link with no live twin is dropped; live link and lead kept; personalization never loads the archived id', async () => {
+    routeCustomers([chain([{ id: ARCHIVED }]), chain([])]);
+    const { kept, dropped, effective } = await dropArchivedAfterSelection([SUB, SOLO_SUB, LEAD_SUB]);
+    expect(dropped.map((s) => s.id)).toEqual(['sub-1']);
+    expect(kept.map((s) => s.id)).toEqual(['sub-2', 'sub-3']);
+    expect(effective.get('sub-1')).toBeNull();
+
+    // The send loop builds payload/touchpoints from `kept` only; the
+    // personalization load receives the same pre-resolved map and must not
+    // touch the archived id — and must not collapse null back to it.
+    const personalization = chain([{ id: 'cust-solo', city: 'Sarasota', lawn_type: null }]);
+    routeCustomers([personalization]);
+    const ctx = await loadPersonalizationContext(kept, { effective });
+    expect(personalization.whereIn).toHaveBeenCalledWith('id', ['cust-solo']);
+    expect(ctx.effectiveCustomerId(SUB)).toBeNull();
+    expect(ctx.effectiveCustomerId(SOLO_SUB)).toBe('cust-solo');
+  });
+
+  test('resolver failure propagates (fail closed)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(dropArchivedAfterSelection([SUB])).rejects.toThrow('db down');
   });
 });

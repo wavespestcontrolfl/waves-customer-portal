@@ -163,11 +163,14 @@ describe('newsletter buildSubscriberQuery', () => {
   // whose LINK is archived matches through its live same-email twin's ids;
   // a live link keeps exact whereIn matching (the OR branch requires the
   // archived-link EXISTS first).
-  test('service-line whereIn lets an archived link segment on its live same-email twin', () => {
+  // Direct customer-id constraint (optional, NOT used by the send path — that
+  // segments on effective ids in selectSegmentRecipients): pinned link must be
+  // in the set AND live. No same-email OR branch lives in SQL any more.
+  test('direct customerIds constraint requires the pinned link to be a live customer', () => {
     const { sql, bindings } = buildSubscriberQuery(null, ['cust-live']).toSQL();
-    expect(sql).toMatch(new RegExp('\\("customer_id" in \\((?:\\$\\d+|\\?)\\) or \\(exists \\(select 1 from "customers" as "ac" where ac\\.id = newsletter_subscribers\\.customer_id and "ac"\\."deleted_at" is not null\\) and exists \\(select 1 from "customers" as "lc" where "lc"\\."id" in \\((?:\\$\\d+|\\?)\\) and LOWER\\(TRIM\\(lc\\.email\\)\\) = LOWER\\(TRIM\\(newsletter_subscribers\\.email\\)\\) and ' + LIVE_LC + '\\)\\)\\)', 'i'));
-    expect(bindings).toEqual(expect.arrayContaining([true, ...CUSTOMER_STAGES]));
-    expect(bindings.filter((b) => b === 'cust-live')).toHaveLength(2);
+    expect(sql).toMatch(new RegExp('"customer_id" in \\((?:\\$\\d+|\\?)\\) and exists \\(select 1 from "customers" as "lk" where lk\\.id = newsletter_subscribers\\.customer_id and ' + LIVE_LC + '\\)', 'i'));
+    expect(sql).not.toMatch(/"lc"\."id" in/);
+    expect(bindings).toEqual(expect.arrayContaining(['cust-live', true, ...CUSTOMER_STAGES]));
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {
