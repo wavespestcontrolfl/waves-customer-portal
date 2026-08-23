@@ -138,7 +138,9 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
     }
     if (!t) return [];
     if (table === 'leads' && t.op === 'first') {
-      if (opsOf(state, 'forUpdate').length) return lockedLead;
+      // The locked read now selects the contact fields too; fixtures give the
+      // locked row only the fields that differ from the pre-read.
+      if (opsOf(state, 'forUpdate').length) return lockedLead ? { ...preLead, ...lockedLead } : lockedLead;
       return preLead;
     }
     if (table === 'leads' && t.op === 'update') return convertedRows;
@@ -437,6 +439,76 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       const emailIdxs = calls.map((c, i) => ({ c, i })).filter(({ c }) => c.table === 'customers' && c.op === 'chain' && c.ops.some((o) => o.op === 'whereRaw' && /LOWER\(TRIM/.test(o.args[0]))).map(({ i }) => i);
       expect(emailIdxs).toHaveLength(2);
       expect(emailIdxs[1]).toBeGreaterThan(tryIdx);
+    });
+  });
+
+  it('createSeparateAccount + live phone match → 409 PHONE_MATCH_CONFIRM (trimmed), zero writes, email matching skipped', async () => {
+    const calls = [];
+    install(phoneMatchKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: null, createSeparateAccount: true });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('PHONE_MATCH_CONFIRM');
+      expect(body.match).toEqual({ accountId: 'cust-legacy', name: 'Legacy Row', phoneMasked: '***-***-4567' });
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      expect(calls.some((c) => c.table === 'customers' && c.op === 'chain')).toBe(false);
+    });
+  });
+
+  it('createSeparateAccount + ignorePhoneMatch with a live phone match → fresh account, no attach, no email lookup', async () => {
+    const calls = [];
+    install(phoneMatchKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: null, createSeparateAccount: true, ignorePhoneMatch: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).createdCustomer).toBe(true);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(1);
+      expect(calls.filter((c) => c.table === 'customers' && c.op === 'update')).toHaveLength(0);
+      expect(calls.some((c) => c.table === 'customers' && c.op === 'chain')).toBe(false);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0]).toMatchObject({ account_id: 'acct-new', is_primary_profile: true, profile_label: 'Primary' });
+    });
+  });
+
+  it('createSeparateAccount with no phone match → fresh account', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead({ phone: '5559876543' }), lockedLead: { customer_id: null, converted_at: null }, emailMatch: existingEmailCustomer }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { attachToAccountId: null, createSeparateAccount: true })).status).toBe(200);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(1);
+      expect(calls.some((c) => c.table === 'customers' && c.op === 'chain')).toBe(false);
+    });
+  });
+
+  it('technician: createSeparateAccount/ignorePhoneMatch ignored → normal phone-first attach path', async () => {
+    const calls = [];
+    install(phoneMatchKnex(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { createSeparateAccount: true, ignorePhoneMatch: true }, { role: 'technician' });
+      expect(res.status).toBe(200);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(1);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0]).toMatchObject({ profile_label: 'Additional property', is_primary_profile: false });
+    });
+  });
+
+  it('locked row wins: pre-read has the old phone, locked row has the corrected one → matching + insert use the corrected phone', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: baseLead({ phone: '5550000000', first_name: 'Old' }),
+      lockedLead: { customer_id: null, converted_at: null, phone: '5551234567', first_name: 'Corrected' },
+    }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl)).status).toBe(200);
+      const phoneLookup = calls.find((c) => c.table === 'customers' && c.op === 'first' && c.ops.some((o) => o.op === 'whereRaw' && /regexp_replace/.test(o.args[0])));
+      expect(phoneLookup.ops.find((o) => o.op === 'whereRaw').args[1]).toEqual(['%5551234567']);
+      const acct = calls.find((c) => c.table === 'customer_accounts' && c.op === 'insert').args[0];
+      expect(String(acct.phone).replace(/\D/g, '').slice(-10)).toBe('5551234567');
+      expect(acct.first_name).toBe('Corrected');
+      const cust = calls.find((c) => c.table === 'customers' && c.op === 'insert').args[0];
+      expect(String(cust.phone).replace(/\D/g, '').slice(-10)).toBe('5551234567');
+      expect(cust.first_name).toBe('Corrected');
     });
   });
 
@@ -951,6 +1023,23 @@ describe('findAccountByContact email opt-in', () => {
     ], calls);
     const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
     expect(out).toBeNull();
+  });
+
+  it('forceNewAccount: skips email matching; phone match → phoneMatch confirmation; ignorePhoneMatch → null (create)', async () => {
+    const calls = [];
+    const knex = makeTrx((table, state) => {
+      if (table !== 'customers') return null;
+      if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return [{ id: 'ce', account_id: 'ae', email: 'x@example.com' }];
+      if (state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) return { id: 'cp', account_id: 'ap', first_name: 'Fake', last_name: 'Person', phone: '+1 555 123 4567' };
+      return null;
+    }, calls);
+    const blocked = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'x@example.com', matchEmail: true, forceNewAccount: true });
+    expect(blocked).toMatchObject({ accountId: null, requiresConfirmation: true, phoneMatch: true, match: { accountId: 'ap', name: 'Fake Person', phoneMasked: '***-***-4567' } });
+    expect(blocked.match).not.toHaveProperty('customerId');
+    const created = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'x@example.com', matchEmail: true, forceNewAccount: true, ignorePhoneMatch: true });
+    expect(created).toBeNull();
+    expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert' || c.op === 'raw')).toHaveLength(0);
   });
 
   it('fenceAttach false (default): phone match attaches as before — no try-lock, no re-resolve', async () => {

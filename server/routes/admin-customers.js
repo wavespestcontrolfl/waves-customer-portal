@@ -1513,6 +1513,11 @@ async function attachMatchedCustomerToAccount(trx, customer) {
 // its own: it is returned with `requiresConfirmation: true` and NO write,
 // and only attaches when the caller passes `confirmEmailAccountId` equal to
 // the account the email resolves to RIGHT NOW (admin-confirmed selection).
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***-***-${digits.slice(-4)}` : '***';
+}
+
 function maskEmail(email) {
   const [local = '', domain = ''] = String(email || '').split('@');
   return `${local.slice(0, 1)}***@${domain}`;
@@ -1546,7 +1551,10 @@ function assertFenceTransaction(trx) {
   }
 }
 
-async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false }) {
+async function findAccountByContact(trx, {
+  phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false,
+  forceNewAccount = false, ignorePhoneMatch = false,
+}) {
   if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
   const lookupByPhone = () => (digits
@@ -1557,6 +1565,30 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
       .orderBy('created_at', 'asc')
       .first()
     : Promise.resolve(null));
+
+  // forceNewAccount (admin-only, lead-convert "create a SEPARATE customer"):
+  // bypass BOTH phone and email matching and create a fresh account — but
+  // fail closed on the phone side: a live phone match that exists right now
+  // is surfaced (PHONE_MATCH_CONFIRM, trimmed payload, no write) unless the
+  // admin also passed ignorePhoneMatch. Never a silent duplicate.
+  if (forceNewAccount) {
+    const byCustomerPhone = await lookupByPhone();
+    if (byCustomerPhone && !ignorePhoneMatch) {
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'phone',
+        requiresConfirmation: true,
+        phoneMatch: true,
+        match: {
+          accountId: String(byCustomerPhone.account_id || byCustomerPhone.id),
+          name: [byCustomerPhone.first_name, byCustomerPhone.last_name].filter(Boolean).join(' '),
+          phoneMasked: maskPhone(byCustomerPhone.phone),
+        },
+      };
+    }
+    return null;
+  }
 
   // Unconfirmed path: phone-first precedence, unchanged.
   if (!confirmEmailAccountId) {
@@ -1700,6 +1732,15 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
 async function ensureCustomerAccount(trx, input) {
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
+  if (existing?.requiresConfirmation && existing.phoneMatch) {
+    const err = new Error('A customer with this phone already exists — confirm whether to create a separate customer anyway.');
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'PHONE_MATCH_CONFIRM';
+    err.match = existing.match;
+    throw err;
+  }
   if (existing?.requiresConfirmation) {
     // Fail closed: never silently create OR attach on an unconfirmed email
     // match — the caller must surface the choice to the admin.

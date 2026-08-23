@@ -2994,10 +2994,39 @@ export function LeadsSection() {
                                                   "Create a SEPARATE new customer for this lead instead? (Cancel = do nothing, lead stays unbooked)",
                                                 )
                                               ) {
-                                                await submitAppt({
-                                                  attachToAccountId: null,
-                                                  createSeparateAccount: true,
-                                                });
+                                                try {
+                                                  await submitAppt({
+                                                    attachToAccountId: null,
+                                                    createSeparateAccount: true,
+                                                  });
+                                                } catch (e2) {
+                                                  if (
+                                                    e2?.code !==
+                                                    "PHONE_MATCH_CONFIRM"
+                                                  )
+                                                    throw e2;
+                                                  const pm = e2.match || {};
+                                                  // Third confirm: a live phone
+                                                  // match exists — separate
+                                                  // customer anyway?
+                                                  if (
+                                                    window.confirm(
+                                                      `A customer with this phone already exists (${pm.name || "(unnamed)"}, ${pm.phoneMasked || "phone hidden"}) — create a separate customer anyway? (Cancel = do nothing, lead stays unbooked)`,
+                                                    )
+                                                  ) {
+                                                    await submitAppt({
+                                                      attachToAccountId: null,
+                                                      createSeparateAccount: true,
+                                                      ignorePhoneMatch: true,
+                                                    });
+                                                  } else {
+                                                    alert(
+                                                      "Nothing was booked — the lead is unchanged.",
+                                                    );
+                                                    setApptSaving(false);
+                                                    return;
+                                                  }
+                                                }
                                               } else {
                                                 alert(
                                                   "Nothing was booked — the lead is unchanged.",

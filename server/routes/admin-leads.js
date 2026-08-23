@@ -1290,6 +1290,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const attachToAccountId = isAdmin && typeof req.body.attachToAccountId === 'string' && req.body.attachToAccountId.trim()
       ? req.body.attachToAccountId.trim() : null;
     const createSeparateAccount = isAdmin && req.body.createSeparateAccount === true;
+    // Third confirm: create the separate customer even though a live phone
+    // match exists (admin-only, only meaningful with createSeparateAccount).
+    const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
@@ -1344,10 +1347,6 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // transaction below (a concurrent convert can have created the customer
     // between this read and the lock).
     let needsCustomer = !customerId;
-    const fallbackName =
-      (lead.first_name && lead.first_name.trim()) ||
-      (lead.email ? String(lead.email).split('@')[0] : '') ||
-      'New Lead';
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     // Workflow columns vary by environment — probe before the transaction so the
@@ -1390,12 +1389,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         .where({ id: lead.id })
         .whereNull('deleted_at')
         .forUpdate()
-        .first('customer_id', 'converted_at');
+        // Every contact field the conversion uses comes from THIS locked row
+        // (matching inputs, customer payload, estimate link) — never from the
+        // unlocked pre-read, which can be stale by the time we hold the lock.
+        .first('id', 'customer_id', 'converted_at', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
       if (!lockedLead) {
         const gone = new Error('Lead was deleted while booking — appointment not created');
         gone.status = 409;
         throw gone;
       }
+      const fallbackName =
+        (lockedLead.first_name && lockedLead.first_name.trim()) ||
+        (lockedLead.email ? String(lockedLead.email).split('@')[0] : '') ||
+        'New Lead';
       const alreadyConverted = (message) => {
         const dup = new Error(message);
         dup.statusCode = 409;
@@ -1448,9 +1454,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,
-          lastName: lead.last_name || '',
-          phone: lead.phone || '',
-          email: lead.email || null,
+          lastName: lockedLead.last_name || '',
+          phone: lockedLead.phone || '',
+          email: lockedLead.email || null,
+          // createSeparateAccount bypasses BOTH phone and email matching
+          // (fail-closed on a live phone match → PHONE_MATCH_CONFIRM unless
+          // ignorePhoneMatch); admin-only, see parsing above.
+          forceNewAccount: createSeparateAccount,
+          ignorePhoneMatch,
           // Email-match opt-in: a lead whose email belongs to a live customer
           // (different/blank phone) attaches as an additional property ONLY
           // after the admin confirmed that exact account (409
@@ -1467,13 +1478,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           is_primary_profile: !account.existingCustomer,
           profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
           first_name: fallbackName,
-          last_name: lead.last_name || '',
-          phone: lead.phone || '',
-          email: lead.email || null,
-          address_line1: lead.address || '',
-          city: lead.city || '',
+          last_name: lockedLead.last_name || '',
+          phone: lockedLead.phone || '',
+          email: lockedLead.email || null,
+          address_line1: lockedLead.address || '',
+          city: lockedLead.city || '',
           state: 'FL',
-          zip: lead.zip || '',
+          zip: lockedLead.zip || '',
           member_since: etDateString(),
           referral_code: code,
           lead_source: 'lead_pipeline',
@@ -1615,7 +1626,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.
       try {
-        await linkLeadEstimatesToCustomer({ database: trx, lead, customerId });
+        await linkLeadEstimatesToCustomer({ database: trx, lead: { ...lead, ...lockedLead }, customerId });
       } catch (e) {
         logger.warn(`[leads] estimate→customer backfill failed for lead ${req.params.id}: ${e.message}`);
       }
@@ -1679,7 +1690,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
   } catch (err) {
-    if (err.code === 'EMAIL_MATCH_CONFIRM') {
+    if (err.code === 'EMAIL_MATCH_CONFIRM' || err.code === 'PHONE_MATCH_CONFIRM') {
       if (req.techRole !== 'admin') {
         return res.status(409).json({ error: "An existing customer matches this lead's email — an admin must book it.", code: 'EMAIL_MATCH_ADMIN_REQUIRED' });
       }
