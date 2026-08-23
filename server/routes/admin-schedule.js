@@ -556,6 +556,13 @@ function shouldRewritePendingRecurringRows(before, after) {
     .some((key) => prev[key] !== next[key]);
 }
 
+// Statuses that do NOT occupy a slot for the admin creator/editor probes:
+// the rebooker's set (cancelled + completed) plus the two the edit path
+// already classifies as terminal/non-occupying (skipped + no_show) — a
+// skipped or no-show future visit keeps its window on the row but has
+// freed it on the calendar (Codex #3443 P2).
+const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+
 // ---- update-details recurrence date planning (rung-1 lock set) -----------
 //
 // PUT /:id/update-details can write scheduled_services rows on dates other
@@ -696,7 +703,7 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
     windowStart: block.start,
     windowEnd: block.end,
     excludeServiceIds,
-    excludeStatuses: ['cancelled', 'completed'],
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
   if (clash.length) {
     throw Object.assign(
@@ -4068,7 +4075,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           date: dateOnly(scheduledDate),
           windowStart: insertData.window_start,
           windowEnd: insertData.window_end,
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
         });
         if (adminCreateClash.length) throw slotTakenError(null);
       }
@@ -4142,7 +4149,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             date: nextDateStr,
             windowStart: childData.window_start,
             windowEnd: childData.window_end,
-            excludeStatuses: ['cancelled', 'completed'],
+            excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
           });
           if (childClash.length) throw slotTakenError(nextDateStr);
         }
@@ -4217,7 +4224,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               date: boosterDate,
               windowStart: boosterData.window_start,
               windowEnd: boosterData.window_end,
-              excludeStatuses: ['cancelled', 'completed'],
+              excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
             });
             if (boosterClash.length) throw slotTakenError(boosterDate);
           }
@@ -6178,8 +6185,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // stamps ARE the service record.
         // Global occupancy probe under rung 1 for a date/window move — the
         // same tech-blind predicate + status exclusions the rebooker's
-        // commit gate runs (cancelled + completed don't occupy; the moving
-        // row excludes itself), thrown as the same SLOT_TAKEN 409 so every
+        // commit gate runs (terminal rows don't occupy —
+        // ADMIN_OCCUPANCY_EXCLUDE_STATUSES; the moving row excludes itself),
+        // thrown as the same SLOT_TAKEN 409 so every
         // caller's conflict handling works unchanged. Terminal rows are
         // record corrections, not occupancy, and skip it. Runs on the
         // LOCKED row (reusing the tuple read above, else its own FOR
@@ -6245,7 +6253,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 windowStart: occStart,
                 windowEnd: occEnd,
                 excludeServiceIds: [req.params.id],
-                excludeStatuses: ['cancelled', 'completed'],
+                excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
               });
               if (adminMoveClash.length) {
                 throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
