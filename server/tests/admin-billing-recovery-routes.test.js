@@ -386,7 +386,7 @@ describe('admin billing-recovery routes', () => {
   test('GET /leaks includes a status-only completion (no service_records row) as completed_no_service_record, not billable', async () => {
     const rows = [
       { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
-      { scheduled_service_id: 'ss-9', service_record_id: null, service_type: 'Pest Control', estimated_price: '99.00', prepaid_amount: '0', completed_at: '2026-06-17', customer_id: 'cust-9', first_name: 'Nora', last_name: 'Quill', monthly_rate: '0', waveguard_tier: null },
+      { scheduled_service_id: 'ss-9', service_record_id: null, service_type: 'Pest Control', estimated_price: '99.00', prepaid_amount: '0', completed_at: '2026-06-17', scheduled_date: '2026-06-17', customer_id: 'cust-9', first_name: 'Nora', last_name: 'Quill', monthly_rate: '0', waveguard_tier: null },
     ];
     let qb;
     db.mockImplementation((arg) => {
@@ -407,6 +407,7 @@ describe('admin billing-recovery routes', () => {
       expect(statusOnly).toBeDefined();
       expect(statusOnly.leak_kind).toBe('completed_no_service_record');
       expect(statusOnly.billable).toBe(false);
+      expect(statusOnly.scheduled_date).toBe('2026-06-17');
       expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-1').leak_kind).toBe('uninvoiced');
       expect(body.summary.leak_visits).toBe(2);
     });

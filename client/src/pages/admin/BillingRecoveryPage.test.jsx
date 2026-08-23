@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, daysSince, formatDateOnly, formatETDate, FREE_REASONS } from "./BillingRecoveryPage";
+import { formatMoney, daysSince, formatDateOnly, formatETDate, FREE_REASONS, completionDeepLink } from "./BillingRecoveryPage";
 
 describe("BillingRecoveryPage helpers", () => {
   it("formats money with USD + thousands separators", () => {
@@ -36,5 +36,17 @@ describe("BillingRecoveryPage helpers", () => {
     expect(FREE_REASONS).toContain("Appointment service (no-cost)");
     expect(FREE_REASONS).toContain("Warranty callback / re-treat");
     expect(FREE_REASONS.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("completionDeepLink (status-only completions)", () => {
+  it("builds the dispatch ?completeService= deep link with the visit's day", () => {
+    expect(completionDeepLink({ scheduled_service_id: "ss-9", scheduled_date: "2026-06-17" }))
+      .toBe("/admin/dispatch?tab=schedule&date=2026-06-17&completeService=ss-9");
+  });
+  it("omits a malformed date and returns null without a visit id", () => {
+    expect(completionDeepLink({ scheduled_service_id: "ss-9", scheduled_date: "garbage" }))
+      .toBe("/admin/dispatch?tab=schedule&completeService=ss-9");
+    expect(completionDeepLink({})).toBeNull();
   });
 });

@@ -108,7 +108,21 @@ function StatCard({ label, value, sub, alert }) {
   );
 }
 
+// Status-only completions (no service_records row) can't be billed here —
+// the completion flow must mint the record first. Same deep link the tech
+// home uses: DispatchPageV2 consumes ?completeService= once and opens
+// CompletionPanel on that visit (its predicate admits completed visits whose
+// day payload says has_service_record === false).
+export function completionDeepLink(visit) {
+  if (!visit?.scheduled_service_id) return null;
+  const params = new URLSearchParams({ tab: "schedule" });
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(visit.scheduled_date || ""))) params.set("date", visit.scheduled_date);
+  params.set("completeService", String(visit.scheduled_service_id));
+  return `/admin/dispatch?${params.toString()}`;
+}
+
 function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
+  const statusOnly = visit.leak_kind === "completed_no_service_record";
   const ago = daysSince(visit.completed_at);
   return (
     <TR>
@@ -119,26 +133,32 @@ function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
       </TD>
       <TD>
         {visit.service_type || "—"}
-        {visit.leak_kind === "completed_no_service_record" && (
+        {statusOnly && (
           <div className="text-12 text-amber-700 mt-0.5">Completed by status only — no service record yet</div>
         )}
       </TD>
       <TD nums>{formatMoney(visit.price)}</TD>
       <TD align="right">
         <div className="flex gap-2 justify-end">
-          <Button
-            size="sm"
-            variant={confirmBill ? "secondary" : "primary"}
-            disabled={busy || !visit.billable}
-            onClick={() => onBill(visit)}
-            title={
-              visit.leak_kind === "completed_no_service_record"
-                ? "Completed by status only — run the completion flow on this visit to mint the service record, then bill"
-                : !visit.billable ? "No completion record — cannot invoice" : undefined
-            }
-          >
-            Bill
-          </Button>
+          {statusOnly ? (
+            <a
+              href={completionDeepLink(visit)}
+              className="inline-flex items-center rounded-md border border-zinc-300 px-2.5 py-1 text-12 font-medium text-zinc-800 hover:bg-zinc-50"
+              title="Opens this visit's completion on the dispatch day — completing it mints the service record and invoice"
+            >
+              Open completion
+            </a>
+          ) : (
+            <Button
+              size="sm"
+              variant={confirmBill ? "secondary" : "primary"}
+              disabled={busy || !visit.billable}
+              onClick={() => onBill(visit)}
+              title={!visit.billable ? "No completion record — cannot invoice" : undefined}
+            >
+              Bill
+            </Button>
+          )}
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => onFree(visit)}>
             Mark free
           </Button>

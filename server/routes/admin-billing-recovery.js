@@ -237,6 +237,8 @@ router.get('/leaks', async (req, res) => {
       // 'completed_no_service_record' = status-only completion; the
       // completion flow must run before Bill works.
       leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
+      // Dispatch-day deep link target for status-only rows (date-only string).
+      scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
     });
 
     // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type

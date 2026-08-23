@@ -1994,7 +1994,12 @@ router.get('/', async (req, res, next) => {
         'customers.ach_status',
         'customers.billing_mode', 'customers.per_application_fee',
         'customers.service_paused_at',
-        'technicians.name as tech_name'
+        'technicians.name as tech_name',
+        // Whether the visit has a completion record. A status-only
+        // 'completed' row (historical PUT /status completions) has none and
+        // is what Billing Recovery deep-links here to finish through
+        // CompletionPanel (fail-closed: readers require === false).
+        db.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record'),
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
@@ -2342,6 +2347,7 @@ router.get('/', async (req, res, next) => {
         windowStart: s.window_start, windowEnd: s.window_end,
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
+        has_service_record: s.has_service_record === true,
         lat: s.visit_lat != null ? Number(s.visit_lat) : null,
         lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
