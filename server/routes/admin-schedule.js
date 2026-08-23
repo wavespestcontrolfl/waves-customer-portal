@@ -4999,6 +4999,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 });
                 updates.window_start = normalizedWindow.window_start;
                 updates.window_end = normalizedWindow.window_end;
+              } else if (normalizeHHMM(svc.window_start) || normalizeHHMM(svc.window_end)) {
+                // Date-only move: the EFFECTIVE stored window rides onto the
+                // new date, so it must satisfy the same rules (a legacy 07:00
+                // row is refused); a windowless row (both null) still moves.
+                assertAdminAppointmentWindow({
+                  windowStart: normalizeHHMM(svc.window_start),
+                  windowEnd: normalizeHHMM(svc.window_end),
+                });
               }
               // Gated overlap probe (lock already held at the top of this trx);
               // the moving row excludes itself.
@@ -5629,24 +5637,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // end, used to persist unchecked). Date-only / clearing edits are
     // untouched. Overlap is the in-trx occupancy probe below (rung 1 +
     // findConflictingVisits), not re-checked here.
-    if (updates.window_start || updates.window_end) {
+    // A DATE-ONLY move validates the EFFECTIVE stored window too (a legacy
+    // 06:30 / 07:00 row must not ride onto a new date); a truly windowless
+    // row (both null) still moves.
+    // The pre-read is UNLOCKED — the trx below compares it with the locked
+    // row and refuses (409 VISIT_CHANGED_RETRY) if the scheduling fields
+    // drifted, so a normalized pair derived here can never overwrite a
+    // concurrent window edit.
+    let preReadWindowRow = null;
+    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
         .first('scheduled_date', 'window_start', 'window_end');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
-      const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
-      if (!effectiveStart) {
-        throw Object.assign(
-          httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
-          { code: 'INVALID_APPOINTMENT_WINDOW' },
-        );
+      preReadWindowRow = currentRow;
+      if (updates.window_start || updates.window_end) {
+        const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
+        if (!effectiveStart) {
+          throw Object.assign(
+            httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+            { code: 'INVALID_APPOINTMENT_WINDOW' },
+          );
+        }
+        const normalizedWindow = assertAdminAppointmentWindow({
+          windowStart: effectiveStart,
+          windowEnd: updates.window_end || null,
+          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end),
+        });
+        updates.window_start = normalizedWindow.window_start;
+        updates.window_end = normalizedWindow.window_end;
+      } else if (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end)) {
+        assertAdminAppointmentWindow({
+          windowStart: normalizeHHMM(currentRow.window_start),
+          windowEnd: normalizeHHMM(currentRow.window_end),
+        });
       }
-      const normalizedWindow = assertAdminAppointmentWindow({
-        windowStart: effectiveStart,
-        windowEnd: updates.window_end || null,
-        durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end),
-      });
-      updates.window_start = normalizedWindow.window_start;
-      updates.window_end = normalizedWindow.window_end;
     }
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
@@ -6304,6 +6328,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               : dateOnly(occRow.scheduled_date);
             if (occDate !== occupancyDateKey) {
               throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            // Scheduling-field CAS against the unlocked pre-read the window
+            // normalization above derived from: a concurrent window/date
+            // edit that committed first must not be overwritten with a
+            // pair built on the stale snapshot.
+            if (preReadWindowRow && (
+              dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
+              || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
+              || normalizeHHMM(occRow.window_end) !== normalizeHHMM(preReadWindowRow.window_end)
+            )) {
+              throw Object.assign(new Error('This appointment was moved or resized while saving — reload and save again.'), {
                 statusCode: 409,
                 isOperational: true,
                 code: 'VISIT_CHANGED_RETRY',

@@ -170,3 +170,34 @@ describe('adminMoveProbeExcludeIds — batch-move exclusion for the admin move p
     expect(trx).not.toHaveBeenCalled();
   });
 });
+
+describe('date-only moves + the scheduling-field CAS', () => {
+  test('a DATE-ONLY move of a legacy 07:00 row → 422 before the transaction', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_start: '07:00:00', window_end: '08:00:00' }));
+    const { status, body } = await put({ scheduledDate: '2099-02-01' });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/before 08:00/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_start: null, window_end: null }));
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ scheduledDate: '2099-02-01' });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(status).toBe(418);
+  });
+
+  test('the locked row is CAS-compared with the unlocked pre-read (date/start/end) before the write — drift is 409 VISIT_CHANGED_RETRY', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    const casIdx = ud.indexOf('if (preReadWindowRow && (');
+    const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+    expect(casIdx).toBeGreaterThan(ud.indexOf('const occRow = preTupleRow'));
+    expect(casIdx).toBeLessThan(writeIdx);
+    const cas = ud.slice(casIdx, ud.indexOf("code: 'VISIT_CHANGED_RETRY'", casIdx));
+    for (const col of ['scheduled_date', 'window_start', 'window_end']) {
+      expect(cas).toContain(`occRow.${col}`);
+      expect(cas).toContain(`preReadWindowRow.${col}`);
+    }
+  });
+});

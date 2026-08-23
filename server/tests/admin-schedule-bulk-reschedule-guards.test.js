@@ -848,3 +848,31 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
     expect(trx.raw.mock.calls.some(([, bindings]) => bindings?.includes('occupancy:2099-01-15'))).toBe(false);
   });
 });
+
+test('a DATE-ONLY move of a legacy 07:00 row lands in failed[] — the stored window must satisfy the rules before it rides to a new date', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '07:00:00', window_end: '08:00:00' }) }),
+      updateChain,
+    ],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.updated).toEqual([]);
+  expect(body.failed[0].reason).toMatch(/before 08:00/);
+  expect(updateChain.update).not.toHaveBeenCalled();
+});
+
+test('a DATE-ONLY move of a windowless row (both null) still moves', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: null, window_end: null }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ scheduled_date: '2099-01-15' });
+});

@@ -22,11 +22,14 @@ jest.mock('../middleware/admin-auth', () => {
     },
   };
 });
+// The visit row the route resolves windows against (scheduled_services
+// .first()); null = not found.
+let mockVisitRow = null;
 jest.mock('../models/db', () => {
   const chain = () => {
     const c = {};
     for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
-    c.first = async () => null;
+    c.first = async () => mockVisitRow;
     c.then = (resolve) => Promise.resolve([]).then(resolve);
     return c;
   };
@@ -76,7 +79,7 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; });
 
 test('a 06:30 drop is refused with 422 INVALID_APPOINTMENT_WINDOW before the rebooker runs', async () => {
   const { status, body } = await reschedule({ newDate: TARGET, newWindow: '06:30-07:30' });
@@ -116,4 +119,49 @@ test('an absent / null / empty window is a date-only move and reaches the rebook
     expect(status).toBe(200);
   }
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(3);
+});
+
+describe('window resolved against the CURRENT visit row', () => {
+  test("{ start } on a 2-hour visit derives and validates the REAL end: 19:00 → 19:00-21:00 is refused (never 19:00-11:00)", async () => {
+    mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '19:00' } });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/end by 20:00/);
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('{ start } submits the derived end explicitly to the rebooker', async () => {
+    mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '10:00' } });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+      expect.any(String), TARGET, { start: '10:00', end: '12:00' }, 'admin', 'admin', expect.any(Object),
+    );
+  });
+
+  test('{ start } falls back to estimated_duration_minutes; with no derivable duration an explicit end is required (422)', async () => {
+    mockVisitRow = { window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90 };
+    let r = await reschedule({ newDate: TARGET, newWindow: { start: '10:00' } });
+    expect(r.status).toBe(200);
+    expect(SmartRebooker.reschedule.mock.calls[0][2]).toEqual({ start: '10:00', end: '11:30' });
+    mockVisitRow = { window_start: null, window_end: null, estimated_duration_minutes: null };
+    r = await reschedule({ newDate: TARGET, newWindow: { start: '10:00' } });
+    expect(r.status).toBe(422);
+    expect(r.body.error).toMatch(/explicit end/);
+  });
+
+  test('date-only move: a legacy 07:00 stored window is refused (422); a windowless row still moves', async () => {
+    mockVisitRow = { window_start: '07:00:00', window_end: '08:00:00' };
+    let r = await reschedule({ newDate: TARGET });
+    expect(r.status).toBe(422);
+    expect(r.body.error).toMatch(/before 08:00/);
+    r = await reschedule({ newDate: TARGET, scope: 'series' });
+    expect(r.status).toBe(422);
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    mockVisitRow = { window_start: null, window_end: null };
+    r = await reschedule({ newDate: TARGET });
+    expect(r.status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
 });
