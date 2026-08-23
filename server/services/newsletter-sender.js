@@ -915,16 +915,17 @@ async function prepareResumeCampaign(sendId) {
     throw err;
   }
   if (totalDeliveries > 0) {
-    // Mirror the retry refetch's suppression exclusion so the "anything left to
-    // resume?" count matches what sendCampaign will actually send — otherwise a
-    // campaign whose only outstanding rows are globally-suppressed would falsely
-    // report work remaining (and previously would have re-mailed them).
-    const outstanding = await excludeGloballySuppressed(applyRetryableDeliveryFilter(
+    // Mirror the retry refetch's suppression + archived-customer exclusions so
+    // the "anything left to resume?" count matches what sendCampaign will
+    // actually send — otherwise a campaign whose only outstanding rows are
+    // suppressed/archived would falsely report work remaining (and repeatedly
+    // claim a resume that then selects nobody).
+    const outstanding = await excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
       db('newsletter_send_deliveries')
         .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
         .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
       'newsletter_send_deliveries',
-    ))
+    )))
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
