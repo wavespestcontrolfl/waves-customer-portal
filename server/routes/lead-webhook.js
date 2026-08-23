@@ -357,8 +357,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // Submitted contact details ride on the note body + metadata (NOT
         // the customers row) so staff can reconcile a changed email/address
         // by hand — existing customers return before the leads insert below.
-        body: `Submitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`
-          + `\nSubmitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`,
+        // Contact line goes FIRST: Customer 360 previews the body truncated
+        // to 200 chars, and a long UTM-laden pageUrl would push it out of view.
+        body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
+          + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
           submittedContact: {
