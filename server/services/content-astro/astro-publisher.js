@@ -3129,9 +3129,16 @@ function bodyMatchesHead(body, headSha) {
   return runs.some((run) => head.startsWith(run.toLowerCase()));
 }
 
+// Only HUMAN/engine comments are review requests. Codex's own verdict comment
+// ends with an "About Codex in GitHub" footer that literally reads
+// `Comment "@codex review"` and embeds the reviewed SHA — so without this
+// exclusion the clean verdict was counted as a same-head re-request that it
+// could never strictly postdate, and every astro PR sat at
+// codex_review_pending forever (#472–#476, 2026-08-23).
 function latestReviewRequestAt(comments = [], headSha = null) {
   const head = String(headSha || '').trim();
   const candidates = comments
+    .filter((comment) => !isCodexAuthor(comment?.user?.login || comment?.author?.login))
     .filter((comment) => /@codex\s+review/i.test(String(comment?.body || '')))
     .filter((comment) => !head || bodyMatchesHead(comment.body, head))
     .map((comment) => Date.parse(comment.created_at || comment.createdAt || 0))

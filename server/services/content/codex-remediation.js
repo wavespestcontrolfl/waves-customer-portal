@@ -485,7 +485,11 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   // the re-review adds only P2s or doesn't repeat old comments.
   const h = shortSha(headSha);
   const issueComments = await gh.listIssueComments(prNumber);
+  // Codex's own verdict comment carries an "About Codex" footer that reads
+  // `Comment "@codex review"` plus the reviewed SHA — never a request. Counting
+  // it made the verdict its own re-request and the round could never complete.
   const latestRequestAt = (Array.isArray(issueComments) ? issueComments : [])
+    .filter((c) => !isCodexAuthor(c && (c.user?.login || c.author?.login)))
     .filter((c) => /@codex\s+review/i.test(String(c && c.body || '')) && (!h || String(c.body || '').includes(h)))
     .map((c) => Date.parse(c.created_at || c.createdAt || 0) || 0)
     .reduce((a, b) => Math.max(a, b), 0);
@@ -1300,6 +1304,7 @@ async function markPrTerminal(prNumber, status, injectedDb = null) {
 function reviewRequestedForHead(issueComments = [], headSha = null) {
   const h = shortSha(headSha);
   return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
+    if (isCodexAuthor(c && (c.user?.login || c.author?.login))) return false; // verdict footer quotes "@codex review"
     const body = String(c && c.body || '');
     return /@codex\s+review/i.test(body) && (!h || body.includes(h));
   });

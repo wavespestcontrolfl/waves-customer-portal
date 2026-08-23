@@ -384,6 +384,25 @@ describe('blog Astro frontmatter validation', () => {
     })).toMatchObject({ clean: false, reason: expect.stringMatching(/usage limits/) });
   });
 
+  test('Codex verdict footer quoting "@codex review" is not a review request (astro #472 deadlock)', () => {
+    const { codexReviewStatus, latestReviewRequestAt } = AstroPublisher._internals;
+    const head = '43b0fc619a886544c7eade292b1a3126a1748914';
+    const comments = [
+      {
+        user: { login: 'wavespestcontrolfl' },
+        body: `@codex review\n\nAll posted findings are addressed on head \`${head}\`.`,
+        created_at: '2026-08-22T01:33:59Z',
+      },
+      {
+        user: { login: 'chatgpt-codex-connector[bot]' },
+        body: "Codex Review: Didn't find any major issues. Swish!\n\n**Reviewed commit:** `43b0fc619a`\n\n<details><summary>About Codex in GitHub</summary>\n- Comment \"@codex review\".\n</details>",
+        created_at: '2026-08-22T01:37:16Z',
+      },
+    ];
+    expect(latestReviewRequestAt(comments, head)).toBe(Date.parse('2026-08-22T01:33:59Z'));
+    expect(codexReviewStatus({ headSha: head, comments })).toEqual({ clean: true });
+  });
+
   test('requires Codex review evidence for the current PR head', () => {
     const { codexReviewStatus } = AstroPublisher._internals;
     const head = 'abcdef1234567890abcdef1234567890abcdef12';
