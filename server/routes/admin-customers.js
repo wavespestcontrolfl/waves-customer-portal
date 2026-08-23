@@ -1508,7 +1508,17 @@ async function attachMatchedCustomerToAccount(trx, customer) {
 // conversion opts in so a lead whose email belongs to an existing account
 // attaches as an additional property instead of splitting history/autopay
 // across a second primary profile. Same return shape either way.
-async function findAccountByContact(trx, { phone, email, matchEmail = false }) {
+// Email is NOT proof of account ownership (an attacker can submit a lead with
+// their phone + a victim's email). An email match therefore never attaches on
+// its own: it is returned with `requiresConfirmation: true` and NO write,
+// and only attaches when the caller passes `confirmEmailAccountId` equal to
+// the account the email resolves to RIGHT NOW (admin-confirmed selection).
+function maskEmail(email) {
+  const [local = '', domain = ''] = String(email || '').split('@');
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
+async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null }) {
   const digits = phoneLast10(phone);
   if (digits) {
     const byCustomerPhone = await trx('customers')
@@ -1525,15 +1535,39 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false }) {
 
   const normalizedEmail = matchEmail ? cleanEmail(email) : null;
   if (normalizedEmail && isEmailLike(normalizedEmail)) {
+    // Shared household/business emails are a supported shape (migration
+    // 20260417000010_allow_duplicate_customer_emails). Only reuse when EVERY
+    // live row with this email resolves to ONE account — if they span
+    // accounts we cannot know which household this is, so fail closed (no
+    // match → caller creates a fresh account) rather than attach to the
+    // wrong one. Unlinked rows resolve to their own id (attach semantics).
     const byCustomerEmail = await trx('customers')
       .whereRaw('LOWER(TRIM(COALESCE(email, \'\'))) = ?', [normalizedEmail])
       .whereNull('deleted_at')
       .orderBy('is_primary_profile', 'desc')
-      .orderBy('created_at', 'asc')
-      .first();
-    if (byCustomerEmail) {
-      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerEmail);
-      return { accountId, existingCustomer: { ...byCustomerEmail, account_id: accountId }, matchType: 'email' };
+      .orderBy('created_at', 'asc');
+    const accountKeys = new Set((byCustomerEmail || []).map((row) => String(row.account_id || row.id)));
+    if (byCustomerEmail?.length && accountKeys.size === 1) {
+      const match = byCustomerEmail[0];
+      const resolvedAccountId = String(match.account_id || match.id);
+      if (!confirmEmailAccountId || String(confirmEmailAccountId) !== resolvedAccountId) {
+        return {
+          accountId: null,
+          existingCustomer: null,
+          matchType: 'email',
+          requiresConfirmation: true,
+          match: {
+            accountId: resolvedAccountId,
+            customerId: match.id,
+            name: [match.first_name, match.last_name].filter(Boolean).join(' '),
+            emailMasked: maskEmail(match.email),
+            propertyLabel: match.profile_label || null,
+            addressLine1: match.address_line1 || null,
+          },
+        };
+      }
+      const accountId = await attachMatchedCustomerToAccount(trx, match);
+      return { accountId, existingCustomer: { ...match, account_id: accountId }, matchType: 'email' };
     }
   }
 
@@ -1543,6 +1577,17 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false }) {
 async function ensureCustomerAccount(trx, input) {
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
+  if (existing?.requiresConfirmation) {
+    // Fail closed: never silently create OR attach on an unconfirmed email
+    // match — the caller must surface the choice to the admin.
+    const err = new Error("This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'EMAIL_MATCH_CONFIRM';
+    err.match = existing.match;
+    throw err;
+  }
 
   // Canonical-format the account row here so callers that pass raw lead data
   // (e.g. admin-leads lead→customer conversion) still create a normalized

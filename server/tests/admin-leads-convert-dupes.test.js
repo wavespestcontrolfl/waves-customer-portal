@@ -85,7 +85,10 @@ function makeKnex(resolve, calls) {
         return q;
       });
     }
-    q.then = (onOk, onErr) => Promise.resolve().then(() => resolve(table, state)).then(onOk, onErr);
+    q.then = (onOk, onErr) => {
+      if (!state.terminal) calls.push({ table, op: 'chain', args: [], ops: state.ops.slice() });
+      return Promise.resolve().then(() => resolve(table, state)).then(onOk, onErr);
+    };
     return q;
   };
   const knex = jest.fn(builder);
@@ -109,6 +112,10 @@ function opsOf(state, name) {
 function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1 }) {
   return (table, state) => {
     const t = state.terminal;
+    if (table === 'customers' && !t && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
+      return emailMatch ? (Array.isArray(emailMatch) ? emailMatch : [emailMatch]) : [];
+    }
+    if (!t) return [];
     if (table === 'leads' && t.op === 'first') {
       if (opsOf(state, 'forUpdate').length) return lockedLead;
       return preLead;
@@ -116,7 +123,6 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
     if (table === 'leads' && t.op === 'update') return convertedRows;
     if (table === 'scheduled_services' && t.op === 'columnInfo') return { service_id: true };
     if (table === 'customers' && t.op === 'first') {
-      if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return emailMatch;
       if (opsOf(state, 'where').some((o) => o.args[0]?.id === 'cust-linked')) return existingLinked;
       return null;
     }
@@ -209,30 +215,78 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
-  it('email matching a live customer (no phone): attaches as Additional property, no new account', async () => {
+  const existingEmailCustomer = {
+    id: 'cust-existing',
+    account_id: 'acct-existing',
+    first_name: 'Existing',
+    last_name: 'Person',
+    email: 'lead.example@example.com',
+    phone: '5550000000',
+    is_primary_profile: true,
+    profile_label: 'Primary',
+    address_line1: '2 Other St',
+  };
+  const emailKnexRoute = (calls) => makeKnex(makeResolver({
+    preLead: baseLead(),
+    lockedLead: { customer_id: null, converted_at: null },
+    emailMatch: existingEmailCustomer,
+  }), calls);
+
+  it('email matches a live customer, no attachToAccountId → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
     const calls = [];
-    const existing = {
-      id: 'cust-existing',
-      account_id: 'acct-existing',
-      first_name: 'Existing',
-      last_name: 'Person',
-      email: 'lead.example@example.com',
-      phone: '5550000000',
-      is_primary_profile: true,
-    };
-    const knex = makeKnex(makeResolver({
-      preLead: baseLead(),
-      lockedLead: { customer_id: null, converted_at: null },
-      emailMatch: existing,
-    }), calls);
-    db.mockImplementation(knex);
-    Object.assign(db, { raw: knex.raw, transaction: knex.transaction });
+    install(emailKnexRoute(calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.match).toEqual({
+        accountId: 'acct-existing',
+        customerId: 'cust-existing',
+        name: 'Existing Person',
+        emailMasked: 'l***@example.com',
+        propertyLabel: 'Primary',
+        addressLine1: '2 Other St',
+      });
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      // No comms lock taken on the create path before the 409.
+      expect(calls.filter((c) => c.op === 'raw')).toHaveLength(0);
+    });
+  });
+
+  it('stale/mismatched attachToAccountId → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-someone-else' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('createSeparateAccount: true → email matching skipped, fresh account + primary customer', async () => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: null, createSeparateAccount: true });
+      expect(res.status).toBe(200);
+      expect(calls.some((c) => c.table === 'customers' && c.op === 'chain')).toBe(false);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(1);
+      const custInsert = calls.filter((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert[0].args[0]).toMatchObject({ account_id: 'acct-new', is_primary_profile: true, profile_label: 'Primary' });
+    });
+  });
+
+  it('email match + matching attachToAccountId → attaches as Additional property, no new account', async () => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
       expect(res.status).toBe(200);
       expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(0);
       // Email lookup is normalized (trimmed + lowercased) and scoped to live rows.
-      const emailLookup = calls.find((c) => c.table === 'customers' && c.op === 'first' && c.ops.some((o) => o.op === 'whereRaw' && /LOWER\(TRIM/.test(o.args[0])));
+      const emailLookup = calls.find((c) => c.table === 'customers' && c.op === 'chain' && c.ops.some((o) => o.op === 'whereRaw' && /LOWER\(TRIM/.test(o.args[0])));
       expect(emailLookup.ops.find((o) => o.op === 'whereRaw').args[1]).toEqual(['lead.example@example.com']);
       expect(emailLookup.ops.some((o) => o.op === 'whereNull' && o.args[0] === 'deleted_at')).toBe(true);
       const custInsert = calls.filter((c) => c.table === 'customers' && c.op === 'insert');
@@ -350,11 +404,99 @@ describe('findAccountByContact email opt-in', () => {
     const knex = makeKnex((table, state) => {
       if (table !== 'customers') return null;
       return opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))
-        ? { id: 'c1', account_id: 'a1', email: 'someone@example.com' }
+        ? [{ id: 'c1', account_id: 'a1', email: 'someone@example.com' }]
         : null;
     }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true });
+    const unconfirmed = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true });
+    expect(unconfirmed).toMatchObject({ accountId: null, matchType: 'email', requiresConfirmation: true, match: { accountId: 'a1', customerId: 'c1' } });
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email' });
     expect(calls.filter((c) => c.table === 'customers' && c.op === 'first')).toHaveLength(2);
+    expect(calls.filter((c) => c.table === 'customers' && c.op === 'chain')).toHaveLength(2);
+  });
+
+  it('phone match wins and attaches without confirmation (unchanged), even with matchEmail', async () => {
+    const calls = [];
+    const knex = makeKnex((table, state) => {
+      if (table !== 'customers' || state.terminal?.op !== 'first') return null;
+      return opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))
+        ? { id: 'cp', account_id: 'ap', phone: '5551234567' }
+        : null;
+    }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'x@example.com', matchEmail: true });
+    expect(out).toMatchObject({ accountId: 'ap', matchType: 'phone' });
+    expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
+  });
+
+  function emailKnex(rows, calls) {
+    return makeKnex((table, state) => {
+      if (table !== 'customers') return null;
+      if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return rows;
+      return null;
+    }, calls);
+  }
+
+  it('shared email across MULTIPLE accounts → no match (fail closed, caller creates a new account)', async () => {
+    const calls = [];
+    const knex = emailKnex([
+      { id: 'c1', account_id: 'a1', email: 'shared@example.com', is_primary_profile: true },
+      { id: 'c2', account_id: 'a2', email: 'shared@example.com', is_primary_profile: true },
+    ], calls);
+    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true });
+    expect(out).toBeNull();
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+  });
+
+  it('shared email across multiple rows of the SAME account → match that account', async () => {
+    const calls = [];
+    const knex = emailKnex([
+      { id: 'c1', account_id: 'a1', email: 'shared@example.com', is_primary_profile: true },
+      { id: 'c2', account_id: 'a1', email: 'shared@example.com', is_primary_profile: false },
+    ], calls);
+    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    expect(out).toMatchObject({ accountId: 'a1', matchType: 'email', existingCustomer: { id: 'c1' } });
+  });
+
+  it('unlinked legacy row (no account_id) alongside a linked row of another account → no match', async () => {
+    const calls = [];
+    const knex = emailKnex([
+      { id: 'c1', account_id: null, email: 'shared@example.com' },
+      { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
+    ], calls);
+    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true });
+    expect(out).toBeNull();
+  });
+});
+
+describe('POST /admin/leads/:id/schedule-appointment — customer_id linked WITHOUT converted_at (public-quote shape)', () => {
+  beforeEach(() => db.mockReset());
+  const quoteLead = () => baseLead({ customer_id: 'cust-linked', converted_at: null });
+  const lockedQuote = { customer_id: 'cust-linked', converted_at: null };
+
+  it('first conversion without rebook → reuses linked customer, update gated on whereNull(converted_at)', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: quoteLead(), lockedLead: lockedQuote }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.createdCustomer).toBe(false);
+      expect(body.customerId).toBe('cust-linked');
+      expect(calls.filter((c) => c.table === 'customers' && c.op === 'insert')).toHaveLength(0);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at', 'converted_at']);
+    });
+  });
+
+  it('retry of that conversion (now converted under lock, no rebook) → 409, zero inserts', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: quoteLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('LEAD_ALREADY_CONVERTED');
+      expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
+    });
   });
 });

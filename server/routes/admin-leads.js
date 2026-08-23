@@ -1277,6 +1277,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // when the card already shows a linked customer). Without it, any convert
     // of a converted lead is a double-submit/retry and is rejected.
     const rebook = req.body.rebook === true;
+    // Email-match account selection (admin-confirmed, never implicit):
+    //  - attachToAccountId: attach ONLY if it equals the account the lead's
+    //    email resolves to under the lock (re-resolved server-side);
+    //  - createSeparateAccount: explicit opt-out of email matching.
+    const attachToAccountId = typeof req.body.attachToAccountId === 'string' && req.body.attachToAccountId.trim()
+      ? req.body.attachToAccountId.trim() : null;
+    const createSeparateAccount = req.body.createSeparateAccount === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
@@ -1423,8 +1430,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           phone: lead.phone || '',
           email: lead.email || null,
           // Email-match opt-in: a lead whose email belongs to a live customer
-          // (different/blank phone) attaches as an additional property.
-          matchEmail: true,
+          // (different/blank phone) attaches as an additional property ONLY
+          // after the admin confirmed that exact account (409
+          // EMAIL_MATCH_CONFIRM otherwise — thrown before any insert, so the
+          // transaction rolls back with nothing written).
+          matchEmail: !createSeparateAccount,
+          confirmEmailAccountId: attachToAccountId,
         });
         const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
@@ -1586,6 +1597,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
   } catch (err) {
+    if (err.code === 'EMAIL_MATCH_CONFIRM') {
+      return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
     if (err.code === 'LEAD_ALREADY_CONVERTED') {
       // Surface the winner's customer so the client can land on it instead of
       // retrying (the generic operational handler drops extra fields).

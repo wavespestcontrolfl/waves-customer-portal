@@ -22,8 +22,22 @@ function adminFetch(path, opts = {}) {
         ? opts.body
         : JSON.stringify(opts.body)
       : undefined,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's error/code/match so callers can branch on
+      // structured 409s (e.g. EMAIL_MATCH_CONFIRM) instead of status alone.
+      let body = null;
+      try {
+        body = await r.clone().json();
+      } catch {
+        body = null;
+      }
+      const err = new Error(body?.error || `HTTP ${r.status}`);
+      err.status = r.status;
+      err.code = body?.code || null;
+      err.match = body?.match || null;
+      throw err;
+    }
     return r.json();
   });
 }
@@ -2915,11 +2929,13 @@ export function LeadsSection() {
                                         onClick={async () => {
                                           setApptSaving(true);
                                           try {
-                                            await adminFetch(
-                                              `/admin/leads/${lead.id}/schedule-appointment`,
-                                              {
-                                                method: "POST",
-                                                body: {
+                                            const submitAppt = (extra) =>
+                                              adminFetch(
+                                                `/admin/leads/${lead.id}/schedule-appointment`,
+                                                {
+                                                  method: "POST",
+                                                  body: {
+                                                    ...extra,
                                                   date: apptForm.date,
                                                   time: apptForm.time,
                                                   serviceType:
@@ -2930,19 +2946,40 @@ export function LeadsSection() {
                                                     apptForm.technicianId ||
                                                     null,
                                                   notes: apptForm.notes,
-                                                  // Card already shows a linked
-                                                  // customer → explicit repeat
-                                                  // booking; a first-time submit
-                                                  // must NOT send this (server
-                                                  // 409s retries on converted
-                                                  // leads).
-                                                  rebook: Boolean(
-                                                    lead.customer_id ||
-                                                      lead.converted_at,
-                                                  ),
+                                                  // Card already shows a CONVERTED
+                                                  // lead → explicit repeat booking.
+                                                  // converted_at ALONE: the public
+                                                  // quote flow links customer_id
+                                                  // without converting, and that
+                                                  // lead's first submit must not
+                                                  // send this (server 409s retries
+                                                  // on converted leads).
+                                                  rebook: Boolean(lead.converted_at),
+                                                  },
                                                 },
-                                              },
-                                            );
+                                              );
+                                            try {
+                                              await submitAppt({});
+                                            } catch (e) {
+                                              // Email matches an existing customer:
+                                              // attaching is an explicit admin
+                                              // choice, never implicit (email is
+                                              // not proof of account ownership).
+                                              if (e?.code !== "EMAIL_MATCH_CONFIRM")
+                                                throw e;
+                                              const m = e.match || {};
+                                              const attach = window.confirm(
+                                                `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account? Cancel creates a separate new customer.`,
+                                              );
+                                              await submitAppt(
+                                                attach
+                                                  ? { attachToAccountId: m.accountId }
+                                                  : {
+                                                      attachToAccountId: null,
+                                                      createSeparateAccount: true,
+                                                    },
+                                              );
+                                            }
                                             setApptForm(null);
                                             loadLeads();
                                             expandLead(lead);
