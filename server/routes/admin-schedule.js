@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -3526,6 +3527,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock, FIRST statement of the trx, before the comms lock
+      // and every row lock below. The admin creator was the one committing
+      // writer with no lock and no global probe: its uncommitted insert was
+      // invisible to every other writer's tech-blind check, and it never
+      // checked anyone else's. The probe itself runs right before the
+      // parent insert (same trx, after this lock).
+      await acquireOccupancyLock(trx, dateOnly(scheduledDate));
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
       // customers row lock below: every scheduled_services insert in this
       // trx (parent, recurring children, boosters) serializes against a
@@ -3677,6 +3686,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
+
+      // Global occupancy probe under rung 1 (the contract's second half):
+      // tech-blind, counts live estimate holds, same predicate the customer
+      // /book and rebooker commit gates run. A timed parent that overlaps
+      // ANY existing visit is refused with the SLOT_TAKEN 409 those paths
+      // already return — the admin UI's SlotConflictNotice is advisory only
+      // and carries no overbook flag, so there is nothing to honor here.
+      // Windowless rows carry no occupancy and skip the probe (the
+      // predicate's NULL window_start is inert either way).
+      if (insertData.window_start && insertData.window_end) {
+        const adminCreateClash = await findConflictingVisits({
+          db: trx,
+          date: dateOnly(scheduledDate),
+          windowStart: insertData.window_start,
+          windowEnd: insertData.window_end,
+          excludeStatuses: ['cancelled', 'completed'],
+        });
+        if (adminCreateClash.length) {
+          throw Object.assign(new Error('That time slot conflicts with another appointment on the schedule. Pick another time.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
@@ -5564,7 +5598,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // (assignment updates below take visit row locks).
       const commsPeek = await trx('scheduled_services')
         .where({ id: req.params.id })
-        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing');
+        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing', 'scheduled_date');
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock, BEFORE the maintenance/comms advisory locks and
+      // every row lock this trx takes. Keyed off the TARGET date: the
+      // requested move date, else the unlocked peek of the row's own date
+      // (a window-only edit still re-occupies that day). The peek is
+      // provisional — the locked read below re-checks the key and aborts
+      // the edit if the row's date moved in between (the row-lock rule:
+      // never take a second date key mid-txn).
+      const occupancyWindowTouched = updates.scheduled_date !== undefined
+        || updates.window_start !== undefined
+        || updates.window_end !== undefined;
+      const occupancyDateKey = updates.scheduled_date !== undefined
+        ? dateOnly(updates.scheduled_date)
+        : dateOnly(commsPeek?.scheduled_date);
+      if (occupancyWindowTouched && occupancyDateKey) {
+        await acquireOccupancyLock(trx, occupancyDateKey);
+      }
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
@@ -5743,6 +5794,59 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // office edits notes/price, and wiping the live attempt would
         // orphan it. Completed/terminal rows keep their lifecycle: the
         // stamps ARE the service record.
+        // Global occupancy probe under rung 1 for a date/window move — the
+        // same tech-blind predicate + status exclusions the rebooker's
+        // commit gate runs (cancelled + completed don't occupy; the moving
+        // row excludes itself), thrown as the same SLOT_TAKEN 409 so every
+        // caller's conflict handling works unchanged. Terminal rows are
+        // record corrections, not occupancy, and skip it. Runs on the
+        // LOCKED row (reusing the tuple read above, else its own FOR
+        // UPDATE), re-checking the provisional date key first.
+        if (occupancyWindowTouched) {
+          const occRow = preTupleRow
+            || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+          if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
+            const occDate = updates.scheduled_date !== undefined
+              ? dateOnly(updates.scheduled_date)
+              : dateOnly(occRow.scheduled_date);
+            if (occDate !== occupancyDateKey) {
+              throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            const occStart = normalizeHHMM(updates.window_start !== undefined ? updates.window_start : occRow.window_start);
+            // A start-only edit leaves the stored end stale — derive the
+            // block from the effective duration like the rebooker does.
+            let occEnd = normalizeHHMM(updates.window_end !== undefined
+              ? updates.window_end
+              : (updates.window_start !== undefined ? null : occRow.window_end));
+            if (occStart && (!occEnd || occEnd <= occStart)) {
+              const [sh, sm] = occStart.split(':').map(Number);
+              const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
+              const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
+              occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+            }
+            if (occDate && occStart && occEnd) {
+              const adminMoveClash = await findConflictingVisits({
+                db: trx,
+                date: occDate,
+                windowStart: occStart,
+                windowEnd: occEnd,
+                excludeServiceIds: [req.params.id],
+                excludeStatuses: ['cancelled', 'completed'],
+              });
+              if (adminMoveClash.length) {
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'SLOT_TAKEN',
+                });
+              }
+            }
+          }
+        }
         const dateActuallyMoves = updates.scheduled_date !== undefined
           && preTupleRow
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))

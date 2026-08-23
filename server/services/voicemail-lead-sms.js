@@ -40,6 +40,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
@@ -347,6 +348,16 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     },
   });
 
+  if (result.sent && !isRealProviderSend(result)) {
+    // Upstream suppression sentinel (SMS gate off, template disabled, owner
+    // kill switch) — sent:true but no text left. Same handling as the
+    // dropped-call lane: never consume the one-shot; release BOTH claims so
+    // the lead is not stamped "texted" forever while the gate is off.
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[voicemail-sms] Suppression sentinel for ${maskPhone(phone)} (${result.providerMessageId || 'no-id'}) — released, not sent`);
+    return { sent: false, skipped: 'send_suppressed', code: result.providerMessageId || null };
+  }
   if (result.sent) {
     await stampStatus(leadId, 'sent');
     await stampPhoneClaim(phone, 'sent');

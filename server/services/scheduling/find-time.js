@@ -295,6 +295,10 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  // Service-day bounds (ET hours) — the one place they are defined; other
+  // offer surfaces (rain-out same-day presets) clamp to these.
+  DAY_START_HOUR,
+  DAY_END_HOUR,
   _internals: {
     enumerateDates,
   },

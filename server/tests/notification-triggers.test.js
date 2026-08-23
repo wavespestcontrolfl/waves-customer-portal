@@ -255,3 +255,26 @@ describe('triggerNotification bell outcome', () => {
     expect(result.bellWritten).toBe(true);
   });
 });
+
+describe('triggerNotification preference lookup failure', () => {
+  const { sendToAdminUsers } = require('../services/push-notifications');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('fails CLOSED — a thrown prefs query delivers to nobody instead of treating everyone as opted in', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'notification_preferences') {
+        return { where: jest.fn(() => Promise.reject(new Error('relation does not exist'))) };
+      }
+      return table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([]);
+    });
+
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' });
+
+    expect(result).toEqual({ bellWritten: false, push: null, prefsUnavailable: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(sendToAdminUsers).not.toHaveBeenCalled();
+  });
+});
