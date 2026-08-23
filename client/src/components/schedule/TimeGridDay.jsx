@@ -13,6 +13,7 @@ import {
   useSensors,
   useDraggable,
   useDroppable,
+  useDndContext,
   pointerWithin,
 } from '@dnd-kit/core';
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
@@ -475,14 +476,23 @@ export function snapSlotIdxToHourMin(slotIdx) {
   return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
 }
 
-// A row accepts drops / drag-create only from BOOKABLE_START_HOUR on.
-export function isBookableSlotIdx(slotIdx) {
-  return snapSlotIdxToHourMin(slotIdx) >= BOOKABLE_START_HOUR * 60;
+// A row accepts drops / drag-create only from BOOKABLE_START_HOUR on, AND
+// only if a visit of `durationMin` starting there ends by DAY_END_HOUR —
+// the server refuses an end past the day end with a 422, so a 2-hour visit
+// must not be offered the 19:00 row.
+export function isBookableSlotIdx(slotIdx, durationMin = 60) {
+  const startMin = snapSlotIdxToHourMin(slotIdx);
+  const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
+  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
 }
 
 function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   const slotMin = snapSlotIdxToHourMin(slotIdx);
-  const bookable = isBookableSlotIdx(slotIdx);
+  // The visit being dragged (same payload onDragEnd reads) sizes the fit
+  // check; with nothing in flight the row is judged as a 60-min create.
+  const { active } = useDndContext();
+  const activeSvc = active?.data?.current?.service;
+  const bookable = isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
@@ -540,7 +550,12 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       // Hour-aligned block: start floors, end ceils to the next hour mark.
       // A selection dragged up into the pre-opening rows is clamped to 8am.
       const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
-      const endMin = Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60);
+      const endMin = Math.min(
+        DAY_END_HOUR * 60,
+        Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
+      );
+      // No hour left before the day end — nothing bookable to pre-fill.
+      if (endMin - startMin < 60) return;
       onCreateSlot?.({
         techId: tech.id,
         windowStart: minutesToHHMM(startMin),
@@ -1069,6 +1084,7 @@ export default function TimeGridDay({
     // Pre-opening rows are disabled droppables; belt-and-braces for a stale
     // drop payload — the server would 422 it anyway.
     if (drop.slotMin != null && toMin < BOOKABLE_START_HOUR * 60) return;
+    if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
     if (fromTech === toTech && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);

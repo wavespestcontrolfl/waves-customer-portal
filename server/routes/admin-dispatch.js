@@ -12092,13 +12092,24 @@ function parseRescheduleWindow(w) {
 }
 
 // Shared admin window rules (scheduling/window-rules.js) on the dispatch
-// reschedule entry: on-the-hour, >= 08:00, end > start, end <= day end. A
-// windowless (date-only) move passes through; an end-less window is judged
-// as a 60-min block (the rebooker derives the real end from the row). The
-// overlap check itself is the rebooker's existing occupancy gate.
+// reschedule entry: on-the-hour, >= 08:00, end > start, end <= day end.
+// Only an ABSENT window (null/undefined/'') is a date-only move; any
+// supplied value that yields no start (truncated "09:00-", an object with
+// only an end, {}) is malformed → 422, never silently a date-only move. An
+// end-less window is judged as a 60-min block (the rebooker derives the
+// real end from the row). The overlap check itself is the rebooker's
+// existing occupancy gate.
 function assertRescheduleWindowRules(window) {
+  if (window == null || window === '') return;
   const win = parseRescheduleWindow(window);
-  if (!win.start) return;
+  if (!win.start) {
+    const err = new Error(`Reschedule window must be "HH:MM-HH:MM" or { start, end } — got ${JSON.stringify(window)}`);
+    err.status = 422;
+    err.statusCode = 422;
+    err.isOperational = true;
+    err.code = 'INVALID_APPOINTMENT_WINDOW';
+    throw err;
+  }
   assertAdminAppointmentWindow({ windowStart: win.start, windowEnd: win.end });
 }
 

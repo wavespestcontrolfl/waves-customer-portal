@@ -5273,13 +5273,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // row-locked parent; a date outside this pre-locked set fails CLOSED.
     const willSpawnChildren = isRecurring && spawnRecurringChildren !== false && recurringPattern
       && ((recurringOngoing ? 4 : (recurringCount || 0)) > 1);
+    // Same fence for the cadence REWRITE path (an existing series edited with
+    // spawnRecurringChildren:false re-dates every pending child/booster):
+    // those destination dates are planned here too, locked as rung 1, and
+    // each row-update is probed under the lock.
+    const mayRewriteSeries = isRecurring && spawnRecurringChildren === false && !!recurringPattern;
     let lockedSpawnDates = null;
     let currentRow = null;
     if (updates.window_start || updates.window_end
-      || (adminSlotOverlapGuardEnabled() && (updates.scheduled_date !== undefined || willSpawnChildren))) {
+      || (adminSlotOverlapGuardEnabled() && (updates.scheduled_date !== undefined || willSpawnChildren || mayRewriteSeries))) {
       currentRow = await db('scheduled_services').where({ id: req.params.id })
         .first('scheduled_date', 'window_start', 'window_end', 'recurring_nth', 'recurring_weekday',
-          'recurring_interval_days', 'skip_weekends', 'weekend_shift');
+          'recurring_interval_days', 'skip_weekends', 'weekend_shift', 'booster_months');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
       if (updates.window_start || updates.window_end) {
         const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
@@ -5350,29 +5355,62 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
-    if (adminSlotOverlapGuardEnabled() && willSpawnChildren && currentRow) {
+    if (adminSlotOverlapGuardEnabled() && (willSpawnChildren || mayRewriteSeries) && currentRow) {
       const probeDate = updates.scheduled_date !== undefined
         ? String(updates.scheduled_date).split('T')[0]
         : dateOnly(currentRow.scheduled_date);
-      // Superset of what the re-seed can insert: same derivation and
-      // attempt cap as the loop, from the same post-update base date.
-      const spawnCountPlan = recurringOngoing ? 4 : (recurringCount || 0);
+      // Superset of what the re-seed can insert / the cadence rewrite can
+      // re-date to: same derivation and attempt caps as those loops, from
+      // the same post-update base date.
       const skipChildPlan = skipWeekends !== undefined ? !!skipWeekends
         : (currentRow.skip_weekends != null ? !!currentRow.skip_weekends : false);
       const dirChildPlan = (weekendShift !== undefined ? weekendShift
         : (currentRow.weekend_shift === 'back' ? 'back' : 'forward')) === 'back' ? 'back' : 'forward';
-      lockedSpawnDates = probeDate ? [probeDate, ...recurringChildDateCandidates({
-        baseDateStr: probeDate,
-        recurringPattern,
-        rOpts: {
-          nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : currentRow.recurring_nth,
-          weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : currentRow.recurring_weekday,
-          intervalDays: recurringIntervalDays != null ? recurringIntervalDays : currentRow.recurring_interval_days,
-        },
-        skipWeekends: skipChildPlan,
-        shiftDir: dirChildPlan,
-        maxAttempts: (spawnCountPlan - 1) * 4 + 30,
-      })] : null;
+      const rOptsPlan = {
+        nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : currentRow.recurring_nth,
+        weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : currentRow.recurring_weekday,
+        intervalDays: recurringIntervalDays != null ? recurringIntervalDays : currentRow.recurring_interval_days,
+      };
+      let pendingChildCount = 0;
+      const pendingBoosterDates = [];
+      if (mayRewriteSeries) {
+        // Unlocked pre-read (superset only — the rewrite derives from the
+        // locked rows and fails closed on any date outside this plan).
+        const pendingRows = await db('scheduled_services')
+          .where({ recurring_parent_id: req.params.id })
+          .whereIn('status', ['pending', 'confirmed'])
+          .select('is_recurring', 'scheduled_date');
+        for (const row of pendingRows || []) {
+          if (row.is_recurring) pendingChildCount++;
+          else if (dateOnly(row.scheduled_date)) pendingBoosterDates.push(dateOnly(row.scheduled_date));
+        }
+      }
+      const spawnCountPlan = willSpawnChildren ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
+      const childAttemptCap = Math.max(
+        willSpawnChildren ? (spawnCountPlan - 1) * 4 + 30 : 0,
+        mayRewriteSeries ? pendingChildCount * 4 + 30 : 0,
+      );
+      if (probeDate) {
+        lockedSpawnDates = [probeDate, ...recurringChildDateCandidates({
+          baseDateStr: probeDate,
+          recurringPattern,
+          rOpts: rOptsPlan,
+          skipWeekends: skipChildPlan,
+          shiftDir: dirChildPlan,
+          maxAttempts: childAttemptCap,
+        })];
+        if (mayRewriteSeries) {
+          // Booster destinations: the recomputed month targets off the new
+          // anchor AND each pending booster's own weekend-shifted date —
+          // the two derivations the rewrite block chooses between.
+          for (const rawDate of computeBoosterDates(probeDate, normalizeBoosterMonths(currentRow.booster_months), 12)) {
+            lockedSpawnDates.push(shiftPastWeekend(rawDate, skipChildPlan, dirChildPlan));
+          }
+          for (const d of pendingBoosterDates) {
+            lockedSpawnDates.push(d, shiftPastWeekend(d, skipChildPlan, dirChildPlan));
+          }
+        }
+      }
     }
     if (isRecurring) {
       updates.is_recurring = true;
@@ -6001,6 +6039,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             );
           }
         }
+        // Gated overlap fence: the probe at the top of this trx used the
+        // UNLOCKED pre-read (currentRow) for the stored span/date. A
+        // concurrent resize or move that committed before our row lock
+        // would let this save carry an unprobed span onto the destination —
+        // compare the LOCKED row with the pre-read and fail CLOSED on any
+        // drift (no second date key mid-trx; the retry re-plans).
+        if (adminSlotOverlapGuardEnabled() && overlapProbe && currentRow) {
+          const lockedRow = preTupleRow
+            || await trx('scheduled_services').where({ id: req.params.id }).forUpdate()
+              .first('scheduled_date', 'window_start', 'window_end');
+          const drifted = lockedRow && (
+            dateOnly(lockedRow.scheduled_date) !== dateOnly(currentRow.scheduled_date)
+            || normalizeHHMM(lockedRow.window_start) !== normalizeHHMM(currentRow.window_start)
+            || normalizeHHMM(lockedRow.window_end) !== normalizeHHMM(currentRow.window_end)
+          );
+          if (drifted) {
+            throw Object.assign(
+              httpError(409, 'This appointment was moved or resized while saving — reload and save again.'),
+              { code: 'VISIT_CHANGED_RETRY' },
+            );
+          }
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the
@@ -6261,13 +6321,29 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
+            .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', ...seriesEvidenceCols);
           const pendingBoosters = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: false })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
+            .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', ...seriesEvidenceCols);
+          // Gated overlap fence for every re-dated row: rung 1 was taken at
+          // the top of this trx for the pre-planned destination set; a
+          // destination outside it fails CLOSED (no second date key
+          // mid-trx), and each real date change is probed under the lock.
+          const fenceRewriteDestination = async (row, nextDateStr) => {
+            if (!adminSlotOverlapGuardEnabled()) return;
+            if (!lockedSpawnDateSet || !lockedSpawnDateSet.has(nextDateStr)) {
+              throw Object.assign(httpError(409, 'The series anchor changed while saving — reload and save again.'), { code: 'SERIES_ANCHOR_MOVED_RETRY' });
+            }
+            if (normalizeDateOnly(row.scheduled_date) === nextDateStr) return;
+            const rowStart = normalizeHHMM(row.window_start);
+            const rowEnd = normalizeHHMM(row.window_end);
+            if (rowStart && rowEnd) {
+              await assertNoSlotOverlap({ trx, date: nextDateStr, windowStart: rowStart, windowEnd: rowEnd, excludeServiceIds: [row.id] });
+            }
+          };
           const pendingRewriteIds = [
             ...pendingChildren.map((row) => row.id),
             ...pendingBoosters.map((row) => row.id),
@@ -6302,6 +6378,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 nextDateStr = candidate;
               }
               if (!nextDateStr) break;
+              await fenceRewriteDestination(child, nextDateStr);
               const childDateChanged = normalizeDateOnly(child.scheduled_date) !== nextDateStr;
               const childUpdates = {
                 scheduled_date: nextDateStr,
@@ -6396,6 +6473,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               for (const booster of pendingBoosters) {
                 const nextDateStr = boosterTargets.get(booster.id);
                 if (!nextDateStr) continue;
+                await fenceRewriteDestination(booster, nextDateStr);
                 const boosterDateChanged = normalizeDateOnly(booster.scheduled_date) !== nextDateStr;
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 // Fence-or-clear contract — same as the child rewrite above.

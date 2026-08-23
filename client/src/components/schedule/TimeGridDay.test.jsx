@@ -5,8 +5,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDay from './TimeGridDay';
 
+let mockActive = null;
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({ children }) => <div>{children}</div>,
+  useDndContext: () => ({ active: mockActive }),
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
   useSensors: () => [],
@@ -37,6 +39,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  mockActive = null;
   cleanup();
   vi.restoreAllMocks();
 });
@@ -99,5 +102,30 @@ describe('TimeGridDay hour-aligned grid', () => {
     expect(snapSlotIdxToHourMin(5)).toBe(8 * 60);
     expect(snapSlotIdxToHourMin(9)).toBe(10 * 60);
     for (let idx = 0; idx < 28; idx += 1) expect(snapSlotIdxToHourMin(idx) % 60).toBe(0);
+  });
+});
+
+describe('TimeGridDay day-end fit', () => {
+  it('a row is bookable only if the dragged visit would end by 8 PM; drag-create pre-fill never runs past it', async () => {
+    const { isBookableSlotIdx } = await import('./TimeGridDay');
+    const IDX_19 = (19 - 6) * 2; // 30-min rows from 06:00 → 19:00
+    expect(isBookableSlotIdx(IDX_19, 60)).toBe(true);
+    expect(isBookableSlotIdx(IDX_19, 120)).toBe(false);
+    expect(isBookableSlotIdx(IDX_19 - 2, 120)).toBe(true); // 18:00 + 2h = 20:00 fits
+    expect(isBookableSlotIdx(IDX_19 + 1, 60)).toBe(true); // 19:30 row snaps to 19:00
+
+    // A 2-hour visit in flight disables the 19:00 row while 18:00 stays open.
+    mockActive = { data: { current: { service: { id: 'svc-long', windowStart: '09:00', windowEnd: '11:00' } } } };
+    const { container } = render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={SERVICES}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+      />,
+    );
+    const row = (min) => container.querySelector(`[data-slot-min="${min}"]`);
+    expect(row(19 * 60).getAttribute('aria-disabled')).toBe('true');
+    expect(row(18 * 60).getAttribute('aria-disabled')).toBeNull();
   });
 });

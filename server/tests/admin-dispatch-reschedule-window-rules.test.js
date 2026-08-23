@@ -100,3 +100,20 @@ test('an on-the-hour window inside the day reaches the rebooker', async () => {
   expect(status).toBe(200);
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
 });
+
+test('a SUPPLIED but malformed window (truncated range / end-only object / {}) is 422, never a silent date-only move', async () => {
+  for (const bad of ['09:00-', '9am-10am', { end: '10:00' }, {}]) {
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: bad });
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+  }
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('an absent / null / empty window is a date-only move and reaches the rebooker', async () => {
+  for (const none of [undefined, null, '']) {
+    const { status } = await reschedule({ newDate: TARGET, newWindow: none });
+    expect(status).toBe(200);
+  }
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(3);
+});

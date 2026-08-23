@@ -132,3 +132,36 @@ test('recurringChildDateCandidates reproduces the inline derivation the spawn lo
   });
   expect(weekly).toEqual(['2099-01-12', '2099-01-19', '2099-01-26']);
 });
+
+describe('rung-1 follow-ups (source-pattern guards)', () => {
+  const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+
+  test('the locked row is compared with the unlocked pre-read before the write; drift fails closed (VISIT_CHANGED_RETRY)', () => {
+    const driftIdx = ud.indexOf("code: 'VISIT_CHANGED_RETRY'");
+    const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+    expect(driftIdx).toBeGreaterThan(-1);
+    expect(driftIdx).toBeLessThan(writeIdx);
+    const check = ud.slice(ud.indexOf('const lockedRow = preTupleRow'), driftIdx);
+    expect(check).toMatch(/forUpdate\(\)/);
+    for (const col of ['scheduled_date', 'window_start', 'window_end']) expect(check).toContain(`lockedRow.${col}`);
+  });
+
+  test('cadence-rewrite destinations are planned into the rung-1 lock set and every re-dated child/booster is fenced before its CAS update', () => {
+    expect(ud).toMatch(/const mayRewriteSeries = isRecurring && spawnRecurringChildren === false/);
+    expect(ud).toMatch(/\(willSpawnChildren \|\| mayRewriteSeries\) && currentRow/);
+    // Booster destinations cover both derivations the rewrite chooses from.
+    expect(ud).toMatch(/computeBoosterDates\(probeDate, normalizeBoosterMonths\(currentRow\.booster_months\), 12\)/);
+    const rewrite = ud.slice(ud.indexOf('shouldRewritePendingRecurringRows(recurringParentBefore, parent)'));
+    const childFence = rewrite.indexOf('await fenceRewriteDestination(child, nextDateStr)');
+    const childCas = rewrite.indexOf('const childUpdated = await');
+    const boosterFence = rewrite.indexOf('await fenceRewriteDestination(booster, nextDateStr)');
+    const boosterCas = rewrite.indexOf('const boosterUpdated = await');
+    expect(childFence).toBeGreaterThan(-1);
+    expect(childFence).toBeLessThan(childCas);
+    expect(boosterFence).toBeGreaterThan(childCas);
+    expect(boosterFence).toBeLessThan(boosterCas);
+    const fence = rewrite.slice(rewrite.indexOf('const fenceRewriteDestination'), rewrite.indexOf('const pendingRewriteIds'));
+    expect(fence).toMatch(/SERIES_ANCHOR_MOVED_RETRY/);
+    expect(fence).toMatch(/assertNoSlotOverlap\(\{ trx, date: nextDateStr/);
+  });
+});
