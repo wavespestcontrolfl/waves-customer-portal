@@ -115,7 +115,8 @@ export default function ScheduleCustomerSidebar({
     let cancelled = false;
     setLoading(true);
     setError('');
-    adminFetch(`/admin/customers/${service.customerId}`)
+    const focus = service.id ? `?focusServiceId=${encodeURIComponent(service.id)}` : '';
+    adminFetch(`/admin/customers/${service.customerId}${focus}`)
       .then(async (r) => {
         const json = await r.json();
         if (!r.ok) throw new Error(json?.error || `HTTP ${r.status}`);
@@ -124,7 +125,7 @@ export default function ScheduleCustomerSidebar({
       .catch((err) => { if (!cancelled) setError(err.message || 'Failed to load customer'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [service?.customerId]);
+  }, [service?.customerId, service?.id]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };

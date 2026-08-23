@@ -1518,7 +1518,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (!customerId) return;
     let cancelled = false;
     setCustomerLoading(true);
-    adminFetch(`/admin/customers/${customerId}`)
+    const focus = service.id ? `?focusServiceId=${encodeURIComponent(service.id)}` : "";
+    adminFetch(`/admin/customers/${customerId}${focus}`)
       .then((json) => {
         if (!cancelled) setCustomerData(json);
       })
@@ -1531,7 +1532,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return () => {
       cancelled = true;
     };
-  }, [service.customerId, service.customer_id]);
+  }, [service.customerId, service.customer_id, service.id]);
 
   // Card-on-file / Auto Pay secure-link state for this visit, shown in the
   // Cards on file panel. Best-effort read — a failed load hides the action.

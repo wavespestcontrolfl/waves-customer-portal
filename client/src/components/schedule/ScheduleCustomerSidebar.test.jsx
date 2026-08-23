@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { adminFetch } from '../../lib/adminFetch';
 
 vi.mock('../admin/CallBridgeLink', () => ({ default: ({ phone }) => <span>{phone}</span> }));
 vi.mock('../../lib/cardHoldCancel', () => ({ confirmCardHoldFeeChoice: vi.fn() }));
@@ -35,6 +36,8 @@ describe('ScheduleCustomerSidebar appointment history', () => {
       />,
     );
     await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
+    // The open visit is pinned server-side so a >cap customer still shows it.
+    expect(adminFetch).toHaveBeenCalledWith('/admin/customers/c1?focusServiceId=v0');
     expect(screen.getByText('Visit 7')).toBeTruthy();
     expect(screen.queryByText('Visit 8')).toBeNull();
     expect(screen.getByText('Current')).toBeTruthy();

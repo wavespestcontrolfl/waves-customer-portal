@@ -50,7 +50,7 @@ function money(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export default function MobileCustomerDetailSheet({ customerId, onClose }) {
+export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, onClose }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -60,13 +60,14 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
   const load = useCallback(async () => {
     setLoading(true); setErr('');
     try {
-      const r = await adminFetch(`/admin/customers/${customerId}`);
+      const focus = focusServiceId ? `?focusServiceId=${encodeURIComponent(focusServiceId)}` : '';
+      const r = await adminFetch(`/admin/customers/${customerId}${focus}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setData(d);
     } catch (e) { setErr(e.message); }
     finally { setLoading(false); }
-  }, [customerId]);
+  }, [customerId, focusServiceId]);
 
   useEffect(() => { if (customerId) load(); }, [customerId, load]);
 

@@ -872,6 +872,7 @@ export default function MobileAppointmentDetailSheet({
       {showCustomer && service.customerId && (
         <MobileCustomerDetailSheet
           customerId={service.customerId}
+          focusServiceId={service.id}
           onClose={() => setShowCustomer(false)}
         />
       )}
