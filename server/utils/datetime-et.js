@@ -158,7 +158,11 @@ function etWeekStart(date = new Date()) {
 // the normalized YYYY-MM-DD string, or null for garbage / impossible / past
 // input so callers surface a clear tool error instead of a Postgres failure
 // or a visit no "upcoming" query ever finds.
-function validScheduleDate(value) {
+// Strict calendar-date check shared by validScheduleDate and tax-period:
+// accepts 'YYYY-MM-DD' (an ISO 'T…' time suffix is dropped, nothing else is),
+// round-trips Y/M/D through Date.UTC so impossible dates (2026-02-31,
+// 2023-02-29) are rejected. Returns the normalized string or null.
+function validCalendarDate(value) {
   const dateStr = String(value == null ? '' : value).split('T')[0];
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
   if (!m) return null;
@@ -169,6 +173,12 @@ function validScheduleDate(value) {
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) {
     return null;
   }
+  return dateStr;
+}
+
+function validScheduleDate(value) {
+  const dateStr = validCalendarDate(value);
+  if (!dateStr) return null;
   if (dateStr < etDateString()) return null;
   return dateStr;
 }
@@ -247,6 +257,6 @@ function etCalendarDayOf(value) {
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
-  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
+  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

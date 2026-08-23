@@ -61,8 +61,8 @@ describe('POST /admin/job-expenses', () => {
     expect(row.quarter).toMatch(/^Q[1-4]$/);
   });
 
-  test('400 on an invalid expense_date instead of a NaN period', async () => {
-    const res = await send('POST', '/admin/job-expenses', { scheduled_service_id: 'ss-1', amount: 5, expense_date: 'garbage' });
+  test.each(['garbage', '2026-02-31', '2026-01-01garbage'])('400 on invalid expense_date %s', async (expense_date) => {
+    const res = await send('POST', '/admin/job-expenses', { scheduled_service_id: 'ss-1', amount: 5, expense_date });
     expect(res.status).toBe(400);
     expect(state.inserted).toHaveLength(0);
   });
@@ -81,8 +81,8 @@ describe('PUT /admin/job-expenses/:id', () => {
     expect(state.updates[0]).toEqual({ amount: 9, tax_deductible_amount: 9 });
   });
 
-  test('400 on an invalid expense_date', async () => {
-    const res = await send('PUT', '/admin/job-expenses/exp-1', { expense_date: '2026-13-40' });
+  test.each(['2026-13-40', '2026-02-31', '2026-01-01garbage'])('400 on invalid expense_date %s', async (expense_date) => {
+    const res = await send('PUT', '/admin/job-expenses/exp-1', { expense_date });
     expect(res.status).toBe(400);
     expect(state.updates).toHaveLength(0);
   });

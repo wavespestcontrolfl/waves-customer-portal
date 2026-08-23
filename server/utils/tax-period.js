@@ -11,12 +11,13 @@
  * tax_year, so a writer that omits it makes the row invisible to the tax
  * dashboard / 1040-ES estimate / tax advisor / IB tax tools.
  */
-const { etDateString } = require('./datetime-et');
-
-const YMD = /^(\d{4})-(\d{2})-(\d{2})/;
+const { etDateString, validCalendarDate } = require('./datetime-et');
 
 /**
- * @param {string|Date} expenseDate 'YYYY-MM-DD' (ISO datetime prefix accepted) or Date
+ * @param {string|Date} expenseDate strict 'YYYY-MM-DD' (an ISO 'T…' time
+ *   suffix is tolerated and ignored; anything else trailing is rejected), or a
+ *   Date. Impossible calendar dates (2026-02-31) are rejected via the shared
+ *   validCalendarDate round-trip so callers can 400 before Postgres sees it.
  * @returns {{ tax_year: string, quarter: string } | null} null when invalid
  */
 function taxPeriodFor(expenseDate) {
@@ -26,13 +27,10 @@ function taxPeriodFor(expenseDate) {
     ymd = etDateString(expenseDate);
   }
   if (typeof ymd !== 'string') return null;
-  const m = YMD.exec(ymd.trim());
-  if (!m) return null;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return { tax_year: String(year), quarter: `Q${Math.ceil(month / 3)}` };
+  const dateStr = validCalendarDate(ymd.trim());
+  if (!dateStr) return null;
+  const month = Number(dateStr.slice(5, 7));
+  return { tax_year: dateStr.slice(0, 4), quarter: `Q${Math.ceil(month / 3)}` };
 }
 
 module.exports = { taxPeriodFor };

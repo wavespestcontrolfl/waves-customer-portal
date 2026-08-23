@@ -271,7 +271,7 @@ describe('POST /expenses partial deductions', () => {
 
 describe('POST /admin/tax/expenses tax period', () => {
   test('400 on a missing/invalid expenseDate instead of tax_year=NaN', async () => {
-    for (const expenseDate of [undefined, 'garbage']) {
+    for (const expenseDate of [undefined, 'garbage', '2026-02-31', '2026-01-01garbage']) {
       const res = await post('/admin/tax/expenses', { categoryId: 'cat-supplies', description: 'x', amount: 5, expenseDate });
       expect(res.status).toBe(400);
     }

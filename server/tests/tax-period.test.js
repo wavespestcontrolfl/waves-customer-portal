@@ -24,7 +24,12 @@ describe('taxPeriodFor', () => {
     expect(taxPeriodFor(new Date('2026-01-01T03:00:00Z'))).toEqual({ tax_year: '2025', quarter: 'Q4' });
   });
 
-  test.each([undefined, null, '', 'not-a-date', '2026-13-01', '2026-00-10', 42, new Date('nope')])(
+  test('leap days: real ones pass, fake ones are rejected', () => {
+    expect(taxPeriodFor('2024-02-29')).toEqual({ tax_year: '2024', quarter: 'Q1' });
+    expect(taxPeriodFor('2023-02-29')).toBeNull();
+  });
+
+  test.each([undefined, null, '', 'not-a-date', '2026-13-01', '2026-00-10', '2026-02-31', '2026-01-01garbage', '2026-01-01 10:00', 42, new Date('nope')])(
     'invalid %p → null', (v) => { expect(taxPeriodFor(v)).toBeNull(); },
   );
 });
