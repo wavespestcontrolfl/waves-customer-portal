@@ -16,7 +16,7 @@
  *     silently corrupts campaign analytics or double-applies events.
  */
 
-const { buildSubscriberQuery, excludeGloballySuppressed, excludeArchivedCustomers, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeGloballySuppressed, excludeArchivedCustomers, resolveEffectiveCustomerIds, loadPersonalizationContext, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
 const db = require('../models/db');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
@@ -151,6 +151,16 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(keep({ customer_id: 1, email: 'SHARED@example.com' })).toBe(true);
     expect(keep({ customer_id: 3, email: 'solo@example.com' })).toBe(false);
     expect(keep({ customer_id: null, email: 'lead@example.com' })).toBe(true);
+  });
+
+  // Service-line segmentation on a pre-resolved customer-id set: a subscriber
+  // whose LINK is archived matches through its live same-email twin's ids;
+  // a live link keeps exact whereIn matching (the OR branch requires the
+  // archived-link EXISTS first).
+  test('service-line whereIn lets an archived link segment on its live same-email twin', () => {
+    const { sql, bindings } = buildSubscriberQuery(null, ['cust-live']).toSQL();
+    expect(sql).toMatch(/\("customer_id" in \((?:\$\d+|\?)\) or \(exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\) and exists \(select 1 from "customers" as "lc" where "lc"\."id" in \((?:\$\d+|\?)\) and LOWER\(TRIM\(lc\.email\)\) = LOWER\(TRIM\(newsletter_subscribers\.email\)\) and "lc"\."deleted_at" is null\)\)\)/i);
+    expect(bindings.filter((b) => b === 'cust-live')).toHaveLength(2);
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {
@@ -3170,3 +3180,4 @@ describe('newsletter quiz — aggregateQuizResults (results dashboard)', () => {
     expect(pest.answers.find((a) => a.key === 'legacy-x').label).toBe('legacy-x'); // raw fallback
   });
 });
+
