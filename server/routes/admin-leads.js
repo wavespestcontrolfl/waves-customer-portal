@@ -1354,6 +1354,40 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
+      // ---- SLOT-OVERLAP GUARD (merge note for PR #3454 fix/sched-window-guard:
+      // that branch replaces THIS block with
+      //   await assertNoSlotOverlap({ trx, date, windowStart, windowEnd });
+      // from services/scheduling/window-rules.js — identical semantics; keep
+      // ONE copy). Rung 1 of occupancy.js's ORDERING CONTRACT: the date-wide
+      // occupancy lock is the FIRST statement of the transaction (coarsest
+      // first — before the comms lock and the lead FOR UPDATE), then the
+      // tech-blind conflict probe exactly as booking.js createSelfBooking.
+      // Runs for first conversions and rebooks alike — same insert.
+      {
+        const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+        const dateStr = String(date).split('T')[0];
+        await acquireOccupancyLock(trx, dateStr);
+        const clash = await findConflictingVisits({ db: trx, date: dateStr, windowStart, windowEnd });
+        if (clash.length) {
+          const err = new Error('That time slot overlaps another visit on the schedule');
+          err.statusCode = 409;
+          err.status = 409;
+          err.isOperational = true;
+          err.code = 'SLOT_CONFLICT';
+          err.conflicts = clash.map((row) => ({
+            id: row.id,
+            scheduled_date: row.scheduled_date,
+            window_start: row.window_start,
+            window_end: row.window_end,
+            status: row.status,
+            technician_id: row.technician_id || null,
+            service_type: row.service_type || null,
+          }));
+          throw err;
+        }
+      }
+      // ---- end slot-overlap guard
+
       // LOCK ORDER (utils/customer-comms-lock.js contract #1): when the
       // customer is already known, take the comms advisory lock FIRST — the
       // merge-undo holds it as its first lock and later repoints the lead, so
@@ -1545,12 +1579,17 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // 0 rows updated rolls the whole booking back. Also gated on converted_at
       // being unchanged since the locked read (belt-and-braces for the race
       // guard above): a first-time conversion must still be unconverted.
+      // A rebook on an already-converted lead is NOT a conversion: keep
+      // converted_at (lead-attribution.js uses it as the revenue cutoff /
+      // earliest-source selector — re-stamping it would drop earlier
+      // revenue) and skip the conversion-only activity below.
+      const isConversion = !lockedLead.converted_at;
       let convertQuery = trx('leads').where('id', req.params.id).whereNull('deleted_at');
-      if (!lockedLead.converted_at) convertQuery = convertQuery.whereNull('converted_at');
+      if (isConversion) convertQuery = convertQuery.whereNull('converted_at');
       const converted = await convertQuery.update({
         status: 'won',
         customer_id: customerId,
-        converted_at: new Date(),
+        ...(isConversion ? { converted_at: new Date() } : {}),
         is_qualified: true,
         updated_at: new Date(),
       });
@@ -1563,13 +1602,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       } catch (e) {
         logger.warn(`[leads] estimate→customer backfill failed for lead ${req.params.id}: ${e.message}`);
       }
-      await trx('lead_activities').insert({
-        lead_id: req.params.id,
-        activity_type: 'converted',
-        description: `Converted to customer (${customerId})`,
-        performed_by: 'system',
-        metadata: JSON.stringify({ customerId }),
-      });
+      if (isConversion) {
+        await trx('lead_activities').insert({
+          lead_id: req.params.id,
+          activity_type: 'converted',
+          description: `Converted to customer (${customerId})`,
+          performed_by: 'system',
+          metadata: JSON.stringify({ customerId }),
+        });
+      }
       await trx('lead_activities').insert({
         lead_id: req.params.id,
         activity_type: 'appointment_scheduled',
@@ -1623,6 +1664,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
   } catch (err) {
     if (err.code === 'EMAIL_MATCH_CONFIRM') {
       return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
+    if (err.code === 'SLOT_CONFLICT') {
+      return res.status(409).json({ error: err.message, code: err.code, conflicts: err.conflicts || [] });
     }
     if (err.code === 'DUPLICATE_VISIT') {
       return res.status(409).json({ error: err.message, code: err.code, scheduled_service_id: err.scheduled_service_id || null });

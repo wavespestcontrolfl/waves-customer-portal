@@ -74,7 +74,7 @@ function makeKnex(resolve, calls) {
   const builder = (table) => {
     const state = { table, ops: [], terminal: null };
     const q = {};
-    const chain = ['where', 'whereNull', 'whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'onConflict', 'ignore', 'returning', 'select'];
+    const chain = ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'orWhereRaw', 'orWhereNot', 'orderBy', 'forUpdate', 'onConflict', 'ignore', 'returning', 'select'];
     for (const m of chain) {
       q[m] = jest.fn((...args) => { state.ops.push({ op: m, args }); return q; });
     }
@@ -97,6 +97,7 @@ function makeKnex(resolve, calls) {
     return { rows: [{ locked: true }] };
   });
   knex.transaction = jest.fn(async (fn) => {
+    calls.push({ table: null, op: 'trx-begin', args: [], ops: [] });
     const trx = jest.fn(builder);
     trx.raw = knex.raw;
     return fn(trx);
@@ -109,9 +110,12 @@ function opsOf(state, name) {
 }
 
 // Shared resolver: the lead the route pre-reads vs the row it sees under lock.
-function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [] }) {
+const isOccupancyProbe = (state) => opsOf(state, 'whereRaw').some((o) => /window_start < \?::time/.test(o.args[0]));
+
+function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [], slotConflicts = [] }) {
   return (table, state) => {
     const t = state.terminal;
+    if (table === 'scheduled_services' && !t && isOccupancyProbe(state)) return slotConflicts;
     if (table === 'customers' && !t && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
       return emailMatch ? (Array.isArray(emailMatch) ? emailMatch : [emailMatch]) : [];
     }
@@ -254,7 +258,7 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       });
       expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
       // No comms lock taken on the create path before the 409.
-      expect(calls.filter((c) => c.op === 'raw')).toHaveLength(0);
+      expect(calls.filter((c) => c.op === 'raw' && /customer-comms/.test(String(c.args[1]?.[0])))).toHaveLength(0);
     });
   });
 
@@ -366,6 +370,67 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
+  it('occupancy: date lock is the FIRST statement of the trx, before comms lock and lead FOR UPDATE', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { rebook: true })).status).toBe(200);
+      const first = calls[calls.findIndex((c) => c.op === 'trx-begin') + 1];
+      expect(first.op).toBe('raw');
+      expect(first.args[0]).toMatch(/pg_advisory_xact_lock\(hashtext/);
+      expect(first.args[1][1]).toBe('occupancy:2027-01-15');
+      const commsIdx = calls.findIndex((c) => c.op === 'raw' && /customer-comms/.test(String(c.args[1]?.[0])));
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      expect(commsIdx).toBeGreaterThan(0);
+      expect(forUpdateIdx).toBeGreaterThan(commsIdx);
+    });
+  });
+
+  it.each([
+    ['rebook', () => ({ preLead: linkedLead(), lockedLead: lockedLinked }), { rebook: true }],
+    ['first conversion', () => ({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), {}],
+  ])('occupancy: %s overlapping another customer\'s visit (tech NULL) → 409 SLOT_CONFLICT, zero inserts', async (_label, fixture, body) => {
+    const calls = [];
+    const conflict = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
+    install(makeKnex(makeResolver({ ...fixture(), slotConflicts: [conflict] }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, body);
+      expect(res.status).toBe(409);
+      const json = await res.json();
+      expect(json.code).toBe('SLOT_CONFLICT');
+      expect(json.conflicts).toEqual([{ id: 'appt-other', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', technician_id: null, service_type: 'Lawn' }]);
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      // Probe is tech-blind with the default cancelled exclusion.
+      const probe = calls.find((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
+      expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
+      expect(probe.ops.some((o) => o.op === 'where' && o.args[0]?.technician_id !== undefined)).toBe(false);
+    });
+  });
+
+  it('rebook preserves converted_at and emits no "converted" activity (appointment event only)', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { rebook: true })).status).toBe(200);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+      const activities = calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert').map((c) => c.args[0].activity_type);
+      expect(activities).toEqual(['appointment_scheduled']);
+    });
+  });
+
+  it('first conversion sets converted_at and logs both converted + appointment activities', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl)).status).toBe(200);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0].converted_at).toBeInstanceOf(Date);
+      const activities = calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert').map((c) => c.args[0].activity_type);
+      expect(activities).toEqual(['converted', 'appointment_scheduled']);
+    });
+  });
+
   it('rebook twice for the same slot → second is 409 DUPLICATE_VISIT with zero inserts', async () => {
     const calls = [];
     install(makeKnex(makeResolver({
@@ -445,7 +510,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       expect(res.status).toBe(200);
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       const raws = calls.map((c, i) => ({ ...c, i })).filter((c) => c.op === 'raw');
-      const blockingBeforeLead = raws.filter((c) => /pg_advisory_xact_lock/.test(c.args[0]) && c.i < forUpdateIdx);
+      const blockingBeforeLead = raws.filter((c) => /pg_advisory_xact_lock/.test(c.args[0]) && /customer-comms/.test(String(c.args[1]?.[0])) && c.i < forUpdateIdx);
       expect(blockingBeforeLead).toHaveLength(0);
       const tryIdx = raws.find((c) => /pg_try_advisory_xact_lock/.test(c.args[0]));
       expect(tryIdx).toBeTruthy();
