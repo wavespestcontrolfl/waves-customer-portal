@@ -6694,13 +6694,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // concurrent En Route transition can make the row live after
               // it — an id-only write would move it without the rewind. A
               // miss skips the row (it changed under us; the next edit
-              // re-reads).
+              // re-reads). The window/duration are in the CAS too: the
+              // occupancy probe above ran on the block that read observed,
+              // and a window edit committed since would move a block the
+              // probe never saw (pre-push audit P1).
               const childUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
                 trx('scheduled_services')
                   .where({
                     id: child.id,
                     status: child.status,
                     scheduled_date: child.scheduled_date,
+                    window_start: child.window_start ?? null,
+                    window_end: child.window_end ?? null,
+                    estimated_duration_minutes: child.estimated_duration_minutes ?? null,
                   }),
                 child,
               )
@@ -6751,13 +6757,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     boosterRewound = true;
                   }
                 }
-                // Same CAS as the child rewrite above.
+                // Same CAS as the child rewrite above (window/duration
+                // included so the probed block is the moved block).
                 const boosterUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
                   trx('scheduled_services')
                     .where({
                       id: booster.id,
                       status: booster.status,
                       scheduled_date: booster.scheduled_date,
+                      window_start: booster.window_start ?? null,
+                      window_end: booster.window_end ?? null,
+                      estimated_duration_minutes: booster.estimated_duration_minutes ?? null,
                     }),
                   booster,
                 )
