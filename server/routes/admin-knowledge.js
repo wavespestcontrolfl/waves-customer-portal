@@ -153,12 +153,27 @@ router.get('/sources', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/knowledge/sources — add a new source
-router.post('/sources', async (req, res, next) => {
+// POST /api/admin/knowledge/sources — add a new source (admin only).
+// file_path is confined to the wiki/ folder (or KNOWLEDGE_SOURCES_DIR) and
+// file_type to the compiler's allowlist — the compiler reads this path from
+// disk and ships the bytes to the LLM, so an unconfined path is an
+// arbitrary-file-read. readSourceFile re-checks on read.
+router.post('/sources', requireAdmin, async (req, res, next) => {
   try {
-    const { filename, file_path, file_type, description } = req.body;
+    const { filename, file_path, file_type, description } = req.body || {};
+    let safePath;
+    let safeType;
+    try {
+      safePath = WikiCompiler.resolveKnowledgeSourcePath(file_path);
+      safeType = WikiCompiler.assertAllowedSourceFileType(file_type);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
     const [source] = await db('knowledge_sources').insert({
-      filename, file_path, file_type, description,
+      filename: String(filename || '').trim() || require('path').basename(safePath),
+      file_path: safePath,
+      file_type: safeType,
+      description: description == null ? null : String(description),
     }).returning('*');
     res.json({ source });
   } catch (err) { next(err); }

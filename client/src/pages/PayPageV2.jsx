@@ -679,7 +679,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               return;
             }
             if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-              onSuccess?.(paymentIntent, 'express_checkout');
+              onSuccessRef.current?.(paymentIntent, 'express_checkout');
             } else if (paymentIntent && paymentIntent.status === 'requires_action') {
               setElementError('Additional verification required. Please follow the prompts.');
             }
@@ -777,6 +777,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // treats a non-opted-in PI's consent POST as a silent no-op.
   const saveCardRef = useRef(saveCard);
   useEffect(() => { saveCardRef.current = saveCard; }, [saveCard]);
+  // Same stale-closure hazard for the success callback: the parent's
+  // handlePaymentSuccess closes over its own saveCard state, and the
+  // Express Checkout confirm handler captured the mount-time copy — a box
+  // ticked after mount never reached POST /consent. Always call the latest.
+  const onSuccessRef = useRef(onSuccess);
+  useEffect(() => { onSuccessRef.current = onSuccess; }, [onSuccess]);
   const redirectReturnUrl = () => {
     if (!saveCardRef.current) return window.location.href;
     const url = new URL(window.location.href);

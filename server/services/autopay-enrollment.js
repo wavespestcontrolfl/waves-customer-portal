@@ -23,6 +23,7 @@
 //    /consent endpoint and the webhook may both complete the same signup).
 const db = require('../models/db');
 const logger = require('./logger');
+const { isExpiredCardMethod } = require('./autopay-eligibility');
 
 const BANK_ALIASES = ['ach', 'us_bank_account'];
 
@@ -135,8 +136,14 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
       })
       .whereNotNull('stripe_payment_method_id')
       .orderBy('updated_at', 'desc')
-      .first('id', 'method_type');
+      .first('id', 'method_type', 'exp_month', 'exp_year');
     if (BANK_ALIASES.includes(incumbent?.method_type) && achUnhealthy) {
+      incumbent = null;
+    }
+    // An expired card incumbent is not in charge either — collection
+    // refuses it (isChargeableAutopayMethod), so deferring to it leaves the
+    // pointer on a card that never charges. The target takes the slot.
+    if (isExpiredCardMethod(incumbent)) {
       incumbent = null;
     }
 

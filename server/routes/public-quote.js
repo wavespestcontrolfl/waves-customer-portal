@@ -601,6 +601,41 @@ function buildPublicQuoteServiceInterest(services = {}) {
   ].filter(Boolean).join(' + ');
 }
 
+// Updates for an EXISTING customers row matched by the public quote wizard.
+// The match is by phone digits / email from an unauthenticated form — NO
+// proven identity — so contact and location fields (email, address lines,
+// city/state/zip, lat/lng) are never backfilled here: anyone who knows a
+// customer's phone could otherwise point that customer's email at their own
+// inbox and receive invoices, pay links and reports. Only attribution /
+// interest / property-size / last-contact fields land. The submitted contact
+// details still reach staff via the leads row and the estimate mirror.
+function buildExistingCustomerPublicQuoteUpdates({
+  existingCust,
+  serviceInterestForCustomer,
+  leadSourceDetail,
+  entryChannel,
+  quoteCity,
+  sqft,
+  lot,
+  landingForCustomer,
+  utm,
+}) {
+  const updates = {
+    last_contact_date: new Date(),
+    last_contact_type: 'website_quote',
+    lead_service_interest: serviceInterestForCustomer,
+  };
+  if (!existingCust.lead_source) updates.lead_source = 'website_quote';
+  if (!existingCust.lead_source_detail) updates.lead_source_detail = leadSourceDetail;
+  if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
+  if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
+  if (existingCust.property_sqft == null && sqft) updates.property_sqft = sqft;
+  if (existingCust.lot_sqft == null && lot) updates.lot_sqft = lot;
+  if (!existingCust.landing_page_url && landingForCustomer) updates.landing_page_url = landingForCustomer;
+  if (!existingCust.utm_data && utm) updates.utm_data = utm;
+  return updates;
+}
+
 function buildCompactPublicQuoteServiceInterest(services = {}) {
   return buildCompactCustomerServiceInterest([
     services.pest ? publicQuoteCompactPestLabel(services.pest) : null,
@@ -1228,40 +1263,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
 
       if (existingCust) {
-        const updates = {
-          last_contact_date: new Date(),
-          last_contact_type: 'website_quote',
-          lead_service_interest: serviceInterestForCustomer,
-        };
-        if (!existingCust.lead_source) updates.lead_source = 'website_quote';
-        if (!existingCust.lead_source_detail) updates.lead_source_detail = sourceMeta.leadSourceDetail;
-        if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
-        if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
-        if (!existingCust.email && emailLc) updates.email = emailLc;
-        if (!existingCust.address_line1 && quoteAddress) {
-          updates.address_line1 = quoteAddress;
-          // Unit rides ONLY with a whole-address fill — this public route
-          // resolves the customer without proven identity, so a unit must
-          // never be bolted onto an existing address (same rule as /api/leads).
-          if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
-        }
-        if (!existingCust.city && quoteCity) updates.city = quoteCity;
-        if (!existingCust.state && quoteState) updates.state = quoteState;
-        if (!existingCust.zip && quoteZip) updates.zip = quoteZip;
-        if (existingCust.latitude == null && ep.lat) updates.latitude = ep.lat;
-        if (existingCust.longitude == null && ep.lng) updates.longitude = ep.lng;
-        if (existingCust.property_sqft == null && sqft) updates.property_sqft = sqft;
-        if (existingCust.lot_sqft == null && lot) updates.lot_sqft = lot;
-        if (!existingCust.landing_page_url && landingForCustomer) updates.landing_page_url = landingForCustomer;
-        if (!existingCust.utm_data && attr?.utm) updates.utm_data = attr.utm;
-        // Email backfills serialize with a concurrent merge-undo's claim
-        // check via the shared normalized-email advisory lock (r16).
-        // Proceed-with-fresh-read: only the email column is ever dropped
-        // (filled concurrently / owned by another live customer) — the rest
-        // of this update always lands, and the quote/lead artifacts keep
-        // the submitted address for staff either way.
-        await require('../services/customer-email-fanout')
-          .applyCustomerUpdatesWithEmailClaimGuard({ customerId: existingCust.id, updates, source: 'public-quote' });
+        const updates = buildExistingCustomerPublicQuoteUpdates({
+          existingCust,
+          serviceInterestForCustomer,
+          leadSourceDetail: sourceMeta.leadSourceDetail,
+          entryChannel,
+          quoteCity,
+          sqft,
+          lot,
+          landingForCustomer,
+          utm: attr?.utm,
+        });
+        await db('customers').where({ id: existingCust.id }).update(updates);
         customerId = existingCust.id;
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -2070,6 +2083,7 @@ module.exports._internals = {
   estimateBlocksSelfBookLink,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
+  buildExistingCustomerPublicQuoteUpdates,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,

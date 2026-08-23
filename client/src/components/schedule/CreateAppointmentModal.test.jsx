@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildFindTimeRequestBody,
   ESTIMATE_SOURCE_LABEL,
   findScheduleEstimateById,
   formatScheduleEstimateAmount,
@@ -104,5 +105,35 @@ describe('CreateAppointmentModal won estimate helpers', () => {
       estimates: [{ id: 108, status: 'accepted', linkedAppointment: false }],
       appliedKey: '7:108',
     })).toBeNull();
+  });
+});
+
+describe('buildFindTimeRequestBody', () => {
+  it('never sends the catalog service id as serviceId (server reads it as a visit id → 404)', () => {
+    const body = buildFindTimeRequestBody({
+      customerId: 'cust-1',
+      serviceName: 'Quarterly Pest',
+      durationMinutes: 60,
+      dateFrom: '2026-08-24',
+      dateTo: '2026-08-31',
+      technicianId: undefined,
+      horizonDays: 7,
+    });
+    expect(body).not.toHaveProperty('serviceId');
+    expect(body).toMatchObject({
+      customerId: 'cust-1',
+      serviceType: 'Quarterly Pest',
+      durationMinutes: 60,
+      dateFrom: '2026-08-24',
+      dateTo: '2026-08-31',
+      topN: 25,
+    });
+    expect(body.technicianId).toBeUndefined();
+  });
+
+  it('widens topN for long horizons and passes a chosen technician', () => {
+    const body = buildFindTimeRequestBody({ customerId: 'c', serviceName: 's', durationMinutes: 90, dateFrom: 'a', dateTo: 'b', technicianId: 'tech-9', horizonDays: 30 });
+    expect(body.topN).toBe(100);
+    expect(body.technicianId).toBe('tech-9');
   });
 });

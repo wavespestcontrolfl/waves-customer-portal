@@ -108,3 +108,17 @@ describe('TrackPage fetch ordering (F-037)', () => {
     expect(screen.queryByText(/TEXT ADAM/i)).not.toBeInTheDocument();
   });
 });
+
+describe('TrackPage en-route partial coordinates', () => {
+  it('a vehicle/property with lat but no lng renders without a NaN distance', async () => {
+    renderTrack();
+    await act(async () => {
+      fetchQueue[0].resolve(jsonResponse(trackBody('en_route', {
+        vehicle: { lat: 27.3, lng: null, lastReportedAt: new Date().toISOString() },
+        property: { lat: 27.4, lng: null },
+      })));
+    });
+    expect(await screen.findByText(/TEXT ADAM/i)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+});
