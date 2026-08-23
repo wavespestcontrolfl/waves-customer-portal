@@ -37,7 +37,7 @@ function adminFetch(path) {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
-  }).then((r) => r.json());
+  }).then(parseAdminResponse);
 }
 function adminPost(path, body) {
   return fetch(`${API_BASE}${path}`, {
@@ -47,7 +47,19 @@ function adminPost(path, body) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then(parseAdminResponse);
+}
+
+// Reject non-2xx with the server's own reason (e.g. 400 "file_path must be
+// inside the wiki/ folder") so callers' catch blocks actually run.
+async function parseAdminResponse(r) {
+  const body = await r.json().catch(() => null);
+  if (!r.ok) {
+    const err = new Error((body && body.error) || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
+  return body;
 }
 
 function Card({ children, style }) {
