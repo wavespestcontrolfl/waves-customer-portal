@@ -1354,39 +1354,21 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
-      // ---- SLOT-OVERLAP GUARD (merge note for PR #3454 fix/sched-window-guard:
-      // that branch replaces THIS block with
-      //   await assertNoSlotOverlap({ trx, date, windowStart, windowEnd });
-      // from services/scheduling/window-rules.js — identical semantics; keep
-      // ONE copy). Rung 1 of occupancy.js's ORDERING CONTRACT: the date-wide
-      // occupancy lock is the FIRST statement of the transaction (coarsest
-      // first — before the comms lock and the lead FOR UPDATE), then the
-      // tech-blind conflict probe exactly as booking.js createSelfBooking.
-      // Runs for first conversions and rebooks alike — same insert.
-      {
-        const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
-        const dateStr = String(date).split('T')[0];
-        await acquireOccupancyLock(trx, dateStr);
-        const clash = await findConflictingVisits({ db: trx, date: dateStr, windowStart, windowEnd });
-        if (clash.length) {
-          const err = new Error('That time slot overlaps another visit on the schedule');
-          err.statusCode = 409;
-          err.status = 409;
-          err.isOperational = true;
-          err.code = 'SLOT_CONFLICT';
-          err.conflicts = clash.map((row) => ({
-            id: row.id,
-            scheduled_date: row.scheduled_date,
-            window_start: row.window_start,
-            window_end: row.window_end,
-            status: row.status,
-            technician_id: row.technician_id || null,
-            service_type: row.service_type || null,
-          }));
-          throw err;
-        }
-      }
-      // ---- end slot-overlap guard
+      // ---- SLOT-OVERLAP GUARD, part 1: date lock (merge note for PR #3454
+      // fix/sched-window-guard: that branch calls assertNoSlotOverlap() —
+      // lock + probe together — at the top of this trx. The probe MUST run
+      // after the converted-lead guard and the DUPLICATE_VISIT dedupe (a
+      // retry would otherwise see its own committed booking and return
+      // SLOT_CONFLICT instead of LEAD_ALREADY_CONVERTED / DUPLICATE_VISIT),
+      // so when merging keep ONE mechanism split the same way: window-rules'
+      // acquireAdminSlotLocks({ trx, dates: [date] }) HERE and its probe at
+      // part 2 below.) Rung 1 of occupancy.js's ORDERING CONTRACT: the
+      // date-wide occupancy lock is the FIRST statement of the transaction —
+      // coarsest first, before the comms lock and the lead FOR UPDATE.
+      const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+      const occupancyDate = String(date).split('T')[0];
+      await acquireOccupancyLock(trx, occupancyDate);
+      // ---- end slot-overlap guard part 1
 
       // LOCK ORDER (utils/customer-comms-lock.js contract #1): when the
       // customer is already known, take the comms advisory lock FIRST — the
@@ -1547,6 +1529,32 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           throw dup;
         }
       }
+
+      // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
+      // booking.js createSelfBooking, immediately before the insert — after
+      // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
+      // merge note). Runs for first conversions and rebooks alike.
+      {
+        const clash = await findConflictingVisits({ db: trx, date: occupancyDate, windowStart, windowEnd });
+        if (clash.length) {
+          const err = new Error('That time slot overlaps another visit on the schedule');
+          err.statusCode = 409;
+          err.status = 409;
+          err.isOperational = true;
+          err.code = 'SLOT_CONFLICT';
+          err.conflicts = clash.map((row) => ({
+            id: row.id,
+            scheduled_date: row.scheduled_date,
+            window_start: row.window_start,
+            window_end: row.window_end,
+            status: row.status,
+            technician_id: row.technician_id || null,
+            service_type: row.service_type || null,
+          }));
+          throw err;
+        }
+      }
+      // ---- end slot-overlap guard part 2
 
       const insertData = {
         customer_id: customerId,

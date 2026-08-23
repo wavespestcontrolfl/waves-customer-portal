@@ -1544,16 +1544,27 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
   if (!confirmEmailAccountId) {
     const byCustomerPhone = await lookupByPhone();
     if (byCustomerPhone) {
-      if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) {
-        const busy = new Error('That customer record is being updated — retry in a moment.');
-        busy.statusCode = 409;
-        busy.status = 409;
-        busy.isOperational = true;
-        busy.code = 'CUSTOMER_BUSY';
-        throw busy;
+      const busy = () => {
+        const err = new Error('That customer record is being updated — retry in a moment.');
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = 'CUSTOMER_BUSY';
+        return err;
+      };
+      if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) throw busy();
+      // resolve → lock → RE-RESOLVE (comms-lock contract): an undo that
+      // committed between the read and the fence leaves the try-lock holding
+      // a stale row. Re-run the same live lookup and require the identical
+      // row + account; anything else (archived, re-pointed, different row
+      // now wins) fails closed with zero writes.
+      const fresh = await lookupByPhone();
+      if (!fresh || String(fresh.id) !== String(byCustomerPhone.id)
+        || String(fresh.account_id || '') !== String(byCustomerPhone.account_id || '')) {
+        throw busy();
       }
-      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
-      return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
+      const accountId = await attachMatchedCustomerToAccount(trx, fresh);
+      return { accountId, existingCustomer: { ...fresh, account_id: accountId }, matchType: 'phone' };
     }
   }
 
@@ -1570,12 +1581,16 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
     // accounts we cannot know which household this is, so fail closed (no
     // match → caller creates a fresh account) rather than attach to the
     // wrong one. Unlinked rows resolve to their own id (attach semantics).
-    const byCustomerEmail = await trx('customers')
-      .whereRaw('LOWER(TRIM(COALESCE(email, \'\'))) = ?', [normalizedEmail])
-      .whereNull('deleted_at')
-      .orderBy('is_primary_profile', 'desc')
-      .orderBy('created_at', 'asc');
-    const accountKeys = new Set((byCustomerEmail || []).map((row) => String(row.account_id || row.id)));
+    const resolveEmailAccountSet = async () => {
+      const rows = await trx('customers')
+        .whereRaw('LOWER(TRIM(COALESCE(email, \'\'))) = ?', [normalizedEmail])
+        .whereNull('deleted_at')
+        .orderBy('is_primary_profile', 'desc')
+        .orderBy('created_at', 'asc');
+      const keys = new Set((rows || []).map((row) => String(row.account_id || row.id)));
+      return { rows: rows || [], keys };
+    };
+    const { rows: byCustomerEmail, keys: accountKeys } = await resolveEmailAccountSet();
     if (confirmEmailAccountId && !(byCustomerEmail?.length && accountKeys.size === 1)) {
       // The admin explicitly chose to ATTACH, but the email no longer
       // revalidates to exactly one account (row deleted/edited, or a second
@@ -1630,8 +1645,29 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
       if (!(await fenceMatchedCustomer(trx, match))) {
         return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, busy: true, match: null };
       }
-      const accountId = await attachMatchedCustomerToAccount(trx, match);
-      return { accountId, existingCustomer: { ...match, account_id: accountId }, matchType: 'email' };
+      // resolve → lock → RE-RESOLVE (comms-lock contract): re-run the whole
+      // live-email account-set resolution (and the phone-conflict check)
+      // under the fence. The set must still collapse to the SAME account and
+      // the SAME winning row; otherwise the world moved between read and
+      // fence — reject with zero writes.
+      const again = await resolveEmailAccountSet();
+      const freshMatch = again.rows[0];
+      const changed = !freshMatch
+        || again.keys.size !== 1
+        || String(freshMatch.account_id || freshMatch.id) !== resolvedAccountId
+        || String(freshMatch.id) !== String(match.id)
+        || String(freshMatch.account_id || '') !== String(match.account_id || '');
+      if (changed) {
+        return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
+      }
+      if (confirmEmailAccountId) {
+        const phoneAgain = await lookupByPhone();
+        if (phoneAgain && String(phoneAgain.account_id || phoneAgain.id) !== resolvedAccountId) {
+          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null };
+        }
+      }
+      const accountId = await attachMatchedCustomerToAccount(trx, freshMatch);
+      return { accountId, existingCustomer: { ...freshMatch, account_id: accountId }, matchType: 'email' };
     }
   }
 

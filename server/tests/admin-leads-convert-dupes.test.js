@@ -112,10 +112,22 @@ function opsOf(state, name) {
 // Shared resolver: the lead the route pre-reads vs the row it sees under lock.
 const isOccupancyProbe = (state) => opsOf(state, 'whereRaw').some((o) => /window_start < \?::time/.test(o.args[0]));
 
-function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [], slotConflicts = [] }) {
+// Occupancy conflicts are derived from the SAME existingVisits fixture the
+// DUPLICATE_VISIT dedupe reads: date match + active status + window overlap
+// (bindings of the probe's whereRaw are [windowEnd, defaultMinutes, windowStart]).
+function occupancyConflicts(state, existingVisits) {
+  const date = opsOf(state, 'where').find((o) => o.args[0] === 'scheduled_date')?.args[1];
+  const probe = opsOf(state, 'whereRaw').find((o) => /window_start < \?::time/.test(o.args[0]));
+  const [windowEnd, , windowStart] = probe.args[1];
+  return existingVisits.filter((v) => v.scheduled_date === date
+    && v.status !== 'cancelled'
+    && v.window_start < windowEnd && (v.window_end || '23:59') > windowStart);
+}
+
+function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [] }) {
   return (table, state) => {
     const t = state.terminal;
-    if (table === 'scheduled_services' && !t && isOccupancyProbe(state)) return slotConflicts;
+    if (table === 'scheduled_services' && !t && isOccupancyProbe(state)) return occupancyConflicts(state, existingVisits);
     if (table === 'customers' && !t && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
       return emailMatch ? (Array.isArray(emailMatch) ? emailMatch : [emailMatch]) : [];
     }
@@ -302,11 +314,16 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
-  const phoneMatchKnex = (calls, { refuse = false } = {}) => {
+  const legacyRow = { id: 'cust-legacy', account_id: null, first_name: 'Legacy', last_name: 'Row', phone: '5551234567', is_primary_profile: true };
+  const ARCHIVED = Symbol('archived-after-fence');
+  const phoneMatchKnex = (calls, { refuse = false, afterFence = null } = {}) => {
     const base = makeResolver({ preLead: baseLead({ phone: '5551234567' }), lockedLead: { customer_id: null, converted_at: null } });
+    let phoneLookups = 0;
     const knex = makeKnex((table, state) => {
       if (table === 'customers' && state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) {
-        return { id: 'cust-legacy', account_id: null, first_name: 'Legacy', last_name: 'Row', phone: '5551234567', is_primary_profile: true };
+        phoneLookups += 1;
+        if (phoneLookups > 1 && afterFence !== null) return afterFence === ARCHIVED ? null : afterFence;
+        return legacyRow;
       }
       return base(table, state);
     }, calls);
@@ -329,6 +346,55 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       expect(custUpdateIdx).toBeGreaterThan(tryIdx);
       // No blocking comms lock on that customer anywhere (lead row already held).
       expect(calls.some((c) => c.op === 'raw' && /SELECT pg_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-legacy')).toBe(false);
+    });
+  });
+
+  it.each([
+    ['archived', ARCHIVED],
+    ['re-pointed to another account', { ...legacyRow, account_id: 'acct-other' }],
+    ['a different row now wins', { ...legacyRow, id: 'cust-winner' }],
+  ])('phone-match attach: matched customer %s after the fence → 409 CUSTOMER_BUSY, zero writes', async (_label, afterFence) => {
+    const calls = [];
+    install(phoneMatchKnex(calls, { afterFence }));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CUSTOMER_BUSY');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      // Re-resolve happened AFTER the try-lock.
+      const tryIdx = calls.findIndex((c) => c.op === 'raw' && /pg_try_advisory_xact_lock/.test(c.args[0]));
+      const phoneIdxs = calls.map((c, i) => ({ c, i })).filter(({ c }) => c.table === 'customers' && c.op === 'first' && c.ops.some((o) => o.op === 'whereRaw' && /regexp_replace/.test(o.args[0]))).map(({ i }) => i);
+      expect(phoneIdxs).toHaveLength(2);
+      expect(phoneIdxs[0]).toBeLessThan(tryIdx);
+      expect(phoneIdxs[1]).toBeGreaterThan(tryIdx);
+    });
+  });
+
+  it('email-confirmed attach: email account-set changed after the fence → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+    const calls = [];
+    const base = makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null }, emailMatch: existingEmailCustomer });
+    let emailLookups = 0;
+    install(makeKnex((table, state) => {
+      if (table === 'customers' && !state.terminal && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
+        emailLookups += 1;
+        // Second resolution (under the fence): a second household now shares the email.
+        return emailLookups > 1
+          ? [existingEmailCustomer, { ...existingEmailCustomer, id: 'cust-other', account_id: 'acct-other' }]
+          : [existingEmailCustomer];
+      }
+      return base(table, state);
+    }, calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.match).toBeNull();
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      const tryIdx = calls.findIndex((c) => c.op === 'raw' && /pg_try_advisory_xact_lock/.test(c.args[0]));
+      const emailIdxs = calls.map((c, i) => ({ c, i })).filter(({ c }) => c.table === 'customers' && c.op === 'chain' && c.ops.some((o) => o.op === 'whereRaw' && /LOWER\(TRIM/.test(o.args[0]))).map(({ i }) => i);
+      expect(emailIdxs).toHaveLength(2);
+      expect(emailIdxs[1]).toBeGreaterThan(tryIdx);
     });
   });
 
@@ -477,20 +543,63 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
+  const ownBooking = { id: 'appt-existing', customer_id: 'cust-linked', technician_id: 'tech-1', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Pest Control' };
+  const otherBooking = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
+
+  it('ordering: retry after commit with its OWN booking on the schedule → LEAD_ALREADY_CONVERTED, not SLOT_CONFLICT', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked, existingVisits: [ownBooking] }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('LEAD_ALREADY_CONVERTED');
+      expect(calls.some((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toBe(false);
+      expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
+    });
+  });
+
+  it('ordering: rebook same slot with its OWN booking on the schedule → DUPLICATE_VISIT, not SLOT_CONFLICT', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked, existingVisits: [ownBooking] }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('DUPLICATE_VISIT');
+      expect(calls.some((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toBe(false);
+    });
+  });
+
+  it('ordering: occupancy probe runs after the dedupe lookup and immediately before the insert', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { rebook: true })).status).toBe(200);
+      const dedupeIdx = calls.findIndex((c) => c.table === 'scheduled_services' && c.op === 'first');
+      const probeIdx = calls.findIndex((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
+      const insertIdx = calls.findIndex((c) => c.table === 'scheduled_services' && c.op === 'insert');
+      expect(probeIdx).toBeGreaterThan(dedupeIdx);
+      expect(insertIdx).toBe(probeIdx + 1);
+    });
+  });
+
   it.each([
     ['rebook', () => ({ preLead: linkedLead(), lockedLead: lockedLinked }), { rebook: true }],
     ['first conversion', () => ({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), {}],
   ])('occupancy: %s overlapping another customer\'s visit (tech NULL) → 409 SLOT_CONFLICT, zero inserts', async (_label, fixture, body) => {
     const calls = [];
-    const conflict = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
-    install(makeKnex(makeResolver({ ...fixture(), slotConflicts: [conflict] }), calls));
+    install(makeKnex(makeResolver({ ...fixture(), existingVisits: [otherBooking] }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, body);
       expect(res.status).toBe(409);
       const json = await res.json();
       expect(json.code).toBe('SLOT_CONFLICT');
       expect(json.conflicts).toEqual([{ id: 'appt-other', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', technician_id: null, service_type: 'Lawn' }]);
-      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+      // The probe sits immediately before the visit insert (after the
+      // customer provisioning, which the trx rollback discards): no visit
+      // row, no lead conversion, no activity.
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(0);
+      expect(calls.filter((c) => c.table === 'leads' && c.op === 'update')).toHaveLength(0);
+      expect(calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert')).toHaveLength(0);
       // Probe is tech-blind with the default cancelled exclusion.
       const probe = calls.find((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
       expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
@@ -647,8 +756,9 @@ describe('findAccountByContact email opt-in', () => {
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
     const out = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email' });
-    expect(calls.filter((c) => c.table === 'customers' && c.op === 'first')).toHaveLength(2);
-    expect(calls.filter((c) => c.table === 'customers' && c.op === 'chain')).toHaveLength(2);
+    // unconfirmed: phone + email; confirmed: email, phone-conflict, fence, email again, phone again
+    expect(calls.filter((c) => c.table === 'customers' && c.op === 'first')).toHaveLength(3);
+    expect(calls.filter((c) => c.table === 'customers' && c.op === 'chain')).toHaveLength(3);
   });
 
   it('phone match wins and attaches without confirmation (unchanged), even with matchEmail', async () => {
@@ -662,6 +772,37 @@ describe('findAccountByContact email opt-in', () => {
     const out = await findAccountByContact(knex, { phone: '5551234567', email: 'x@example.com', matchEmail: true });
     expect(out).toMatchObject({ accountId: 'ap', matchType: 'phone' });
     expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
+  });
+
+  it('phone path: re-resolve after fence sees a different account → CUSTOMER_BUSY, no attach', async () => {
+    const calls = [];
+    let n = 0;
+    const knex = makeKnex((table, state) => {
+      if (table !== 'customers' || state.terminal?.op !== 'first') return null;
+      if (!opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) return null;
+      n += 1;
+      return n === 1 ? { id: 'cp', account_id: null, phone: '5551234567' } : { id: 'cp', account_id: 'ap-undo', phone: '5551234567' };
+    }, calls);
+    await expect(findAccountByContact(knex, { phone: '5551234567' })).rejects.toMatchObject({ code: 'CUSTOMER_BUSY', statusCode: 409 });
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+  });
+
+  it('email path: re-resolve after fence sees a different winning row → matchChanged, no attach', async () => {
+    const calls = [];
+    let n = 0;
+    const knex = makeKnex((table, state) => {
+      if (table !== 'customers') return null;
+      if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
+        n += 1;
+        return n === 1
+          ? [{ id: 'c1', account_id: 'a1', email: 'someone@example.com' }]
+          : [{ id: 'c9', account_id: 'a1', email: 'someone@example.com' }];
+      }
+      return null;
+    }, calls);
+    const out = await findAccountByContact(knex, { phone: '', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
   });
 
   function emailKnex(rows, calls) {
