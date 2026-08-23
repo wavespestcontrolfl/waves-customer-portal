@@ -1803,11 +1803,21 @@ async function rescheduleAppointment(input) {
   // moves date-only. Surfaced as the tool's error result.
   // Overlap: the CAS update below now runs inside db.transaction, so the
   // gated rung-1 lock + probe fences this move too (see below).
+  // The validator also hands back the EFFECTIVE block this visit will
+  // occupy. On an END-LESS row a date-only move persists end null but still
+  // occupies start + estimated_duration_minutes, so the probe window below
+  // is the DERIVED pair, not the persisted one — keying the probe off
+  // newWindowEnd skipped the overlap check entirely on exactly those rows
+  // (gate on, occupied destination, no refusal).
+  let probeWindowStart = null;
+  let probeWindowEnd = null;
   if (newStart || newWindowEnd) {
     try {
       const normalizedWindow = assertAdminAppointmentWindow({
         windowStart: newStart, windowEnd: newWindowEnd, durationMinutes: apptDuration,
       });
+      probeWindowStart = normalizedWindow.window_start;
+      probeWindowEnd = normalizedWindow.window_end;
       if (win.start) newWindowEnd = normalizedWindow.window_end;
     } catch (err) {
       if (err?.status === 422) return { error: err.message };
@@ -1882,12 +1892,12 @@ async function rescheduleAppointment(input) {
   let updatedRows = 0;
   try {
     await db.transaction(async (trx) => {
-      if (newStart && newWindowEnd) {
+      if (probeWindowStart && probeWindowEnd) {
         await assertNoSlotOverlap({
           trx,
           date: dateStr,
-          windowStart: newStart,
-          windowEnd: newWindowEnd,
+          windowStart: probeWindowStart,
+          windowEnd: probeWindowEnd,
           excludeServiceIds: [appointment_id],
         });
       }
@@ -1899,6 +1909,21 @@ async function rescheduleAppointment(input) {
             scheduled_date: observedDate,
             window_start: appt.window_start ?? null,
             window_end: appt.window_end ?? null,
+            // Duration pin, only when this move's window math DEPENDED on the
+            // column: on a row with a start and NO end, apptDuration is the
+            // estimated_duration_minutes fallback, and it sets both the
+            // persisted end of a start-only move and the probed block of a
+            // date-only one. A concurrent duration-only edit changes the block
+            // the visit occupies, so this write must miss and surface the
+            // concurrent-change error rather than land a span built on the
+            // stale value — the same safeguard rebooker.js's CAS applies
+            // (codex #3377 P1). A row with a real stored span never reads the
+            // column, and a WINDOWLESS row (both null) has no block at all, so
+            // both stay out of the predicate. (A stored end without a start is
+            // 422'd by the validator above and never reaches this write.)
+            ...((appt.window_start && !appt.window_end)
+              ? { estimated_duration_minutes: appt.estimated_duration_minutes ?? null }
+              : {}),
           }),
         // The full observed tracker/lifecycle snapshot is in the CAS: a
         // geofence/manual transition between the read and this write can
