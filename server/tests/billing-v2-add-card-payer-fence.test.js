@@ -58,6 +58,7 @@ const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const PayerService = require('../services/payer');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const { isExpiredCardMethod } = require('../services/autopay-eligibility');
 const NotificationService = require('../services/notification-service');
 const router = require('../routes/billing-v2');
 
@@ -114,6 +115,33 @@ beforeEach(() => {
     return mkChain(undefined);
   });
   PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+  isExpiredCardMethod.mockImplementation(() => false);
+});
+
+describe('POST /cards incumbent expiry', () => {
+  test('an expired default autopay card is NOT an incumbent — the replacement saves as default', async () => {
+    const expired = { id: 'pm-expired', method_type: 'card', exp_month: 1, exp_year: 2020 };
+    isExpiredCardMethod.mockImplementation((m) => m?.id === 'pm-expired');
+    let pmCalls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'payment_methods') {
+        pmCalls += 1;
+        // Probe finds the expired incumbent; lookup-first save finds no row.
+        return mkChain(pmCalls === 1 ? expired : undefined);
+      }
+      return mkChain(undefined);
+    });
+    StripeService.savePaymentMethod.mockResolvedValue({ ...SAVED_CARD });
+    await withServer(async (baseUrl) => {
+      const res = await postCard(baseUrl);
+      expect(res.status).toBe(200);
+      expect(isExpiredCardMethod).toHaveBeenCalledWith(expired);
+      expect(StripeService.savePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_stripe_1', {
+        enableAutopay: false,
+        makeDefault: true,
+      });
+    });
+  });
 });
 
 describe('POST /cards payer fence', () => {

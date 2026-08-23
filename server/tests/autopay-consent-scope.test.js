@@ -202,3 +202,26 @@ test('the two new audit sources are registered in the real consent service', () 
   expect(real.NON_ENROLLMENT_CONSENT_SOURCES.has('portal_autopay_enable')).toBe(false);
   expect(real.NON_ENROLLMENT_CONSENT_SOURCES.has('portal_set_default')).toBe(false);
 });
+
+describe('PUT /billing/autopay clearing the method', () => {
+  const router = () => require('../routes/customer-autopay');
+
+  // The client sends autopay_payment_method_id: '' to mean "clear". The
+  // column is a uuid — '' must be normalized to null before the write or
+  // Postgres rejects the update (500) and the disable never lands.
+  test("autopay_payment_method_id '' disables and writes NULL, never ''", () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      Object.assign(state.customers[0], { autopay_enabled: true, autopay_payment_method_id: 'pm-old' });
+      const res = await fetch(`${baseUrl}/billing/autopay`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autopay_enabled: false, autopay_payment_method_id: '' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.changes).toEqual(expect.arrayContaining(['autopay_enabled', 'autopay_payment_method_id']));
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(state.customers[0].autopay_payment_method_id).toBeNull();
+      expect(state.payment_methods.every((p) => p.autopay_enabled === false)).toBe(true);
+    }));
+});

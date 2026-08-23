@@ -192,7 +192,13 @@ router.get('/', async (req, res, next) => {
  */
 router.put('/', autopayWriteLimiter, async (req, res, next) => {
   try {
-    const { autopay_enabled, autopay_payment_method_id, billing_day } = req.body || {};
+    const { autopay_enabled, billing_day } = req.body || {};
+    // '' means "clear" (same as null) — but it must never reach the uuid
+    // column: writing '' into customers.autopay_payment_method_id is a
+    // Postgres cast error (500), so a disable that sent '' never landed.
+    const autopay_payment_method_id = req.body?.autopay_payment_method_id === ''
+      ? null
+      : req.body?.autopay_payment_method_id;
     const updates = {};
     const events = [];
 
@@ -211,7 +217,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
         .where({ id: autopay_payment_method_id, customer_id: req.customerId })
         .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
       if (!selectedPaymentMethod) return res.status(400).json({ error: 'Payment method not found' });
-    } else if (autopay_payment_method_id === null || autopay_payment_method_id === '') {
+    } else if (autopay_payment_method_id === null) {
       selectedPaymentMethod = null;
     } else if (current.autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')

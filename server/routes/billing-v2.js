@@ -558,7 +558,7 @@ router.post('/cards', async (req, res, next) => {
       });
     }
 
-    const currentAutopayMethod = await db('payment_methods')
+    let currentAutopayMethod = await db('payment_methods')
       .where({
         customer_id: req.customerId,
         processor: 'stripe',
@@ -566,7 +566,11 @@ router.post('/cards', async (req, res, next) => {
         autopay_enabled: true,
       })
       .whereNotNull('stripe_payment_method_id')
-      .first('id');
+      .first('id', 'method_type', 'exp_month', 'exp_year');
+    // An expired card is not an incumbent: collection already refuses it
+    // (getChargeableAutopayMethod), so the replacement must take the
+    // default slot instead of saving non-default behind a dead pointer.
+    if (isExpiredCardMethod(currentAutopayMethod)) currentAutopayMethod = null;
 
     // Idempotent save (lookup-first like /setup-complete): a retry after a
     // partial first attempt (saved, but consent/enrollment failed below)
