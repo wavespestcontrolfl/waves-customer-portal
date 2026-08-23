@@ -37,7 +37,7 @@ function adminFetch(path) {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
-  }).then(parseAdminResponse);
+  }).then((r) => r.json());
 }
 function adminPost(path, body) {
   return fetch(`${API_BASE}${path}`, {
@@ -47,19 +47,29 @@ function adminPost(path, body) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-  }).then(parseAdminResponse);
+  }).then((r) => r.json());
 }
-
-// Reject non-2xx with the server's own reason (e.g. 400 "file_path must be
-// inside the wiki/ folder") so callers' catch blocks actually run.
-async function parseAdminResponse(r) {
-  const body = await r.json().catch(() => null);
-  if (!r.ok) {
-    const err = new Error((body && body.error) || `HTTP ${r.status}`);
-    err.status = r.status;
-    throw err;
-  }
-  return body;
+// Strict variant used ONLY by the source-add flow: rejects non-2xx with the
+// server's reason (e.g. 400 "file_path must be inside the wiki/ folder") so
+// the form can show it. The lenient helpers above stay as-is because their
+// existing callers have no error cleanup.
+function adminPostStrict(path, body) {
+  return fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }).then(async (r) => {
+    const data = await r.json().catch(() => null);
+    if (!r.ok) {
+      const err = new Error((data && data.error) || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    return data;
+  });
 }
 
 function Card({ children, style }) {
@@ -555,7 +565,7 @@ function SourcesView() {
 
   const handleAdd = async () => {
     try {
-      await adminPost("/admin/knowledge/sources", addForm);
+      await adminPostStrict("/admin/knowledge/sources", addForm);
     } catch (e) {
       // 400 from the server: path outside wiki/ or unsupported type.
       alert(`Could not add source: ${e.message}`);
