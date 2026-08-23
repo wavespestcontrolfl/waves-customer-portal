@@ -265,6 +265,35 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
+  it('attachToAccountId supplied but email now unmatched → 409 EMAIL_MATCH_CONFIRM (match null), zero writes', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null }, emailMatch: null }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.match).toBeNull();
+      expect(body.error).toMatch(/changed/i);
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('attachToAccountId supplied but email now multi-account → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: baseLead(),
+      lockedLead: { customer_id: null, converted_at: null },
+      emailMatch: [existingEmailCustomer, { ...existingEmailCustomer, id: 'cust-other', account_id: 'acct-other' }],
+    }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
   it('createSeparateAccount: true → email matching skipped, fresh account + primary customer', async () => {
     const calls = [];
     install(emailKnexRoute(calls));
@@ -456,6 +485,23 @@ describe('findAccountByContact email opt-in', () => {
     ], calls);
     const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email', existingCustomer: { id: 'c1' } });
+  });
+
+  it('confirm id supplied but email now unmatched → requiresConfirmation (matchChanged), never null', async () => {
+    const calls = [];
+    const out = await findAccountByContact(emailKnex([], calls), { phone: '', email: 'gone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+  });
+
+  it('confirm id supplied but email now spans multiple accounts → requiresConfirmation, never null', async () => {
+    const calls = [];
+    const knex = emailKnex([
+      { id: 'c1', account_id: 'a1', email: 'shared@example.com' },
+      { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
+    ], calls);
+    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
   });
 
   it('unlinked legacy row (no account_id) alongside a linked row of another account → no match', async () => {

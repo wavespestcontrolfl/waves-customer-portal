@@ -2969,16 +2969,32 @@ export function LeadsSection() {
                                                 throw e;
                                               const m = e.match || {};
                                               const attach = window.confirm(
-                                                `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account? Cancel creates a separate new customer.`,
+                                                `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account?`,
                                               );
-                                              await submitAppt(
-                                                attach
-                                                  ? { attachToAccountId: m.accountId }
-                                                  : {
-                                                      attachToAccountId: null,
-                                                      createSeparateAccount: true,
-                                                    },
-                                              );
+                                              if (attach) {
+                                                await submitAppt({
+                                                  attachToAccountId: m.accountId,
+                                                });
+                                              } else if (
+                                                // Cancel/Escape on the first prompt
+                                                // must NOT create anything — a
+                                                // separate customer is its own
+                                                // explicit OK.
+                                                window.confirm(
+                                                  "Create a SEPARATE new customer for this lead instead? (Cancel = do nothing, lead stays unbooked)",
+                                                )
+                                              ) {
+                                                await submitAppt({
+                                                  attachToAccountId: null,
+                                                  createSeparateAccount: true,
+                                                });
+                                              } else {
+                                                alert(
+                                                  "Nothing was booked — the lead is unchanged.",
+                                                );
+                                                setApptSaving(false);
+                                                return;
+                                              }
                                             }
                                             setApptForm(null);
                                             loadLeads();

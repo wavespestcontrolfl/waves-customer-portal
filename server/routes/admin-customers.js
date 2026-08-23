@@ -1547,6 +1547,20 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
       .orderBy('is_primary_profile', 'desc')
       .orderBy('created_at', 'asc');
     const accountKeys = new Set((byCustomerEmail || []).map((row) => String(row.account_id || row.id)));
+    if (confirmEmailAccountId && !(byCustomerEmail?.length && accountKeys.size === 1)) {
+      // The admin explicitly chose to ATTACH, but the email no longer
+      // revalidates to exactly one account (row deleted/edited, or a second
+      // household now shares it). Never let an explicit attach silently
+      // become a fresh account — surface the change instead.
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'email',
+        requiresConfirmation: true,
+        matchChanged: true,
+        match: null,
+      };
+    }
     if (byCustomerEmail?.length && accountKeys.size === 1) {
       const match = byCustomerEmail[0];
       const resolvedAccountId = String(match.account_id || match.id);
@@ -1580,7 +1594,9 @@ async function ensureCustomerAccount(trx, input) {
   if (existing?.requiresConfirmation) {
     // Fail closed: never silently create OR attach on an unconfirmed email
     // match — the caller must surface the choice to the admin.
-    const err = new Error("This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
+    const err = new Error(existing.matchChanged
+      ? "The customer this lead's email matched has changed since you confirmed — re-open the lead and try again."
+      : "This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
     err.statusCode = 409;
     err.status = 409;
     err.isOperational = true;
