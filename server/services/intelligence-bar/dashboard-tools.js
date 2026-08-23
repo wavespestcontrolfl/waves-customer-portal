@@ -277,6 +277,8 @@ async function getKpiSnapshot() {
     // place, so created_at never moves); created_at is the tie/null fallback.
     db('customer_health_scores as h')
       .join(db.raw("(SELECT customer_id, MAX(COALESCE(scored_at, created_at)) as max_scored FROM customer_health_scores GROUP BY customer_id) latest ON h.customer_id = latest.customer_id AND COALESCE(h.scored_at, h.created_at) = latest.max_scored"))
+      // Archived customers keep their score rows — scope like the MRR/active counts above.
+      .whereNotExists(function () { this.select(1).from('customers as ac').whereRaw('ac.id = h.customer_id').whereNotNull('ac.deleted_at'); })
       .select('h.churn_risk', db.raw('COUNT(*) as count')).groupBy('h.churn_risk'),
   ]);
 

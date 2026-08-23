@@ -319,6 +319,7 @@ async function executeBITool(toolName, input) {
           .where('churn_risk', 'critical')
           .where('scored_at', '>=', weekAgo)
           .innerJoin('customers', 'customer_health_scores.customer_id', 'customers.id')
+          .whereNull('customers.deleted_at') // never name an archived customer in the briefing
           .select('customers.first_name', 'customers.last_name', 'customers.monthly_rate')
           .limit(5);
         if (newCritical.length > 0) {

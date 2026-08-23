@@ -72,6 +72,7 @@ router.get('/', async (req, res, next) => {
     const pendingOutreach = await db('retention_outreach as r')
       .join('customers as c', 'r.customer_id', 'c.id')
       .where('r.status', 'pending_approval')
+      .whereNull('c.deleted_at') // archived customers keep active=true; their outreach is unusable (approve 409s)
       .select('r.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate')
       .orderBy('r.created_at', 'desc');
 
