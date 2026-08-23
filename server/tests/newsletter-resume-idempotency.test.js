@@ -490,6 +490,64 @@ describe('resumeCampaign — preconditions', () => {
     });
   });
 
+  test("a STALE 'sending' parent with zero eligible recipients is reclaimed and finalized — never left sending", async () => {
+    const staleSend = {
+      id: 's',
+      status: 'sending',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      updated_at: new Date(Date.now() - 60 * 60 * 1000),   // lease expired
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+      sending_claim_token: 'old-token',
+    };
+    let sweepUpdate = null;
+    let finalUpdate = null;
+    let finalQuery = null;
+    const queues = {
+      newsletter_sends: [
+        chain({ first: staleSend }),                                  // resume fetch
+        chain({ returning: [{ id: 's' }] }),                          // atomic reclaim (NOT skipped)
+        chain({ first: { ...staleSend, status: 'sending' } }),        // sendCampaign fetch
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                          // rows exist
+        chain({ count: 0 }),                                          // none eligible
+        chain({ updated: 2, onUpdate: (payload) => { sweepUpdate = payload; } }), // sweep
+        chain({ result: [                                             // ledger after the sweep
+          { id: 'd-1', subscriber_id: 1, status: 'skipped', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'skipped', ab_variant: null },
+        ] }),
+        chain({ count: 0 }),                                          // final retryable ledger count
+      ],
+    };
+    finalQuery = chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } });
+    queues.newsletter_sends.push(finalQuery);                         // guarded final update
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(sweepUpdate).toMatchObject({ status: 'skipped' });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+    // The parent leaves 'sending' through the SAME guarded final update every
+    // other send uses — no stale claim, terminal status, and skipped rows are
+    // not counted as recipients.
+    expect(finalUpdate).toMatchObject({ status: 'sent', recipient_count: 0 });
+    expect(finalQuery.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: 's', status: 'sending', sending_claim_token: expect.any(String),
+    }));
+    expect(result.recipients).toBe(0);
+  });
+
   test("rejects 'sent' with NOTHING_TO_RESUME when existing rows are all terminal-success", async () => {
     let sendsCalls = 0;
     let deliveriesCalls = 0;
@@ -519,9 +577,15 @@ describe('resumeCampaign — preconditions', () => {
     let sweepUpdate = null;
     let sweepQuery = null;
     let deliveriesCalls = 0;
+    let sendsCalls = 0;
+    let sendUpdate = null;
     db.mockImplementation((table) => {
       if (table === 'newsletter_sends') {
-        return chain({ first: { id: 's', status: 'sent', html_body: 'x', text_body: 'x' } });
+        sendsCalls++;
+        return chain({
+          first: { id: 's', status: 'sent', html_body: 'x', text_body: 'x' },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
       }
       if (table === 'newsletter_send_deliveries') {
         deliveriesCalls++;
@@ -540,6 +604,10 @@ describe('resumeCampaign — preconditions', () => {
 
     expect(deliveriesCalls).toBe(3);
     expect(sweepUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    // The parent is already terminal ('sent') and holds no claim: rows are
+    // swept, the send row itself is left completely untouched.
+    expect(sendsCalls).toBe(1);
+    expect(sendUpdate).toBeNull();
     // Scoped to this send's retryable, non-success rows only.
     expect(sweepQuery.where).toHaveBeenCalledWith({ send_id: 's' });
     expect(sweepQuery.whereIn).toHaveBeenCalledWith('status', RETRYABLE_DELIVERY_STATUSES_FOR_TEST);

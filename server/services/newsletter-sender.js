@@ -625,7 +625,12 @@ async function sendCampaign(sendId, opts = {}) {
     if (opts.existingDeliveriesOnly && !d) return false;
     return !d || isRetryableDelivery(d);
   });
-  let recipientCount = opts.existingDeliveriesOnly ? existingDeliveries.length : subscribers.length;
+  // Rows already terminal-'skipped' (an earlier sweep, here or in
+  // prepareResumeCampaign) are not recipients of this campaign — never count
+  // them. Rows this run skips are subtracted separately, after the loop.
+  let recipientCount = opts.existingDeliveriesOnly
+    ? existingDeliveries.filter((d) => d.status !== SKIPPED_DELIVERY_STATUS).length
+    : subscribers.length;
   // Ledger rows already terminalized by the sweep above are not "already
   // sent" — they are ineligible, and counted as such.
   const skippedAlreadySent = recipientCount - skippedIneligible - subscribersToSend.length;
@@ -1049,9 +1054,20 @@ async function prepareResumeCampaign(sendId) {
       if (swept) {
         logger.info(`[newsletter] resume ${send.id}: no eligible recipients — terminalized ${swept} retryable ledger row(s) as skipped`);
       }
-      const err = new Error('no outstanding deliveries to resume');
-      err.code = 'NOTHING_TO_RESUME';
-      throw err;
+      // A STALE 'sending' parent must NOT be abandoned here: throwing before
+      // the atomic reclaim below would leave it stuck in 'sending' with a
+      // stale claim forever (recovery is exactly what this call is). Fall
+      // through instead — the reclaim happens, sendCampaign processes a
+      // zero-eligible ledger, and its ONE guarded final update lands the
+      // terminal status + recipient_count. For any other status the parent is
+      // already terminal and holds no claim, so the early report stands and
+      // the send row is left untouched.
+      if (!reclaimingStaleSend) {
+        const err = new Error('no outstanding deliveries to resume');
+        err.code = 'NOTHING_TO_RESUME';
+        throw err;
+      }
+      logger.info(`[newsletter] resume ${send.id}: stale 'sending' claim with no eligible recipients — reclaiming to finalize the parent`);
     }
   }
 
