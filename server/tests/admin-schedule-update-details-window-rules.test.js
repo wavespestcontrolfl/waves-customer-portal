@@ -266,3 +266,47 @@ describe('start-only edit derives its end from the stored span, else estimated_d
     expect(r.status).toBe(418);
   });
 });
+
+describe('effective duration on end-less rows + submitted duration + CAS', () => {
+  const ud = () => src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+
+  test('POST /: an end without a start is asymmetric → 422 before any booking work', async () => {
+    const res = await fetch(`${baseUrl}/api/admin/schedule`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ customerId: 'cust-1', scheduledDate: '2099-02-01', serviceType: 'Pest Control', windowEnd: '10:00' }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+    expect(db.transaction).not.toHaveBeenCalled();
+    const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
+    expect(post).toMatch(/const createWindowIntake = windowIntakeFromBody\(req\.body\)/);
+  });
+
+  test('update-details DATE-ONLY move of a 19:00 end-less 120-min row → 422 (19:00-21:00 past the day end)', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_start: '19:00:00', window_end: null, estimated_duration_minutes: 120 }));
+    const { status, body } = await put({ scheduledDate: '2099-02-01' });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/end by 20:00/);
+    // Same row with a 60-min duration fits and reaches the transaction.
+    db.mockImplementation(() => chain({ ...STORED, window_start: '19:00:00', window_end: null, estimated_duration_minutes: 60 }));
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    expect((await put({ scheduledDate: '2099-02-01' })).status).toBe(418);
+  });
+
+  test('start-only: the SUBMITTED estimatedDuration wins over the stored one (stored 60 fits at 19:00; submitted 120 does not)', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_start: '09:00:00', window_end: null, estimated_duration_minutes: 60 }));
+    const { status, body } = await put({ windowStart: '19:00', estimatedDuration: 120 });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/end by 20:00/);
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    expect((await put({ windowStart: '19:00' })).status).toBe(418);
+    expect(ud()).toMatch(/durationMinutes: submittedDuration\s*\|\| windowDurationMinutes\(currentRow/);
+  });
+
+  test('the scheduling-field CAS includes estimated_duration_minutes', () => {
+    const cas = ud().slice(ud().indexOf('if (preReadWindowRow && ('), ud().indexOf("code: 'VISIT_CHANGED_RETRY'", ud().indexOf('if (preReadWindowRow && (')));
+    expect(cas).toContain('occRow.estimated_duration_minutes');
+    expect(cas).toContain('preReadWindowRow.estimated_duration_minutes');
+  });
+});

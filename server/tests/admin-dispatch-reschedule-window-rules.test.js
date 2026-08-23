@@ -165,3 +165,14 @@ describe('window resolved against the CURRENT visit row', () => {
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
   });
 });
+
+test('date-only move of a 19:00 end-less 120-min row is refused (19:00-21:00), a 60-min one reaches the rebooker', async () => {
+  mockVisitRow = { window_start: '19:00:00', window_end: null, estimated_duration_minutes: 120 };
+  let r = await reschedule({ newDate: TARGET });
+  expect(r.status).toBe(422);
+  expect(r.body.error).toMatch(/end by 20:00/);
+  mockVisitRow = { window_start: '19:00:00', window_end: null, estimated_duration_minutes: 60 };
+  r = await reschedule({ newDate: TARGET });
+  expect(r.status).toBe(200);
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+});

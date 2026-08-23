@@ -3420,10 +3420,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
       sendCardOnFileLink,
     } = req.body;
 
-    // Normalized below by assertAdminAppointmentWindow once the duration is
-    // known; windowless (date-only) bookings stay null.
-    let windowStart = windowStartRaw;
-    let windowEnd = windowEndRaw;
+    // Window intake by explicit presence (windowIntakeFromBody, shared with
+    // update-details): both absent / both cleared = a windowless booking;
+    // an end without a start is asymmetric and refused (it used to insert
+    // window_start NULL beside a real end — a row invisible to occupancy).
+    // The pair is normalized below by assertAdminAppointmentWindow once the
+    // duration is known.
+    const createWindowIntake = windowIntakeFromBody(req.body);
+    let windowStart = createWindowIntake.clearBoth ? null : (createWindowIntake.windowStart ?? null);
+    let windowEnd = createWindowIntake.clearBoth ? null : (createWindowIntake.windowEnd ?? null);
+    if (!windowStart && windowEnd) {
+      throw Object.assign(
+        httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+        { code: 'INVALID_APPOINTMENT_WINDOW' },
+      );
+    }
+    void windowStartRaw; void windowEndRaw;
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
@@ -5031,16 +5043,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // Date-only move: the EFFECTIVE stored window rides onto the
                 // new date, so it must satisfy the same rules (a legacy 07:00
                 // row is refused); a windowless row (both null) still moves.
+                // An end-less row is judged on its effective duration (stored
+                // span → estimated_duration_minutes → 60), so 19:00 + 120 min
+                // is 19:00-21:00 and refused.
                 assertAdminAppointmentWindow({
                   windowStart: normalizeHHMM(svc.window_start),
                   windowEnd: normalizeHHMM(svc.window_end),
+                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
                 });
               }
               // Gated overlap probe (lock already held at the top of this trx);
-              // the moving row excludes itself.
+              // the moving row excludes itself. An end-less row probes its
+              // DERIVED end (same effective duration), never skips.
               {
                 const effStart = updates.window_start || normalizeHHMM(svc.window_start);
-                const effEnd = updates.window_end || normalizeHHMM(svc.window_end);
+                const effEnd = updates.window_end || normalizeHHMM(svc.window_end)
+                  || (effStart ? deriveWindowEnd(effStart, windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes)) : null);
                 if (effStart && effEnd) {
                   await assertNoSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
@@ -5697,20 +5715,29 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             { code: 'INVALID_APPOINTMENT_WINDOW' },
           );
         }
+        // Duration for a start-only edit: the SUBMITTED estimatedDuration
+        // (this same request) wins, else the stored span, else the row's
+        // estimated_duration_minutes, else 60 — the block the visit will
+        // actually occupy after this save.
+        const submittedDuration = Number.isInteger(updates.estimated_duration_minutes) && updates.estimated_duration_minutes > 0
+          ? updates.estimated_duration_minutes
+          : null;
         const normalizedWindow = assertAdminAppointmentWindow({
           windowStart: effectiveStart,
           windowEnd: updates.window_end || null,
-          // No valid stored span → the row's estimated duration (same
-          // precedence as occupancy / dispatch), never a flat 60.
-          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
+          durationMinutes: submittedDuration
+            || windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
         });
         updates.window_start = normalizedWindow.window_start;
         updates.window_end = normalizedWindow.window_end;
       } else if (!windowIntake.clearBoth
         && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))) {
+        // Date-only move of an end-less row: judged on its effective
+        // duration (stored span → estimated_duration_minutes → 60).
         assertAdminAppointmentWindow({
           windowStart: normalizeHHMM(currentRow.window_start),
           windowEnd: normalizeHHMM(currentRow.window_end),
+          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
         });
       }
     }
@@ -6379,10 +6406,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // normalization above derived from: a concurrent window/date
             // edit that committed first must not be overwritten with a
             // pair built on the stale snapshot.
+            // estimated_duration_minutes is part of the compare: a start-only
+            // edit derives its end from it, so a concurrent duration-only
+            // edit must not be overwritten with a block built on the old one.
             if (preReadWindowRow && (
               dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
               || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
               || normalizeHHMM(occRow.window_end) !== normalizeHHMM(preReadWindowRow.window_end)
+              || (parseInt(occRow.estimated_duration_minutes, 10) || null) !== (parseInt(preReadWindowRow.estimated_duration_minutes, 10) || null)
             )) {
               throw Object.assign(new Error('This appointment was moved or resized while saving — reload and save again.'), {
                 statusCode: 409,

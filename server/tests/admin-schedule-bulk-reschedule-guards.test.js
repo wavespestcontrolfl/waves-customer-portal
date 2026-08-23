@@ -890,3 +890,45 @@ test('a start-only move on an end-less row uses estimated_duration_minutes (120)
   expect(body.updated).toEqual(['svc-1']);
   expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '12:00' });
 });
+
+test('a DATE-ONLY move of a 19:00 end-less 120-min row is refused (effective 19:00-21:00), a 60-min one moves', async () => {
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '19:00:00', window_end: null, estimated_duration_minutes: 120 }) })],
+  });
+  let { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.updated).toEqual([]);
+  expect(body.failed[0].reason).toMatch(/end by 20:00/);
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '19:00:00', window_end: null, estimated_duration_minutes: 60 }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+  ({ body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } }));
+  expect(body.updated).toEqual(['svc-1']);
+});
+
+test('gate ON: a DATE-ONLY move of an end-less row probes its DERIVED end (never skipped)', async () => {
+  process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  try {
+    const probe = chain({ whereNotIn: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
+    const updateChain = chain();
+    wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '10:00:00', window_end: null, estimated_duration_minutes: 120 }) }),
+        probe,
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+    expect(body.updated).toEqual(['svc-1']);
+    // The probe ran with the derived 10:00-12:00 block (bindings: [end, 60, start]).
+    const rawCall = probe.whereRaw.mock.calls.find(([sql]) => /window_start </.test(sql));
+    expect(rawCall[1]).toEqual(['12:00', 60, '10:00']);
+  } finally {
+    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+  }
+});

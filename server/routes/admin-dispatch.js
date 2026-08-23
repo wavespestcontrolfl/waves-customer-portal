@@ -12148,10 +12148,18 @@ function visitDurationMinutes(row) {
 //     malformed (422), never a silent date-only move.
 async function resolveRescheduleWindow(serviceId, window) {
   if (window == null || window === '') {
-    const row = await db('scheduled_services').where({ id: serviceId }).first('window_start', 'window_end');
+    const row = await db('scheduled_services').where({ id: serviceId })
+      .first('window_start', 'window_end', 'estimated_duration_minutes');
     // pg TIME values carry seconds — the validator's parser accepts them.
+    // An end-less row is judged on the duration the rebooker persists
+    // (visitDurationMinutes: span → estimated_duration_minutes), so 19:00 +
+    // 120 min is 19:00-21:00 and refused, not a 60-min block.
     if (row && (row.window_start || row.window_end)) {
-      assertAdminAppointmentWindow({ windowStart: row.window_start, windowEnd: row.window_end });
+      assertAdminAppointmentWindow({
+        windowStart: row.window_start,
+        windowEnd: row.window_end,
+        durationMinutes: visitDurationMinutes(row) || undefined,
+      });
     }
     return window;
   }
