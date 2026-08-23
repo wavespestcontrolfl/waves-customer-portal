@@ -348,6 +348,32 @@ describe('new recurring welcome SMS', () => {
     expect(requeue.data.status).toBe('active');
   });
 
+  test('processDueWelcomes treats a suppression sentinel (sent:true, template-disabled sid) as not sent — released, attempt refunded, never completed', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    // Upstream gate off: twilio.js reports success with a sentinel sid and
+    // nothing reaches the customer.
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'template-disabled' });
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+    const requeue = mockUpdates.find((u) => u.table === 'sms_sequences' && 'next_send_at' in u.data);
+    expect(requeue.data.next_send_at).toBeInstanceOf(Date);
+    // Attempt refunded — a suppression is not a delivery failure.
+    expect(requeue.data.step).toBe(0);
+    expect(mockInserts.find((i) => i.table === 'customer_interactions')).toBeUndefined();
+  });
+
   test('processDueWelcomes retries CONSENT_LOOKUP_FAILED instead of burning the once-ever guard', async () => {
     mockDueSequences = [{
       id: 'seq-1',
@@ -408,7 +434,7 @@ describe('new recurring welcome SMS', () => {
     mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
     mockScheduledServiceRow = { status: 'pending' };
     mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
-    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
     // Another worker won the claim (0 rows updated) — this sweep must not text.
     mockClaimResults = [0];
 
@@ -509,7 +535,7 @@ describe('new recurring welcome SMS', () => {
     mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234', email: 'ada@example.com' };
     mockScheduledServiceRow = { status: 'pending' };
     mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
-    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
 
     const results = await service.processDueWelcomes();
 
@@ -613,7 +639,7 @@ describe('new recurring welcome SMS', () => {
     mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
     mockScheduledServiceRow = { status: 'pending' };
     mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
-    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
 
     await service.processDueWelcomes();
 

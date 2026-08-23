@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isRealProviderSend } = require('./sms-auto-send');
 
 const TEMPLATE_KEY = 'auto_new_recurring';
 const SEQUENCE_TYPE = 'new_customer_welcome';
@@ -12,6 +13,10 @@ const WELCOME_DELAY_MINUTES = 60;
 // A queued row that keeps erroring is abandoned after this many attempts so
 // the processor can't retry forever.
 const MAX_DELIVERY_ATTEMPTS = 3;
+// An upstream suppression sentinel (gate off / template disabled) is not a
+// delivery failure — the row is released and re-checked on this cadence
+// without burning an attempt, until the gate opens.
+const SUPPRESSED_RETRY_MINUTES = 60;
 // A 'sending' claim older than this is presumed crashed mid-dispatch and is
 // settled by the recovery pass (completed if a provider row proves the text
 // left, released for retry otherwise). Must comfortably exceed one dispatch.
@@ -404,6 +409,23 @@ async function deliverQueuedWelcome(row) {
     });
     logger.warn(`[new-recurring-welcome] SMS blocked/failed for customer ${customer.id}: ${sendResult.code || sendResult.reason || 'unknown'}`);
     return sendResult;
+  }
+
+  if (!isRealProviderSend(sendResult)) {
+    // sent:true with a suppression sentinel id (SMS gate off, template
+    // disabled, owner kill switch) — nothing reached the customer. Completing
+    // here would stamp the once-ever welcome as delivered while the gate is
+    // off. Release the claim like a legal-window hold: back to 'active' with
+    // the attempt refunded (a suppression is not a delivery failure), so the
+    // welcome goes out once the gate opens.
+    await db('sms_sequences').where({ id: row.id }).update({
+      status: 'active',
+      next_send_at: new Date(Date.now() + SUPPRESSED_RETRY_MINUTES * 60 * 1000),
+      step: parseInt(row.step, 10) || 0,
+      updated_at: new Date(),
+    });
+    logger.info(`[new-recurring-welcome] send suppressed upstream for customer ${customer.id} (${sendResult.providerMessageId || 'no-id'}) — released, not sent`);
+    return { ...sendResult, sent: false, skipped: 'send_suppressed', code: sendResult.providerMessageId || null };
   }
 
   await finish('completed', {

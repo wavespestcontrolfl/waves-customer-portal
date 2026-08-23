@@ -649,13 +649,18 @@ async function triggerNotification(triggerKey, payload = {}) {
     const built = sanitizeBuiltNotification(trigger.build(payload), trigger);
     const safePayload = sanitizeNotificationPayload(triggerKey, payload);
 
-    // Load per-user preferences (default to enabled if no row exists)
+    // Load per-user preferences (default to enabled if no row exists).
+    // A FAILED lookup is not "no rows": falling through with prefs=[] treated
+    // every admin as opted in to bell + push — an explicit opt-out was
+    // silently overridden whenever the query blipped. FAIL CLOSED: no prefs,
+    // no delivery to anyone.
     let prefs = [];
     try {
       prefs = await db('notification_preferences')
         .where({ trigger_key: triggerKey });
     } catch (e) {
-      logger.warn(`[notification-triggers] preferences table missing or query failed: ${e.message}`);
+      logger.error(`[notification-triggers] preferences lookup failed for '${triggerKey}' — delivering to nobody (fail closed): ${e.message}`);
+      return { bellWritten: false, push: null, prefsUnavailable: true };
     }
 
     let activeAdmins = [];

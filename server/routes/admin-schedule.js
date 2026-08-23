@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -553,6 +554,312 @@ function shouldRewritePendingRecurringRows(before, after) {
   const next = recurringRewriteSignature(after);
   return ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift']
     .some((key) => prev[key] !== next[key]);
+}
+
+// Statuses that do NOT occupy a slot for the admin creator/editor probes:
+// the rebooker's set (cancelled + completed) plus the two the edit path
+// already classifies as terminal/non-occupying (skipped + no_show) — a
+// skipped or no-show future visit keeps its window on the row but has
+// freed it on the calendar (Codex #3443 P2).
+const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+
+// ---- update-details recurrence date planning (rung-1 lock set) -----------
+//
+// PUT /:id/update-details can write scheduled_services rows on dates other
+// than the edited row's own: the cadence rewrite re-dates pending children
+// and boosters, make-this-recurring spawns children, and the visit-count /
+// ongoing top-up extends the series. Each is a committing writer under the
+// scheduling/occupancy.js ORDERING CONTRACT, so every destination date has
+// to be in the rung-1 lock set the trx takes as its FIRST statement. The
+// three generators below are the single source of those dates: the in-trx
+// write sites iterate their output, and planUpdateDetailsRecurrenceDates
+// runs the same generators against an UNLOCKED pre-trx peek to build the
+// lock set (the commsPeek idiom — provisional keys, re-verified under the
+// lock by guardRecurrenceDestination: a destination the peek did not
+// predict aborts the save with a retryable 409 rather than taking a second
+// date key mid-txn).
+
+function planCadenceRewriteTargets({
+  baseDateStr, pattern, rOpts, skip, dir, pendingChildren, pendingBoosters, boosterMonths, seenDates,
+}) {
+  const childTargets = new Map();
+  const boosterTargets = new Map();
+  const maxAttempts = pendingChildren.length * 4 + 30;
+  let attempt = 1;
+  for (const child of pendingChildren) {
+    let nextDateStr = null;
+    while (!nextDateStr && attempt < maxAttempts) {
+      const rawNext = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
+      attempt++;
+      const candidate = seasonalSafeShift(rawNext, pattern, skip, dir);
+      if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, candidate)) continue;
+      if (seenDates.has(candidate)) continue;
+      seenDates.add(candidate);
+      nextDateStr = candidate;
+    }
+    if (!nextDateStr) break;
+    childTargets.set(child.id, nextDateStr);
+  }
+  if (pendingBoosters.length > 0) {
+    let recomputedTargetIndex = 0;
+    if (boosterMonths.length > 0) {
+      for (const rawDate of computeBoosterDates(baseDateStr, boosterMonths, 12)) {
+        const targetBooster = pendingBoosters[recomputedTargetIndex];
+        if (!targetBooster) break;
+        const candidate = shiftPastWeekend(rawDate, skip, dir);
+        const targetCurrentDate = normalizeDateOnly(targetBooster.scheduled_date);
+        if (seenDates.has(candidate) && candidate !== targetCurrentDate) continue;
+        if (candidate !== targetCurrentDate) seenDates.add(candidate);
+        boosterTargets.set(targetBooster.id, candidate);
+        recomputedTargetIndex++;
+        if (recomputedTargetIndex >= pendingBoosters.length) break;
+      }
+    }
+    for (const booster of pendingBoosters) {
+      if (boosterTargets.has(booster.id)) continue;
+      const rawDate = dateOnly(booster.scheduled_date) || '';
+      if (!rawDate) continue;
+      const candidate = shiftPastWeekend(rawDate, skip, dir);
+      const currentDate = normalizeDateOnly(booster.scheduled_date);
+      if (seenDates.has(candidate) && candidate !== currentDate) continue;
+      if (candidate !== currentDate) seenDates.add(candidate);
+      boosterTargets.set(booster.id, candidate);
+    }
+  }
+  return { childTargets, boosterTargets };
+}
+
+// Iterate by placed dates, not attempts (matches the POST spawn): skip-
+// weekends can collapse consecutive recurrences onto the same shifted
+// weekday, and a fixed-count plan still owes spawnTarget children.
+function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spawnCount, spawnTarget }) {
+  const dates = [];
+  const maxAttempts = (spawnCount - 1) * 4 + 30;
+  let attempt = 1;
+  while (dates.length < spawnTarget && attempt < maxAttempts) {
+    const rawNext = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
+    attempt++;
+    const nextDateStr = seasonalSafeShift(rawNext, pattern, skip, dir);
+    if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nextDateStr)) continue;
+    if (seen.has(nextDateStr)) continue;
+    seen.add(nextDateStr);
+    dates.push(nextDateStr);
+  }
+  return dates;
+}
+
+function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, need }) {
+  const dates = [];
+  const maxAttempts = need * 4 + 30;
+  let attempt = 1;
+  while (dates.length < need && attempt < maxAttempts) {
+    const raw = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
+    attempt++;
+    const nd = seasonalSafeShift(raw, pattern, skip, dir);
+    if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nd)) continue;
+    if (seen.has(nd)) continue;
+    // The anchor can itself be in the past on a stalled series; a top-up must
+    // still only ever land on future dates.
+    if (nd <= etDateString()) continue;
+    seen.add(nd);
+    dates.push(nd);
+  }
+  return dates;
+}
+
+// The occupied block a row carries, derived exactly the way the parent move
+// probe derives it (window_end, else window_start + duration, default 60).
+// null for windowless rows — they carry no occupancy and skip the probe.
+function occupancyBlockFor(row) {
+  const start = normalizeHHMM(row?.window_start);
+  if (!start) return null;
+  let end = normalizeHHMM(row?.window_end);
+  if (!end || end <= start) {
+    const [h, m] = start.split(':').map(Number);
+    const endMin = Math.min(h * 60 + m + (parseInt(row?.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+    end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+  }
+  return { start, end };
+}
+
+// In-trx half of the plan: a destination the pre-trx peek did not predict
+// means the series moved under us — abort (retryable) rather than take a
+// second rung-1 key mid-txn (the contract's row-lock rule). Then the
+// tech-blind global probe on the row's own block, same predicate and status
+// exclusions as the parent move probe; a hit is the SLOT_TAKEN 409 naming
+// only the date (no customer data).
+async function guardRecurrenceDestination(trx, { lockedDates, date, row, excludeServiceIds }) {
+  if (!lockedDates || !lockedDates.has(date)) {
+    throw Object.assign(
+      new Error('This plan changed while saving — reload and save again.'),
+      { statusCode: 409, isOperational: true, code: 'SERIES_CHANGED_RETRY' },
+    );
+  }
+  const block = occupancyBlockFor(row);
+  if (!block) return;
+  const clash = await findConflictingVisits({
+    db: trx,
+    date,
+    windowStart: block.start,
+    windowEnd: block.end,
+    excludeServiceIds,
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  if (clash.length) {
+    throw Object.assign(
+      new Error(`That time slot conflicts with another appointment on the schedule on ${date}. Pick another time.`),
+      { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' },
+    );
+  }
+}
+
+// Every date the three recurrence write paths of PUT /:id/update-details will
+// land on, from an unlocked peek — mirrors each path's own guard conditions
+// and inputs (the row as this save's generic update leaves it), and runs the
+// same generators the paths iterate inside the trx.
+async function planUpdateDetailsRecurrenceDates(conn, {
+  id, updates, isRecurring, recurringPattern, spawnRecurringChildren, recurringCount, recurringOngoing,
+  recurringOngoingBaseline, recurringIntervalDays, skipWeekends, weekendShift, editMonthAnchorOpts,
+  wantsVisitCountReconcile, parsedPlannedCount,
+}) {
+  const dates = new Set();
+  if (!isRecurring) return dates;
+  const before = await conn('scheduled_services').where({ id }).first();
+  if (!before) return dates;
+  const cols = await conn('scheduled_services').columnInfo();
+  const after = { ...before, ...updates };
+  const shouldSpawn = spawnRecurringChildren !== false;
+  const editOpts = (parent) => ({
+    nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
+    weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
+    intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+  });
+
+  // Cadence rewrite of the pending children/boosters of a series parent.
+  if (!shouldSpawn && recurringPattern && before.is_recurring && !before.recurring_parent_id
+    && shouldRewritePendingRecurringRows(before, after)) {
+    const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
+    const skip = skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends;
+    const dir = (weekendShift !== undefined ? weekendShift : after.weekend_shift) === 'back' ? 'back' : 'forward';
+    const pendingChildren = await conn('scheduled_services')
+      .where({ recurring_parent_id: before.id, is_recurring: true })
+      .whereIn('status', ['pending', 'confirmed'])
+      .orderBy('scheduled_date')
+      .orderBy('created_at')
+      .select('id', 'status', 'scheduled_date');
+    const pendingBoosters = await conn('scheduled_services')
+      .where({ recurring_parent_id: before.id, is_recurring: false })
+      .whereIn('status', ['pending', 'confirmed'])
+      .orderBy('scheduled_date')
+      .orderBy('created_at')
+      .select('id', 'status', 'scheduled_date');
+    if (pendingChildren.length > 0 || pendingBoosters.length > 0) {
+      const reservedQuery = conn('scheduled_services')
+        .where(function () {
+          this.where({ id: before.id }).orWhere({ recurring_parent_id: before.id });
+        })
+        .whereNotIn('status', ['cancelled', 'rescheduled']);
+      if (pendingChildren.length > 0) {
+        reservedQuery.whereNotIn('id', pendingChildren.map((row) => row.id));
+      }
+      const reservedRows = await reservedQuery.select('scheduled_date');
+      const seenDates = new Set(reservedRows.map((row) => dateOnly(row.scheduled_date) || '').filter(Boolean));
+      const { childTargets, boosterTargets } = planCadenceRewriteTargets({
+        baseDateStr,
+        pattern: recurringPattern,
+        rOpts: editOpts(after),
+        skip,
+        dir,
+        pendingChildren,
+        pendingBoosters,
+        boosterMonths: normalizeBoosterMonths(after.booster_months),
+        seenDates,
+      });
+      for (const d of childTargets.values()) dates.add(d);
+      for (const d of boosterTargets.values()) dates.add(d);
+    }
+  }
+
+  // Make-this-recurring spawn (Ongoing seeds 4; Fixed uses recurringCount).
+  const spawnCount = shouldSpawn ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
+  if (recurringPattern && spawnCount > 1 && !before.recurring_parent_id) {
+    const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
+    const skipParent = after.skip_weekends != null ? !!after.skip_weekends : false;
+    const dirParent = after.weekend_shift === 'back' ? 'back' : 'forward';
+    const skip = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+    const dir = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
+    const seen = new Set();
+    seen.add(dateOnly(baseDateStr) || '');
+    try {
+      const existingSeriesRows = await conn('scheduled_services')
+        .where(function () { this.where('recurring_parent_id', before.id).orWhere('id', before.id); })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .select('scheduled_date');
+      for (const r of existingSeriesRows) {
+        const d = dateOnly(r.scheduled_date);
+        if (d) seen.add(d);
+      }
+    } catch { /* preload is protective; the base-date seed still guards */ }
+    let existingUpcomingChildren = 0;
+    try {
+      const upRow = await conn('scheduled_services')
+        .where({ recurring_parent_id: before.id, is_recurring: true })
+        .whereIn('status', ['pending', 'confirmed'])
+        .where('scheduled_date', '>=', etDateString())
+        .count('* as c')
+        .first();
+      existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
+    } catch { existingUpcomingChildren = 0; }
+    const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
+    for (const d of planSpawnChildDates({
+      baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget,
+    })) dates.add(d);
+  }
+
+  // Visit-count reconcile / fixed→ongoing top-up extends of a running plan.
+  if (!shouldSpawn && (wantsVisitCountReconcile || recurringOngoing !== undefined)) {
+    const parentId = before.recurring_parent_id || before.id;
+    const parentBefore = before.recurring_parent_id
+      ? await conn('scheduled_services').where({ id: before.recurring_parent_id }).first()
+      : before;
+    const parent = before.recurring_parent_id ? parentBefore : after;
+    if (parent?.is_recurring && parent.recurring_pattern) {
+      const wasOngoing = parentBefore?.recurring_ongoing === true;
+      const ongoingBaselineAgrees = typeof recurringOngoingBaseline === 'boolean'
+        ? recurringOngoingBaseline === wasOngoing
+        : true;
+      let target = null;
+      if (wantsVisitCountReconcile) {
+        target = Math.min(Math.max(parsedPlannedCount, 1), MAX_SERIES_VISIT_COUNT);
+      } else if (recurringOngoing === true && !wasOngoing && ongoingBaselineAgrees && isEnabled('editApptVisitCount')
+        && (await countUpcomingSeriesVisits(conn, parentId)) < 3) {
+        target = 3;
+      }
+      if (target != null) {
+        const live = await liveUpcomingSeriesVisits(conn, parentId);
+        const need = target - live.length;
+        if (need > 0) {
+          const rOpts = {
+            ...recurrenceOrdinalOptions(parent.scheduled_date, {
+              nth: parent.recurring_nth,
+              weekday: parent.recurring_weekday,
+            }),
+            intervalDays: parent.recurring_interval_days,
+          };
+          const skip = cols.skip_weekends ? !!parent.skip_weekends : false;
+          const dir = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
+          const latest = await latestLiveSeriesVisit(conn, parentId);
+          const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+          const seen = await loadActiveSeriesDates(conn, parentId);
+          seen.add(baseDateStr);
+          for (const d of planSeriesExtendDates({
+            baseDateStr, pattern: parent.recurring_pattern, rOpts, skip, dir, seen, need,
+          })) dates.add(d);
+        }
+      }
+    }
+  }
+  return dates;
 }
 
 function appointmentReminderTime(dateStr, windowStart) {
@@ -3530,8 +3837,84 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
+    // Track all scheduled_date strings created for this parent series
+    // (parent itself, recurring children, AND boosters). Hoisted so the
+    // booster spawn block below can dedupe against base-series dates —
+    // certain cadence/month combos (e.g. monthly Jan 15 + April booster
+    // → Apr 15 already on the calendar) would otherwise double-book.
+    // Generated BEFORE the transaction so every date the series will write
+    // is known up front: rung 1 must cover all of them (Codex #3443 P1 —
+    // occupancy:<parent-date> does not serialize occupancy:<child-date>).
+    const seriesDates = new Set();
+    seriesDates.add(dateOnly(scheduledDate) || '');
+    const plannedChildDates = [];
+    const plannedBoosterDates = [];
+
+    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
+    const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+    const plannedCount = isRecurring
+      ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+      : 0;
+    const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
+    const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    if (isRecurring && recurringPattern && plannedCount > 1) {
+      // Iterate by inserts, not by attempts: when skip-weekends collapses
+      // consecutive recurrences onto the same shifted weekday (e.g. custom
+      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
+      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
+      // infinite loop if the pattern is degenerate.
+      const maxAttempts = (plannedCount - 1) * 4 + 30;
+      let attempt = 1;
+      while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
+        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
+        attempt++;
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
+        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
+        if (seriesDates.has(nextDateStr)) continue;
+        seriesDates.add(nextDateStr);
+        plannedChildDates.push(nextDateStr);
+      }
+    }
+
+    // Booster months — extra one-off visits on top of the base series
+    // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
+    // months from the initial date.
+    if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+      const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+      const dates = computeBoosterDates(scheduledDate, cleaned, 12);
+      for (const rawDate of dates) {
+        const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
+        // Skip if this date already has a row on the series (parent or
+        // recurring child). Common case: monthly Jan 15 → child Apr 15
+        // PLUS April booster → Apr 15 collision.
+        if (seriesDates.has(boosterDate)) continue;
+        seriesDates.add(boosterDate);
+        plannedBoosterDates.push(boosterDate);
+      }
+    }
+
+    // Same SLOT_TAKEN 409 the parent probe throws, naming the generated
+    // date that collided (dates only — no customer data).
+    const slotTakenError = (conflictDate) => Object.assign(
+      new Error(conflictDate
+        ? `That time slot conflicts with another appointment on the schedule on ${conflictDate}. Pick another time.`
+        : 'That time slot conflicts with another appointment on the schedule. Pick another time.'),
+      { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' },
+    );
+
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock, FIRST statement of the trx, before the comms lock
+      // and every row lock below. The admin creator was the one committing
+      // writer with no lock and no global probe: its uncommitted insert was
+      // invisible to every other writer's tech-blind check, and it never
+      // checked anyone else's. Every date this series writes (parent +
+      // generated children + boosters) is locked here, deduped and in
+      // ascending date order, so two multi-date writers sharing any subset
+      // of dates take them in the same relative order. Each timed row is
+      // probed right before its own insert (same trx, under these locks).
+      await acquireOccupancyLocks(trx, [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates]);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
       // customers row lock below: every scheduled_services insert in this
       // trx (parent, recurring children, boosters) serializes against a
@@ -3684,6 +4067,25 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
 
+      // Global occupancy probe under rung 1 (the contract's second half):
+      // tech-blind, counts live estimate holds, same predicate the customer
+      // /book and rebooker commit gates run. A timed parent that overlaps
+      // ANY existing visit is refused with the SLOT_TAKEN 409 those paths
+      // already return — the admin UI's SlotConflictNotice is advisory only
+      // and carries no overbook flag, so there is nothing to honor here.
+      // Windowless rows carry no occupancy and skip the probe (the
+      // predicate's NULL window_start is inert either way).
+      if (insertData.window_start && insertData.window_end) {
+        const adminCreateClash = await findConflictingVisits({
+          db: trx,
+          date: dateOnly(scheduledDate),
+          windowStart: insertData.window_start,
+          windowEnd: insertData.window_end,
+          excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+        });
+        if (adminCreateClash.length) throw slotTakenError(null);
+      }
+
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
@@ -3696,37 +4098,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         source: 'admin_schedule',
       });
 
-      // Track all scheduled_date strings created for this parent series
-      // (parent itself, recurring children, AND boosters). Hoisted so the
-      // booster spawn block below can dedupe against base-series dates —
-      // certain cadence/month combos (e.g. monthly Jan 15 + April booster
-      // → Apr 15 already on the calendar) would otherwise double-book.
-      const seriesDates = new Set();
-      seriesDates.add(dateOnly(scheduledDate) || '');
-
-      // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-      const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-      const plannedCount = isRecurring
-        ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
-        : 0;
-      if (isRecurring && recurringPattern && plannedCount > 1) {
-      const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
-      const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-      // Iterate by inserts, not by attempts: when skip-weekends collapses
-      // consecutive recurrences onto the same shifted weekday (e.g. custom
-      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
-      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
-      // infinite loop if the pattern is degenerate.
-      const maxAttempts = (plannedCount - 1) * 4 + 30;
-      let attempt = 1;
-      let inserted = 0;
-      while (inserted < plannedCount - 1 && attempt < maxAttempts) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
-        attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
-        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDates.has(nextDateStr)) continue;
-        seriesDates.add(nextDateStr);
+      // Create recurring instances from the dates precomputed (and locked)
+      // above.
+      for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -3774,33 +4148,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
+        // Same global probe as the parent, under this child's own date lock.
+        if (childData.window_start && childData.window_end) {
+          const childClash = await findConflictingVisits({
+            db: trx,
+            date: nextDateStr,
+            windowStart: childData.window_start,
+            windowEnd: childData.window_end,
+            excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          });
+          if (childClash.length) throw slotTakenError(nextDateStr);
+        }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
         if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, childAddonLines, addonCols);
         createdAppointments.push({ id: childRow.id, date: nextDateStr, confirmation: false });
-        inserted++;
-      }
       }
 
-      // Booster months — extra one-off visits on top of the base series
-      // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
-      // months from the initial date; boosters share recurring_parent_id but
-      // are themselves is_recurring=false so the auto-extend path leaves
-      // them alone. A future cron can refresh year-2 boosters from
-      // parent.booster_months.
-      if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-        const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-        const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
-        const dates = computeBoosterDates(scheduledDate, cleaned, 12);
-        for (const rawDate of dates) {
-          const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
-          // Skip if this date already has a row on the series (parent or
-          // recurring child). Common case: monthly Jan 15 → child Apr 15
-          // PLUS April booster → Apr 15 collision.
-          if (seriesDates.has(boosterDate)) continue;
-          seriesDates.add(boosterDate);
+      // Booster months — dates precomputed (and locked) above; boosters
+      // share recurring_parent_id but are themselves is_recurring=false so
+      // the auto-extend path leaves them alone. A future cron can refresh
+      // year-2 boosters from parent.booster_months.
+      if (plannedBoosterDates.length > 0) {
+        for (const boosterDate of plannedBoosterDates) {
           const boosterData = {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
@@ -3851,6 +4223,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
           if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
+          // Same global probe as the parent, under this booster's own date lock.
+          if (boosterData.window_start && boosterData.window_end) {
+            const boosterClash = await findConflictingVisits({
+              db: trx,
+              date: boosterDate,
+              windowStart: boosterData.window_start,
+              windowEnd: boosterData.window_end,
+              excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+            });
+            if (boosterClash.length) throw slotTakenError(boosterDate);
+          }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror only add-ons due on this booster date; one-time and
@@ -5562,6 +5945,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // the cadence rewrite below — same post-commit cleanup, applied per
     // row after commit with each row's unchanged status.
     const rewoundSeriesRows = [];
+    // Rung-1 lock set for every date this save's recurrence paths can write
+    // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
+    // top-up extends), computed from an UNLOCKED peek with the same
+    // generators those paths run inside the trx — re-verified under the
+    // lock at each write (guardRecurrenceDestination). Empty for a save that
+    // writes no other date.
+    const plannedRecurrenceDates = await planUpdateDetailsRecurrenceDates(db, {
+      id: req.params.id,
+      updates,
+      isRecurring,
+      recurringPattern,
+      spawnRecurringChildren,
+      recurringCount,
+      recurringOngoing,
+      recurringOngoingBaseline,
+      recurringIntervalDays,
+      skipWeekends,
+      weekendShift,
+      editMonthAnchorOpts,
+      wantsVisitCountReconcile,
+      parsedPlannedCount,
+    });
 
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -5570,7 +5975,42 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // (assignment updates below take visit row locks).
       const commsPeek = await trx('scheduled_services')
         .where({ id: req.params.id })
-        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing');
+        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing', 'scheduled_date');
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock, BEFORE the maintenance/comms advisory locks and
+      // every row lock this trx takes. Keyed off the TARGET date: the
+      // requested move date, else the unlocked peek of the row's own date
+      // (a window-only edit still re-occupies that day). The peek is
+      // provisional — the locked read below re-checks the key and aborts
+      // the edit if the row's date moved in between (the row-lock rule:
+      // never take a second date key mid-txn).
+      // Duration counts as a window edit: the shared predicate derives the
+      // occupied block from estimated_duration_minutes when window_end is
+      // NULL, so a longer duration can widen occupancy too.
+      const occupancyWindowTouched = updates.scheduled_date !== undefined
+        || updates.window_start !== undefined
+        || updates.window_end !== undefined
+        || updates.estimated_duration_minutes !== undefined;
+      const occupancyDateKey = updates.scheduled_date !== undefined
+        ? dateOnly(updates.scheduled_date)
+        : dateOnly(commsPeek?.scheduled_date);
+      // Multi-date when the recurrence paths will write other dates: the
+      // row's own (target) date plus every planned destination, deduped and
+      // in ascending order (acquireOccupancyLocks), so this trx and any other
+      // multi-date writer sharing a subset take them in the same relative
+      // order. A recurrence-only save (no date/window edit) used to take no
+      // date key at all while still moving children and inserting generated
+      // visits on other dates.
+      const lockedRecurrenceDates = new Set(
+        plannedRecurrenceDates.size > 0
+          ? [occupancyDateKey, ...plannedRecurrenceDates].filter(Boolean)
+          : [],
+      );
+      if (lockedRecurrenceDates.size > 0) {
+        await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
+      } else if (occupancyWindowTouched && occupancyDateKey) {
+        await acquireOccupancyLock(trx, occupancyDateKey);
+      }
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
@@ -5749,6 +6189,88 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // office edits notes/price, and wiping the live attempt would
         // orphan it. Completed/terminal rows keep their lifecycle: the
         // stamps ARE the service record.
+        // Global occupancy probe under rung 1 for a date/window move — the
+        // same tech-blind predicate + status exclusions the rebooker's
+        // commit gate runs (terminal rows don't occupy —
+        // ADMIN_OCCUPANCY_EXCLUDE_STATUSES; the moving row excludes itself),
+        // thrown as the same SLOT_TAKEN 409 so every
+        // caller's conflict handling works unchanged. Terminal rows are
+        // record corrections, not occupancy, and skip it. Runs on the
+        // LOCKED row (reusing the tuple read above, else its own FOR
+        // UPDATE), re-checking the provisional date key first.
+        if (occupancyWindowTouched) {
+          const occRow = preTupleRow
+            || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+          if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
+            const occDate = updates.scheduled_date !== undefined
+              ? dateOnly(updates.scheduled_date)
+              : dateOnly(occRow.scheduled_date);
+            if (occDate !== occupancyDateKey) {
+              throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            const occStart = normalizeHHMM(updates.window_start !== undefined ? updates.window_start : occRow.window_start);
+            // A start-only edit leaves the stored end stale — derive the
+            // block from the effective duration like the rebooker does.
+            let occEnd = normalizeHHMM(updates.window_end !== undefined
+              ? updates.window_end
+              : (updates.window_start !== undefined ? null : occRow.window_end));
+            if (occStart && (!occEnd || occEnd <= occStart)) {
+              const [sh, sm] = occStart.split(':').map(Number);
+              const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
+              const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
+              occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+            }
+            // Presence is not change (Codex #3443 P2): the mobile edit
+            // modal echoes date/window/duration on every save, so a
+            // notes-only edit of an already-overlapping visit must not be
+            // refused. Compare the effective block with the locked row's
+            // and probe only when the slot actually moves.
+            const rowStart = normalizeHHMM(occRow.window_start);
+            let rowEnd = normalizeHHMM(occRow.window_end);
+            if (rowStart && (!rowEnd || rowEnd <= rowStart)) {
+              const [rh, rm] = rowStart.split(':').map(Number);
+              const rowMin = Math.min(rh * 60 + rm + (parseInt(occRow.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+              rowEnd = `${String(Math.floor(rowMin / 60)).padStart(2, '0')}:${String(rowMin % 60).padStart(2, '0')}`;
+            }
+            const slotUnchanged = occDate === dateOnly(occRow.scheduled_date) && occStart === rowStart && occEnd === rowEnd;
+            // The end this save would leave stored; an end at/before the
+            // start is invalid (a submitted 08:00 end on a 09:00 start, or a
+            // legacy row already stored that way) and must never persist —
+            // findConflictingVisits falls back to the duration only for a
+            // NULL end, so an inverted stored end hides the visit from every
+            // later overlap check (pre-push audit P1).
+            const storedEndAfterSave = normalizeHHMM(updates.window_end !== undefined ? updates.window_end : occRow.window_end);
+            const storedEndInvalid = !!occStart && !!storedEndAfterSave && storedEndAfterSave <= occStart;
+            if (occEnd && (storedEndInvalid || (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined))) {
+              // Persist the block that was probed: a start-only edit used
+              // to keep the OLD end (09:00-10:00 moved to 13:00 stored
+              // 13:00-10:00), which every later overlap query read as a
+              // non-null end and the visit went invisible to occupancy.
+              updates.window_end = occEnd;
+            }
+            if (!slotUnchanged && occDate && occStart && occEnd) {
+              const adminMoveClash = await findConflictingVisits({
+                db: trx,
+                date: occDate,
+                windowStart: occStart,
+                windowEnd: occEnd,
+                excludeServiceIds: [req.params.id],
+                excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+              });
+              if (adminMoveClash.length) {
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'SLOT_TAKEN',
+                });
+              }
+            }
+          }
+        }
         const dateActuallyMoves = updates.scheduled_date !== undefined
           && preTupleRow
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))
@@ -6089,13 +6611,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
+            .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', ...seriesEvidenceCols);
           const pendingBoosters = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: false })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
+            .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', ...seriesEvidenceCols);
           const pendingRewriteIds = [
             ...pendingChildren.map((row) => row.id),
             ...pendingBoosters.map((row) => row.id),
@@ -6116,21 +6638,36 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 .map((row) => dateOnly(row.scheduled_date) || '')
                 .filter(Boolean),
             );
-            const maxAttempts = pendingChildren.length * 4 + 30;
-            let attempt = 1;
+            // Destination dates from the shared generator (the pre-trx lock
+            // plan ran the same one). Every re-dated row is verified against
+            // the held rung-1 keys and probed before its write below; the
+            // probe ignores the rows this rewrite itself re-places (their
+            // stale positions are not occupancy — the generator already
+            // keeps their new dates distinct) and the parent.
+            const { childTargets, boosterTargets } = planCadenceRewriteTargets({
+              baseDateStr,
+              pattern: recurringPattern,
+              rOpts,
+              skip: skipChild,
+              dir: dirChild,
+              pendingChildren,
+              pendingBoosters,
+              boosterMonths: normalizeBoosterMonths(parent.booster_months),
+              seenDates,
+            });
+            const rewriteProbeExcludeIds = [parent.id, ...pendingRewriteIds];
             for (const child of pendingChildren) {
-              let nextDateStr = null;
-              while (!nextDateStr && attempt < maxAttempts) {
-                const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
-                attempt++;
-                const candidate = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
-                if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, candidate)) continue;
-                if (seenDates.has(candidate)) continue;
-                seenDates.add(candidate);
-                nextDateStr = candidate;
-              }
+              const nextDateStr = childTargets.get(child.id);
               if (!nextDateStr) break;
               const childDateChanged = normalizeDateOnly(child.scheduled_date) !== nextDateStr;
+              if (childDateChanged) {
+                await guardRecurrenceDestination(trx, {
+                  lockedDates: lockedRecurrenceDates,
+                  date: nextDateStr,
+                  row: child,
+                  excludeServiceIds: rewriteProbeExcludeIds,
+                });
+              }
               const childUpdates = {
                 scheduled_date: nextDateStr,
                 recurring_pattern: recurringPattern,
@@ -6163,13 +6700,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // concurrent En Route transition can make the row live after
               // it — an id-only write would move it without the rewind. A
               // miss skips the row (it changed under us; the next edit
-              // re-reads).
+              // re-reads). The window/duration are in the CAS too: the
+              // occupancy probe above ran on the block that read observed,
+              // and a window edit committed since would move a block the
+              // probe never saw (pre-push audit P1).
               const childUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
                 trx('scheduled_services')
                   .where({
                     id: child.id,
                     status: child.status,
                     scheduled_date: child.scheduled_date,
+                    window_start: child.window_start ?? null,
+                    window_end: child.window_end ?? null,
+                    estimated_duration_minutes: child.estimated_duration_minutes ?? null,
                   }),
                 child,
               )
@@ -6195,36 +6738,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               recurringUpdatedJobIds.push(child.id);
             }
             if (pendingBoosters.length > 0) {
-              const boosterMonths = normalizeBoosterMonths(parent.booster_months);
-              const boosterTargets = new Map();
-              let recomputedTargetIndex = 0;
-              if (boosterMonths.length > 0) {
-                for (const rawDate of computeBoosterDates(baseDateStr, boosterMonths, 12)) {
-                  const targetBooster = pendingBoosters[recomputedTargetIndex];
-                  if (!targetBooster) break;
-                  const candidate = shiftPastWeekend(rawDate, skipChild, dirChild);
-                  const targetCurrentDate = normalizeDateOnly(targetBooster.scheduled_date);
-                  if (seenDates.has(candidate) && candidate !== targetCurrentDate) continue;
-                  if (candidate !== targetCurrentDate) seenDates.add(candidate);
-                  boosterTargets.set(targetBooster.id, candidate);
-                  recomputedTargetIndex++;
-                  if (recomputedTargetIndex >= pendingBoosters.length) break;
-                }
-              }
-              for (const booster of pendingBoosters) {
-                if (boosterTargets.has(booster.id)) continue;
-                const rawDate = dateOnly(booster.scheduled_date) || '';
-                if (!rawDate) continue;
-                const candidate = shiftPastWeekend(rawDate, skipChild, dirChild);
-                const currentDate = normalizeDateOnly(booster.scheduled_date);
-                if (seenDates.has(candidate) && candidate !== currentDate) continue;
-                if (candidate !== currentDate) seenDates.add(candidate);
-                boosterTargets.set(booster.id, candidate);
-              }
               for (const booster of pendingBoosters) {
                 const nextDateStr = boosterTargets.get(booster.id);
                 if (!nextDateStr) continue;
                 const boosterDateChanged = normalizeDateOnly(booster.scheduled_date) !== nextDateStr;
+                if (boosterDateChanged) {
+                  await guardRecurrenceDestination(trx, {
+                    lockedDates: lockedRecurrenceDates,
+                    date: nextDateStr,
+                    row: booster,
+                    excludeServiceIds: rewriteProbeExcludeIds,
+                  });
+                }
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 // Fence-or-clear contract — same as the child rewrite above.
                 if (boosterDateChanged) boosterUpdates.route_order = null;
@@ -6238,13 +6763,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     boosterRewound = true;
                   }
                 }
-                // Same CAS as the child rewrite above.
+                // Same CAS as the child rewrite above (window/duration
+                // included so the probed block is the moved block).
                 const boosterUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
                   trx('scheduled_services')
                     .where({
                       id: booster.id,
                       status: booster.status,
                       scheduled_date: booster.scheduled_date,
+                      window_start: booster.window_start ?? null,
+                      window_end: booster.window_end ?? null,
+                      estimated_duration_minutes: booster.estimated_duration_minutes ?? null,
                     }),
                   booster,
                 )
@@ -6406,7 +6935,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
           // Iterate by inserts (matches POST spawn): skip-weekends can
           // collapse multiple raw recurrences onto the same shifted weekday,
-          // and a fixed-count plan still owes spawnTarget children.
+          // and a fixed-count plan still owes spawnTarget children. Same
+          // walk as planSpawnChildDates (the pre-trx lock plan); each child
+          // is verified against the held rung-1 keys and probed right before
+          // its insert.
           const maxAttempts = (spawnCount - 1) * 4 + 30;
           let attempt = 1;
           let inserted = 0;
@@ -6475,6 +7007,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // children that fall back to the customer's primary address.
               copyStampedServiceAddressFields(childData, parent, cols);
             } catch { /* non-blocking */ }
+            await guardRecurrenceDestination(trx, {
+              lockedDates: lockedRecurrenceDates,
+              date: nextDateStr,
+              row: childData,
+              excludeServiceIds: [parent.id],
+            });
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
               spawnedRecurringChildren.push({
@@ -6590,6 +7128,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               claimToken: visitCountClaimToken,
               protectedVisitId: req.params.id,
               ongoingSeries: true,
+              occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId] },
             });
             recurringCreated += visitCountResult.added.length;
             for (const child of visitCountResult.added) {
@@ -6619,6 +7158,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             baselineCount: Number.isInteger(Number.parseInt(recurringPlannedCountBaseline, 10))
               ? Number.parseInt(recurringPlannedCountBaseline, 10)
               : null,
+            occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId] },
           });
           recurringCreated += visitCountResult.added.length;
           for (const child of visitCountResult.added) {
@@ -8005,6 +8545,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Never" flip reuses this writer to guarantee the plan has visits ahead of
   // it, and must never trim.
   ongoingSeries = false,
+  // update-details only: { lockedDates, excludeServiceIds } — each extend
+  // insert is verified against the caller's held rung-1 date keys and probed
+  // for global occupancy right before the write (guardRecurrenceDestination).
+  occupancyGuard = null,
 }) {
   const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
@@ -8106,18 +8650,12 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     ? await resolveSeriesCreateInvoiceOnComplete(trx, parentId, parent)
     : undefined;
 
-  const maxAttempts = need * 4 + 30;
-  let attempt = 1;
-  while (result.added.length < need && attempt < maxAttempts) {
-    const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
-    attempt++;
-    const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
-    if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
-    if (seen.has(nd)) continue;
-    // The anchor can itself be in the past on a stalled series; a top-up must
-    // still only ever land on future dates.
-    if (nd <= etDateString()) continue;
-    seen.add(nd);
+  // Extend dates from the shared generator (update-details' pre-trx lock
+  // plan runs the same one).
+  const extendDates = planSeriesExtendDates({
+    baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
+  });
+  for (const nd of extendDates) {
     const data = {
       customer_id: parent.customer_id,
       technician_id: recurringTemplateTechnicianId(parent),
@@ -8151,6 +8689,14 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyStampedServiceAddressFields(data, parent, cols);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
     applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+    if (occupancyGuard) {
+      await guardRecurrenceDestination(trx, {
+        lockedDates: occupancyGuard.lockedDates,
+        date: nd,
+        row: data,
+        excludeServiceIds: occupancyGuard.excludeServiceIds,
+      });
+    }
     const [row] = await trx('scheduled_services').insert(data).returning('*');
     if (!row?.id) continue;
     // Mirror the parent's add-on lines onto the new visit — a multi-service
@@ -8198,7 +8744,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // exists, not what was asked for (Codex #3337 r5 P1): telling the office
     // "set to 24" when 22 were placed means missed service nobody can see.
     result.shortfall = need - result.added.length;
-    logger.warn(`[schedule/visit-count] parent=${parentId} wanted ${need} more visit(s), placed ${result.added.length} — every candidate within ${maxAttempts} cadence steps was already booked`);
+    logger.warn(`[schedule/visit-count] parent=${parentId} wanted ${need} more visit(s), placed ${result.added.length} — every candidate within ${need * 4 + 30} cadence steps was already booked`);
   }
   result.achieved = live.length + result.added.length;
   return result;

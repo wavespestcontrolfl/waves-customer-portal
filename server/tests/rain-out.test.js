@@ -294,6 +294,22 @@ describe('rain-out service', () => {
       const options = RainOut._test.sameDayOptions(new Date('2026-06-11T20:40:00Z'));
       expect(options).toHaveLength(0);
     });
+
+    test('last same-day start leaves a full slot before the 5 PM close (17:00 is never offered)', () => {
+      // 17:10Z = 13:10 ET → +2h = 15:10 → 15:00 OK; +4h = 17:10 → 17:00 would
+      // run 17:00-18:00, past day close → dropped. 16:00 is the last start.
+      const options = RainOut._test.sameDayOptions(new Date('2026-06-11T17:10:00Z'));
+      expect(options.map((o) => o.window)).toEqual([{ start: '15:00', end: '16:00' }]);
+    });
+
+    test('pre-dawn rain-out floors both presets to 8 AM ET and dedupes them', () => {
+      // 08:10Z = 04:10 ET → +2h = 06:10 → 06:00 → floored to 08:00; +4h = 08:10
+      // → 08:00 → same slot → offered once. No client appointment before 8 AM.
+      const options = RainOut._test.sameDayOptions(new Date('2026-06-11T08:10:00Z'));
+      expect(options).toHaveLength(1);
+      expect(options[0].window).toEqual({ start: '08:00', end: '09:00' });
+      expect(options[0].date).toBe('2026-06-11');
+    });
   });
 
   describe('commit — single job', () => {

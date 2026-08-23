@@ -378,9 +378,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
     expect(helperBody).toContain(".orderBy('scheduled_date', 'desc')");
     expect(helperBody).toContain(".where('is_recurring', true)");
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(3);
-    // The occupied-dates preload is shared the same way.
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(3);
+    // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
+    // rung-1 date peek) anchors its extend plan on the same helper.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(4);
+    // The occupied-dates preload is shared the same way (same 4th consumer).
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
