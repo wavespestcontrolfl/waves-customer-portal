@@ -134,6 +134,21 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Appointment history for the customer-detail payload (`scheduled`): past +
+// future, all statuses, NEWEST first. Consumers (ScheduleCustomerSidebar,
+// MobileCustomerDetailSheet, SchedulePage history) render the most recent
+// visits; upcoming lists read `upcomingScheduled` instead. Ordering ASC under
+// a cap returned the OLDEST rows for long-tenured customers, so every
+// history view showed ancient visits and the upcoming tab came up empty.
+const SCHEDULED_HISTORY_LIMIT = 50;
+function customerScheduledHistoryQuery(dbConn, customerId) {
+  return dbConn('scheduled_services')
+    .where({ customer_id: customerId })
+    .orderBy('scheduled_date', 'desc')
+    .orderBy('window_start', 'desc')
+    .limit(SCHEDULED_HISTORY_LIMIT);
+}
+
 function techSafe360Payload(payload) {
   const out = { ...payload };
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
@@ -2516,11 +2531,7 @@ router.get('/:id', async (req, res, next) => {
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
-      // Full appointment history (past + future, all statuses). Schedule-side
-      // customer drawers (ScheduleCustomerSidebar / MobileCustomerDetailSheet)
-      // consume data.scheduled and split it into upcoming vs previous, so this
-      // must stay unfiltered.
-      db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
+      customerScheduledHistoryQuery(db, c.id),
       // Upcoming, active-only — drives Customer 360's "next service" selection.
       db('scheduled_services')
         .where({ customer_id: c.id })
@@ -4675,6 +4686,8 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  SCHEDULED_HISTORY_LIMIT,
+  customerScheduledHistoryQuery,
   technicianServicesCustomer,
   techSafeListRow,
   techSafeListFilters,

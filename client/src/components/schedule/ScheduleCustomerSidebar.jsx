@@ -3,6 +3,7 @@ import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import { TIMEZONE } from '../../lib/timezone';
+import { appointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
 function money(value) {
@@ -132,7 +133,6 @@ export default function ScheduleCustomerSidebar({
   }, [onClose]);
 
   const c = data?.customer || {};
-  const scheduled = data?.scheduled || [];
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
@@ -172,11 +172,9 @@ export default function ScheduleCustomerSidebar({
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;
-    return [...scheduled]
-      .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)))
-      .slice(0, 8)
+    return appointmentHistory(data, 8)
       .map((item) => ({ ...item, isCurrent: item.id === currentId }));
-  }, [scheduled, service?.id]);
+  }, [data, service?.id]);
 
   const saveNote = async () => {
     if (!service?.id || !noteDirty) return;

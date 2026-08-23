@@ -1221,3 +1221,29 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
     expect(sites.length).toBe(2);
   });
 });
+
+describe('customerScheduledHistoryQuery (customer-detail `scheduled`)', () => {
+  const { customerScheduledHistoryQuery, SCHEDULED_HISTORY_LIMIT } = adminCustomersRoute._private;
+
+  test('returns NEWEST-first history under a cap wide enough for long-tenured customers', () => {
+    const calls = [];
+    const builder = {
+      where: (...a) => { calls.push(['where', ...a]); return builder; },
+      orderBy: (...a) => { calls.push(['orderBy', ...a]); return builder; },
+      limit: (...a) => { calls.push(['limit', ...a]); return builder; },
+    };
+    const fakeDb = jest.fn((table) => { calls.push(['from', table]); return builder; });
+    customerScheduledHistoryQuery(fakeDb, 'cust-1');
+    expect(calls).toEqual([
+      ['from', 'scheduled_services'],
+      ['where', { customer_id: 'cust-1' }],
+      ['orderBy', 'scheduled_date', 'desc'],
+      ['orderBy', 'window_start', 'desc'],
+      ['limit', SCHEDULED_HISTORY_LIMIT],
+    ]);
+    // No date floor: past AND future rows, all statuses, so history views
+    // work; an ASC order under a cap previously returned only the oldest rows.
+    expect(calls.some(([op, col, cmp]) => op === 'where' && col === 'scheduled_date' && cmp)).toBe(false);
+    expect(SCHEDULED_HISTORY_LIMIT).toBeGreaterThanOrEqual(50);
+  });
+});
