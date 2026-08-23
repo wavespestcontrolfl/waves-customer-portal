@@ -67,7 +67,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
@@ -92,7 +92,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       chain({ result: deliveries }),                        // SELECT after insert
       // Terminal 'skipped' update for recipients that failed the dispatch
       // re-check — only consumed when eligibleAtDispatch drops someone.
-      ...(eligibleAtDispatch ? [chain({ updated: subscribers.length - eligibleAtDispatch.length, onUpdate: onSkipUpdate })] : []),
+      ...(eligibleAtDispatch ? [chain({ updated: skipUpdated ?? (subscribers.length - eligibleAtDispatch.length), onUpdate: onSkipUpdate })] : []),
       chain({ updated: (eligibleAtDispatch || subscribers).length }), // bulk update post-send
       chain({ count: 0 }),                                  // final retryable ledger count
     ],
@@ -147,6 +147,42 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
     expect(result.skipped_ineligible).toBe(1);
     expect(result.recipients).toBe(1);
+    expect(result.accepted).toBe(1);
+  });
+
+  test('a row a webhook already terminalized: recipient still excluded from the payload, but NOT counted as skipped here', async () => {
+    let skipUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-live' },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: 'cust-archived' },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      eligibleAtDispatch: [{ id: 1 }],
+      // The skip write matches ZERO rows: a bounce webhook moved d-2 to a
+      // terminal state between selection and dispatch.
+      skipUpdated: 0,
+      onSkipUpdate: (payload) => { skipUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    // Payload: excluded regardless — eligibility failed, so we do not mail it.
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped' });
+    // Counters: this write transitioned nothing, so nothing is counted here
+    // (the webhook's own terminal state already accounts for that row).
+    expect(result.skipped_ineligible).toBe(0);
+    expect(result.recipients).toBe(2);
     expect(result.accepted).toBe(1);
   });
 
@@ -457,6 +493,7 @@ describe('resumeCampaign — preconditions', () => {
   test("rejects 'sent' with NOTHING_TO_RESUME when existing rows are all terminal-success", async () => {
     let sendsCalls = 0;
     let deliveriesCalls = 0;
+    let sweepUpdate = null;
     db.mockImplementation((table) => {
       if (table === 'newsletter_sends') {
         sendsCalls++;
@@ -464,13 +501,50 @@ describe('resumeCampaign — preconditions', () => {
       }
       if (table === 'newsletter_send_deliveries') {
         deliveriesCalls++;
-        return deliveriesCalls === 1 ? chain({ count: 1 }) : chain({ count: 0 });
+        if (deliveriesCalls === 1) return chain({ count: 1 });
+        if (deliveriesCalls === 2) return chain({ count: 0 });
+        // Pre-throw sweep. Its retryable filter matches nothing here (every
+        // row is terminal-success), so it transitions zero rows.
+        return chain({ updated: 0, onUpdate: (payload) => { sweepUpdate = payload; } });
       }
       throw new Error(`unexpected ${table}`);
     });
     await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'NOTHING_TO_RESUME' });
     expect(sendsCalls).toBe(1);
-    expect(deliveriesCalls).toBe(2);
+    expect(deliveriesCalls).toBe(3);
+    expect(sweepUpdate).toMatchObject({ status: 'skipped' });
+  });
+
+  test('resume with only ineligible outstanding rows terminalizes them, then reports NOTHING_TO_RESUME', async () => {
+    let sweepUpdate = null;
+    let sweepQuery = null;
+    let deliveriesCalls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({ first: { id: 's', status: 'sent', html_body: 'x', text_body: 'x' } });
+      }
+      if (table === 'newsletter_send_deliveries') {
+        deliveriesCalls++;
+        if (deliveriesCalls === 1) return chain({ count: 2 });   // rows exist
+        if (deliveriesCalls === 2) return chain({ count: 0 });   // none ELIGIBLE (all archived/suppressed)
+        // The two queued/failed rows are terminalized here — otherwise a
+        // later restore/unsuppress would let the next resume mail this stale
+        // campaign to them.
+        sweepQuery = chain({ updated: 2, onUpdate: (payload) => { sweepUpdate = payload; } });
+        return sweepQuery;
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'NOTHING_TO_RESUME' });
+
+    expect(deliveriesCalls).toBe(3);
+    expect(sweepUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    // Scoped to this send's retryable, non-success rows only.
+    expect(sweepQuery.where).toHaveBeenCalledWith({ send_id: 's' });
+    expect(sweepQuery.whereIn).toHaveBeenCalledWith('status', RETRYABLE_DELIVERY_STATUSES_FOR_TEST);
+    expect(sweepQuery.whereNull).toHaveBeenCalledWith('sent_at');
+    expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
   });
 
   test("rejects 'sent' with NOTHING_TO_RESUME when no delivery rows exist", async () => {
