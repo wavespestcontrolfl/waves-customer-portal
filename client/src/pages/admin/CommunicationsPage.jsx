@@ -1054,6 +1054,8 @@ function CallLogTab() {
       // Server refuses spam on a live customer's number (409 CUSTOMER_NUMBER);
       // roll the dropdown back so the row doesn't read as tagged.
       setDispositions((prev) => {
+        // A newer change on this row already superseded us — leave it alone.
+        if (prev[callId] !== value) return prev;
         const next = { ...prev };
         if (priorOverride === undefined) delete next[callId];
         else next[callId] = priorOverride;
