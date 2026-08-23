@@ -287,7 +287,7 @@ async function confirmByToken(token) {
 /**
  * THE twin picker — the single SQL that decides which customer profile a
  * subscriber email links to. Shared by linkToCustomer (first link),
- * relinkSubscribersFromArchivedCustomer (archive-time move) and mirrored by the
+ * relinkSubscribersForEmail (archive/restore-time move) and mirrored by the
  * 20260823000005 backfill. One email may span several customer profiles
  * (20260417000010), some archived: pick the LIVE one (canonical scope:
  * active = true, deleted_at IS NULL, pipeline_stage IN CUSTOMER_STAGES —
@@ -346,26 +346,34 @@ async function linkToCustomer(email) {
 }
 
 /**
- * Archive-time relink. Soft-deleting a customer stamps customers.deleted_at
- * only; the subscriber↔customer link (customer_id, set once by linkToCustomer
- * and never refreshed) would keep pointing at the archived profile, and the
- * sender's plain anti-join (newsletter-sender.js excludeArchivedCustomers)
- * would then stop mailing a multi-property household that archived ONE
- * property. So at archive time, move every subscriber linked to the archived
- * customer onto its live twin — same picker as linkToCustomer
- * (liveTwinSubselect), keyed on the archived profile's own normalized email.
- * No twin → link left alone (the anti-join excludes it; restore lifts it).
- * Runs on the caller's transaction. Returns { twinId, relinked }.
+ * Symmetric relink for one email, used by BOTH the archive route (after
+ * deleted_at is set) and the restore route (after it is cleared), inside
+ * their transaction. Re-runs the canonical twin picker (liveTwinSubselect)
+ * for the SUBSCRIBER's normalized email and points every subscriber row that
+ * carries that email AND is linked to one of that email's customer profiles
+ * at the winner — so archiving the primary moves the link to the secondary,
+ * and restoring the primary moves it back. Rows are matched on their OWN
+ * email (never a customer's current email), so a stale email snapshot can't
+ * be attached to an unrelated twin. No live winner → links left alone (the
+ * sender's anti-join excludes archived links; a later restore lifts it).
+ * Returns { winnerId, relinked }.
  */
-async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
-  const twin = liveTwinSubselect('(SELECT LOWER(TRIM(email)) FROM customers WHERE id = ?)', { excludeCustomerId: archivedCustomerId });
-  const picked = await trx.raw(`SELECT ${twin.sql} AS id`, [archivedCustomerId, ...twin.bindings]);
-  const twinId = picked?.rows?.[0]?.id ?? null;
-  if (!twinId) return { twinId: null, relinked: 0 };
+async function relinkSubscribersForEmail(trx, email) {
+  const key = String(email || '').trim().toLowerCase();
+  if (!key) return { winnerId: null, relinked: 0 };
+  const twin = liveTwinSubselect('?');
+  const picked = await trx.raw(`SELECT ${twin.sql} AS id`, [key, ...twin.bindings]);
+  const winnerId = picked?.rows?.[0]?.id ?? null;
+  if (!winnerId) return { winnerId: null, relinked: 0 };
   const relinked = await trx('newsletter_subscribers')
-    .where({ customer_id: archivedCustomerId })
-    .update({ customer_id: twinId, updated_at: trx.fn.now() });
-  return { twinId, relinked: Number(relinked || 0) };
+    .whereRaw('LOWER(TRIM(email)) = ?', [key])
+    .whereNotNull('customer_id')
+    .whereNot('customer_id', winnerId)
+    .whereIn('customer_id', function () {
+      this.select('id').from('customers').whereRaw('LOWER(TRIM(email)) = ?', [key]);
+    })
+    .update({ customer_id: winnerId, updated_at: trx.fn.now() });
+  return { winnerId, relinked: Number(relinked || 0) };
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, liveTwinSubselect, relinkSubscribersFromArchivedCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, liveTwinSubselect, relinkSubscribersForEmail, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

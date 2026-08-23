@@ -277,6 +277,10 @@ function assignAbVariant() {
 // operator-triggered resume would double-send.
 const TERMINAL_SUCCESS_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 const RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
+// Terminal, never retried: recipient failed the eligibility re-check at
+// dispatch (archived customer / no longer active). status is a plain string
+// column (20260418000008), so no constraint change.
+const SKIPPED_DELIVERY_STATUS = 'skipped';
 const DEFAULT_SENDING_LEASE_MINUTES = 30;
 
 function sendingLeaseMinutes() {
@@ -547,8 +551,11 @@ async function sendCampaign(sendId, opts = {}) {
     if (opts.existingDeliveriesOnly && !d) return false;
     return !d || isRetryableDelivery(d);
   });
-  const recipientCount = opts.existingDeliveriesOnly ? existingDeliveries.length : subscribers.length;
+  let recipientCount = opts.existingDeliveriesOnly ? existingDeliveries.length : subscribers.length;
   const skippedAlreadySent = recipientCount - subscribersToSend.length;
+  // Recipients dropped by the per-chunk eligibility re-check (see the chunk
+  // loop). Subtracted from recipientCount before finalization.
+  let skippedIneligible = 0;
   if (skippedAlreadySent > 0) {
     logger.info(`[newsletter] send ${send.id} skipping ${skippedAlreadySent} recipient(s) already in non-retryable state (resume)`);
   }
@@ -641,12 +648,40 @@ async function sendCampaign(sendId, opts = {}) {
       let chunkToSend = chunk;
       let claimedDeliveryIds = [];
       let attemptTokenBySub = new Map();
+      let claimedBySub = new Map();
       if (opts.existingDeliveriesOnly) {
         const claimedRows = await claimRetryableDeliveriesForResume(send.id, chunk.map((s) => s.id));
-        const claimedBySub = new Map(claimedRows.map((d) => [d.subscriber_id, d]));
+        claimedBySub = new Map(claimedRows.map((d) => [d.subscriber_id, d]));
         chunkToSend = chunk.filter((s) => claimedBySub.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         attemptTokenBySub = new Map(chunkToSend.map((s) => [s.id, claimedBySub.get(s.id)?.send_attempt_token]).filter(([, token]) => token));
+        if (!chunkToSend.length) continue;
+      }
+
+      // Eligibility can change between recipient selection and dispatch
+      // (customer archived with no live twin, unsubscribe). Re-run the SAME
+      // selection predicate (status='active' + excludeArchivedCustomers) for
+      // this chunk immediately before the SendGrid call — one query per
+      // chunk — and terminally skip anyone no longer eligible: the delivery
+      // row becomes 'skipped' (not in RETRYABLE_DELIVERY_STATUSES, so resume
+      // never re-queues it) and recipient_count reflects the kept set.
+      const stillEligible = new Set((await excludeArchivedCustomers(
+        db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
+      ).select('id')).map((r) => r.id));
+      const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
+      if (ineligible.length) {
+        const skipQuery = db('newsletter_send_deliveries').where({ send_id: send.id });
+        if (opts.existingDeliveriesOnly) {
+          skipQuery.where({ status: 'sending' }).whereIn('id', ineligible.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean));
+        } else {
+          skipQuery.whereIn('subscriber_id', ineligible.map((s) => s.id));
+        }
+        await (opts.existingDeliveriesOnly ? applyDeliveryNoSuccessFilter(skipQuery) : applyRetryableDeliveryFilter(skipQuery))
+          .update({ status: SKIPPED_DELIVERY_STATUS, bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null, updated_at: new Date() });
+        skippedIneligible += ineligible.length;
+        logger.info(`[newsletter] send ${send.id} skipped ${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active)`);
+        chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
+        claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         if (!chunkToSend.length) continue;
       }
 
@@ -792,8 +827,9 @@ async function sendCampaign(sendId, opts = {}) {
   // mark events featured, or fire the social share — the reclaiming owner
   // runs that lifecycle. Deliveries already updated stay updated (the new
   // owner's retryable filter skips them).
+  recipientCount -= skippedIneligible;
   if (claimLost) {
-    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible, lostClaim: true };
   }
 
   // Final state. If every recipient bounced into 'failed', the whole send
@@ -805,9 +841,10 @@ async function sendCampaign(sendId, opts = {}) {
   )
     .count('* as c')
     .first();
+  const attemptedCount = subscribersToSend.length - skippedIneligible;
   const allFailed = Number(retryableRemaining?.c || 0) > 0
-    && failed === subscribersToSend.length
-    && subscribersToSend.length > 0
+    && failed === attemptedCount
+    && attemptedCount > 0
     && successfulDeliveryCount === 0;
   const finalSendUpdate = {
     status: allFailed ? 'failed' : 'sent',
@@ -828,7 +865,7 @@ async function sendCampaign(sendId, opts = {}) {
     .update(finalSendUpdate);
   if (!finalized) {
     logger.error(`[newsletter] send ${send.id} claim lost at finalization — skipping lifecycle side effects; the reclaiming owner finalizes`);
-    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible, lostClaim: true };
   }
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
@@ -864,7 +901,7 @@ async function sendCampaign(sendId, opts = {}) {
     }).catch(() => {});
   }
 
-  return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent };
+  return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible };
 }
 
 /**
@@ -1167,4 +1204,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

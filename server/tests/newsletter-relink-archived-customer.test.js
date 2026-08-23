@@ -6,7 +6,7 @@ jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(async (
 jest.mock('../services/newsletter-sunset', () => ({ REENGAGEMENT_TAG: 'reengagement_due' }));
 
 const db = require('../models/db');
-const { liveTwinSubselect, linkToCustomer, relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
+const { liveTwinSubselect, linkToCustomer, relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 const SCOPE = /c\.active = true\s+AND c\.deleted_at IS NULL\s+AND c\.pipeline_stage IN \((\?, )*\?\)/;
@@ -52,33 +52,49 @@ describe('linkToCustomer picks the LIVE twin', () => {
   });
 });
 
-describe('relinkSubscribersFromArchivedCustomer uses the same picker', () => {
-  function fakeTrx(twinId) {
-    const subs = { where: jest.fn(() => subs), update: jest.fn(async () => (twinId ? 2 : 0)) };
+describe('relinkSubscribersForEmail (archive AND restore) uses the same picker', () => {
+  function fakeTrx(winnerId) {
+    const subs = {};
+    ['whereRaw', 'whereNotNull', 'whereNot', 'whereIn'].forEach((m) => { subs[m] = jest.fn(() => subs); });
+    subs.update = jest.fn(async () => (winnerId ? 2 : 0));
     const trx = jest.fn(() => subs);
-    trx.raw = jest.fn(async () => ({ rows: [{ id: twinId }] }));
+    trx.raw = jest.fn(async () => ({ rows: [{ id: winnerId }] }));
     trx.fn = { now: () => 'NOW()' };
     return { trx, subs };
   }
 
-  test('archive with a live twin → subscribers relinked; picker keyed on the archived profile email, archived id excluded', async () => {
-    const { trx, subs } = fakeTrx('twin-1');
-    const out = await relinkSubscribersFromArchivedCustomer(trx, 'archived-1');
-    expect(out).toEqual({ twinId: 'twin-1', relinked: 2 });
+  test('archive of the primary → rows carrying that email move to the live secondary; matched on the SUBSCRIBER email and the email\'s own profile set', async () => {
+    const { trx, subs } = fakeTrx('secondary-1');
+    const out = await relinkSubscribersForEmail(trx, ' Household@Example.com ');
+    expect(out).toEqual({ winnerId: 'secondary-1', relinked: 2 });
     const [sql, bindings] = trx.raw.mock.calls[0];
-    expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \(SELECT LOWER\(TRIM\(email\)\) FROM customers WHERE id = \?\)/);
-    expect(sql).toMatch(/c\.id <> \?/);
+    expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \?/);
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
-    expect(bindings).toEqual(['archived-1', 'archived-1', ...CUSTOMER_STAGES]);
-    expect(subs.where).toHaveBeenCalledWith({ customer_id: 'archived-1' });
-    expect(subs.update).toHaveBeenCalledWith({ customer_id: 'twin-1', updated_at: 'NOW()' });
+    expect(bindings).toEqual(['household@example.com', ...CUSTOMER_STAGES]);
+    expect(subs.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['household@example.com']);
+    expect(subs.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(subs.whereNot).toHaveBeenCalledWith('customer_id', 'secondary-1');
+    // Only links into THIS email's profile set move (never a foreign link).
+    const inner = { select: jest.fn(() => inner), from: jest.fn(() => inner), whereRaw: jest.fn(() => inner) };
+    subs.whereIn.mock.calls[0][1].call(inner);
+    expect(inner.from).toHaveBeenCalledWith('customers');
+    expect(inner.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['household@example.com']);
+    expect(subs.update).toHaveBeenCalledWith({ customer_id: 'secondary-1', updated_at: 'NOW()' });
   });
 
-  test('archive without a live twin → link untouched', async () => {
+  test('restore of the primary → same call re-picks the primary (symmetric)', async () => {
+    const { trx, subs } = fakeTrx('primary-1');
+    const out = await relinkSubscribersForEmail(trx, 'household@example.com');
+    expect(out.winnerId).toBe('primary-1');
+    expect(subs.update).toHaveBeenCalledWith({ customer_id: 'primary-1', updated_at: 'NOW()' });
+  });
+
+  test('no live profile for the email → links untouched; empty email → no query', async () => {
     const { trx, subs } = fakeTrx(null);
-    const out = await relinkSubscribersFromArchivedCustomer(trx, 'archived-2');
-    expect(out).toEqual({ twinId: null, relinked: 0 });
+    expect(await relinkSubscribersForEmail(trx, 'solo@example.com')).toEqual({ winnerId: null, relinked: 0 });
     expect(subs.update).not.toHaveBeenCalled();
+    expect(await relinkSubscribersForEmail(trx, '')).toEqual({ winnerId: null, relinked: 0 });
+    expect(trx.raw).toHaveBeenCalledTimes(1);
   });
 });

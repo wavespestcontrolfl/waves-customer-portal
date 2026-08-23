@@ -32,6 +32,7 @@ jest.mock('../services/conversations', () => ({
 }));
 
 const db = require('../models/db');
+const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
 const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
@@ -66,7 +67,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
@@ -82,11 +83,17 @@ function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, he
     newsletter_subscribers: [
       chain({ count: subscribers.length }),                 // 0-recipient guard
       chain({ result: subscribers }),                       // fetch
+      // Per-chunk eligibility re-check right before SendGrid (status='active'
+      // + archived-customer anti-join). Default: everyone still eligible.
+      chain({ result: (eligibleAtDispatch || subscribers).map((s) => ({ id: s.id })) }),
     ],
     newsletter_send_deliveries: [
       chain({}),                                            // insert onConflict
       chain({ result: deliveries }),                        // SELECT after insert
-      chain({ updated: subscribers.length }),               // bulk update post-send
+      // Terminal 'skipped' update for recipients that failed the dispatch
+      // re-check — only consumed when eligibleAtDispatch drops someone.
+      ...(eligibleAtDispatch ? [chain({ updated: subscribers.length - eligibleAtDispatch.length, onUpdate: onSkipUpdate })] : []),
+      chain({ updated: (eligibleAtDispatch || subscribers).length }), // bulk update post-send
       chain({ count: 0 }),                                  // final retryable ledger count
     ],
     // Calendar lifecycle: sendCampaign advances the linked calendar row to
@@ -111,6 +118,38 @@ beforeEach(() => {
 });
 
 describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
+  test('a subscriber archived between selection and dispatch is skipped: no SendGrid payload, delivery row terminal, not counted', async () => {
+    let skipUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-live' },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: 'cust-archived' },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      // The re-check (same predicate as selection) no longer returns #2.
+      eligibleAtDispatch: [{ id: 1 }],
+      onSkipUpdate: (payload) => { skipUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
+    expect(result.skipped_ineligible).toBe(1);
+    expect(result.recipients).toBe(1);
+    expect(result.accepted).toBe(1);
+  });
+
   test('passes custom_args.delivery_id + send_id on each recipient', async () => {
     buildDb({
       send: {
@@ -330,6 +369,8 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
           { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
           { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
         ] }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
+        chain({ result: [{ id: 1 }, { id: 2 }] }),
       ],
       newsletter_send_deliveries: [
         chain({}),
@@ -484,6 +525,8 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
+        chain({ result: [{ id: 1 }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender
@@ -552,6 +595,8 @@ describe('resumeCampaign — preconditions', () => {
           ],
           onWhereIn: (...args) => { subscriberWhereIn = args; },
         }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
+        chain({ result: [{ id: 2 }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender
@@ -580,6 +625,74 @@ describe('resumeCampaign — preconditions', () => {
       send_id: 's',
       send_attempt_token: 'attempt-2',
     });
+  });
+
+  test('resume: a subscriber archived since the original send is skipped terminally, not re-sent', async () => {
+    let finalUpdate = null;
+    let skipUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                           // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 2 }),                                  // two outstanding
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+        ] }),
+        chain({ returning: [
+          { id: 'd-1', subscriber_id: 1, send_attempt_token: 'attempt-1' },
+          { id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' },
+        ] }),                                                 // claim both before SendGrid
+        chain({ updated: 1, onUpdate: (payload) => { skipUpdate = payload; } }), // terminal skip
+        chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
+      ],
+      newsletter_subscribers: [
+        chain({ result: [
+          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-live' },
+          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: 'cust-archived' },
+        ] }),
+        // Dispatch re-check: #2's customer was archived after the original
+        // selection and has no live twin, so it drops out here.
+        chain({ result: [{ id: 1 }] }),
+      ],
+    };
+    queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
+    queues.newsletter_sends.push(chain({ first: null }));
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
+    expect(result.skipped_ineligible).toBe(1);
+    expect(result.recipients).toBe(1);
+    expect(finalUpdate.recipient_count).toBe(1);
   });
 
   test('resume skips a delivery row that self-healed before the external send claim', async () => {
@@ -699,6 +812,8 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
+        chain({ result: [{ id: 1 }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender
