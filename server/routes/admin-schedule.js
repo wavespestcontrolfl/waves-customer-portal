@@ -6927,14 +6927,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
           } catch { existingUpcomingChildren = 0; }
           const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
-          // Child dates from the shared generator (the pre-trx lock plan ran
-          // the same one); each is verified against the held rung-1 keys and
-          // probed right before its insert.
-          const spawnDates = planSpawnChildDates({
-            baseDateStr, pattern: recurringPattern, rOpts, skip: skipChild, dir: dirChild,
-            seen: seenChildDates, spawnCount, spawnTarget,
-          });
-          for (const nextDateStr of spawnDates) {
+          // Iterate by inserts (matches POST spawn): skip-weekends can
+          // collapse multiple raw recurrences onto the same shifted weekday,
+          // and a fixed-count plan still owes spawnTarget children. Same
+          // walk as planSpawnChildDates (the pre-trx lock plan); each child
+          // is verified against the held rung-1 keys and probed right before
+          // its insert.
+          const maxAttempts = (spawnCount - 1) * 4 + 30;
+          let attempt = 1;
+          let inserted = 0;
+          while (inserted < spawnTarget && attempt < maxAttempts) {
+            const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
+            attempt++;
+            const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
+            if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
+            if (seenChildDates.has(nextDateStr)) continue;
+            seenChildDates.add(nextDateStr);
             const childData = {
               customer_id: parent.customer_id,
               technician_id: recurringTemplateTechnicianId(parent),
@@ -7034,6 +7042,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
             }
             recurringCreated++;
+            inserted++;
           }
         }
       }
