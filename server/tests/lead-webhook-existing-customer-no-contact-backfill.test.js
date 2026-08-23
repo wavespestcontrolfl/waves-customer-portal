@@ -10,8 +10,9 @@
  * Rule under test (sibling of the /public/quote/calculate fix): the
  * existing-customer update carries ONLY attribution, last-contact and
  * intake-status fields. Email, address lines, city/state/zip and lat/lng are
- * never written here; the submitted contact details stay on the leads row
- * for staff reconciliation.
+ * never written here; the submitted contact details ride on the existing-
+ * customer interaction note's metadata for staff reconciliation (existing
+ * customers return before the leads insert).
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -81,9 +82,12 @@ describe('route wiring', () => {
     expect(src).not.toMatch(/applyCustomerUpdatesWithEmailClaimGuard/);
   });
 
-  test('the leads row still carries the submitted email and address for staff', () => {
-    const insert = src.slice(src.indexOf("await db('leads').insert({"));
-    expect(insert).toMatch(/phone: phoneFormatted, email: email \|\| null,/);
-    expect(insert).toMatch(/address: fullAddress \|\| '',/);
+  test('the existing-customer interaction note carries the submitted contact details for staff', () => {
+    const note = src.slice(src.indexOf("subject: 'Form submission (existing customer)'"));
+    const metadata = note.slice(0, note.indexOf('logger.info('));
+    expect(metadata).toMatch(/submittedContact: \{/);
+    expect(metadata).toMatch(/email: email \|\| null,/);
+    expect(metadata).toMatch(/address: fullAddress \|\| null,/);
+    expect(metadata).toMatch(/zip: normalizedAddress\.zip \|\| null,/);
   });
 });

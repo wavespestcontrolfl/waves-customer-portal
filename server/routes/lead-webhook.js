@@ -355,7 +355,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         customer_id: existing.id, interaction_type: 'note',
         subject: 'Form submission (existing customer)',
         body: `Submitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
-        metadata: JSON.stringify({ formId, formName, utmSource, utmMedium, utmCampaign }),
+        // Submitted contact details ride on the note (NOT the customers row)
+        // so staff can reconcile a changed email/address by hand — existing
+        // customers return before the leads insert below.
+        metadata: JSON.stringify({
+          formId, formName, utmSource, utmMedium, utmCampaign,
+          submittedContact: {
+            email: email || null,
+            address: fullAddress || null,
+            city: normalizedAddress.city || zipCity || null,
+            state: normalizedAddress.state || null,
+            zip: normalizedAddress.zip || null,
+          },
+        }),
       });
 
       logger.info(`Lead webhook: existing customer ${existing.id} submitted form${isDuplicateSubmission ? ' (duplicate within 5min — skipping notifications)' : ''}`);
@@ -1858,9 +1870,10 @@ function cleanPhone(value) {
 // city/state/zip) are never backfilled here: anyone who knows a customer's
 // phone could otherwise point that customer's email at their own inbox and
 // receive invoices, pay links and reports. Only attribution / last-contact /
-// intake-status fields land. The submitted contact details still reach staff
-// via the leads row (email, address, extracted_data). Same rule as
-// /public/quote/calculate.
+// intake-status fields land. Existing customers return before the leads
+// insert, so the submitted contact details reach staff via the 'Form
+// submission (existing customer)' interaction note's metadata instead.
+// Same rule as /public/quote/calculate.
 function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
   const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
   if (!existing.lead_source) updates.lead_source = leadSource.source;
