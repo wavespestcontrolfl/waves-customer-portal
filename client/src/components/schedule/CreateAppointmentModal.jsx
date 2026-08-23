@@ -388,6 +388,32 @@ export function pickAutoScheduleEstimate({
   return { estimate, key };
 }
 
+// Request body for POST /admin/schedule/find-time from the CREATE modal.
+// Deliberately sends NO `serviceId`: the server treats that field as an
+// existing scheduled_services (visit) id and 404s "Visit not found" when it
+// doesn't resolve. A new appointment has no visit yet, and the selected
+// service here is a service-LIBRARY catalog row — its id is not a visit id.
+// Ranking is anchored on the customer instead.
+export function buildFindTimeRequestBody({
+  customerId,
+  serviceName,
+  durationMinutes,
+  dateFrom,
+  dateTo,
+  technicianId,
+  horizonDays = 7,
+}) {
+  return {
+    customerId,
+    serviceType: serviceName,
+    durationMinutes,
+    dateFrom,
+    dateTo,
+    technicianId: technicianId || undefined,
+    topN: horizonDays > 7 ? 100 : 25,
+  };
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -1098,16 +1124,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const to = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
       const r = await adminFetch('/admin/schedule/find-time', {
         method: 'POST',
-        body: JSON.stringify({
+        body: JSON.stringify(buildFindTimeRequestBody({
           customerId: selectedCustomer.id,
-          serviceType: selectedService.name,
-          serviceId: selectedService.id || undefined,
+          serviceName: selectedService.name,
           durationMinutes: dur,
           dateFrom: searchFrom,
           dateTo: to,
           technicianId: techMode === 'choose' && techId ? techId : undefined,
-          topN: horizonDays > 7 ? 100 : 25,
-        }),
+          horizonDays,
+        })),
       });
       setTimeSlots((r.slots || [])
         .filter((slot) => isHourTime(slot.start_time))
