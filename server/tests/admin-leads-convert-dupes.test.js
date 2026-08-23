@@ -92,6 +92,7 @@ function makeKnex(resolve, calls) {
     return q;
   };
   const knex = jest.fn(builder);
+  knex.isTransaction = false;
   knex.raw = jest.fn(async (sql, bindings) => {
     calls.push({ table: null, op: 'raw', args: [sql, bindings], ops: [] });
     return { rows: [{ locked: true }] };
@@ -99,6 +100,7 @@ function makeKnex(resolve, calls) {
   knex.transaction = jest.fn(async (fn) => {
     calls.push({ table: null, op: 'trx-begin', args: [], ops: [] });
     const trx = jest.fn(builder);
+    trx.isTransaction = true;
     trx.raw = knex.raw;
     return fn(trx);
   });
@@ -734,27 +736,31 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
 
 describe('findAccountByContact email opt-in', () => {
   const { findAccountByContact } = require('../routes/admin-customers');
+  // Unit tests below exercise the fenced lead-convert contract: a trx-like
+  // fake (isTransaction: true) + fenceAttach: true.
+  const makeTrx = (resolve, calls) => Object.assign(makeKnex(resolve, calls), { isTransaction: true });
+  const FENCED = { fenceAttach: true };
 
   it('stays phone-only by default (quick-add / webhooks semantics unchanged)', async () => {
     const calls = [];
-    const knex = makeKnex(() => null, calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'someone@example.com' });
+    const knex = makeTrx(() => null, calls);
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'someone@example.com' });
     expect(out).toBeNull();
     expect(calls).toHaveLength(0);
   });
 
   it('matches email only when matchEmail is set and phone found nothing', async () => {
     const calls = [];
-    const knex = makeKnex((table, state) => {
+    const knex = makeTrx((table, state) => {
       if (table !== 'customers') return null;
       return opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))
         ? [{ id: 'c1', account_id: 'a1', email: 'someone@example.com' }]
         : null;
     }, calls);
-    const unconfirmed = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true });
+    const unconfirmed = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true });
     expect(unconfirmed).toMatchObject({ accountId: null, matchType: 'email', requiresConfirmation: true, match: { accountId: 'a1', customerId: 'c1' } });
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email' });
     // unconfirmed: phone + email; confirmed: email, phone-conflict, fence, email again, phone again
     expect(calls.filter((c) => c.table === 'customers' && c.op === 'first')).toHaveLength(3);
@@ -763,13 +769,13 @@ describe('findAccountByContact email opt-in', () => {
 
   it('phone match wins and attaches without confirmation (unchanged), even with matchEmail', async () => {
     const calls = [];
-    const knex = makeKnex((table, state) => {
+    const knex = makeTrx((table, state) => {
       if (table !== 'customers' || state.terminal?.op !== 'first') return null;
       return opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))
         ? { id: 'cp', account_id: 'ap', phone: '5551234567' }
         : null;
     }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'x@example.com', matchEmail: true });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'x@example.com', matchEmail: true });
     expect(out).toMatchObject({ accountId: 'ap', matchType: 'phone' });
     expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
   });
@@ -777,20 +783,20 @@ describe('findAccountByContact email opt-in', () => {
   it('phone path: re-resolve after fence sees a different account → CUSTOMER_BUSY, no attach', async () => {
     const calls = [];
     let n = 0;
-    const knex = makeKnex((table, state) => {
+    const knex = makeTrx((table, state) => {
       if (table !== 'customers' || state.terminal?.op !== 'first') return null;
       if (!opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) return null;
       n += 1;
       return n === 1 ? { id: 'cp', account_id: null, phone: '5551234567' } : { id: 'cp', account_id: 'ap-undo', phone: '5551234567' };
     }, calls);
-    await expect(findAccountByContact(knex, { phone: '5551234567' })).rejects.toMatchObject({ code: 'CUSTOMER_BUSY', statusCode: 409 });
+    await expect(findAccountByContact(knex, { ...FENCED, phone: '5551234567' })).rejects.toMatchObject({ code: 'CUSTOMER_BUSY', statusCode: 409 });
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
   });
 
   it('email path: re-resolve after fence sees a different winning row → matchChanged, no attach', async () => {
     const calls = [];
     let n = 0;
-    const knex = makeKnex((table, state) => {
+    const knex = makeTrx((table, state) => {
       if (table !== 'customers') return null;
       if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
         n += 1;
@@ -800,13 +806,13 @@ describe('findAccountByContact email opt-in', () => {
       }
       return null;
     }, calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
   });
 
   function emailKnex(rows, calls) {
-    return makeKnex((table, state) => {
+    return makeTrx((table, state) => {
       if (table !== 'customers') return null;
       if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return rows;
       return null;
@@ -819,7 +825,7 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c1', account_id: 'a1', email: 'shared@example.com', is_primary_profile: true },
       { id: 'c2', account_id: 'a2', email: 'shared@example.com', is_primary_profile: true },
     ], calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
     expect(out).toBeNull();
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
   });
@@ -830,12 +836,12 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c1', account_id: 'a1', email: 'shared@example.com', is_primary_profile: true },
       { id: 'c2', account_id: 'a1', email: 'shared@example.com', is_primary_profile: false },
     ], calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email', existingCustomer: { id: 'c1' } });
   });
 
   function emailPhoneKnex({ emailRows, phoneRow }, calls) {
-    return makeKnex((table, state) => {
+    return makeTrx((table, state) => {
       if (table !== 'customers') return null;
       if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return emailRows;
       if (state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) return phoneRow;
@@ -847,7 +853,7 @@ describe('findAccountByContact email opt-in', () => {
   it('confirm id A + phone match now on account B → requiresConfirmation (phoneConflict), zero writes', async () => {
     const calls = [];
     const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'cB', account_id: 'B', phone: '5551234567' } }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
     expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null });
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
     // Email resolved FIRST on the confirmed path, phone validated after.
@@ -860,28 +866,28 @@ describe('findAccountByContact email opt-in', () => {
   it('confirm id A + phone match on A → attaches to A', async () => {
     const calls = [];
     const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'c2', account_id: 'A', phone: '5551234567' } }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
     expect(out).toMatchObject({ accountId: 'A', matchType: 'email', existingCustomer: { id: 'c1' } });
   });
 
   it('confirm id A + no phone match → attaches to A', async () => {
     const calls = [];
     const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: null }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
     expect(out).toMatchObject({ accountId: 'A', matchType: 'email' });
   });
 
   it('no confirm id + phone match on B → phone precedence as before (no email lookup)', async () => {
     const calls = [];
     const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'cB', account_id: 'B', phone: '5551234567' } }, calls);
-    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: 'someone@example.com', matchEmail: true });
     expect(out).toMatchObject({ accountId: 'B', matchType: 'phone' });
     expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
   });
 
   it('confirm id supplied but email now unmatched → requiresConfirmation (matchChanged), never null', async () => {
     const calls = [];
-    const out = await findAccountByContact(emailKnex([], calls), { phone: '', email: 'gone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(emailKnex([], calls), { ...FENCED, phone: '', email: 'gone@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
   });
@@ -892,7 +898,7 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c1', account_id: 'a1', email: 'shared@example.com' },
       { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
     ], calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, match: null });
   });
 
@@ -902,8 +908,30 @@ describe('findAccountByContact email opt-in', () => {
       { id: 'c1', account_id: null, email: 'shared@example.com' },
       { id: 'c2', account_id: 'a2', email: 'shared@example.com' },
     ], calls);
-    const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true });
+    const out = await findAccountByContact(knex, { ...FENCED, phone: '', email: 'shared@example.com', matchEmail: true });
     expect(out).toBeNull();
+  });
+
+  it('fenceAttach false (default): phone match attaches as before — no try-lock, no re-resolve', async () => {
+    const calls = [];
+    const knex = makeKnex((table, state) => {
+      if (table !== 'customers' || state.terminal?.op !== 'first') return null;
+      return opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))
+        ? { id: 'cp', account_id: null, phone: '5551234567' }
+        : null;
+    }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567' });
+    expect(out).toMatchObject({ accountId: 'cp', matchType: 'phone' });
+    expect(calls.filter((c) => c.op === 'raw')).toHaveLength(0);
+    expect(calls.filter((c) => c.table === 'customers' && c.op === 'first')).toHaveLength(1);
+    expect(calls.some((c) => c.table === 'customers' && c.op === 'update')).toBe(true);
+  });
+
+  it('fenceAttach true with a root (non-transaction) knex → throws before any read or write', async () => {
+    const calls = [];
+    const knex = makeKnex(() => ({ id: 'cp', account_id: null }), calls);
+    await expect(findAccountByContact(knex, { phone: '5551234567', fenceAttach: true })).rejects.toThrow(/requires a knex transaction/);
+    expect(calls).toHaveLength(0);
   });
 });
 

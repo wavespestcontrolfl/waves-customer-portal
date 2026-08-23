@@ -1524,12 +1524,30 @@ function maskEmail(email) {
 // merge-undo takes comms-lock/customer-row FIRST then repoints the lead, so a
 // blocking lock here could deadlock. Use the NON-BLOCKING variant and fail
 // closed when refused (undo in flight on that exact customer).
+//
+// `fenceAttach` (default false) turns the fence + re-resolve ON. Only the
+// lead-convert path (routes/admin-leads.js, always inside its transaction)
+// passes true. A transaction-scoped advisory lock taken via the ROOT knex
+// releases at statement end, so callers that pass `db` (booking.js,
+// lead-webhook.js, public-quote.js, twilio-webhook.js, ...) cannot be fenced
+// this way — for them the behavior is exactly pre-#3453 (no try-lock, no
+// re-resolve); that pre-existing contract gap is out of scope here.
 async function fenceMatchedCustomer(trx, customer) {
   const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
   return tryLockCustomerComms(trx, customer.id);
 }
 
-async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null }) {
+function assertFenceTransaction(trx) {
+  // Same trx-detection idiom as services/autopay-enrollment.js /
+  // service-photos.js (`isTransaction === true`). A root knex here is a
+  // programming error — fail closed before any read or write.
+  if (!trx || trx.isTransaction !== true) {
+    throw new Error('findAccountByContact: fenceAttach requires a knex transaction (got root knex) — the comms fence would not span the attach');
+  }
+}
+
+async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false }) {
+  if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
   const lookupByPhone = () => (digits
     ? trx('customers')
@@ -1552,16 +1570,19 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
         err.code = 'CUSTOMER_BUSY';
         return err;
       };
-      if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) throw busy();
-      // resolve → lock → RE-RESOLVE (comms-lock contract): an undo that
-      // committed between the read and the fence leaves the try-lock holding
-      // a stale row. Re-run the same live lookup and require the identical
-      // row + account; anything else (archived, re-pointed, different row
-      // now wins) fails closed with zero writes.
-      const fresh = await lookupByPhone();
-      if (!fresh || String(fresh.id) !== String(byCustomerPhone.id)
-        || String(fresh.account_id || '') !== String(byCustomerPhone.account_id || '')) {
-        throw busy();
+      let fresh = byCustomerPhone;
+      if (fenceAttach) {
+        if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) throw busy();
+        // resolve → lock → RE-RESOLVE (comms-lock contract): an undo that
+        // committed between the read and the fence leaves the try-lock holding
+        // a stale row. Re-run the same live lookup and require the identical
+        // row + account; anything else (archived, re-pointed, different row
+        // now wins) fails closed with zero writes.
+        fresh = await lookupByPhone();
+        if (!fresh || String(fresh.id) !== String(byCustomerPhone.id)
+          || String(fresh.account_id || '') !== String(byCustomerPhone.account_id || '')) {
+          throw busy();
+        }
       }
       const accountId = await attachMatchedCustomerToAccount(trx, fresh);
       return { accountId, existingCustomer: { ...fresh, account_id: accountId }, matchType: 'phone' };
@@ -1642,28 +1663,31 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
           };
         }
       }
-      if (!(await fenceMatchedCustomer(trx, match))) {
-        return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, busy: true, match: null };
-      }
-      // resolve → lock → RE-RESOLVE (comms-lock contract): re-run the whole
-      // live-email account-set resolution (and the phone-conflict check)
-      // under the fence. The set must still collapse to the SAME account and
-      // the SAME winning row; otherwise the world moved between read and
-      // fence — reject with zero writes.
-      const again = await resolveEmailAccountSet();
-      const freshMatch = again.rows[0];
-      const changed = !freshMatch
-        || again.keys.size !== 1
-        || String(freshMatch.account_id || freshMatch.id) !== resolvedAccountId
-        || String(freshMatch.id) !== String(match.id)
-        || String(freshMatch.account_id || '') !== String(match.account_id || '');
-      if (changed) {
-        return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
-      }
-      if (confirmEmailAccountId) {
-        const phoneAgain = await lookupByPhone();
-        if (phoneAgain && String(phoneAgain.account_id || phoneAgain.id) !== resolvedAccountId) {
-          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null };
+      let freshMatch = match;
+      if (fenceAttach) {
+        if (!(await fenceMatchedCustomer(trx, match))) {
+          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, busy: true, match: null };
+        }
+        // resolve → lock → RE-RESOLVE (comms-lock contract): re-run the whole
+        // live-email account-set resolution (and the phone-conflict check)
+        // under the fence. The set must still collapse to the SAME account and
+        // the SAME winning row; otherwise the world moved between read and
+        // fence — reject with zero writes.
+        const again = await resolveEmailAccountSet();
+        freshMatch = again.rows[0];
+        const changed = !freshMatch
+          || again.keys.size !== 1
+          || String(freshMatch.account_id || freshMatch.id) !== resolvedAccountId
+          || String(freshMatch.id) !== String(match.id)
+          || String(freshMatch.account_id || '') !== String(match.account_id || '');
+        if (changed) {
+          return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
+        }
+        if (confirmEmailAccountId) {
+          const phoneAgain = await lookupByPhone();
+          if (phoneAgain && String(phoneAgain.account_id || phoneAgain.id) !== resolvedAccountId) {
+            return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null };
+          }
         }
       }
       const accountId = await attachMatchedCustomerToAccount(trx, freshMatch);

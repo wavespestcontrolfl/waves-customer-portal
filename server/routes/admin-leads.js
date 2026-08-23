@@ -1452,6 +1452,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           // transaction rolls back with nothing written).
           matchEmail: !createSeparateAccount,
           confirmEmailAccountId: attachToAccountId,
+          // Comms fence + re-resolve on attach — valid here ONLY because this
+          // call always runs inside `trx` (see findAccountByContact).
+          fenceAttach: true,
         });
         const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
