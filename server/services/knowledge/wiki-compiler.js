@@ -141,6 +141,62 @@ function normalizeArticle(article, fallback, index) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Source-path confinement. knowledge_sources.file_path is operator input
+// (admin UI free-text) and is read with fs.readFileSync then shipped to the
+// LLM + stored in knowledge_base — so it MUST be confined to known roots or it
+// is an arbitrary-file-read (/proc/self/environ, knexfile, …) primitive.
+// Allowed roots: the repo wiki/ folder and, optionally, KNOWLEDGE_SOURCES_DIR.
+// ---------------------------------------------------------------------------
+const ALLOWED_SOURCE_FILE_TYPES = ['md', 'txt', 'csv', 'json', 'js', 'xlsx'];
+
+function knowledgeSourceRoots() {
+  const roots = [path.resolve(__dirname, '../../../wiki')];
+  const extra = String(process.env.KNOWLEDGE_SOURCES_DIR || '').trim();
+  if (extra) roots.push(path.resolve(extra));
+  // Compare against the REAL root so a symlinked root (macOS /var →
+  // /private/var, container mounts) matches its realpath'd children.
+  return roots.map((r) => { try { return fs.realpathSync(r); } catch { return r; } });
+}
+
+function isInsideRoot(candidate, root) {
+  const rel = path.relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Resolve an operator-supplied source path to an absolute path inside an
+ * allowed root, or throw. Relative inputs resolve under the wiki/ root.
+ * When the file exists, the REAL path (symlinks resolved) must also be inside
+ * a root, so a symlink planted under wiki/ cannot point elsewhere.
+ * @returns {string} absolute path
+ */
+function resolveKnowledgeSourcePath(input) {
+  const raw = String(input || '').trim();
+  if (!raw || raw.includes('\0')) throw new Error('file_path is required');
+  const roots = knowledgeSourceRoots();
+  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(roots[0], raw);
+  // Existing files are judged by their REAL path (symlinks resolved) so a link
+  // planted under wiki/ cannot point elsewhere; not-yet-existing paths are
+  // judged lexically (roots are already realpath'd).
+  let candidate = abs;
+  if (fs.existsSync(abs)) {
+    try { candidate = fs.realpathSync(abs); } catch { candidate = abs; }
+  }
+  if (!roots.some((r) => isInsideRoot(candidate, r))) {
+    throw new Error('file_path must be inside the wiki/ folder');
+  }
+  return candidate;
+}
+
+function assertAllowedSourceFileType(fileType) {
+  const t = String(fileType || '').trim().toLowerCase();
+  if (!ALLOWED_SOURCE_FILE_TYPES.includes(t)) {
+    throw new Error(`file_type must be one of: ${ALLOWED_SOURCE_FILE_TYPES.join(', ')}`);
+  }
+  return t;
+}
+
 class WikiCompiler {
 
   async compileSource(sourceId) {
@@ -303,9 +359,14 @@ ${content.substring(0, 50000)}`
   }
 
   async readSourceFile(filePath, fileType) {
-    if (!filePath || !fs.existsSync(filePath)) {
+    // Confine on READ as well as on insert — rows written before the guard
+    // (or by any other writer) get the same treatment.
+    const safePath = resolveKnowledgeSourcePath(filePath);
+    if (!fs.existsSync(safePath)) {
       return null;
     }
+    filePath = safePath;
+    fileType = assertAllowedSourceFileType(fileType);
 
     switch (fileType) {
       case 'md':
@@ -326,7 +387,8 @@ ${content.substring(0, 50000)}`
         }).join('\n\n');
       }
       default:
-        try { return fs.readFileSync(filePath, 'utf-8'); } catch { return null; }
+        // Unreachable after assertAllowedSourceFileType; never a catch-all read.
+        return null;
     }
   }
 
@@ -579,4 +641,8 @@ ${content.substring(0, 50000)}`
   }
 }
 
-module.exports = new WikiCompiler();
+const compiler = new WikiCompiler();
+compiler.resolveKnowledgeSourcePath = resolveKnowledgeSourcePath;
+compiler.assertAllowedSourceFileType = assertAllowedSourceFileType;
+compiler.ALLOWED_SOURCE_FILE_TYPES = ALLOWED_SOURCE_FILE_TYPES;
+module.exports = compiler;

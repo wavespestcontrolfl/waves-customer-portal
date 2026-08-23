@@ -49,6 +49,28 @@ function adminPost(path, body) {
     body: JSON.stringify(body),
   }).then((r) => r.json());
 }
+// Strict variant used ONLY by the source-add flow: rejects non-2xx with the
+// server's reason (e.g. 400 "file_path must be inside the wiki/ folder") so
+// the form can show it. The lenient helpers above stay as-is because their
+// existing callers have no error cleanup.
+function adminPostStrict(path, body) {
+  return fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }).then(async (r) => {
+    const data = await r.json().catch(() => null);
+    if (!r.ok) {
+      const err = new Error((data && data.error) || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    return data;
+  });
+}
 
 function Card({ children, style }) {
   return (
@@ -542,7 +564,13 @@ function SourcesView() {
   };
 
   const handleAdd = async () => {
-    await adminPost("/admin/knowledge/sources", addForm);
+    try {
+      await adminPostStrict("/admin/knowledge/sources", addForm);
+    } catch (e) {
+      // 400 from the server: path outside wiki/ or unsupported type.
+      alert(`Could not add source: ${e.message}`);
+      return;
+    }
     setShowAdd(false);
     setAddForm({
       filename: "",
@@ -632,7 +660,7 @@ function SourcesView() {
               onChange={(e) =>
                 setAddForm((p) => ({ ...p, file_path: e.target.value }))
               }
-              placeholder="Full file path"
+              placeholder="Path inside the repo wiki/ folder (e.g. protocols/termite.md)"
               style={{
                 padding: "8px 10px",
                 borderRadius: 6,
@@ -663,7 +691,6 @@ function SourcesView() {
               <option value="txt">Text</option>
               <option value="json">JSON</option>
               <option value="js">JavaScript</option>
-              <option value="pdf">PDF</option>{" "}
             </select>{" "}
             <input
               value={addForm.description}
