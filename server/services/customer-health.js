@@ -861,7 +861,8 @@ async function scoreAllCustomers() {
   let failed = 0;
 
   try {
-    const customers = await db('customers').where('active', true).select('id');
+    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+    const customers = await db('customers').where('active', true).whereNull('deleted_at').select('id');
     logger.info(`[health] Scoring ${customers.length} active customers`);
 
     for (const cust of customers) {

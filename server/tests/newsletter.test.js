@@ -16,7 +16,7 @@
  *     silently corrupts campaign analytics or double-applies events.
  */
 
-const { buildSubscriberQuery, excludeGloballySuppressed, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeGloballySuppressed, excludeArchivedCustomers, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
 const db = require('../models/db');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
@@ -82,7 +82,9 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).toMatch(/from "newsletter_subscribers"/);
     expect(sql).toMatch(/"status" = (?:\$1|\?)/);
     expect(bindings).toContain('active');
-    expect(sql).not.toMatch(/customer_id/);
+    // No audience constraint on the subscriber row itself (the archived-
+    // customer anti-join references customer_id inside its subquery only).
+    expect(sql).not.toMatch(/"customer_id" is (not )?null/);
     expect(sql).not.toMatch(/source/);
     expect(sql).not.toMatch(/tags/);
   });
@@ -110,6 +112,23 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).toMatch(/not exists/i);
     expect(sql).toMatch(/email_suppressions/);
     expect(bindings).toEqual(expect.arrayContaining(['bounce', 'spam_complaint', 'do_not_email']));
+  });
+
+  // Archive sets customers.deleted_at only (active stays true) and never
+  // touches newsletter_subscribers, so the send path must fail closed on the
+  // linked customer's deleted_at — for fresh sends AND the resume/retry
+  // refetch (both go through excludeArchivedCustomers).
+  test('always anti-joins archived (deleted_at) linked customers', () => {
+    const { sql } = shapeOf(null);
+    expect(sql).toMatch(/not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\)/i);
+  });
+
+  test('excludeArchivedCustomers emits the same anti-join for the retry refetch', () => {
+    const { sql } = excludeArchivedCustomers(
+      db('newsletter_subscribers').where({ status: 'active' }),
+    ).toSQL();
+    expect(sql).toMatch(/"customers" as "ac"/);
+    expect(sql).toMatch(/"ac"\."deleted_at" is not null/);
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {

@@ -17,7 +17,7 @@ const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
 const crypto = require('crypto');
-const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { linkToCustomer, linkManyToCustomers, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
@@ -273,16 +273,10 @@ router.post('/subscribers/import', async (req, res, next) => {
 
       // Bulk customer auto-link covers both fresh inserts AND rows that
       // already existed (the onConflict path) — running over the full
-      // imported email set, idempotent on already-linked rows. One query.
-      await db.raw(
-        `UPDATE newsletter_subscribers ns
-            SET customer_id = c.id, updated_at = NOW()
-            FROM customers c
-           WHERE ns.email = ANY(?)
-             AND ns.customer_id IS NULL
-             AND LOWER(c.email) = ns.email`,
-        [rows.map((r) => r.email)],
-      );
+      // imported email set, idempotent on already-linked rows. One query,
+      // and the SAME twin picker linkToCustomer uses: an unscoped match here
+      // could pin an archived profile that the sender then suppresses.
+      await linkManyToCustomers(rows.map((r) => r.email));
     }
     const skipped = subscribers.length - inserted;
 
@@ -2150,8 +2144,11 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
   try {
     const { cityToZone } = require('../services/event-freshness');
 
-    // Get all customers with emails
+    // Get all live customers with emails. Archive sets only deleted_at (never
+    // active), so without this an archived customer would be (re)subscribed
+    // and emailed — mirrors whereLiveCustomer (services/customer-stages.js).
     const customers = await db('customers')
+      .whereNull('deleted_at')
       .whereNotNull('email')
       .where('email', '!=', '')
       .select('id', 'email', 'first_name', 'last_name', 'city');

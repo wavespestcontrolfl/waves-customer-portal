@@ -465,6 +465,8 @@ router.get('/customers/search', async (req, res, next) => {
           .orWhere('email', 'like', `%${q.toLowerCase()}%`);
       })
       .where({ active: true })
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'address_line1', 'city', 'property_type')
       .limit(10);
     res.json({ customers });

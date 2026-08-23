@@ -257,7 +257,7 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
-    db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
     // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
     // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
     // Days; the prior status whitelist would silently drop any new
@@ -277,6 +277,8 @@ async function getKpiSnapshot() {
     // place, so created_at never moves); created_at is the tie/null fallback.
     db('customer_health_scores as h')
       .join(db.raw("(SELECT customer_id, MAX(COALESCE(scored_at, created_at)) as max_scored FROM customer_health_scores GROUP BY customer_id) latest ON h.customer_id = latest.customer_id AND COALESCE(h.scored_at, h.created_at) = latest.max_scored"))
+      // Archived customers keep their score rows — scope like the MRR/active counts above.
+      .whereNotExists(function () { this.select(1).from('customers as ac').whereRaw('ac.id = h.customer_id').whereNotNull('ac.deleted_at'); })
       .select('h.churn_risk', db.raw('COUNT(*) as count')).groupBy('h.churn_risk'),
   ]);
 
@@ -570,14 +572,15 @@ async function getRevenueBreakdown(input) {
   }
 
   if (group_by === 'tier') {
-    const rows = await db('customers').where({ active: true })
+    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+    const rows = await db('customers').where({ active: true }).whereNull('deleted_at')
       .select('waveguard_tier', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as mrr'))
       .groupBy('waveguard_tier').orderByRaw('SUM(monthly_rate) DESC');
     return { group_by, rows: rows.map(r => ({ tier: r.waveguard_tier || 'None', count: parseInt(r.count), mrr: parseFloat(r.mrr || 0), arr: parseFloat(r.mrr || 0) * 12 })) };
   }
 
   if (group_by === 'city') {
-    const rows = await db('customers').where({ active: true }).whereNotNull('city').where('city', '!=', '')
+    const rows = await db('customers').where({ active: true }).whereNull('deleted_at').whereNotNull('city').where('city', '!=', '')
       .select('city', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as mrr'))
       .groupBy('city').orderByRaw('SUM(monthly_rate) DESC');
     return { group_by, rows: rows.map(r => ({ city: r.city, count: parseInt(r.count), mrr: parseFloat(r.mrr || 0) })) };

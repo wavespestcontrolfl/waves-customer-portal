@@ -32,6 +32,8 @@ router.get('/dashboard', async (req, res, next) => {
     // Top upsell opportunities — Bronze/Silver customers who could upgrade
     const upgradeOpps = await db('customers')
       .where('active', true)
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
@@ -182,6 +184,7 @@ router.get('/upsell-opportunities', async (req, res, next) => {
     // Active Bronze/Silver customers with good health
     const candidates = await db('customers')
       .where('active', true)
+      .whereNull('deleted_at')
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
@@ -224,6 +227,13 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
   try {
     const customer = await db('customers').where('id', req.params.customerId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    // Action boundary re-check: the candidate list is scoped to live customers,
+    // but a stale UI row (or a direct id) must never text an archived/inactive
+    // customer. Archive only sets deleted_at, never active — require BOTH
+    // deleted_at IS NULL and active === true (active is nullable on legacy rows).
+    if (customer.deleted_at || customer.active !== true) {
+      return res.status(409).json({ error: 'Customer is archived or inactive — no outreach.', code: 'CUSTOMER_NOT_LIVE' });
+    }
     if (!customer.phone) return res.status(400).json({ error: 'Customer has no phone number' });
 
     const upsell = await PricingIntelligence.findBestUpsell(customer.id);
@@ -353,6 +363,8 @@ router.get('/ltv-analysis', async (req, res, next) => {
     // Retention curve
     const customers = await db('customers')
       .where('active', true)
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereNotNull('member_since')
       .select('member_since');
 

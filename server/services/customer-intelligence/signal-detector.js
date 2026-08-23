@@ -141,7 +141,7 @@ Only include signals you detect. Empty array if none found.`;
 
 class SignalDetector {
   async detectAllSignals() {
-    const customers = await db('customers').where('active', true).select('id');
+    const customers = await db('customers').where('active', true).whereNull('deleted_at').select('id');
     logger.info(`Signal detection: scanning ${customers.length} customers`);
 
     let totalNew = 0;

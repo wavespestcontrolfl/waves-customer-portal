@@ -352,6 +352,7 @@ async function getOutreachCandidates(input) {
 
   let query = db('customers')
     .where('customers.active', true)
+    .whereNull('customers.deleted_at')
     .whereExists(function () {
       this.select(db.raw(1)).from('scheduled_services')
         .whereRaw('scheduled_services.customer_id = customers.id')

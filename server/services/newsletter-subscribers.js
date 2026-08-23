@@ -285,12 +285,51 @@ async function confirmByToken(token) {
 }
 
 /**
+ * THE twin picker — the single SQL that decides which customer profile a
+ * subscriber email links to. Shared by linkToCustomer (first link),
+ * linkManyToCustomers (bulk import), the relink helpers (archive/restore)
+ * and mirrored by the 20260823000005 backfill. One email may span several
+ * customer profiles (20260417000010), some archived: pick a NON-ARCHIVED one
+ * deterministically — is_primary_profile DESC NULLS LAST, created_at ASC,
+ * id ASC, LIMIT 1. An unordered match could pin an archived profile and the
+ * sender's anti-join would then suppress the household forever.
+ *
+ * SCOPE IS DELIBERATELY NARROWER THAN whereLiveCustomer: `deleted_at IS NULL`
+ * only — no `active = true`, no `pipeline_stage IN CUSTOMER_STAGES`. This PR
+ * is about ARCHIVED customers, and customer_id here carries LINK semantics,
+ * not lifecycle semantics: a lead-stage row (new_lead, contacted, …) is a
+ * legitimate link target and always has been, and buildSubscriberQuery's
+ * customers/leads audiences key on customer_id IS [NOT] NULL. Adding the
+ * lifecycle scope here would silently unlink future lead-stage subscribers
+ * while historical ones kept their link — two different audiences for
+ * identical data. Lifecycle filtering belongs in the readers, not the link.
+ *
+ * Returns a correlated scalar-subselect fragment: `emailExprSql` is the SQL
+ * expression (already normalized by the caller or normalized here) the
+ * customer email is compared against; `excludeCustomerId` (optional) keeps
+ * the archived profile itself out of the candidates.
+ */
+function liveTwinSubselect(emailExprSql, { excludeCustomerId = null } = {}) {
+  const bindings = [];
+  let sql = `(SELECT c.id FROM customers c
+       WHERE LOWER(TRIM(c.email)) = ${emailExprSql}`;
+  if (excludeCustomerId != null) { sql += '\n         AND c.id <> ?'; bindings.push(excludeCustomerId); }
+  sql += `
+         AND c.deleted_at IS NULL
+       ORDER BY c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       LIMIT 1)`;
+  return { sql, bindings };
+}
+
+/**
  * Link a newsletter subscriber to its matching customer (by email) when
  * one isn't linked yet. Case-insensitive on the customers side because
  * customer rows come from many entry points (booking, lead webhooks,
  * Twilio call ingestion, admin add) and not all of them lowercase email
  * before insert. Idempotent: only touches rows where customer_id IS NULL,
- * so calling repeatedly on the same email is a no-op.
+ * so calling repeatedly on the same email is a no-op. Candidate = the live
+ * twin from liveTwinSubselect (never an archived / non-customer profile);
+ * when there is none the row simply stays unlinked.
  *
  * Without this, the "Customers only" / "Leads only" segment filters in
  * the composer match ~zero subscribers because customer_id was NULL on
@@ -299,15 +338,115 @@ async function confirmByToken(token) {
 async function linkToCustomer(email) {
   if (!email) return;
   const lc = email.toLowerCase();
+  const twin = liveTwinSubselect('?');
   await db.raw(
     `UPDATE newsletter_subscribers
-       SET customer_id = c.id, updated_at = NOW()
-       FROM customers c
+       SET customer_id = twin.id, updated_at = NOW()
+       FROM ${twin.sql} twin
        WHERE newsletter_subscribers.email = ?
-         AND LOWER(c.email) = ?
          AND newsletter_subscribers.customer_id IS NULL`,
-    [lc, lc],
+    [lc.trim(), ...twin.bindings, lc],
   );
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+/**
+ * Set-based first-link for a batch of emails (the CSV bulk import). Same
+ * decision as linkToCustomer / liveTwinSubselect — same scope (deleted_at
+ * IS NULL only; see the picker's note on why it is narrower than
+ * whereLiveCustomer) and same ordering (is_primary_profile DESC NULLS LAST,
+ * created_at ASC, id ASC) — expressed once per email with DISTINCT ON
+ * instead of a correlated LIMIT 1, so a 25k-row import stays one query. An
+ * email whose only profiles are archived matches no candidate and the row
+ * stays unlinked (the sender's anti-join would suppress an archived link
+ * anyway). Idempotent: only rows with customer_id IS NULL move. Returns the
+ * number of rows linked.
+ */
+async function linkManyToCustomers(emails, conn = db) {
+  const keys = Array.from(new Set((emails || [])
+    .map((e) => String(e || '').trim().toLowerCase())
+    .filter(Boolean)));
+  if (!keys.length) return 0;
+  const res = await conn.raw(
+    `UPDATE newsletter_subscribers ns
+        SET customer_id = t.twin_id, updated_at = NOW()
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE LOWER(TRIM(c.email)) = ANY(?)
+            AND c.deleted_at IS NULL
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
+      WHERE LOWER(TRIM(ns.email)) = t.email_key
+        AND ns.customer_id IS NULL
+        AND LOWER(TRIM(ns.email)) = ANY(?)`,
+    [keys, keys],
+  );
+  return Number(res?.rowCount || 0);
+}
+
+/**
+ * Symmetric relink for one email, used by BOTH the archive route (after
+ * deleted_at is set) and the restore route (after it is cleared), inside
+ * their transaction. Re-runs the canonical twin picker (liveTwinSubselect)
+ * for the SUBSCRIBER's normalized email and points every subscriber row that
+ * carries that email AND is linked to one of that email's customer profiles
+ * at the winner — so archiving the primary moves the link to the secondary,
+ * and restoring the primary moves it back. Rows are matched on their OWN
+ * email (never a customer's current email), so a stale email snapshot can't
+ * be attached to an unrelated twin. No live winner → links left alone (the
+ * sender's anti-join excludes archived links; a later restore lifts it).
+ * Returns { winnerId, relinked }.
+ */
+async function relinkSubscribersForEmail(trx, email) {
+  const key = String(email || '').trim().toLowerCase();
+  if (!key) return { winnerId: null, relinked: 0 };
+  const twin = liveTwinSubselect('?');
+  const picked = await trx.raw(`SELECT ${twin.sql} AS id`, [key, ...twin.bindings]);
+  const winnerId = picked?.rows?.[0]?.id ?? null;
+  if (!winnerId) return { winnerId: null, relinked: 0 };
+  const relinked = await trx('newsletter_subscribers')
+    .whereRaw('LOWER(TRIM(email)) = ?', [key])
+    .whereNotNull('customer_id')
+    .whereNot('customer_id', winnerId)
+    .whereIn('customer_id', function () {
+      this.select('id').from('customers').whereRaw('LOWER(TRIM(email)) = ?', [key]);
+    })
+    .update({ customer_id: winnerId, updated_at: trx.fn.now() });
+  return { winnerId, relinked: Number(relinked || 0) };
+}
+
+/**
+ * ARCHIVE-side relink. The subscriber's stored email is a SNAPSHOT taken at
+ * signup and is never refreshed, so it can differ from the archived
+ * customer's CURRENT email — keying off customer.email alone would miss those
+ * rows (and could attach them to a twin of an email they no longer carry).
+ * So: resolve the rows BY the archived customer_id, then pick a twin per
+ * DISTINCT normalized SUBSCRIBER email, excluding the archived profile
+ * itself. Same scope + ordering as liveTwinSubselect, one set-based UPDATE.
+ * An email with no non-archived profile matches nothing and its rows stay on
+ * the archived id (the sender's anti-join excludes them; restore lifts it).
+ * Runs on the caller's transaction. Returns { relinked }.
+ */
+async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
+  if (!archivedCustomerId) return { relinked: 0 };
+  const res = await trx.raw(
+    `UPDATE newsletter_subscribers ns
+        SET customer_id = t.twin_id, updated_at = NOW()
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE c.deleted_at IS NULL
+            AND c.id <> ?
+            AND LOWER(TRIM(c.email)) IN (
+              SELECT LOWER(TRIM(x.email)) FROM newsletter_subscribers x WHERE x.customer_id = ?
+            )
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
+      WHERE ns.customer_id = ?
+        AND LOWER(TRIM(ns.email)) = t.email_key`,
+    [archivedCustomerId, archivedCustomerId, archivedCustomerId],
+  );
+  return { relinked: Number(res?.rowCount || 0) };
+}
+
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
