@@ -5848,29 +5848,32 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     .whereNotIn('status', ['paid', 'refunded', 'disputed'])
     .update({ status: 'canceled' });
 
-  // Combined PI canceled AFTER entering processing (codex r20 P2, a rare
-  // but supported Stripe transition): the processing handler already moved
-  // every allocated invoice to 'processing' — without an allocation-aware
-  // revert they stay non-collectible forever (excluded from dunning,
-  // blocked from a replacement payment). Mirror the failure path's revert:
-  // reopen each stamped 'processing' invoice, clear the dead PI binding
-  // and the ACH-ack claim so a retry re-acknowledges.
+  // PI canceled AFTER entering processing (codex r20 P2, a rare but
+  // supported Stripe transition): the processing handler already moved
+  // the stamped invoice(s) to 'processing' — without a revert they stay
+  // non-collectible forever (excluded from dunning, blocked from a
+  // replacement payment). Applies to the single-invoice ACH lane as much
+  // as the combined lane (both stamp invoices.stripe_payment_intent_id).
+  // Mirror the failure path's revert: reopen each stamped 'processing'
+  // invoice, clear the dead PI binding and the ACH-ack claim so a retry
+  // re-acknowledges. No customer notification — nothing was collected.
+  const canceledStamped = await db('invoices')
+    .where({ stripe_payment_intent_id: piId, status: 'processing' });
+  for (const stampedRow of canceledStamped) {
+    await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
+      status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+      paid_at: null,
+      stripe_payment_intent_id: null,
+      stripe_charge_id: null,
+      ach_processing_notified_at: null,
+      updated_at: db.fn.now(),
+    });
+  }
+  if (canceledStamped.length) {
+    logger.warn(`[stripe-webhook] canceled PI ${piId} — reopened ${canceledStamped.length} invoice(s) from 'processing'`);
+  }
+
   if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
-    const canceledStamped = await db('invoices')
-      .where({ stripe_payment_intent_id: piId, status: 'processing' });
-    for (const stampedRow of canceledStamped) {
-      await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
-        status: nextInvoiceStatusAfterFailedPayment(stampedRow),
-        paid_at: null,
-        stripe_payment_intent_id: null,
-        stripe_charge_id: null,
-        ach_processing_notified_at: null,
-        updated_at: db.fn.now(),
-      });
-    }
-    if (canceledStamped.length) {
-      logger.warn(`[stripe-webhook] canceled combined PI ${piId} — reopened ${canceledStamped.length} allocated invoice(s) from 'processing'`);
-    }
     // Any remaining collectible stamps (not yet 'processing') unbind too.
     await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
     // Provisional processing-stage residuals resolve with the cancellation
@@ -7608,6 +7611,7 @@ module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
+module.exports._handlePaymentIntentCanceled = handlePaymentIntentCanceled;
 module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
 module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProcessingAcks;
 module.exports._handleAchFailure = handleAchFailure;

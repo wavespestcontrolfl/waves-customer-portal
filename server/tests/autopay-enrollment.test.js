@@ -124,7 +124,7 @@ describe('enrollConsentedMethod', () => {
     const custUpdate = qb();
     setQueues({
       customers: [qb({ first: custRow({ autopay_enabled: true, autopay_payment_method_id: 'pm-old' }) }), custUpdate],
-      payment_methods: [qb({ first: TARGET }), qb({ first: { id: 'pm-old', method_type: 'card' } }), enrollTarget],
+      payment_methods: [qb({ first: TARGET }), qb({ first: { id: 'pm-old', method_type: 'card', exp_month: 12, exp_year: 2099 } }), enrollTarget],
     });
 
     const result = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'save_card_consent' });
@@ -155,8 +155,34 @@ describe('enrollConsentedMethod', () => {
     expect(custUpdate.update).toHaveBeenCalledWith({ autopay_enabled: true, autopay_payment_method_id: 'pm-new' });
   });
 
+  test('expired card incumbent is NOT in charge — target claims default, pointer moves', async () => {
+    // Collection already refuses an expired card (isChargeableAutopayMethod);
+    // keeping it as the incumbent saved the replacement non-default and left
+    // the autopay pointer on a card that never charges.
+    const unsetOthers = qb();
+    const enrollTarget = qb();
+    const custUpdate = qb();
+    setQueues({
+      customers: [qb({ first: custRow({ autopay_enabled: true, autopay_payment_method_id: 'pm-expired' }) }), custUpdate],
+      payment_methods: [
+        qb({ first: TARGET }),
+        qb({ first: { id: 'pm-expired', method_type: 'card', exp_month: 1, exp_year: 2020 } }),
+        unsetOthers,
+        enrollTarget,
+      ],
+    });
+
+    const result = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'portal_add_card' });
+
+    expect(result.enrolled).toBe(true);
+    expect(result.inChargeMethodId).toBe('pm-new');
+    expect(unsetOthers.update).toHaveBeenCalledWith({ is_default: false });
+    expect(enrollTarget.update).toHaveBeenCalledWith({ autopay_enabled: true, is_default: true });
+    expect(custUpdate.update).toHaveBeenCalledWith({ autopay_enabled: true, autopay_payment_method_id: 'pm-new' });
+  });
+
   test('already fully enrolled on the same method → idempotent no-op, no duplicate log', async () => {
-    const incumbent = { id: 'pm-new', method_type: 'card' };
+    const incumbent = { id: 'pm-new', method_type: 'card', exp_month: 12, exp_year: 2099 };
     setQueues({
       customers: [qb({ first: custRow({ autopay_enabled: true, autopay_payment_method_id: 'pm-new' }) })],
       payment_methods: [qb({ first: TARGET }), qb({ first: incumbent })],
@@ -285,7 +311,7 @@ describe('enrollConsentedMethod — savepoint mode side effects honor the outer 
   test('a healthy incumbent in charge → no email callback at all (the wrong-card rule, Codex #2698 r1)', async () => {
     setQueues({
       customers: [qb({ first: custRow({ autopay_enabled: true, autopay_payment_method_id: 'pm-old' }) }), qb()],
-      payment_methods: [qb({ first: TARGET }), qb({ first: { id: 'pm-old', method_type: 'card' } }), qb()],
+      payment_methods: [qb({ first: TARGET }), qb({ first: { id: 'pm-old', method_type: 'card', exp_month: 12, exp_year: 2099 } }), qb()],
     });
 
     const result = await enrollConsentedMethod({
