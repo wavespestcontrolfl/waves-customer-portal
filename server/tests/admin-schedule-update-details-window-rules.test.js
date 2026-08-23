@@ -324,3 +324,44 @@ describe('duration-only edits on end-less rows', () => {
     expect((await put({ estimatedDuration: 120 })).status).toBe(418);
   });
 });
+
+describe('malformed SUPPLIED bounds are refused at intake (before the unchanged-slot comparison)', () => {
+  // The unchanged-slot comparison normalizes both sides, and a malformed
+  // bound normalizes to null — on a WINDOWLESS row it compared equal to the
+  // stored null, so the slot read as unchanged, the window rules were
+  // skipped, and Postgres cast the string into the TIME column anyway: a
+  // pre-08:00 appointment written past every guard. Only an explicit
+  // null/'' is a clear (windowIntakeFromBody); anything else must parse.
+  const WINDOWLESS = { ...STORED, window_start: null, window_end: null };
+
+  test('windowless row + a Postgres-castable "7:00 AM" start → 422, nothing written', async () => {
+    db.mockImplementation(() => chain(WINDOWLESS));
+    const { status, body } = await put({ windowStart: '7:00 AM' });
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+    expect(body.error).toMatch(/24h HH:MM/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('other Postgres-castable / out-of-range strings are refused on both bounds', async () => {
+    db.mockImplementation(() => chain(WINDOWLESS));
+    for (const bad of ['9am', '7:00 PM', '25:00', '09:75', 'noon']) {
+      expect((await put({ windowStart: bad })).status).toBe(422);
+      expect((await put({ windowStart: '09:00', windowEnd: bad })).status).toBe(422);
+    }
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the same malformed start is refused on a row that HAS a window (not just windowless ones)', async () => {
+    const { status, body } = await put({ windowStart: '7:00 AM', windowEnd: '8:00 AM' });
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+  });
+
+  test('an explicit clear of BOTH bounds is still a clear, not a malformed value', async () => {
+    db.mockImplementation(() => chain(WINDOWLESS));
+    // Windowless row, cleared again: unchanged slot, no validation, no 422.
+    const { status } = await put({ windowStart: null, windowEnd: null });
+    expect(status).not.toBe(422);
+  });
+});

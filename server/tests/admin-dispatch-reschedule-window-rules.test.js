@@ -182,7 +182,13 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
   const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '10:00' }, scope: 'series' });
   expect(status).toBe(200);
   expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith(
-    expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', { allowLive: true, adminWindowRules: true },
+    expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', {
+      allowLive: true,
+      adminWindowRules: true,
+      // The anchor state this route's window resolution read, pinned through
+      // the series writer's existing expectAnchor fence.
+      expectAnchor: { window_start: '09:00:00' },
+    },
   );
 });
 
@@ -191,4 +197,85 @@ test('an explicit newWindow: null on a WINDOWLESS row is a 200 date-only move (t
   const { status } = await reschedule({ newDate: TARGET, newWindow: null });
   expect(status).toBe(200);
   expect(SmartRebooker.reschedule).toHaveBeenCalledWith(expect.any(String), TARGET, null, 'admin', 'admin', expect.any(Object));
+});
+
+describe('the resolved window is fenced by the rebooker CAS (options.expect)', () => {
+  // resolveRescheduleWindow reads and validates the row OUTSIDE the rebooker's
+  // transaction, and the rebooker's own CAS pins status + tracker state (plus
+  // its own null-end duration) — not the fields this resolution derived from.
+  // The route now feeds those fields into the rebooker's existing
+  // options.expect predicate, so a concurrent resize/window edit makes the
+  // UPDATE miss and surfaces the existing changed-concurrently 409.
+  const ROW = {
+    scheduled_date: '2026-08-01', window_start: '19:00:00', window_end: null,
+    estimated_duration_minutes: 60,
+  };
+
+  // Stand-in for the rebooker's CAS: the UPDATE matches only if every
+  // options.expect field still equals the row at commit time.
+  function casRebooker(rowAtCommit) {
+    return jest.fn(async (_id, _date, _win, _reason, _by, options = {}) => {
+      const pin = options.expect || {};
+      const matched = Object.entries(pin).every(([col, val]) => (rowAtCommit[col] ?? null) === val);
+      if (!matched) {
+        throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), { statusCode: 409 });
+      }
+      return { success: true };
+    });
+  }
+
+  test('a start-only move pins the date, window and the duration its end was derived from', async () => {
+    mockVisitRow = { ...ROW };
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00' } });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      expect: {
+        scheduled_date: '2026-08-01', window_start: '19:00:00', window_end: null,
+        estimated_duration_minutes: 60,
+      },
+    });
+  });
+
+  test('a DATE-ONLY move pins the stored window it validated', async () => {
+    mockVisitRow = { ...ROW, window_start: '09:00:00', window_end: '10:00:00' };
+    const { status } = await reschedule({ newDate: TARGET, newWindow: null });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      expect: {
+        scheduled_date: '2026-08-01', window_start: '09:00:00', window_end: '10:00:00',
+        estimated_duration_minutes: 60,
+      },
+    });
+  });
+
+  test('a concurrent DURATION change between the resolve and the CAS is a 409 — nothing moved', async () => {
+    mockVisitRow = { ...ROW };
+    // The row was resized to 120 minutes after this route read it: the 09:00
+    // end it derived (10:00) is stale.
+    SmartRebooker.reschedule.mockImplementation(casRebooker({ ...ROW, estimated_duration_minutes: 120 }));
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00' } });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/concurrently/);
+  });
+
+  test('a concurrent WINDOW edit between the resolve and the CAS is a 409 too', async () => {
+    mockVisitRow = { ...ROW, window_start: '09:00:00', window_end: '10:00:00' };
+    SmartRebooker.reschedule.mockImplementation(casRebooker({ ...ROW, window_start: '07:00:00', window_end: '08:00:00' }));
+    const { status } = await reschedule({ newDate: TARGET, newWindow: null });
+    expect(status).toBe(409);
+  });
+
+  test('an UNCHANGED row moves normally through the same predicate', async () => {
+    mockVisitRow = { ...ROW };
+    SmartRebooker.reschedule.mockImplementation(casRebooker({ ...ROW }));
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00' } });
+    expect(status).toBe(200);
+  });
+
+  test('a FULL explicit window reads no row and pins nothing (it derived from nothing stored)', async () => {
+    mockVisitRow = { ...ROW };
+    const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expect');
+  });
 });

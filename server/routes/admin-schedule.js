@@ -5681,6 +5681,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       updates.window_start = null;
       updates.window_end = null;
     } else {
+      // A SUPPLIED bound must be a real HH:MM before anything else looks at
+      // it. windowIntakeFromBody has already ruled that only an explicit
+      // null/'' is a clear, so anything else that normalizeHHMM can't read
+      // ('7:00 AM', '9am', '25:00') is malformed — refuse it here, at intake.
+      // The unchanged-slot comparison below normalizes both sides, and a
+      // malformed bound normalizes to null: on a WINDOWLESS row it compared
+      // equal to the stored null, the effective slot read as unchanged, the
+      // window rules were skipped, and Postgres happily cast '7:00 AM' into
+      // the TIME column — a pre-08:00 appointment written past every guard.
+      for (const [field, value] of [['windowStart', windowIntake.windowStart], ['windowEnd', windowIntake.windowEnd]]) {
+        if (value === undefined) continue;
+        if (!normalizeHHMM(value)) {
+          throw Object.assign(
+            httpError(422, `Appointment ${field === 'windowStart' ? 'start' : 'end'} must be a 24h HH:MM time — got "${String(value)}" (use e.g. "08:00")`),
+            { code: 'INVALID_APPOINTMENT_WINDOW' },
+          );
+        }
+      }
       if (windowIntake.windowStart !== undefined) updates.window_start = windowIntake.windowStart;
       if (windowIntake.windowEnd !== undefined) updates.window_end = windowIntake.windowEnd;
     }
