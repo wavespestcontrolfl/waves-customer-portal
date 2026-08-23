@@ -201,3 +201,68 @@ describe('date-only moves + the scheduling-field CAS', () => {
     }
   });
 });
+
+describe('window intake by explicit presence (clear both or 422)', () => {
+  const { windowIntakeFromBody } = adminScheduleRouter._test;
+
+  test('{ windowStart: null } alone → 422, no transaction, nothing written', async () => {
+    const { status, body } = await put({ windowStart: null });
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+    expect(body.error).toMatch(/both the start and end/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('{ windowStart: null, windowEnd: null } (or both "") clears BOTH bounds', () => {
+    expect(windowIntakeFromBody({ windowStart: null, windowEnd: null })).toEqual({ clearBoth: true });
+    expect(windowIntakeFromBody({ windowStart: '', windowEnd: '' })).toEqual({ clearBoth: true });
+    expect(windowIntakeFromBody({ windowStart: null, windowEnd: '' })).toEqual({ clearBoth: true });
+  });
+
+  test('a partial clear in either direction throws 422; absent fields are "no opinion"; supplied values pass through', () => {
+    for (const bad of [{ windowStart: null }, { windowEnd: '' }, { windowStart: null, windowEnd: '10:00' }, { windowStart: '09:00', windowEnd: null }]) {
+      let caught;
+      try { windowIntakeFromBody(bad); } catch (err) { caught = err; }
+      expect(caught?.status).toBe(422);
+      expect(caught?.code).toBe('INVALID_APPOINTMENT_WINDOW');
+    }
+    expect(windowIntakeFromBody({ notes: 'x' })).toEqual({ clearBoth: false, windowStart: undefined, windowEnd: undefined });
+    expect(windowIntakeFromBody({ windowStart: '09:00' })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: undefined });
+    expect(windowIntakeFromBody({ windowStart: '09:00', windowEnd: '10:00' })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: '10:00' });
+  });
+
+  test('the route only ever writes the intake result (never `windowStart || null`)', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    expect(ud).not.toMatch(/updates\.window_start = windowStart \|\| null/);
+    expect(ud).toMatch(/const windowIntake = windowIntakeFromBody\(req\.body\)/);
+    expect(ud).toMatch(/if \(windowIntake\.clearBoth\) \{\s*updates\.window_start = null;\s*updates\.window_end = null;/);
+  });
+});
+
+describe('start-only edit derives its end from the stored span, else estimated_duration_minutes', () => {
+  const { windowDurationMinutes } = require('../utils/datetime-et');
+
+  test('windowDurationMinutes: valid span wins; no span → estimated duration; nothing → 60', () => {
+    expect(windowDurationMinutes('09:00:00', '11:00:00', 30)).toBe(120);
+    expect(windowDurationMinutes('10:00', null, 120)).toBe(120);
+    expect(windowDurationMinutes('10:00', '09:00', 90)).toBe(90);
+    expect(windowDurationMinutes(null, null, 'abc')).toBe(60);
+    expect(windowDurationMinutes(null, null, 0)).toBe(60);
+  });
+
+  test('the pre-read selects estimated_duration_minutes and passes it as the fallback', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'\)/);
+    expect(ud).toMatch(/windowDurationMinutes\(currentRow\.window_start, currentRow\.window_end, currentRow\.estimated_duration_minutes\)/);
+  });
+
+  test('start-only on an end-less 120-minute row validates as a 2-hour block (19:00 → 21:00 is refused; 10:00 passes)', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_end: null, estimated_duration_minutes: 120 }));
+    let r = await put({ windowStart: '19:00' });
+    expect(r.status).toBe(422);
+    expect(r.body.error).toMatch(/end by 20:00/);
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    r = await put({ windowStart: '10:00' });
+    expect(r.status).toBe(418);
+  });
+});

@@ -1247,6 +1247,34 @@ function normalizeAssignmentScope(scope) {
   return normalized;
 }
 
+// update-details window intake. Presence is explicit (hasOwnProperty): an
+// absent field is "no opinion"; null/'' is a CLEAR and must clear both
+// bounds together; anything else is a supplied value the shared validator
+// judges downstream. Partial clears never persist (422).
+function windowIntakeFromBody(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined;
+  const isClear = (v) => v === null || v === '';
+  const hasStart = has('windowStart');
+  const hasEnd = has('windowEnd');
+  const clearStart = hasStart && isClear(src.windowStart);
+  const clearEnd = hasEnd && isClear(src.windowEnd);
+  if (clearStart || clearEnd) {
+    if (!(clearStart && clearEnd)) {
+      throw Object.assign(
+        httpError(422, 'Clear both the start and end time together, or supply a valid start time (HH:MM, on the hour)'),
+        { code: 'INVALID_APPOINTMENT_WINDOW' },
+      );
+    }
+    return { clearBoth: true };
+  }
+  return {
+    clearBoth: false,
+    windowStart: hasStart ? src.windowStart : undefined,
+    windowEnd: hasEnd ? src.windowEnd : undefined,
+  };
+}
+
 function dateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -4958,7 +4986,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (updates.window_start && !updates.window_end) {
                 const derivedEnd = deriveWindowEnd(
                   updates.window_start,
-                  windowDurationMinutes(svc.window_start, svc.window_end),
+                  windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
                 );
                 if (!derivedEnd) {
                   throw Object.assign(
@@ -4995,7 +5023,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const normalizedWindow = assertAdminAppointmentWindow({
                   windowStart: effStart,
                   windowEnd: updates.window_end || null,
-                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end),
+                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
                 });
                 updates.window_start = normalizedWindow.window_start;
                 updates.window_end = normalizedWindow.window_end;
@@ -5625,8 +5653,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // hit the PG DATE cast downstream (codex P1).
       updates.scheduled_date = movedTo;
     }
-    if (windowStart !== undefined) updates.window_start = windowStart || null;
-    if (windowEnd !== undefined) updates.window_end = windowEnd || null;
+    // Window intake by explicit PRESENCE (not truthiness): a null/'' bound
+    // is a clear, and a clear must take BOTH bounds — `{ windowStart: null }`
+    // used to persist window_start NULL beside a kept end, an end-only row
+    // invisible to every occupancy predicate. A partial clear is refused
+    // (422) and never persists.
+    const windowIntake = windowIntakeFromBody(req.body);
+    if (windowIntake.clearBoth) {
+      updates.window_start = null;
+      updates.window_end = null;
+    } else {
+      if (windowIntake.windowStart !== undefined) updates.window_start = windowIntake.windowStart;
+      if (windowIntake.windowEnd !== undefined) updates.window_end = windowIntake.windowEnd;
+    }
     // Shared admin window rules (scheduling/window-rules.js) whenever EITHER
     // endpoint is supplied, on the EFFECTIVE pair (supplied-or-stored start,
     // supplied-or-stored end): on-the-hour, >= 08:00, end > start, end <=
@@ -5647,7 +5686,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let preReadWindowRow = null;
     if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('scheduled_date', 'window_start', 'window_end');
+        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
       preReadWindowRow = currentRow;
       if (updates.window_start || updates.window_end) {
@@ -5661,11 +5700,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const normalizedWindow = assertAdminAppointmentWindow({
           windowStart: effectiveStart,
           windowEnd: updates.window_end || null,
-          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end),
+          // No valid stored span → the row's estimated duration (same
+          // precedence as occupancy / dispatch), never a flat 60.
+          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
         });
         updates.window_start = normalizedWindow.window_start;
         updates.window_end = normalizedWindow.window_end;
-      } else if (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end)) {
+      } else if (!windowIntake.clearBoth
+        && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))) {
         assertAdminAppointmentWindow({
           windowStart: normalizeHHMM(currentRow.window_start),
           windowEnd: normalizeHHMM(currentRow.window_end),
@@ -14015,6 +14057,7 @@ function flushEstimateSlotCaches() {
 
 router._test = {
   adminMoveProbeExcludeIds,
+  windowIntakeFromBody,
   noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,

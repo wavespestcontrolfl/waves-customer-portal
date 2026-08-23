@@ -876,3 +876,17 @@ test('a DATE-ONLY move of a windowless row (both null) still moves', async () =>
   expect(body.updated).toEqual(['svc-1']);
   expect(updateChain.update.mock.calls[0][0]).toMatchObject({ scheduled_date: '2099-01-15' });
 });
+
+test('a start-only move on an end-less row uses estimated_duration_minutes (120) for the derived end, not a flat 60', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 120 }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15', windowStart: '10:00' } });
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '12:00' });
+});
