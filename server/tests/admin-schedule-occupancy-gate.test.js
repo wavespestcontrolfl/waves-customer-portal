@@ -158,7 +158,14 @@ describe('PUT /:id/update-details — date/window move', () => {
     }));
   });
 
-  test('window-only edit keys rung 1 off the row\'s own date and derives the end from the duration', async () => {
+  test('window-only edit keys rung 1 off the row\'s own date, derives the end from the duration, and persists that end', async () => {
+    const updateCalls = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC } : undefined);
+      if (table === 'scheduled_services') c.update = jest.fn(async (data) => { updateCalls.push(data); return 1; });
+      return c;
+    });
+
     await put('svc-1', { windowStart: '13:00' });
 
     expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, '2099-07-01');
@@ -166,6 +173,22 @@ describe('PUT /:id/update-details — date/window move', () => {
       date: '2099-07-01',
       windowStart: '13:00',
       windowEnd: '14:00',
+      excludeServiceIds: ['svc-1'],
+    }));
+    // The probed block is what gets stored — never 13:00 with the stale 10:00 end.
+    const rowUpdate = updateCalls.find((d) => d && d.window_start === '13:00');
+    expect(rowUpdate).toBeTruthy();
+    expect(rowUpdate.window_end).toBe('14:00');
+  });
+
+  test('a duration-only edit is an occupancy change — locks and probes', async () => {
+    await put('svc-1', { estimatedDuration: 120 });
+
+    expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, '2099-07-01');
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      date: '2099-07-01',
+      windowStart: '09:00',
+      windowEnd: '10:00',
       excludeServiceIds: ['svc-1'],
     }));
   });

@@ -5607,9 +5607,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // provisional — the locked read below re-checks the key and aborts
       // the edit if the row's date moved in between (the row-lock rule:
       // never take a second date key mid-txn).
+      // Duration counts as a window edit: the shared predicate derives the
+      // occupied block from estimated_duration_minutes when window_end is
+      // NULL, so a longer duration can widen occupancy too.
       const occupancyWindowTouched = updates.scheduled_date !== undefined
         || updates.window_start !== undefined
-        || updates.window_end !== undefined;
+        || updates.window_end !== undefined
+        || updates.estimated_duration_minutes !== undefined;
       const occupancyDateKey = updates.scheduled_date !== undefined
         ? dateOnly(updates.scheduled_date)
         : dateOnly(commsPeek?.scheduled_date);
@@ -5827,6 +5831,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
               const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
               occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+              // Persist the block that was probed: a start-only edit used
+              // to keep the OLD end (09:00-10:00 moved to 13:00 stored
+              // 13:00-10:00), which every later overlap query read as a
+              // non-null end and the visit went invisible to occupancy.
+              if (updates.window_start !== undefined && updates.window_end === undefined) {
+                updates.window_end = occEnd;
+              }
             }
             if (occDate && occStart && occEnd) {
               const adminMoveClash = await findConflictingVisits({
