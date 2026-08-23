@@ -660,14 +660,14 @@ async function sendCampaign(sendId, opts = {}) {
 
       // Eligibility can change between recipient selection and dispatch
       // (customer archived with no live twin, unsubscribe). Re-run the SAME
-      // selection predicate (status='active' + excludeArchivedCustomers) for
+      // selection predicate (status='active' + global suppression + excludeArchivedCustomers) for
       // this chunk immediately before the SendGrid call — one query per
       // chunk — and terminally skip anyone no longer eligible: the delivery
       // row becomes 'skipped' (not in RETRYABLE_DELIVERY_STATUSES, so resume
       // never re-queues it) and recipient_count reflects the kept set.
-      const stillEligible = new Set((await excludeArchivedCustomers(
+      const stillEligible = new Set((await excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ).select('id')).map((r) => r.id));
+      ).select('id'))).map((r) => r.id));
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
         const skipQuery = db('newsletter_send_deliveries').where({ send_id: send.id });
