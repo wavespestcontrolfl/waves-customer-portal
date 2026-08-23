@@ -208,7 +208,8 @@ class PricingIntelligence {
   // ─────────────────────────────────────────────
 
   async recalculateAllLTV() {
-    const customers = await db('customers').where('active', true).select('id');
+    // Archived customers keep active=true — scope on deleted_at like the other bulk scorers.
+    const customers = await db('customers').where('active', true).whereNull('deleted_at').select('id');
     let processed = 0;
     let errors = 0;
 
