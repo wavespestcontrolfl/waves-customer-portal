@@ -302,6 +302,78 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
+  const phoneMatchKnex = (calls, { refuse = false } = {}) => {
+    const base = makeResolver({ preLead: baseLead({ phone: '5551234567' }), lockedLead: { customer_id: null, converted_at: null } });
+    const knex = makeKnex((table, state) => {
+      if (table === 'customers' && state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) {
+        return { id: 'cust-legacy', account_id: null, first_name: 'Legacy', last_name: 'Row', phone: '5551234567', is_primary_profile: true };
+      }
+      return base(table, state);
+    }, calls);
+    knex.raw = jest.fn(async (sql, bindings) => {
+      calls.push({ table: null, op: 'raw', args: [sql, bindings], ops: [] });
+      return { rows: [{ locked: !(refuse && /pg_try_advisory/.test(sql)) }] };
+    });
+    return knex;
+  };
+
+  it('phone-match attach: try-lock customer-comms:<matched id> AFTER the lead FOR UPDATE and BEFORE the customers update', async () => {
+    const calls = [];
+    install(phoneMatchKnex(calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl)).status).toBe(200);
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      const tryIdx = calls.findIndex((c) => c.op === 'raw' && /pg_try_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-legacy');
+      const custUpdateIdx = calls.findIndex((c) => c.table === 'customers' && c.op === 'update');
+      expect(tryIdx).toBeGreaterThan(forUpdateIdx);
+      expect(custUpdateIdx).toBeGreaterThan(tryIdx);
+      // No blocking comms lock on that customer anywhere (lead row already held).
+      expect(calls.some((c) => c.op === 'raw' && /SELECT pg_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-legacy')).toBe(false);
+    });
+  });
+
+  it('phone-match attach: try-lock refused → 409 CUSTOMER_BUSY, zero customer updates/inserts', async () => {
+    const calls = [];
+    install(phoneMatchKnex(calls, { refuse: true }));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CUSTOMER_BUSY');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('email-confirmed attach: try-lock customer-comms:<matched id> after lead lock, before customers update', async () => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { attachToAccountId: 'acct-existing' })).status).toBe(200);
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      const tryIdx = calls.findIndex((c) => c.op === 'raw' && /pg_try_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-existing');
+      expect(tryIdx).toBeGreaterThan(forUpdateIdx);
+      const firstWrite = calls.findIndex((c) => c.op === 'insert' || c.op === 'update');
+      expect(firstWrite).toBeGreaterThan(tryIdx);
+    });
+  });
+
+  it('email-confirmed attach: try-lock refused → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+    const calls = [];
+    const knex = emailKnexRoute(calls);
+    knex.raw = jest.fn(async (sql, bindings) => {
+      calls.push({ table: null, op: 'raw', args: [sql, bindings], ops: [] });
+      return { rows: [{ locked: !/pg_try_advisory/.test(sql) }] };
+    });
+    install(knex);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.error).toMatch(/being updated/i);
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
   it('attachToAccountId A but lead phone now matches a customer on another account → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
     const calls = [];
     const base = makeResolver({ preLead: baseLead({ phone: '5551234567' }), lockedLead: { customer_id: null, converted_at: null }, emailMatch: existingEmailCustomer });

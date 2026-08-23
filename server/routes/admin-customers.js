@@ -1518,6 +1518,17 @@ function maskEmail(email) {
   return `${local.slice(0, 1)}***@${domain}`;
 }
 
+// Attach-path fence (utils/customer-comms-lock.js contract): callers such as
+// the lead convert already hold a lead FOR UPDATE when they reach here, and
+// attachMatchedCustomerToAccount UPDATES the matched customer row — the
+// merge-undo takes comms-lock/customer-row FIRST then repoints the lead, so a
+// blocking lock here could deadlock. Use the NON-BLOCKING variant and fail
+// closed when refused (undo in flight on that exact customer).
+async function fenceMatchedCustomer(trx, customer) {
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+  return tryLockCustomerComms(trx, customer.id);
+}
+
 async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null }) {
   const digits = phoneLast10(phone);
   const lookupByPhone = () => (digits
@@ -1533,6 +1544,14 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
   if (!confirmEmailAccountId) {
     const byCustomerPhone = await lookupByPhone();
     if (byCustomerPhone) {
+      if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) {
+        const busy = new Error('That customer record is being updated — retry in a moment.');
+        busy.statusCode = 409;
+        busy.status = 409;
+        busy.isOperational = true;
+        busy.code = 'CUSTOMER_BUSY';
+        throw busy;
+      }
       const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
       return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
     }
@@ -1608,6 +1627,9 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
           };
         }
       }
+      if (!(await fenceMatchedCustomer(trx, match))) {
+        return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, busy: true, match: null };
+      }
       const accountId = await attachMatchedCustomerToAccount(trx, match);
       return { accountId, existingCustomer: { ...match, account_id: accountId }, matchType: 'email' };
     }
@@ -1622,7 +1644,9 @@ async function ensureCustomerAccount(trx, input) {
   if (existing?.requiresConfirmation) {
     // Fail closed: never silently create OR attach on an unconfirmed email
     // match — the caller must surface the choice to the admin.
-    const err = new Error(existing.phoneConflict
+    const err = new Error(existing.busy
+      ? 'That customer record is being updated — re-open the lead and try again in a moment.'
+      : existing.phoneConflict
       ? "This lead's phone now matches a customer in a DIFFERENT account than the one you confirmed — re-open the lead and try again."
       : existing.matchChanged
         ? "The customer this lead's email matched has changed since you confirmed — re-open the lead and try again."
