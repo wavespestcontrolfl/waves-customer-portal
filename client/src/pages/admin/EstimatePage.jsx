@@ -1103,6 +1103,11 @@ function EstimateToolView() {
   // the address the form holds NOW before anything applies.
   const formAddressRef = useRef("");
   const [savedId, setSavedId] = useState(null);
+  // Inputs the saved row was written from. Any form/contact/estimate change
+  // after a save (new object identity — every setter produces one) means the
+  // stored row is stale, so SMS/Email-only must re-save in place before
+  // sending instead of dispatching the OLD row to the OLD contact.
+  const savedSnapshotRef = useRef(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -2334,8 +2339,10 @@ function EstimateToolView() {
         manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
-      const r = await fetch("/api/admin/estimates", {
-        method: "POST",
+      // Re-save revises the existing row in place (same PUT contract the V2
+      // builder uses) — a second POST would create a duplicate estimate.
+      const r = await fetch(savedId ? `/api/admin/estimates/${savedId}` : "/api/admin/estimates", {
+        method: savedId ? "PUT" : "POST",
         headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
@@ -2355,6 +2362,7 @@ function EstimateToolView() {
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
+      savedSnapshotRef.current = { form, estimate: E, customerSearch, satelliteUrl: satelliteData?.imageUrl || null };
       return id;
     } catch (e) {
       alert(e.message);
@@ -2544,7 +2552,13 @@ function EstimateToolView() {
         return;
       }
     }
-    const id = savedId || (await doSave());
+    const snap = savedSnapshotRef.current;
+    const savedIsCurrent = !!savedId && !!snap
+      && snap.form === form
+      && snap.estimate === estimate
+      && snap.customerSearch === customerSearch
+      && snap.satelliteUrl === (satelliteData?.imageUrl || null);
+    const id = savedIsCurrent ? savedId : await doSave();
     if (id) await doSend(id, method);
   }
 

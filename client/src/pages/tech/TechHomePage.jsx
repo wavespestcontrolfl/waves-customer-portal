@@ -77,6 +77,27 @@ const DARK = {
   muted: '#94a3b8',
 };
 
+// Day-view stops come from GET /api/admin/schedule, whose payload is
+// camelCase and carries the arrival window as windowStart/windowEnd/
+// windowDisplay — there is no `time`/`scheduled_time` field, so the old
+// reads rendered 'Pending' (or nothing) for every booked stop. Prefer the
+// server's display string; fall back to a formatted windowStart.
+const fmtWindowClock = (v) => {
+  const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const h12 = h % 12 || 12;
+  return `${h12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+};
+const serviceWindowLabel = (service) => {
+  if (!service) return null;
+  if (service.windowDisplay) return service.windowDisplay;
+  const start = fmtWindowClock(service.windowStart);
+  if (!start) return null;
+  const end = fmtWindowClock(service.windowEnd);
+  return end ? `${start}–${end}` : start;
+};
+
 const API = import.meta.env.VITE_API_URL || '';
 
 // Pest control services get the lightweight ServiceRecapModal instead of
@@ -558,7 +579,7 @@ export default function TechHomePage() {
               fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
               background: '#0ea5e920', color: DARK.teal,
             }}>
-              {nextStop.time || nextStop.scheduled_time || 'Pending'}
+              {serviceWindowLabel(nextStop) || 'Pending'}
             </span>
           </div>
           {/* Property alerts — the server compiles gate codes, pets, chemical
@@ -901,7 +922,7 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
                   </div>
                   <div style={{ fontSize: 12, color: DARK.muted, marginTop: 3 }}>
                     {status.replace(/_/g, ' ')}
-                    {service.scheduled_time ? ` · ${service.scheduled_time}` : ''}
+                    {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
                   </div>
                 </button>
               );
@@ -1101,7 +1122,7 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
         </p>
         <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
           {status.replace(/_/g, ' ')}
-          {service.scheduled_time && <span style={{ color: DARK.muted }}> · {service.scheduled_time}</span>}
+          {serviceWindowLabel(service) && <span style={{ color: DARK.muted }}> · {serviceWindowLabel(service)}</span>}
         </p>
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
