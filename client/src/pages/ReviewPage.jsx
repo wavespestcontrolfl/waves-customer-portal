@@ -18,12 +18,6 @@ export default function ReviewPage() {
   const [phase, setPhase] = useState('rate'); // rate, submitting, thankyou, feedback, redirecting
   const [feedbackText, setFeedbackText] = useState('');
   const [submittingFeedback, setSubmittingFeedback] = useState(false);
-  // Plain inline error for a failed POST; the rating buttons / Send button
-  // stay on screen as the retry.
-  const [submitError, setSubmitError] = useState(null);
-  // "Something wasn't right?" opens the feedback form with no rating picked.
-  // The server requires a 1-10 rating and records it permanently, so the form
-  // asks for one rather than inventing a score on the customer's behalf.
 
   useEffect(() => {
     fetch(`${API_BASE}/review/${token}`)
@@ -34,7 +28,6 @@ export default function ReviewPage() {
 
   const handleRate = async (rating) => {
     setSelectedRating(rating);
-    setSubmitError(null);
     setPhase('submitting');
 
     try {
@@ -43,8 +36,6 @@ export default function ReviewPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating }),
       });
-      if (res.status === 409) { setPhase('thankyou'); return; } // already rated
-      if (!res.ok) throw new Error('save_failed');
       const result = await res.json();
 
       if (result.action === 'review' && result.googleReviewUrl) {
@@ -58,37 +49,20 @@ export default function ReviewPage() {
         setPhase('feedback');
       }
     } catch {
-      setSubmitError("We couldn't save your rating. Please try again.");
       setPhase('rate'); // retry
     }
   };
 
   const handleFeedback = async () => {
-    if (selectedRating == null) return;
     setSubmittingFeedback(true);
-    setSubmitError(null);
     try {
-      const res = await fetch(`${API_BASE}/review/${token}`, {
+      await fetch(`${API_BASE}/review/${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating: selectedRating, feedbackText }),
       });
-      // 409 = rating already recorded (handleRate's POST landed); the text
-      // can't be attached again, so thank them rather than loop.
-      if (!res.ok && res.status !== 409) throw new Error('save_failed');
-      // The server treats 7+ as a promoter and records the Google redirect,
-      // so honor its action here exactly like handleRate does — a 7+ picked
-      // inside the feedback form must actually get the redirect it recorded.
-      const result = res.ok ? await res.json().catch(() => ({})) : {};
-      if (result.action === 'review' && result.googleReviewUrl) {
-        setPhase('redirecting');
-        setTimeout(() => { window.location.href = result.googleReviewUrl; }, 2000);
-      } else {
-        setPhase('thankyou');
-      }
-    } catch {
-      setSubmitError("We couldn't send your feedback. Please try again.");
-    }
+    } catch { /* already rated, that's fine */ }
+    setPhase('thankyou');
     setSubmittingFeedback(false);
   };
 
@@ -211,9 +185,6 @@ export default function ReviewPage() {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
-            {submitError && (
-              <div role="alert" style={{ fontSize: 14, color: COLORS.red, marginTop: 14 }}>{submitError}</div>
-            )}
           </div>
         )}
 
@@ -264,38 +235,11 @@ export default function ReviewPage() {
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
-            {selectedRating == null && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 8 }}>
-                  Tap a number first so we know how the visit went.
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, 1fr)', gap: 4 }}>
-                  {[1,2,3,4,5,6,7,8,9,10].map(n => (
-                    <button key={n} type="button"
-                      aria-label={`Rate ${n}`}
-                      onClick={() => setSelectedRating(n)}
-                      style={{
-                        padding: '8px 0', borderRadius: 8, border: `1px solid ${COLORS.grayLight}`,
-                        background: COLORS.white, color: COLORS.textBody,
-                        fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, cursor: 'pointer',
-                      }}>
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {selectedRating != null && (
-              <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 12 }}>Your rating: {selectedRating}/10</div>
-            )}
-            {submitError && (
-              <div role="alert" style={{ fontSize: 14, color: COLORS.red, marginTop: 12 }}>{submitError}</div>
-            )}
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
               <Button
                 variant="primary"
                 onClick={handleFeedback}
-                disabled={submittingFeedback || selectedRating == null}
+                disabled={submittingFeedback}
                 data-glass-accent=""
                 style={{ flex: 1, cursor: submittingFeedback ? 'wait' : 'pointer' }}
               >
