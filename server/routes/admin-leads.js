@@ -3,8 +3,11 @@ const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { assertAdminAppointmentWindow, assertNoSlotOverlap } = require('../services/scheduling/window-rules');
+const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
+// Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
+// overlap guard for this route lives in the trx below (occupancy lock rung 1
+// + findConflictingVisits before insert) — one mechanism, see #3453.
+const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1274,6 +1277,26 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
 router.post('/:id/schedule-appointment', async (req, res, next) => {
   try {
     const { date, time, serviceType, serviceId, technicianId, notes, durationMinutes } = req.body;
+    // Explicit repeat booking on an already-converted lead (client sends it
+    // when the card already shows a linked customer). Without it, any convert
+    // of a converted lead is a double-submit/retry and is rejected.
+    const rebook = req.body.rebook === true;
+    // Email-match account selection (admin-confirmed, never implicit):
+    //  - attachToAccountId: attach ONLY if it equals the account the lead's
+    //    email resolves to under the lock (re-resolved server-side);
+    //  - createSeparateAccount: explicit opt-out of email matching.
+    // Account selection is ADMIN-only (same predicate as admin-auth's
+    // requireAdmin: req.techRole === 'admin'). A technician's
+    // attachToAccountId / createSeparateAccount are ignored, and an email
+    // match surfaces as EMAIL_MATCH_ADMIN_REQUIRED with no match details —
+    // the tech-scoped directory never shows other customers' account data.
+    const isAdmin = req.techRole === 'admin';
+    const attachToAccountId = isAdmin && typeof req.body.attachToAccountId === 'string' && req.body.attachToAccountId.trim()
+      ? req.body.attachToAccountId.trim() : null;
+    const createSeparateAccount = isAdmin && req.body.createSeparateAccount === true;
+    // Third confirm: create the separate customer even though a live phone
+    // match exists (admin-only, only meaningful with createSeparateAccount).
+    const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
@@ -1330,15 +1353,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (!existingCustomer) customerId = null;
     }
 
-    const needsCustomer = !customerId;
-    const fallbackName = needsCustomer
-      ? (lead.first_name && lead.first_name.trim()) ||
-        (lead.email ? String(lead.email).split('@')[0] : '') ||
-        'New Lead'
-      : null;
-    const code = needsCustomer
-      ? 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('')
-      : null;
+    // Provisional — re-derived from the row-locked re-read inside the
+    // transaction below (a concurrent convert can have created the customer
+    // between this read and the lock).
+    let needsCustomer = !customerId;
+    const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     // Workflow columns vary by environment — probe before the transaction so the
     // insert only sets columns the live schema actually has.
@@ -1350,19 +1369,74 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
-      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT): the date-wide
-      // occupancy lock + tech-blind overlap probe are the FIRST statements of
-      // this trx — before the customer-comms key (rung 6) and every row lock
-      // (lead FOR UPDATE, customers insert/update, visit insert). Gated
-      // (GATE_ADMIN_SLOT_OVERLAP_GUARD); a no-op while the gate is off.
-      if (windowStart && windowEnd) {
-        await assertNoSlotOverlap({ trx, date, windowStart, windowEnd });
+      // ---- SLOT-OVERLAP GUARD, part 1: date lock. Rung 1 of occupancy.js's ORDERING CONTRACT: the
+      // date-wide occupancy lock is the FIRST statement of the transaction —
+      // coarsest first, before the comms lock and the lead FOR UPDATE.
+      const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+      const occupancyDate = String(date).split('T')[0];
+      await acquireOccupancyLock(trx, occupancyDate);
+      // ---- end slot-overlap guard part 1
+
+      // LOCK ORDER (utils/customer-comms-lock.js contract #1): when the
+      // customer is already known, take the comms advisory lock FIRST — the
+      // merge-undo holds it as its first lock and later repoints the lead, so
+      // a lead row lock taken before it could deadlock.
+      if (customerId) await lockCustomerComms(trx, customerId);
+
+      // Row-lock the lead so two concurrent converts (double-submit / retry —
+      // the client guard is per-tab) serialize here. The second one sees the
+      // first's conversion under the lock and stops instead of inserting a
+      // second customer + visit that the lead can never point at.
+      const lockedLead = await trx('leads')
+        .where({ id: lead.id })
+        .whereNull('deleted_at')
+        .forUpdate()
+        // Every contact field the conversion uses comes from THIS locked row
+        // (matching inputs, customer payload, estimate link) — never from the
+        // unlocked pre-read, which can be stale by the time we hold the lock.
+        .first('id', 'customer_id', 'converted_at', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
+      if (!lockedLead) {
+        const gone = new Error('Lead was deleted while booking — appointment not created');
+        gone.status = 409;
+        throw gone;
       }
+      const fallbackName =
+        (lockedLead.first_name && lockedLead.first_name.trim()) ||
+        (lockedLead.email ? String(lockedLead.email).split('@')[0] : '') ||
+        'New Lead';
+      const alreadyConverted = (message) => {
+        const dup = new Error(message);
+        dup.statusCode = 409;
+        dup.status = 409;
+        dup.isOperational = true;
+        dup.code = 'LEAD_ALREADY_CONVERTED';
+        dup.customer_id = lockedLead.customer_id || null;
+        return dup;
+      };
+      // Any conversion of an already-converted lead is a retry unless the
+      // client explicitly asked for a repeat booking (a retry that BEGINS
+      // after the first commit sees converted_at on its pre-read too).
+      if (lockedLead.converted_at && !rebook) {
+        throw alreadyConverted('This lead was already converted — reload the lead (or book a repeat visit from the linked customer).');
+      }
+      if (!customerId && lockedLead.customer_id) {
+        // Customer discovered only under the lead lock (rebook on a lead
+        // linked since the pre-read). The blocking comms lock would be out
+        // of contract order here (lead row already held) — use the
+        // non-blocking variant and fail CLOSED if an undo holds it.
+        const fenced = await tryLockCustomerComms(trx, lockedLead.customer_id);
+        if (!fenced) throw alreadyConverted("This lead's customer is being merged/undone right now — reload the lead and try again.");
+        existingCustomer = await trx('customers').where({ id: lockedLead.customer_id }).whereNull('deleted_at').first();
+        if (existingCustomer) customerId = existingCustomer.id;
+      }
+      needsCustomer = !customerId;
+
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the appointment
       // insert below resolves comms recipients LIVE from the customer row —
-      // serialize against a concurrent merge-undo BEFORE this trx's
-      // customers-row update and the insert. A customer CREATED inside this
-      // trx cannot be an undo's winner, so only the reuse path locks.
+      // the comms lock for a reused customer is already held (taken above,
+      // before the lead row; re-acquisition is a no-op). A customer CREATED
+      // inside this trx cannot be an undo's winner, so only the reuse path
+      // re-resolves.
       if (!needsCustomer) {
         await lockCustomerComms(trx, customerId);
         // Re-resolve UNDER the lock (r28): a merge-undo that held this key
@@ -1382,22 +1456,37 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,
-          lastName: lead.last_name || '',
-          phone: lead.phone || '',
-          email: lead.email || null,
+          lastName: lockedLead.last_name || '',
+          phone: lockedLead.phone || '',
+          email: lockedLead.email || null,
+          // createSeparateAccount bypasses BOTH phone and email matching
+          // (fail-closed on a live phone match → PHONE_MATCH_CONFIRM unless
+          // ignorePhoneMatch); admin-only, see parsing above.
+          forceNewAccount: createSeparateAccount,
+          ignorePhoneMatch,
+          // Email-match opt-in: a lead whose email belongs to a live customer
+          // (different/blank phone) attaches as an additional property ONLY
+          // after the admin confirmed that exact account (409
+          // EMAIL_MATCH_CONFIRM otherwise — thrown before any insert, so the
+          // transaction rolls back with nothing written).
+          matchEmail: !createSeparateAccount,
+          confirmEmailAccountId: attachToAccountId,
+          // Comms fence + re-resolve on attach — valid here ONLY because this
+          // call always runs inside `trx` (see findAccountByContact).
+          fenceAttach: true,
         });
         const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
           is_primary_profile: !account.existingCustomer,
           profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
           first_name: fallbackName,
-          last_name: lead.last_name || '',
-          phone: lead.phone || '',
-          email: lead.email || null,
-          address_line1: lead.address || '',
-          city: lead.city || '',
+          last_name: lockedLead.last_name || '',
+          phone: lockedLead.phone || '',
+          email: lockedLead.email || null,
+          address_line1: lockedLead.address || '',
+          city: lockedLead.city || '',
           state: 'FL',
-          zip: lead.zip || '',
+          zip: lockedLead.zip || '',
           member_since: etDateString(),
           referral_code: code,
           lead_source: 'lead_pipeline',
@@ -1439,6 +1528,56 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
 
       // Create the scheduled service. Only set workflow columns the schema has.
+      // Rebook dedupe (under the comms lock + lead FOR UPDATE already held):
+      // `rebook: true` bypasses the converted-lead rejection, so a double
+      // submit / network retry of a repeat booking would insert the same
+      // visit twice (and fire duplicate booking comms). No customer-scoped
+      // same-slot predicate exists in services/scheduling (occupancy.js is
+      // tech/day-scoped), so this is a tight inline lookup using occupancy's
+      // own active-visit status exclusion — no new columns.
+      if (rebook) {
+        const { DEFAULT_EXCLUDE_STATUSES } = require('../services/scheduling/occupancy');
+        const sameVisit = await trx('scheduled_services')
+          .where({ customer_id: customerId, scheduled_date: date, window_start: windowStart, service_type: svcType })
+          .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+          .first('id');
+        if (sameVisit) {
+          const dup = new Error('This customer already has that visit booked.');
+          dup.statusCode = 409;
+          dup.status = 409;
+          dup.isOperational = true;
+          dup.code = 'DUPLICATE_VISIT';
+          dup.scheduled_service_id = sameVisit.id;
+          throw dup;
+        }
+      }
+
+      // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
+      // booking.js createSelfBooking, immediately before the insert — after
+      // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
+      // merge note). Runs for first conversions and rebooks alike.
+      {
+        const clash = await findConflictingVisits({ db: trx, date: occupancyDate, windowStart, windowEnd });
+        if (clash.length) {
+          const err = new Error('That time slot overlaps another visit on the schedule');
+          err.statusCode = 409;
+          err.status = 409;
+          err.isOperational = true;
+          err.code = 'SLOT_CONFLICT';
+          err.conflicts = clash.map((row) => ({
+            id: row.id,
+            scheduled_date: row.scheduled_date,
+            window_start: row.window_start,
+            window_end: row.window_end,
+            status: row.status,
+            technician_id: row.technician_id || null,
+            service_type: row.service_type || null,
+          }));
+          throw err;
+        }
+      }
+      // ---- end slot-overlap guard part 2
+
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1467,34 +1606,41 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // same transaction so the conversion can't commit without the appointment).
       // Re-gated on deleted_at inside the transaction: the pre-transaction read
       // can race a concurrent soft delete, and a deleted lead must not book —
-      // 0 rows updated rolls the whole booking back.
-      const converted = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
+      // 0 rows updated rolls the whole booking back. Also gated on converted_at
+      // being unchanged since the locked read (belt-and-braces for the race
+      // guard above): a first-time conversion must still be unconverted.
+      // A rebook on an already-converted lead is NOT a conversion: keep
+      // converted_at (lead-attribution.js uses it as the revenue cutoff /
+      // earliest-source selector — re-stamping it would drop earlier
+      // revenue) and skip the conversion-only activity below.
+      const isConversion = !lockedLead.converted_at;
+      let convertQuery = trx('leads').where('id', req.params.id).whereNull('deleted_at');
+      if (isConversion) convertQuery = convertQuery.whereNull('converted_at');
+      const converted = await convertQuery.update({
         status: 'won',
         customer_id: customerId,
-        converted_at: new Date(),
+        ...(isConversion ? { converted_at: new Date() } : {}),
         is_qualified: true,
         updated_at: new Date(),
       });
-      if (!converted) {
-        const gone = new Error('Lead was deleted while booking — appointment not created');
-        gone.status = 409;
-        throw gone;
-      }
+      if (!converted) throw alreadyConverted('Lead was deleted or already converted while booking — appointment not created');
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.
       try {
-        await linkLeadEstimatesToCustomer({ database: trx, lead, customerId });
+        await linkLeadEstimatesToCustomer({ database: trx, lead: { ...lead, ...lockedLead }, customerId });
       } catch (e) {
         logger.warn(`[leads] estimate→customer backfill failed for lead ${req.params.id}: ${e.message}`);
       }
-      await trx('lead_activities').insert({
-        lead_id: req.params.id,
-        activity_type: 'converted',
-        description: `Converted to customer (${customerId})`,
-        performed_by: 'system',
-        metadata: JSON.stringify({ customerId }),
-      });
+      if (isConversion) {
+        await trx('lead_activities').insert({
+          lead_id: req.params.id,
+          activity_type: 'converted',
+          description: `Converted to customer (${customerId})`,
+          performed_by: 'system',
+          metadata: JSON.stringify({ customerId }),
+        });
+      }
       await trx('lead_activities').insert({
         lead_id: req.params.id,
         activity_type: 'appointment_scheduled',
@@ -1545,7 +1691,29 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'EMAIL_MATCH_CONFIRM' || err.code === 'PHONE_MATCH_CONFIRM' || err.code === 'EMAIL_MATCH_AMBIGUOUS') {
+      if (req.techRole !== 'admin') {
+        return res.status(409).json({ error: "An existing customer matches this lead's email — an admin must book it.", code: 'EMAIL_MATCH_ADMIN_REQUIRED' });
+      }
+      if (err.code === 'EMAIL_MATCH_AMBIGUOUS') {
+        return res.status(409).json({ error: err.message, code: err.code, candidates: err.candidates || [] });
+      }
+      return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
+    if (err.code === 'SLOT_CONFLICT') {
+      return res.status(409).json({ error: err.message, code: err.code, conflicts: err.conflicts || [] });
+    }
+    if (err.code === 'DUPLICATE_VISIT') {
+      return res.status(409).json({ error: err.message, code: err.code, scheduled_service_id: err.scheduled_service_id || null });
+    }
+    if (err.code === 'LEAD_ALREADY_CONVERTED') {
+      // Surface the winner's customer so the client can land on it instead of
+      // retrying (the generic operational handler drops extra fields).
+      return res.status(409).json({ error: err.message, code: err.code, customer_id: err.customer_id || null });
+    }
+    next(err);
+  }
 });
 
 // =========================================================================

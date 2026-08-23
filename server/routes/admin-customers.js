@@ -1531,18 +1531,239 @@ async function attachMatchedCustomerToAccount(trx, customer) {
   return accountId;
 }
 
-async function findAccountByContact(trx, { phone }) {
+// Phone-first account match (last-10 digits). `matchEmail` (default OFF —
+// every existing caller stays phone-only) additionally matches a normalized
+// email against live customers when the phone finds nothing; the lead→customer
+// conversion opts in so a lead whose email belongs to an existing account
+// attaches as an additional property instead of splitting history/autopay
+// across a second primary profile. Same return shape either way.
+// Email is NOT proof of account ownership (an attacker can submit a lead with
+// their phone + a victim's email). An email match therefore never attaches on
+// its own: it is returned with `requiresConfirmation: true` and NO write,
+// and only attaches when the caller passes `confirmEmailAccountId` equal to
+// the account the email resolves to RIGHT NOW (admin-confirmed selection).
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***-***-${digits.slice(-4)}` : '***';
+}
+
+function maskEmail(email) {
+  const [local = '', domain = ''] = String(email || '').split('@');
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
+// Attach-path fence (utils/customer-comms-lock.js contract): callers such as
+// the lead convert already hold a lead FOR UPDATE when they reach here, and
+// attachMatchedCustomerToAccount UPDATES the matched customer row — the
+// merge-undo takes comms-lock/customer-row FIRST then repoints the lead, so a
+// blocking lock here could deadlock. Use the NON-BLOCKING variant and fail
+// closed when refused (undo in flight on that exact customer).
+//
+// `fenceAttach` (default false) turns the fence + re-resolve ON. Only the
+// lead-convert path (routes/admin-leads.js, always inside its transaction)
+// passes true. A transaction-scoped advisory lock taken via the ROOT knex
+// releases at statement end, so callers that pass `db` (booking.js,
+// lead-webhook.js, public-quote.js, twilio-webhook.js, ...) cannot be fenced
+// this way — for them the behavior is exactly pre-#3453 (no try-lock, no
+// re-resolve); that pre-existing contract gap is out of scope here.
+async function fenceMatchedCustomer(trx, customer) {
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+  return tryLockCustomerComms(trx, customer.id);
+}
+
+function assertFenceTransaction(trx) {
+  // Same trx-detection idiom as services/autopay-enrollment.js /
+  // service-photos.js (`isTransaction === true`). A root knex here is a
+  // programming error — fail closed before any read or write.
+  if (!trx || trx.isTransaction !== true) {
+    throw new Error('findAccountByContact: fenceAttach requires a knex transaction (got root knex) — the comms fence would not span the attach');
+  }
+}
+
+async function findAccountByContact(trx, {
+  phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false,
+  forceNewAccount = false, ignorePhoneMatch = false,
+}) {
+  if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
-  if (digits) {
-    const byCustomerPhone = await trx('customers')
+  const lookupByPhone = () => (digits
+    ? trx('customers')
       .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
       .whereNull('deleted_at')
       .orderBy('is_primary_profile', 'desc')
       .orderBy('created_at', 'asc')
-      .first();
+      .first()
+    : Promise.resolve(null));
+
+  // forceNewAccount (admin-only, lead-convert "create a SEPARATE customer"):
+  // bypass BOTH phone and email matching and create a fresh account — but
+  // fail closed on the phone side: a live phone match that exists right now
+  // is surfaced (PHONE_MATCH_CONFIRM, trimmed payload, no write) unless the
+  // admin also passed ignorePhoneMatch. Never a silent duplicate.
+  if (forceNewAccount) {
+    const byCustomerPhone = await lookupByPhone();
+    if (byCustomerPhone && !ignorePhoneMatch) {
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'phone',
+        requiresConfirmation: true,
+        phoneMatch: true,
+        match: {
+          accountId: String(byCustomerPhone.account_id || byCustomerPhone.id),
+          name: [byCustomerPhone.first_name, byCustomerPhone.last_name].filter(Boolean).join(' '),
+          phoneMasked: maskPhone(byCustomerPhone.phone),
+        },
+      };
+    }
+    return null;
+  }
+
+  // Unconfirmed path: phone-first precedence, unchanged.
+  if (!confirmEmailAccountId) {
+    const byCustomerPhone = await lookupByPhone();
     if (byCustomerPhone) {
-      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
-      return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
+      const busy = () => {
+        const err = new Error('That customer record is being updated — retry in a moment.');
+        err.statusCode = 409;
+        err.status = 409;
+        err.isOperational = true;
+        err.code = 'CUSTOMER_BUSY';
+        return err;
+      };
+      let fresh = byCustomerPhone;
+      if (fenceAttach) {
+        if (!(await fenceMatchedCustomer(trx, byCustomerPhone))) throw busy();
+        // resolve → lock → RE-RESOLVE (comms-lock contract): an undo that
+        // committed between the read and the fence leaves the try-lock holding
+        // a stale row. Re-run the same live lookup and require the identical
+        // row + account; anything else (archived, re-pointed, different row
+        // now wins) fails closed with zero writes.
+        fresh = await lookupByPhone();
+        if (!fresh || String(fresh.id) !== String(byCustomerPhone.id)
+          || String(fresh.account_id || '') !== String(byCustomerPhone.account_id || '')) {
+          throw busy();
+        }
+      }
+      const accountId = await attachMatchedCustomerToAccount(trx, fresh);
+      return { accountId, existingCustomer: { ...fresh, account_id: accountId }, matchType: 'phone' };
+    }
+  }
+
+  const normalizedEmail = matchEmail ? cleanEmail(email) : null;
+  if (confirmEmailAccountId && !(normalizedEmail && isEmailLike(normalizedEmail))) {
+    // Confirmed retry with no usable email: the admin's selection cannot be
+    // revalidated at all — never fall through to phone/creation.
+    return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
+  }
+  if (normalizedEmail && isEmailLike(normalizedEmail)) {
+    // Shared household/business emails are a supported shape (migration
+    // 20260417000010_allow_duplicate_customer_emails). Only reuse when EVERY
+    // live row with this email resolves to ONE account — if they span
+    // accounts we cannot know which household this is, so fail closed (no
+    // match → caller creates a fresh account) rather than attach to the
+    // wrong one. Unlinked rows resolve to their own id (attach semantics).
+    const resolveEmailAccountSet = async () => {
+      const rows = await trx('customers')
+        .whereRaw('LOWER(TRIM(COALESCE(email, \'\'))) = ?', [normalizedEmail])
+        .whereNull('deleted_at')
+        .orderBy('is_primary_profile', 'desc')
+        .orderBy('created_at', 'asc');
+      const keys = new Set((rows || []).map((row) => String(row.account_id || row.id)));
+      return { rows: rows || [], keys };
+    };
+    const { rows: byCustomerEmail, keys: accountKeys } = await resolveEmailAccountSet();
+    const keyOf = (row) => String(row.account_id || row.id);
+    const trimmed = (row) => ({
+      // Trimmed to what the confirm dialog shows — no customer id, label,
+      // or street address (this payload can reach a tech-scoped caller).
+      accountId: keyOf(row),
+      name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+      emailMasked: maskEmail(row.email),
+    });
+    const sameKeySet = (a, b) => a.size === b.size && [...a].every((k) => b.has(k));
+    const changedResult = (extra = {}) => ({
+      accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null, ...extra,
+    });
+
+    let match = null;
+    let resolvedAccountId = null;
+    if (confirmEmailAccountId) {
+      // The admin explicitly chose to ATTACH. The chosen account must be one
+      // the email resolves to RIGHT NOW (the unique match, or one of the
+      // ambiguous candidates); anything else — row deleted/edited, account
+      // no longer in the set — is a changed world. Never let an explicit
+      // attach silently become a fresh account.
+      const chosen = String(confirmEmailAccountId);
+      match = byCustomerEmail.find((row) => keyOf(row) === chosen) || null;
+      if (!match) return changedResult();
+      resolvedAccountId = chosen;
+    } else if (byCustomerEmail.length && accountKeys.size === 1) {
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'email',
+        requiresConfirmation: true,
+        match: trimmed(byCustomerEmail[0]),
+      };
+    } else if (byCustomerEmail.length) {
+      // Shared household/business emails are a supported shape (migration
+      // 20260417000010_allow_duplicate_customer_emails). Ambiguity is NOT
+      // "no match": surface one trimmed candidate per account (max 5) for
+      // an admin to pick from, or to create a separate customer explicitly.
+      const seen = new Set();
+      const candidates = [];
+      for (const row of byCustomerEmail) {
+        const k = keyOf(row);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        candidates.push(trimmed(row));
+        if (candidates.length >= 5) break;
+      }
+      return {
+        accountId: null,
+        existingCustomer: null,
+        matchType: 'email',
+        requiresConfirmation: true,
+        ambiguous: true,
+        match: null,
+        candidates,
+      };
+    }
+
+    if (match) {
+      // Confirmed retry: the admin chose the EMAIL-selected account. A
+      // phone match that now points at a DIFFERENT account (appeared
+      // between the first request and the confirmation) means the world
+      // changed under the admin — never attach to either; re-confirm.
+      const byCustomerPhone = await lookupByPhone();
+      if (byCustomerPhone && keyOf(byCustomerPhone) !== resolvedAccountId) {
+        return changedResult({ phoneConflict: true });
+      }
+      let freshMatch = match;
+      if (fenceAttach) {
+        if (!(await fenceMatchedCustomer(trx, match))) {
+          return changedResult({ busy: true });
+        }
+        // resolve → lock → RE-RESOLVE (comms-lock contract): re-run the whole
+        // live-email account-set resolution (and the phone-conflict check)
+        // under the fence. The account set must be IDENTICAL and the chosen
+        // account's winning row unchanged; otherwise the world moved between
+        // read and fence — reject with zero writes.
+        const again = await resolveEmailAccountSet();
+        freshMatch = again.rows.find((row) => keyOf(row) === resolvedAccountId) || null;
+        const changed = !freshMatch
+          || !sameKeySet(again.keys, accountKeys)
+          || String(freshMatch.id) !== String(match.id)
+          || String(freshMatch.account_id || '') !== String(match.account_id || '');
+        if (changed) return changedResult();
+        const phoneAgain = await lookupByPhone();
+        if (phoneAgain && keyOf(phoneAgain) !== resolvedAccountId) {
+          return changedResult({ phoneConflict: true });
+        }
+      }
+      const accountId = await attachMatchedCustomerToAccount(trx, freshMatch);
+      return { accountId, existingCustomer: { ...freshMatch, account_id: accountId }, matchType: 'email' };
     }
   }
 
@@ -1552,6 +1773,41 @@ async function findAccountByContact(trx, { phone }) {
 async function ensureCustomerAccount(trx, input) {
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
+  if (existing?.requiresConfirmation && existing.phoneMatch) {
+    const err = new Error('A customer with this phone already exists — confirm whether to create a separate customer anyway.');
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'PHONE_MATCH_CONFIRM';
+    err.match = existing.match;
+    throw err;
+  }
+  if (existing?.requiresConfirmation && existing.ambiguous) {
+    const err = new Error("This lead's email matches customers in several accounts — pick one or create a separate customer.");
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'EMAIL_MATCH_AMBIGUOUS';
+    err.candidates = existing.candidates || [];
+    throw err;
+  }
+  if (existing?.requiresConfirmation) {
+    // Fail closed: never silently create OR attach on an unconfirmed email
+    // match — the caller must surface the choice to the admin.
+    const err = new Error(existing.busy
+      ? 'That customer record is being updated — re-open the lead and try again in a moment.'
+      : existing.phoneConflict
+      ? "This lead's phone now matches a customer in a DIFFERENT account than the one you confirmed — re-open the lead and try again."
+      : existing.matchChanged
+        ? "The customer this lead's email matched has changed since you confirmed — re-open the lead and try again."
+        : "This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = 'EMAIL_MATCH_CONFIRM';
+    err.match = existing.match;
+    throw err;
+  }
 
   // Canonical-format the account row here so callers that pass raw lead data
   // (e.g. admin-leads lead→customer conversion) still create a normalized
@@ -4738,6 +4994,7 @@ router._private = {
 };
 
 router.ensureCustomerAccount = ensureCustomerAccount;
+router.findAccountByContact = findAccountByContact;
 router.createDefaultCustomerRows = createDefaultCustomerRows;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file
