@@ -444,6 +444,8 @@ const ComplianceService = {
 
     const lawnCustomers = await db('customers')
       .where({ active: true })
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereNotNull('lawn_type')
       .select('id', 'first_name', 'last_name', 'city', 'zip', 'lawn_type');
 

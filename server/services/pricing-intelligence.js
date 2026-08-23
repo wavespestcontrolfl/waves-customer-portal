@@ -316,7 +316,8 @@ class PricingIntelligence {
 
   async getMoneyModel() {
     // Stage 1: Attraction — lead gen & first service
-    const totalCustomers = await db('customers').where('active', true).count('id as cnt').first();
+    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+    const totalCustomers = await db('customers').where('active', true).whereNull('deleted_at').count('id as cnt').first();
     const totalLeads = await db('leads').whereNull('deleted_at').count('id as cnt').first().catch(() => ({ cnt: 0 }));
     const totalEstimates = await db('estimates').count('id as cnt').first();
     const acceptedEstimates = await db('estimates').where('status', 'accepted').count('id as cnt').first();

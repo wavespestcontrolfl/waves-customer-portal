@@ -257,7 +257,7 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
-    db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
     // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
     // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
     // Days; the prior status whitelist would silently drop any new

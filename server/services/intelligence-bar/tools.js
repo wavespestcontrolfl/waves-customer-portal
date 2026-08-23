@@ -505,6 +505,7 @@ async function findOverdueCustomers(input) {
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)
+      .whereNull('customers.deleted_at')
       .whereExists(function () {
         this.select('*').from('service_records')
           .whereRaw('service_records.customer_id = customers.id')

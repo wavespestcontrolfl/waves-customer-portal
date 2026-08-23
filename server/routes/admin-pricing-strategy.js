@@ -32,6 +32,8 @@ router.get('/dashboard', async (req, res, next) => {
     // Top upsell opportunities — Bronze/Silver customers who could upgrade
     const upgradeOpps = await db('customers')
       .where('active', true)
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
@@ -182,6 +184,7 @@ router.get('/upsell-opportunities', async (req, res, next) => {
     // Active Bronze/Silver customers with good health
     const candidates = await db('customers')
       .where('active', true)
+      .whereNull('deleted_at')
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)

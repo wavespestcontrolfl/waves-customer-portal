@@ -176,7 +176,7 @@ async function getRevenueOverview(period = 'month') {
   const prevServices = await fetchServiceRecords(prevStart, prevEnd);
   const prevTopline = computeTopline(prevServices);
 
-  const mrr = await db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
+  const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
   const mrrVal = parseFloat(mrr?.total || 0);
 
   return {

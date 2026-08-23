@@ -82,6 +82,21 @@ function excludeGloballySuppressed(query) {
   });
 }
 
+// Archived (soft-deleted) customers keep active=true and the archive route
+// never touches newsletter_subscribers, so a linked row can sit at
+// status='active' (earlier import-customers runs, pre-scope). Fail closed at
+// send time: exclude any subscriber whose linked customer has deleted_at set.
+// Unlinked rows (customer_id NULL) are untouched. Shared by buildSubscriberQuery
+// AND the resume/retry refetch, like excludeGloballySuppressed.
+function excludeArchivedCustomers(query) {
+  return query.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('customers as ac')
+      .whereRaw('ac.id = newsletter_subscribers.customer_id')
+      .whereNotNull('ac.deleted_at');
+  });
+}
+
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
 // depend on classifying each customer's active recurring services, so they are
 // resolved to a customer_id set by resolveSegmentCustomerIds() first.
@@ -213,7 +228,7 @@ async function loadPersonalizationContext(subscribers) {
  *   resolveSegmentCustomerIds(); null = no service-line constraint.
  */
 function buildSubscriberQuery(segmentFilter, customerIds = null) {
-  let q = excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }));
+  let q = excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' })));
 
   // Service-line / membership constraint, pre-resolved to customer ids.
   if (Array.isArray(customerIds)) q = q.whereIn('customer_id', customerIds);
@@ -513,11 +528,11 @@ async function sendCampaign(sendId, opts = {}) {
       .map((d) => d.subscriber_id)
       .filter((id) => id !== null && id !== undefined)));
     subscribers = retryableSubscriberIds.length
-      ? await excludeGloballySuppressed(
+      ? await excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers')
           .where({ status: 'active' })
           .whereIn('id', retryableSubscriberIds),
-      ).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
+      )).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
   }
@@ -1151,4 +1166,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, markEventsFeatured, sendingClaimIsStale };

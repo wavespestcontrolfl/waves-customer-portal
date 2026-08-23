@@ -16,7 +16,7 @@ const { SIGNAL_TYPES } = require('./signal-detector');
 class HealthScorer {
 
   async enrichAllCustomers() {
-    const customers = await db('customers').where('active', true).select('id');
+    const customers = await db('customers').where('active', true).whereNull('deleted_at').select('id');
     logger.info(`Customer enrichment: ${customers.length} customers`);
 
     let enriched = 0, upsells = 0;
