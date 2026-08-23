@@ -76,7 +76,16 @@ export default function ReviewPage() {
       // 409 = rating already recorded (handleRate's POST landed); the text
       // can't be attached again, so thank them rather than loop.
       if (!res.ok && res.status !== 409) throw new Error('save_failed');
-      setPhase('thankyou');
+      // The server treats 7+ as a promoter and records the Google redirect,
+      // so honor its action here exactly like handleRate does — a 7+ picked
+      // inside the feedback form must actually get the redirect it recorded.
+      const result = res.ok ? await res.json().catch(() => ({})) : {};
+      if (result.action === 'review' && result.googleReviewUrl) {
+        setPhase('redirecting');
+        setTimeout(() => { window.location.href = result.googleReviewUrl; }, 2000);
+      } else {
+        setPhase('thankyou');
+      }
     } catch {
       setSubmitError("We couldn't send your feedback. Please try again.");
     }
