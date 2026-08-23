@@ -42,6 +42,18 @@ import { palmPrefillAllowed } from "../../lib/lookupPrefill";
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
 
+// Form keys that change WHO/HOW a saved estimate is delivered but never its
+// pricing — the only edits saveAndSend may re-save in place without a fresh
+// Generate Estimate.
+const SEND_ONLY_RESAVE_KEYS = new Set([
+  "customerName",
+  "customerPhone",
+  "customerEmail",
+  "notes",
+  "scheduleSend",
+  "scheduledAt",
+]);
+
 const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "dethatchingCleanupLevel",
   "dethatchingDebrisRemovalIncluded",
@@ -2553,12 +2565,31 @@ function EstimateToolView() {
       }
     }
     const snap = savedSnapshotRef.current;
-    const savedIsCurrent = !!savedId && !!snap
-      && snap.form === form
-      && snap.estimate === estimate
-      && snap.customerSearch === customerSearch
-      && snap.satelliteUrl === (satelliteData?.imageUrl || null);
-    const id = savedIsCurrent ? savedId : await doSave();
+    let id = savedId;
+    if (savedId && snap) {
+      const savedIsCurrent = snap.form === form
+        && snap.estimate === estimate
+        && snap.customerSearch === customerSearch
+        && snap.satelliteUrl === (satelliteData?.imageUrl || null);
+      if (!savedIsCurrent) {
+        // Most setters keep the generated `estimate` mounted, so a
+        // pricing-input edit after Save would re-save the NEW inputs
+        // against the OLD result. Only contact/delivery edits may reuse
+        // the generated pricing; anything else needs a regenerate first.
+        const changedKeys = Object.keys({ ...snap.form, ...form })
+          .filter((k) => snap.form[k] !== form[k]);
+        const pricingChanged = snap.estimate !== estimate
+          || snap.satelliteUrl !== (satelliteData?.imageUrl || null)
+          || changedKeys.some((k) => !SEND_ONLY_RESAVE_KEYS.has(k));
+        if (pricingChanged) {
+          alert('Inputs changed since this estimate was saved. Click "Generate Estimate" again before sending.');
+          return;
+        }
+        id = await doSave();
+      }
+    } else if (!savedId) {
+      id = await doSave();
+    }
     if (id) await doSend(id, method);
   }
 

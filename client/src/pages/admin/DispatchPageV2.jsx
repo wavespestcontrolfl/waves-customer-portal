@@ -2172,15 +2172,13 @@ export default function DispatchPageV2({
           onCreated={(appt) => {
             setShowNewAppt(false);
             setNewApptDefaults(null);
-            // Only swap the board's data when the new appointment lands on
-            // the displayed day — otherwise fetchSchedule's default
-            // updateState would replace the board with ANOTHER day's stops
-            // while the header still shows `date` (same guard as the
-            // post-payment refresh below).
-            const createdDate = String(appt?.scheduledDate || date).split("T")[0];
-            const displayedDate = String(date).split("T")[0];
-            fetchSchedule(createdDate, { updateState: createdDate === displayedDate });
-            if (createdDate !== displayedDate) fetchSchedule(date, { silent: true });
+            // Always refresh the DISPLAYED day. Fetching the created
+            // appointment's own date (default updateState) replaced the
+            // board with another day's stops while the header still showed
+            // `date`; a non-silent fetch of that other day would also trip
+            // the page-level loading/error gates for data we discard.
+            // Off-screen days are covered by the week-grid key bump below.
+            fetchSchedule(date);
             // TimeGridDays (week / 5-day) owns its own week-fetch — bump the
             // key so it refetches and the just-created appointment shows up.
             setScheduleRefreshKey((k) => k + 1);
