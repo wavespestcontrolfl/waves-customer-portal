@@ -1490,6 +1490,30 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
 
       // Create the scheduled service. Only set workflow columns the schema has.
+      // Rebook dedupe (under the comms lock + lead FOR UPDATE already held):
+      // `rebook: true` bypasses the converted-lead rejection, so a double
+      // submit / network retry of a repeat booking would insert the same
+      // visit twice (and fire duplicate booking comms). No customer-scoped
+      // same-slot predicate exists in services/scheduling (occupancy.js is
+      // tech/day-scoped), so this is a tight inline lookup using occupancy's
+      // own active-visit status exclusion — no new columns.
+      if (rebook) {
+        const { DEFAULT_EXCLUDE_STATUSES } = require('../services/scheduling/occupancy');
+        const sameVisit = await trx('scheduled_services')
+          .where({ customer_id: customerId, scheduled_date: date, window_start: windowStart, service_type: svcType })
+          .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+          .first('id');
+        if (sameVisit) {
+          const dup = new Error('This customer already has that visit booked.');
+          dup.statusCode = 409;
+          dup.status = 409;
+          dup.isOperational = true;
+          dup.code = 'DUPLICATE_VISIT';
+          dup.scheduled_service_id = sameVisit.id;
+          throw dup;
+        }
+      }
+
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1599,6 +1623,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
   } catch (err) {
     if (err.code === 'EMAIL_MATCH_CONFIRM') {
       return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
+    if (err.code === 'DUPLICATE_VISIT') {
+      return res.status(409).json({ error: err.message, code: err.code, scheduled_service_id: err.scheduled_service_id || null });
     }
     if (err.code === 'LEAD_ALREADY_CONVERTED') {
       // Surface the winner's customer so the client can land on it instead of

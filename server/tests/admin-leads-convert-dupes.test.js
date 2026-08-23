@@ -74,7 +74,7 @@ function makeKnex(resolve, calls) {
   const builder = (table) => {
     const state = { table, ops: [], terminal: null };
     const q = {};
-    const chain = ['where', 'whereNull', 'whereRaw', 'orderBy', 'forUpdate', 'onConflict', 'ignore', 'returning', 'select'];
+    const chain = ['where', 'whereNull', 'whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'onConflict', 'ignore', 'returning', 'select'];
     for (const m of chain) {
       q[m] = jest.fn((...args) => { state.ops.push({ op: m, args }); return q; });
     }
@@ -109,7 +109,7 @@ function opsOf(state, name) {
 }
 
 // Shared resolver: the lead the route pre-reads vs the row it sees under lock.
-function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1 }) {
+function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [] }) {
   return (table, state) => {
     const t = state.terminal;
     if (table === 'customers' && !t && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
@@ -122,6 +122,10 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
     }
     if (table === 'leads' && t.op === 'update') return convertedRows;
     if (table === 'scheduled_services' && t.op === 'columnInfo') return { service_id: true };
+    if (table === 'scheduled_services' && t.op === 'first') {
+      const w = opsOf(state, 'where')[0]?.args[0] || {};
+      return existingVisits.find((v) => v.customer_id === w.customer_id && v.scheduled_date === w.scheduled_date && v.window_start === w.window_start) || null;
+    }
     if (table === 'customers' && t.op === 'first') {
       if (opsOf(state, 'where').some((o) => o.args[0]?.id === 'cust-linked')) return existingLinked;
       return null;
@@ -359,6 +363,52 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // Already-converted lead: update is NOT gated on converted_at IS NULL.
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
       expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at']);
+    });
+  });
+
+  it('rebook twice for the same slot → second is 409 DUPLICATE_VISIT with zero inserts', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: linkedLead(),
+      lockedLead: lockedLinked,
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+    }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('DUPLICATE_VISIT');
+      expect(body.scheduled_service_id).toBe('appt-existing');
+      expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
+      // The dedupe lookup excludes cancelled visits and ran under the locks.
+      const lookup = calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
+      expect(lookup.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
+      expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', service_type: 'Pest Control' });
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      expect(calls.indexOf(lookup)).toBeGreaterThan(forUpdateIdx);
+    });
+  });
+
+  it('rebook with a different date → 200, visit inserted', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: linkedLead(),
+      lockedLead: lockedLinked,
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+    }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true, date: '2027-01-22' });
+      expect(res.status).toBe(200);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+    });
+  });
+
+  it('first conversion (no rebook) skips the dedupe lookup', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl)).status).toBe(200);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'first')).toHaveLength(0);
     });
   });
 
