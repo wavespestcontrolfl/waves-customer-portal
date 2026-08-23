@@ -181,14 +181,16 @@ describe('PUT /:id/update-details — date/window move', () => {
     expect(rowUpdate.window_end).toBe('14:00');
   });
 
-  test('a duration-only edit is an occupancy change — locks and probes', async () => {
+  test('a duration-only edit on an end-less row widens occupancy — locks and probes', async () => {
+    trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...SVC, window_end: null } : undefined));
+
     await put('svc-1', { estimatedDuration: 120 });
 
     expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, '2099-07-01');
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       date: '2099-07-01',
       windowStart: '09:00',
-      windowEnd: '10:00',
+      windowEnd: '11:00',
       excludeServiceIds: ['svc-1'],
     }));
   });
@@ -203,6 +205,17 @@ describe('PUT /:id/update-details — date/window move', () => {
     trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...SVC, status: 'completed' } : undefined));
 
     const { status } = await put('svc-1', { scheduledDate: '2099-07-03', windowStart: '10:00' });
+
+    expect(status).not.toBe(409);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('echoed-but-unchanged date/window/duration (mobile modal re-save) does NOT probe', async () => {
+    findConflictingVisits.mockResolvedValue([{ id: 'svc-other' }]);
+
+    const { status } = await put('svc-1', {
+      notes: 'updated notes', scheduledDate: '2099-07-01', windowStart: '09:00', windowEnd: '10:00', estimatedDuration: 60,
+    });
 
     expect(status).not.toBe(409);
     expect(findConflictingVisits).not.toHaveBeenCalled();

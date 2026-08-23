@@ -5831,15 +5831,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
               const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
               occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+            }
+            // Presence is not change (Codex #3443 P2): the mobile edit
+            // modal echoes date/window/duration on every save, so a
+            // notes-only edit of an already-overlapping visit must not be
+            // refused. Compare the effective block with the locked row's
+            // and probe only when the slot actually moves.
+            const rowStart = normalizeHHMM(occRow.window_start);
+            let rowEnd = normalizeHHMM(occRow.window_end);
+            if (rowStart && (!rowEnd || rowEnd <= rowStart)) {
+              const [rh, rm] = rowStart.split(':').map(Number);
+              const rowMin = Math.min(rh * 60 + rm + (parseInt(occRow.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+              rowEnd = `${String(Math.floor(rowMin / 60)).padStart(2, '0')}:${String(rowMin % 60).padStart(2, '0')}`;
+            }
+            const slotUnchanged = occDate === dateOnly(occRow.scheduled_date) && occStart === rowStart && occEnd === rowEnd;
+            if (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined) {
               // Persist the block that was probed: a start-only edit used
               // to keep the OLD end (09:00-10:00 moved to 13:00 stored
               // 13:00-10:00), which every later overlap query read as a
               // non-null end and the visit went invisible to occupancy.
-              if (updates.window_start !== undefined && updates.window_end === undefined) {
-                updates.window_end = occEnd;
-              }
+              updates.window_end = occEnd;
             }
-            if (occDate && occStart && occEnd) {
+            if (!slotUnchanged && occDate && occStart && occEnd) {
               const adminMoveClash = await findConflictingVisits({
                 db: trx,
                 date: occDate,
