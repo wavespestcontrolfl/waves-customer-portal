@@ -12080,6 +12080,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');
+const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
 function parseRescheduleWindow(w) {
@@ -12088,6 +12089,17 @@ function parseRescheduleWindow(w) {
   const m = String(w).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
   if (!m) return { start: null, end: null };
   return { start: m[1], end: m[2] };
+}
+
+// Shared admin window rules (scheduling/window-rules.js) on the dispatch
+// reschedule entry: on-the-hour, >= 08:00, end > start, end <= day end. A
+// windowless (date-only) move passes through; an end-less window is judged
+// as a 60-min block (the rebooker derives the real end from the row). The
+// overlap check itself is the rebooker's existing occupancy gate.
+function assertRescheduleWindowRules(window) {
+  const win = parseRescheduleWindow(window);
+  if (!win.start) return;
+  assertAdminAppointmentWindow({ windowStart: win.start, windowEnd: win.end });
 }
 
 function normalizeHHMM(value) {
@@ -12585,6 +12597,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // customer pushes the whole cadence) — the rebooker rewinds its
     // tracker lifecycle and frees the tech, same as the single path.
     if (scope === 'series') {
+      assertRescheduleWindowRules(newWindow);
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
       // The rebooker unassigns any shifted sibling whose kept tech would
@@ -12780,6 +12793,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         effectiveWindow = { ...effectiveWindow, end };
       }
     }
+    assertRescheduleWindowRules(effectiveWindow);
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
@@ -12806,7 +12820,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     }
     res.json(result);
   } catch (err) {
-    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
 });

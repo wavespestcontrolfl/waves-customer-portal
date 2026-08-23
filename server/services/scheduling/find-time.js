@@ -295,6 +295,10 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  // Booking-day bounds — shared with scheduling/window-rules.js so the
+  // admin write paths and the customer slot finder agree on the same day.
+  DAY_START_HOUR,
+  DAY_END_HOUR,
   _internals: {
     enumerateDates,
   },

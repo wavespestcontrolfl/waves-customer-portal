@@ -64,3 +64,27 @@ describe('TimeGridDay bulk reconciliation', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('TimeGridDay hour-aligned grid', () => {
+  it('starts at 8 AM (no pre-opening rows) and snaps every drop row to its hour', async () => {
+    const { snapSlotIdxToHourMin } = await import('./TimeGridDay');
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={SERVICES}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('6 AM')).toBeNull();
+    expect(screen.queryByText('7 AM')).toBeNull();
+    expect(screen.getByText('8 AM')).toBeInTheDocument();
+    // 30-min visual rows: idx 0 = 08:00, idx 1 = 08:30 → snaps to 08:00,
+    // idx 5 = 10:30 → snaps to 10:00. Nothing can land on a :30 start.
+    expect(snapSlotIdxToHourMin(0)).toBe(8 * 60);
+    expect(snapSlotIdxToHourMin(1)).toBe(8 * 60);
+    expect(snapSlotIdxToHourMin(4)).toBe(10 * 60);
+    expect(snapSlotIdxToHourMin(5)).toBe(10 * 60);
+    for (let idx = 0; idx < 24; idx += 1) expect(snapSlotIdxToHourMin(idx) % 60).toBe(0);
+  });
+});

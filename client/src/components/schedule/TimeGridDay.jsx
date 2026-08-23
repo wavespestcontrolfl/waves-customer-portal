@@ -22,7 +22,9 @@ import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-const DAY_START_HOUR = 6;
+// No client appointments before 8am ET (owner rule) — the grid starts where
+// the server's window validator (scheduling/window-rules.js) does.
+const DAY_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -463,8 +465,14 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   );
 }
 
+// Appointments are 60-min slots ON THE HOUR: a drop on a half-hour visual
+// row snaps DOWN to its hour (the server refuses :30 starts with a 422).
+export function snapSlotIdxToHourMin(slotIdx) {
+  return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
+}
+
 function SlotDroppable({ techId, slotIdx, onCreateStart }) {
-  const slotMin = DAY_START_HOUR * 60 + slotIdx * SLOT_MIN;
+  const slotMin = snapSlotIdxToHourMin(slotIdx);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
@@ -511,8 +519,9 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       if (!cur) return;
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
-      const startMin = DAY_START_HOUR * 60 + lo * SLOT_MIN;
-      const endMin = DAY_START_HOUR * 60 + (hi + 1) * SLOT_MIN;
+      // Hour-aligned block: start floors, end ceils to the next hour mark.
+      const startMin = snapSlotIdxToHourMin(lo);
+      const endMin = Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60);
       onCreateSlot?.({
         techId: tech.id,
         windowStart: minutesToHHMM(startMin),
@@ -1037,7 +1046,7 @@ export default function TimeGridDay({
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
-    const toMin = drop.slotMin != null ? drop.slotMin : fromMin;
+    const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
     if (fromTech === toTech && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);

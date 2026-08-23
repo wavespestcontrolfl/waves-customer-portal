@@ -1302,8 +1302,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // Compute the time window from start + duration.
     const windowStart = /^\d{2}:\d{2}$/.test(time) ? time : null;
     // Appointment windows start ON THE HOUR (owner rule; Codex #3109 r37 —
-    // this convert path was the remaining bypass; the schedule-appointment
-    // route already rejects). Same rejection shape as that route.
+    // this convert path was the remaining bypass). The admin schedule /
+    // dispatch write paths enforce the same rule (plus >= 08:00 and the day
+    // end) through the shared scheduling/window-rules.js validator; this
+    // route keeps its own 400 shape for the lead-conversion UI.
     if (windowStart && !windowStart.endsWith(':00')) {
       return res.status(400).json({ error: `Appointment windows start on the hour — got "${time}"; use e.g. "${windowStart.slice(0, 2)}:00"` });
     }

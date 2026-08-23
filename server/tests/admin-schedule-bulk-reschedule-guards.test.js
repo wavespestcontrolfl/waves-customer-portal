@@ -494,13 +494,15 @@ test('a start-only move preserves a longer stored duration in the derived end', 
   const { body } = await bulk({
     action: 'reschedule',
     serviceIds: ['svc-1'],
-    payload: { scheduledDate: '2099-01-15', windowStart: '16:00' },
+    // 15:00 (not 16:00): the shared window rules cap the end at the 17:00
+    // booking day end, so a 90-min block must start by 15:30.
+    payload: { scheduledDate: '2099-01-15', windowStart: '15:00' },
   });
 
   expect(body.updated).toEqual(['svc-1']);
   expect(updateChain.update.mock.calls[0][0]).toMatchObject({
-    window_start: '16:00',
-    window_end: '17:30',
+    window_start: '15:00',
+    window_end: '16:30',
   });
 });
 
@@ -517,13 +519,13 @@ test('an explicit windowStart+windowEnd pair is persisted as given (no derivatio
   const { body } = await bulk({
     action: 'reschedule',
     serviceIds: ['svc-1'],
-    payload: { scheduledDate: '2099-01-15', windowStart: '16:00', windowEnd: '18:30' },
+    payload: { scheduledDate: '2099-01-15', windowStart: '14:00', windowEnd: '16:30' },
   });
 
   expect(body.updated).toEqual(['svc-1']);
   expect(updateChain.update.mock.calls[0][0]).toMatchObject({
-    window_start: '16:00',
-    window_end: '18:30',
+    window_start: '14:00',
+    window_end: '16:30',
   });
 });
 
@@ -713,4 +715,136 @@ test('a start-only move whose derived end would cross midnight lands in failed[]
     id: 'svc-1',
     reason: 'that window would cross midnight (pick an earlier start)',
   }]);
+});
+
+// ---------------------------------------------------------------------------
+// Shared admin window rules (scheduling/window-rules.js) + the gated
+// occupancy overlap guard (GATE_ADMIN_SLOT_OVERLAP_GUARD).
+// ---------------------------------------------------------------------------
+
+test('a 06:30 windowStart lands in failed[] with the shared validator\'s reason — never persisted', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      updateChain,
+    ],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '06:30' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toHaveLength(1);
+  expect(body.failed[0]).toMatchObject({ id: 'svc-1' });
+  expect(body.failed[0].reason).toMatch(/on the hour/);
+  expect(updateChain.update).not.toHaveBeenCalled();
+});
+
+test('a pre-8am on-the-hour windowStart is refused the same way', async () => {
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '07:00' },
+  });
+  expect(body.updated).toEqual([]);
+  expect(body.failed[0].reason).toMatch(/before 08:00/);
+});
+
+describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
+  const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+    else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = saved;
+  });
+
+  // The occupancy probe's query builder (findConflictingVisits) — resolves
+  // to the given rows when awaited.
+  function probeChain(rows) {
+    const c = chain({
+      whereNotIn: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue(rows),
+    });
+    return c;
+  }
+
+  test('gate ON: an overlapping non-cancelled visit refuses the move (SLOT_CONFLICT) under the date lock; nothing persisted', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const updateChain = chain();
+    const probe = probeChain([{
+      id: 'svc-other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00',
+      status: 'confirmed', technician_id: null, service_type: 'Pest Control',
+    }]);
+    const trx = wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+        probe,
+        updateChain,
+      ],
+    });
+
+    const { status, body } = await bulk({
+      action: 'reschedule',
+      serviceIds: ['svc-1'],
+      payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
+    });
+
+    expect(status).toBe(200);
+    expect(body.updated).toEqual([]);
+    expect(body.failed[0].reason).toMatch(/overlaps another visit/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+    // Rung 1: the date-wide occupancy advisory lock was taken in this trx.
+    expect(trx.raw.mock.calls.some(([sql, bindings]) =>
+      /pg_advisory_xact_lock/.test(sql) && bindings?.includes('occupancy:2099-01-15'))).toBe(true);
+    // The moving row excludes itself from the probe.
+    expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
+  });
+
+  test('gate ON: no overlap → the move persists', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const updateChain = chain();
+    wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+        probeChain([]),
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    const { body } = await bulk({
+      action: 'reschedule',
+      serviceIds: ['svc-1'],
+      payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
+    });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '11:00' });
+  });
+
+  test('gate OFF (default): no probe runs and the move persists even where the probe would have found a clash', async () => {
+    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+    const updateChain = chain();
+    const trx = wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    const { body } = await bulk({
+      action: 'reschedule',
+      serviceIds: ['svc-1'],
+      payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
+    });
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.failed).toEqual([]);
+    expect(trx.raw.mock.calls.some(([, bindings]) => bindings?.includes('occupancy:2099-01-15'))).toBe(false);
+  });
 });

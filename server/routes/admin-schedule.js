@@ -9,6 +9,8 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
+const { assertAdminAppointmentWindow, assertNoSlotOverlap, adminSlotOverlapGuardEnabled } = require('../services/scheduling/window-rules');
+const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
@@ -3042,7 +3044,7 @@ function duplicateSeriesConflictBody(existingSeries) {
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
-      customerId, technicianId, scheduledDate, windowStart, windowEnd,
+      customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
@@ -3055,6 +3057,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       sendCardOnFileLink,
     } = req.body;
 
+    // Normalized below by assertAdminAppointmentWindow once the duration is
+    // known; windowless (date-only) bookings stay null.
+    let windowStart = windowStartRaw;
+    let windowEnd = windowEndRaw;
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
@@ -3424,12 +3430,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       duration = parsedExplicitDuration;
     }
 
-    // Calculate end time from start + duration if not provided
-    let computedEnd = windowEnd;
-    if (windowStart && !windowEnd) {
-      const [h, m] = windowStart.split(':').map(Number);
-      const endMin = h * 60 + m + duration;
-      computedEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+    // Shared admin window rules (scheduling/window-rules.js): on-the-hour,
+    // >= 08:00, end > start, end <= day end; the end is derived from the
+    // duration when not supplied. Previously any string was persisted
+    // ("8am" stored with a NaN-derived end, 06:30 booked before opening).
+    let computedEnd = windowEnd || null;
+    if (windowStart) {
+      const normalizedWindow = assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes: duration });
+      windowStart = normalizedWindow.window_start;
+      windowEnd = normalizedWindow.window_end;
+      computedEnd = normalizedWindow.window_end;
     }
 
     // Auto-assign tech if requested
@@ -3526,6 +3536,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Rung 1 (occupancy.js ORDERING CONTRACT): date-wide occupancy lock +
+      // tech-blind overlap probe, FIRST — gated (GATE_ADMIN_SLOT_OVERLAP_GUARD).
+      if (windowStart && computedEnd) {
+        await assertNoSlotOverlap({ trx, date: scheduledDate, windowStart, windowEnd: computedEnd });
+      }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
       // customers row lock below: every scheduled_services insert in this
       // trx (parent, recurring children, boosters) serializes against a
@@ -4246,6 +4261,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
+    if (err.isOperational && err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+    }
     next(err);
   }
 });
@@ -4464,6 +4482,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // status for an evidence-only tracker rewind.
             let liveMoveRefreshStatus = 'confirmed';
             await db.transaction(async (trx) => {
+              // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
+              // must precede every other lock in this trx — including the
+              // tech-day fence below — so take it up front when the overlap
+              // guard is on; the probe itself (assertNoSlotOverlap, which
+              // re-takes the reentrant lock) runs once the window is final.
+              if (adminSlotOverlapGuardEnabled()) {
+                await acquireOccupancyLock(trx, bulkTargetDate);
+              }
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
               // Terminal rows are one-way (#2717 pattern — see the cancel
@@ -4553,6 +4579,31 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   new Error('that window has already passed today (pick a later window or a future date)'),
                   { isValidation: true },
                 );
+              }
+              // Shared admin window rules on any SUPPLIED window (on-the-hour,
+              // >= 08:00, end <= day end) — the normalized pair is what
+              // persists. Stored-only windows (date-only moves) are left as
+              // they are. Per-row throw like every other validation here.
+              if (updates.window_start || updates.window_end) {
+                const effStart = updates.window_start || normalizeHHMM(svc.window_start);
+                const normalizedWindow = assertAdminAppointmentWindow({
+                  windowStart: effStart,
+                  windowEnd: updates.window_end || null,
+                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end),
+                });
+                updates.window_start = normalizedWindow.window_start;
+                updates.window_end = normalizedWindow.window_end;
+              }
+              // Gated overlap probe (lock already held at the top of this trx);
+              // the moving row excludes itself.
+              {
+                const effStart = updates.window_start || normalizeHHMM(svc.window_start);
+                const effEnd = updates.window_end || normalizeHHMM(svc.window_end);
+                if (effStart && effEnd) {
+                  await assertNoSlotOverlap({
+                    trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
+                  });
+                }
               }
               // A live (en_route/on_site) row being moved rewinds its tracker
               // lifecycle like the rebooker's live override — stale arrival
@@ -5162,6 +5213,36 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
+    // Shared admin window rules (scheduling/window-rules.js) on a SUPPLIED
+    // start: on-the-hour, >= 08:00, end > start, end <= day end — the
+    // normalized pair persists (a start-only edit derives its end from the
+    // row's stored span, the bulk mover's convention, instead of keeping a
+    // stale end beside the new start). Date-only / clearing edits are
+    // untouched. The same read seeds the gated overlap probe below.
+    let overlapProbe = null;
+    if (updates.window_start
+      || (adminSlotOverlapGuardEnabled() && (updates.scheduled_date !== undefined || updates.window_end))) {
+      const currentRow = await db('scheduled_services').where({ id: req.params.id })
+        .first('scheduled_date', 'window_start', 'window_end');
+      if (!currentRow) return res.status(404).json({ error: 'Service not found' });
+      if (updates.window_start) {
+        const normalizedWindow = assertAdminAppointmentWindow({
+          windowStart: updates.window_start,
+          windowEnd: updates.window_end || null,
+          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end),
+        });
+        updates.window_start = normalizedWindow.window_start;
+        updates.window_end = normalizedWindow.window_end;
+      }
+      const probeStart = updates.window_start || normalizeHHMM(currentRow.window_start);
+      const probeEnd = updates.window_end || normalizeHHMM(currentRow.window_end);
+      const probeDate = updates.scheduled_date !== undefined
+        ? String(updates.scheduled_date).split('T')[0]
+        : dateOnly(currentRow.scheduled_date);
+      if (probeStart && probeEnd && probeDate) {
+        overlapProbe = { date: probeDate, windowStart: probeStart, windowEnd: probeEnd };
+      }
+    }
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
@@ -5558,6 +5639,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const rewoundSeriesRows = [];
 
     await db.transaction(async (trx) => {
+      // Rung 1 (occupancy.js ORDERING CONTRACT): date-wide occupancy lock +
+      // tech-blind overlap probe FIRST, before the comms (rung 6) and
+      // tech-day locks below — gated (GATE_ADMIN_SLOT_OVERLAP_GUARD); the
+      // row being edited excludes itself.
+      if (overlapProbe) {
+        await assertNoSlotOverlap({ trx, ...overlapProbe, excludeServiceIds: [req.params.id] });
+      }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
       // customer-comms off an unlocked peek BEFORE any row lock in the trx
@@ -6921,7 +7009,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+    }
     next(err);
   }
 });
