@@ -542,7 +542,13 @@ function SourcesView() {
   };
 
   const handleAdd = async () => {
-    await adminPost("/admin/knowledge/sources", addForm);
+    try {
+      await adminPost("/admin/knowledge/sources", addForm);
+    } catch (e) {
+      // 400 from the server: path outside wiki/ or unsupported type.
+      alert(`Could not add source: ${e.message}`);
+      return;
+    }
     setShowAdd(false);
     setAddForm({
       filename: "",
@@ -632,7 +638,7 @@ function SourcesView() {
               onChange={(e) =>
                 setAddForm((p) => ({ ...p, file_path: e.target.value }))
               }
-              placeholder="Full file path"
+              placeholder="Path inside the repo wiki/ folder (e.g. protocols/termite.md)"
               style={{
                 padding: "8px 10px",
                 borderRadius: 6,
