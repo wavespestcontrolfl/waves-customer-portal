@@ -10,6 +10,9 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
+const {
+  assertAdminAppointmentWindow, assertNoSlotOverlap, adminSlotOverlapGuardEnabled,
+} = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
@@ -713,6 +716,27 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
   }
 }
 
+// Rows the admin-move occupancy probe must ignore (occupancy.js
+// excludeServiceIds — the batch-move case): the row itself, plus — when this
+// same save's cadence rewrite will re-date the parent's pending children and
+// boosters — every one of those participants. Their CURRENT slots are about
+// to be vacated by the same transaction, so a weekly parent moved Jan 5 →
+// Jan 12 must not collide with its own Jan 12 child (the rewrite's per-row
+// probes, which already exclude the whole set, still guard the destinations).
+// The rewrite decision mirrors the rewrite block's own gate on the LOCKED
+// before-row and the after-state this save will persist.
+async function adminMoveProbeExcludeIds(trx, { id, parentBefore, updates }) {
+  const ids = [String(id)];
+  if (!parentBefore?.is_recurring || parentBefore.recurring_parent_id) return ids;
+  if (!shouldRewritePendingRecurringRows(parentBefore, { ...parentBefore, ...updates })) return ids;
+  const participants = await trx('scheduled_services')
+    .where({ recurring_parent_id: parentBefore.id })
+    .whereIn('status', ['pending', 'confirmed'])
+    .select('id');
+  for (const row of participants || []) ids.push(String(row.id));
+  return ids;
+}
+
 // Every date the three recurrence write paths of PUT /:id/update-details will
 // land on, from an unlocked peek — mirrors each path's own guard conditions
 // and inputs (the row as this save's generic update leaves it), and runs the
@@ -1221,6 +1245,34 @@ function normalizeAssignmentScope(scope) {
     throw httpError(400, 'assignmentScope must be this_only, following, or series');
   }
   return normalized;
+}
+
+// update-details window intake. Presence is explicit (hasOwnProperty): an
+// absent field is "no opinion"; null/'' is a CLEAR and must clear both
+// bounds together; anything else is a supplied value the shared validator
+// judges downstream. Partial clears never persist (422).
+function windowIntakeFromBody(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined;
+  const isClear = (v) => v === null || v === '';
+  const hasStart = has('windowStart');
+  const hasEnd = has('windowEnd');
+  const clearStart = hasStart && isClear(src.windowStart);
+  const clearEnd = hasEnd && isClear(src.windowEnd);
+  if (clearStart || clearEnd) {
+    if (!(clearStart && clearEnd)) {
+      throw Object.assign(
+        httpError(422, 'Clear both the start and end time together, or supply a valid start time (HH:MM, on the hour)'),
+        { code: 'INVALID_APPOINTMENT_WINDOW' },
+      );
+    }
+    return { clearBoth: true };
+  }
+  return {
+    clearBoth: false,
+    windowStart: hasStart ? src.windowStart : undefined,
+    windowEnd: hasEnd ? src.windowEnd : undefined,
+  };
 }
 
 function dateOnly(value) {
@@ -3355,7 +3407,7 @@ function duplicateSeriesConflictBody(existingSeries) {
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
-      customerId, technicianId, scheduledDate, windowStart, windowEnd,
+      customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
@@ -3368,6 +3420,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
       sendCardOnFileLink,
     } = req.body;
 
+    // Window intake by explicit presence (windowIntakeFromBody, shared with
+    // update-details): both absent / both cleared = a windowless booking;
+    // an end without a start is asymmetric and refused (it used to insert
+    // window_start NULL beside a real end — a row invisible to occupancy).
+    // The pair is normalized below by assertAdminAppointmentWindow once the
+    // duration is known.
+    const createWindowIntake = windowIntakeFromBody(req.body);
+    let windowStart = createWindowIntake.clearBoth ? null : (createWindowIntake.windowStart ?? null);
+    let windowEnd = createWindowIntake.clearBoth ? null : (createWindowIntake.windowEnd ?? null);
+    if (!windowStart && windowEnd) {
+      throw Object.assign(
+        httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+        { code: 'INVALID_APPOINTMENT_WINDOW' },
+      );
+    }
+    void windowStartRaw; void windowEndRaw;
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
@@ -3737,12 +3805,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       duration = parsedExplicitDuration;
     }
 
-    // Calculate end time from start + duration if not provided
-    let computedEnd = windowEnd;
-    if (windowStart && !windowEnd) {
-      const [h, m] = windowStart.split(':').map(Number);
-      const endMin = h * 60 + m + duration;
-      computedEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+    // Shared admin window rules (scheduling/window-rules.js): on-the-hour,
+    // >= 08:00, end > start, end <= day end; the end is derived from the
+    // duration when not supplied. Previously any string was persisted
+    // ("8am" stored with a NaN-derived end, 06:30 booked before opening).
+    let computedEnd = windowEnd || null;
+    if (windowStart) {
+      const normalizedWindow = assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes: duration });
+      windowStart = normalizedWindow.window_start;
+      windowEnd = normalizedWindow.window_end;
+      computedEnd = normalizedWindow.window_end;
     }
 
     // Auto-assign tech if requested
@@ -4635,6 +4707,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
+    if (err.isOperational && err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+    }
     next(err);
   }
 });
@@ -4853,6 +4928,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // status for an evidence-only tracker rewind.
             let liveMoveRefreshStatus = 'confirmed';
             await db.transaction(async (trx) => {
+              // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
+              // must precede every other lock in this trx — including the
+              // tech-day fence below — so take it up front when the overlap
+              // guard is on; the probe itself (assertNoSlotOverlap, which
+              // re-takes the reentrant lock) runs once the window is final.
+              if (adminSlotOverlapGuardEnabled()) {
+                await acquireOccupancyLock(trx, bulkTargetDate);
+              }
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
               // Terminal rows are one-way (#2717 pattern — see the cancel
@@ -4915,7 +4998,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (updates.window_start && !updates.window_end) {
                 const derivedEnd = deriveWindowEnd(
                   updates.window_start,
-                  windowDurationMinutes(svc.window_start, svc.window_end),
+                  windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
                 );
                 if (!derivedEnd) {
                   throw Object.assign(
@@ -4942,6 +5025,45 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   new Error('that window has already passed today (pick a later window or a future date)'),
                   { isValidation: true },
                 );
+              }
+              // Shared admin window rules on any SUPPLIED window (on-the-hour,
+              // >= 08:00, end <= day end) — the normalized pair is what
+              // persists. Stored-only windows (date-only moves) are left as
+              // they are. Per-row throw like every other validation here.
+              if (updates.window_start || updates.window_end) {
+                const effStart = updates.window_start || normalizeHHMM(svc.window_start);
+                const normalizedWindow = assertAdminAppointmentWindow({
+                  windowStart: effStart,
+                  windowEnd: updates.window_end || null,
+                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
+                });
+                updates.window_start = normalizedWindow.window_start;
+                updates.window_end = normalizedWindow.window_end;
+              } else if (normalizeHHMM(svc.window_start) || normalizeHHMM(svc.window_end)) {
+                // Date-only move: the EFFECTIVE stored window rides onto the
+                // new date, so it must satisfy the same rules (a legacy 07:00
+                // row is refused); a windowless row (both null) still moves.
+                // An end-less row is judged on its effective duration (stored
+                // span → estimated_duration_minutes → 60), so 19:00 + 120 min
+                // is 19:00-21:00 and refused.
+                assertAdminAppointmentWindow({
+                  windowStart: normalizeHHMM(svc.window_start),
+                  windowEnd: normalizeHHMM(svc.window_end),
+                  durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
+                });
+              }
+              // Gated overlap probe (lock already held at the top of this trx);
+              // the moving row excludes itself. An end-less row probes its
+              // DERIVED end (same effective duration), never skips.
+              {
+                const effStart = updates.window_start || normalizeHHMM(svc.window_start);
+                const effEnd = updates.window_end || normalizeHHMM(svc.window_end)
+                  || (effStart ? deriveWindowEnd(effStart, windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes)) : null);
+                if (effStart && effEnd) {
+                  await assertNoSlotOverlap({
+                    trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
+                  });
+                }
               }
               // A live (en_route/on_site) row being moved rewinds its tracker
               // lifecycle like the rebooker's live override — stale arrival
@@ -5549,8 +5671,133 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // hit the PG DATE cast downstream (codex P1).
       updates.scheduled_date = movedTo;
     }
-    if (windowStart !== undefined) updates.window_start = windowStart || null;
-    if (windowEnd !== undefined) updates.window_end = windowEnd || null;
+    // Window intake by explicit PRESENCE (not truthiness): a null/'' bound
+    // is a clear, and a clear must take BOTH bounds — `{ windowStart: null }`
+    // used to persist window_start NULL beside a kept end, an end-only row
+    // invisible to every occupancy predicate. A partial clear is refused
+    // (422) and never persists.
+    const windowIntake = windowIntakeFromBody(req.body);
+    if (windowIntake.clearBoth) {
+      updates.window_start = null;
+      updates.window_end = null;
+    } else {
+      // A SUPPLIED bound must be a real HH:MM before anything else looks at
+      // it. windowIntakeFromBody has already ruled that only an explicit
+      // null/'' is a clear, so anything else that normalizeHHMM can't read
+      // ('7:00 AM', '9am', '25:00') is malformed — refuse it here, at intake.
+      // The unchanged-slot comparison below normalizes both sides, and a
+      // malformed bound normalizes to null: on a WINDOWLESS row it compared
+      // equal to the stored null, the effective slot read as unchanged, the
+      // window rules were skipped, and Postgres happily cast '7:00 AM' into
+      // the TIME column — a pre-08:00 appointment written past every guard.
+      for (const [field, value] of [['windowStart', windowIntake.windowStart], ['windowEnd', windowIntake.windowEnd]]) {
+        if (value === undefined) continue;
+        if (!normalizeHHMM(value)) {
+          throw Object.assign(
+            httpError(422, `Appointment ${field === 'windowStart' ? 'start' : 'end'} must be a 24h HH:MM time — got "${String(value)}" (use e.g. "08:00")`),
+            { code: 'INVALID_APPOINTMENT_WINDOW' },
+          );
+        }
+      }
+      if (windowIntake.windowStart !== undefined) updates.window_start = windowIntake.windowStart;
+      if (windowIntake.windowEnd !== undefined) updates.window_end = windowIntake.windowEnd;
+    }
+    // Shared admin window rules (scheduling/window-rules.js) whenever EITHER
+    // endpoint is supplied, on the EFFECTIVE pair (supplied-or-stored start,
+    // supplied-or-stored end): on-the-hour, >= 08:00, end > start, end <=
+    // day end — the normalized pair persists. A start-only edit derives its
+    // end from the row's stored span (the bulk mover's convention) instead
+    // of keeping a stale end beside the new start; an end-only edit is
+    // judged against the stored start (an end before it, or past the day
+    // end, used to persist unchecked). Date-only / clearing edits are
+    // untouched. Overlap is the in-trx occupancy probe below (rung 1 +
+    // findConflictingVisits), not re-checked here.
+    // A DATE-ONLY move validates the EFFECTIVE stored window too (a legacy
+    // 06:30 / 07:00 row must not ride onto a new date); a truly windowless
+    // row (both null) still moves.
+    // The pre-read is UNLOCKED — the trx below compares it with the locked
+    // row and refuses (409 VISIT_CHANGED_RETRY) if the scheduling fields
+    // drifted, so a normalized pair derived here can never overwrite a
+    // concurrent window edit.
+    // A DURATION-only edit on an END-LESS row changes the block the visit
+    // occupies (start + new duration), so it validates too: 19:00 + 60→120
+    // is 19:00-21:00 and refused.
+    let preReadWindowRow = null;
+    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
+      || updates.estimated_duration_minutes !== undefined) {
+      const currentRow = await db('scheduled_services').where({ id: req.params.id })
+        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+      if (!currentRow) return res.status(404).json({ error: 'Service not found' });
+      // Presence is not change (same ruling the in-trx occupancy probe below
+      // already applies): BOTH schedule editors echo the current date, window
+      // and duration on every save, so a notes / price / service / technician
+      // edit arrives carrying the row's own slot. Validating on presence made
+      // every legacy off-hour visit (a 07:00 row booked before these rules)
+      // uneditable — a notes-only save 422'd. Compare the EFFECTIVE slot
+      // (supplied-or-stored date, start, end, duration) with the stored row
+      // and run the window rules only when the slot actually changes; a
+      // genuine date-only move or a real window/duration edit still
+      // validates (a legacy 07:00 row cannot ride onto a new date).
+      const storedSlotDate = dateOnly(currentRow.scheduled_date) || null;
+      const storedSlotStart = normalizeHHMM(currentRow.window_start) || null;
+      const storedSlotEnd = normalizeHHMM(currentRow.window_end) || null;
+      const storedSlotDuration = parseInt(currentRow.estimated_duration_minutes, 10) || null;
+      const effectiveSlotDate = updates.scheduled_date !== undefined
+        ? (dateOnly(updates.scheduled_date) || null) : storedSlotDate;
+      const effectiveSlotStart = updates.window_start !== undefined
+        ? (normalizeHHMM(updates.window_start) || null) : storedSlotStart;
+      const effectiveSlotEnd = updates.window_end !== undefined
+        ? (normalizeHHMM(updates.window_end) || null) : storedSlotEnd;
+      const effectiveSlotDuration = updates.estimated_duration_minutes !== undefined
+        ? (parseInt(updates.estimated_duration_minutes, 10) || null) : storedSlotDuration;
+      const effectiveSlotUnchanged = effectiveSlotDate === storedSlotDate
+        && effectiveSlotStart === storedSlotStart
+        && effectiveSlotEnd === storedSlotEnd
+        && effectiveSlotDuration === storedSlotDuration;
+      if (!effectiveSlotUnchanged && (updates.window_start || updates.window_end)) {
+        // The CAS below is armed only when this pre-read actually fed a
+        // derivation/validation (here and in the stored-window branch).
+        preReadWindowRow = currentRow;
+        const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
+        if (!effectiveStart) {
+          throw Object.assign(
+            httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+            { code: 'INVALID_APPOINTMENT_WINDOW' },
+          );
+        }
+        // Duration for a start-only edit: the SUBMITTED estimatedDuration
+        // (this same request) wins, else the stored span, else the row's
+        // estimated_duration_minutes, else 60 — the block the visit will
+        // actually occupy after this save.
+        const submittedDuration = Number.isInteger(updates.estimated_duration_minutes) && updates.estimated_duration_minutes > 0
+          ? updates.estimated_duration_minutes
+          : null;
+        const normalizedWindow = assertAdminAppointmentWindow({
+          windowStart: effectiveStart,
+          windowEnd: updates.window_end || null,
+          durationMinutes: submittedDuration
+            || windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
+        });
+        updates.window_start = normalizedWindow.window_start;
+        updates.window_end = normalizedWindow.window_end;
+      } else if (!effectiveSlotUnchanged && !windowIntake.clearBoth
+        && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))
+        && (updates.scheduled_date !== undefined || !normalizeHHMM(currentRow.window_end))) {
+        // Date-only move (any stored window) or a duration-only edit on an
+        // end-less row: judged on the effective block — stored end, else the
+        // SUBMITTED duration, else the stored one, else 60.
+        preReadWindowRow = currentRow;
+        const submittedDuration = Number.isInteger(updates.estimated_duration_minutes) && updates.estimated_duration_minutes > 0
+          ? updates.estimated_duration_minutes
+          : null;
+        assertAdminAppointmentWindow({
+          windowStart: normalizeHHMM(currentRow.window_start),
+          windowEnd: normalizeHHMM(currentRow.window_end),
+          durationMinutes: submittedDuration
+            || windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
+        });
+      }
+    }
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
@@ -6212,6 +6459,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 code: 'VISIT_CHANGED_RETRY',
               });
             }
+            // Scheduling-field CAS against the unlocked pre-read the window
+            // normalization above derived from: a concurrent window/date
+            // edit that committed first must not be overwritten with a
+            // pair built on the stale snapshot.
+            // estimated_duration_minutes is part of the compare: a start-only
+            // edit derives its end from it, so a concurrent duration-only
+            // edit must not be overwritten with a block built on the old one.
+            if (preReadWindowRow && (
+              dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
+              || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
+              || normalizeHHMM(occRow.window_end) !== normalizeHHMM(preReadWindowRow.window_end)
+              || (parseInt(occRow.estimated_duration_minutes, 10) || null) !== (parseInt(preReadWindowRow.estimated_duration_minutes, 10) || null)
+            )) {
+              throw Object.assign(new Error('This appointment was moved or resized while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
             const occStart = normalizeHHMM(updates.window_start !== undefined ? updates.window_start : occRow.window_start);
             // A start-only edit leaves the stored end stale — derive the
             // block from the effective duration like the rebooker does.
@@ -6258,7 +6524,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 date: occDate,
                 windowStart: occStart,
                 windowEnd: occEnd,
-                excludeServiceIds: [req.params.id],
+                excludeServiceIds: await adminMoveProbeExcludeIds(trx, {
+                  id: req.params.id, parentBefore: recurringParentBefore, updates,
+                }),
                 excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
               });
               if (adminMoveClash.length) {
@@ -7467,7 +7735,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+    }
     next(err);
   }
 });
@@ -13874,6 +14144,8 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  adminMoveProbeExcludeIds,
+  windowIntakeFromBody,
   noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,

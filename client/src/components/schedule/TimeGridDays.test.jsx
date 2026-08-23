@@ -12,6 +12,7 @@ vi.mock('@dnd-kit/core', () => ({
   useSensors: () => [],
   useDraggable: () => ({ attributes: {}, listeners: {}, setNodeRef: vi.fn(), transform: null, isDragging: false }),
   useDroppable: () => ({ setNodeRef: vi.fn(), isOver: false }),
+  useDndContext: () => ({ active: null }),
   pointerWithin: vi.fn(),
 }));
 
@@ -102,5 +103,18 @@ describe('TimeGridDays week loading', () => {
       '/api/admin/schedule/week?start=2026-07-20',
       expect.any(Object),
     );
+  });
+});
+
+describe('TimeGridDays bookable rows', () => {
+  it('rows before 8 AM are not bookable, drops snap to the hour, and late rows respect the visit duration', async () => {
+    const { snapSlotIdxToHourMin, isBookableSlotIdx } = await import('./TimeGridDays');
+    // 30-min rows from 06:00: idx 4 = 08:00.
+    expect(isBookableSlotIdx(3)).toBe(false);
+    expect(isBookableSlotIdx(4)).toBe(true);
+    expect(snapSlotIdxToHourMin(5)).toBe(8 * 60);
+    const IDX_19 = (19 - 6) * 2;
+    expect(isBookableSlotIdx(IDX_19, 60)).toBe(true);
+    expect(isBookableSlotIdx(IDX_19, 120)).toBe(false);
   });
 });

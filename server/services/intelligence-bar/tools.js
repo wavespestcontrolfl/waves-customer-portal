@@ -8,7 +8,9 @@
  */
 
 const db = require('../../models/db');
-const { lockCustomerComms, withCustomerCommsLock } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+// Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
+const { assertAdminAppointmentWindow, assertNoSlotOverlap } = require('../scheduling/window-rules');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1612,9 +1614,21 @@ async function createAppointment(input) {
   // deriveWindowEnd returns null when start+60 would cross midnight — the
   // old modulo wrap turned a 23:30 start into a 23:30–00:30 same-day block
   // no overlap predicate could see. Reject up front, before any DB read.
-  const windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
+  let windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
   if (win.start && !windowEnd) {
     return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
+  // Shared admin window rules on the EFFECTIVE window (start + flat-60 end):
+  // >= 08:00, end <= day end, on the hour. parseTimeWindowStart accepted
+  // 07:00 / 20:00 and this tool persisted them directly, bypassing every
+  // other creator's validator. Surfaced as the tool's error result.
+  if (win.start) {
+    try {
+      ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 }));
+    } catch (err) {
+      if (err?.status === 422) return { error: err.message };
+      throw err;
+    }
   }
 
   const customer = await db('customers').where('id', customer_id).first();
@@ -1652,26 +1666,41 @@ async function createAppointment(input) {
   // any open offer. The marker runs in a savepoint, so an evidence hiccup
   // still never blocks the booking.
   let appointment;
-  await withCustomerCommsLock(db, customer_id, async (trx) => {
-    const [created] = await trx('scheduled_services').insert({
-      customer_id,
-      scheduled_date: dateStr,
-      service_type,
-      technician_id,
-      status: 'pending',
-      window_start: win.start,
-      window_end: windowEnd,
-      notes: notes || null,
-      created_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    appointment = created;
-    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
-      customerId: customer_id,
-      scheduledServiceId: created.id,
-      source: 'intelligence_bar',
+  try {
+    await db.transaction(async (trx) => {
+      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+      // occupancy lock + tech-blind probe FIRST, before the comms key (rung
+      // 6) and the insert's row locks; mirrors the lead-booking route. Gated
+      // (GATE_ADMIN_SLOT_OVERLAP_GUARD): a no-op while the gate is off.
+      if (win.start && windowEnd) {
+        await assertNoSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      }
+      // Rung 6 — the same comms fence withCustomerCommsLock provided.
+      await lockCustomerComms(trx, customer_id);
+      const [created] = await trx('scheduled_services').insert({
+        customer_id,
+        scheduled_date: dateStr,
+        service_type,
+        technician_id,
+        status: 'pending',
+        window_start: win.start,
+        window_end: windowEnd,
+        notes: notes || null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }).returning('*');
+      appointment = created;
+      await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId: customer_id,
+        scheduledServiceId: created.id,
+        source: 'intelligence_bar',
+      });
     });
-  });
+  } catch (err) {
+    // Gated overlap refusal → the tool's error shape (no throw to the IB).
+    if (err?.code === 'SLOT_CONFLICT') return { error: err.message };
+    throw err;
+  }
 
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
@@ -1752,7 +1781,6 @@ async function rescheduleAppointment(input) {
   const win = parseTimeWindowStart(new_time_window);
   if (win.error) return { error: win.error };
 
-  const customer = await db('customers').where('id', appt.customer_id).first();
   const oldDate = appt.scheduled_date;
 
   // Preserve the original visit's window length when a new start is given.
@@ -1761,13 +1789,43 @@ async function rescheduleAppointment(input) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
-  const newWindowEnd = win.start
-    ? deriveWindowEnd(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
+  let newWindowEnd = win.start
+    ? deriveWindowEnd(win.start, apptDuration)
     : appt.window_end;
   if (win.start && !newWindowEnd) {
     return { error: 'That window would cross midnight — pick an earlier start.' };
   }
+  // Shared admin window rules on the EFFECTIVE window the move will persist
+  // (supplied-or-stored start, derived-or-stored end, stored duration for an
+  // end-less row): >= 08:00, end <= day end. A windowless row (both null)
+  // moves date-only. Surfaced as the tool's error result.
+  // Overlap: the CAS update below now runs inside db.transaction, so the
+  // gated rung-1 lock + probe fences this move too (see below).
+  // The validator also hands back the EFFECTIVE block this visit will
+  // occupy. On an END-LESS row a date-only move persists end null but still
+  // occupies start + estimated_duration_minutes, so the probe window below
+  // is the DERIVED pair, not the persisted one — keying the probe off
+  // newWindowEnd skipped the overlap check entirely on exactly those rows
+  // (gate on, occupied destination, no refusal).
+  let probeWindowStart = null;
+  let probeWindowEnd = null;
+  if (newStart || newWindowEnd) {
+    try {
+      const normalizedWindow = assertAdminAppointmentWindow({
+        windowStart: newStart, windowEnd: newWindowEnd, durationMinutes: apptDuration,
+      });
+      probeWindowStart = normalizedWindow.window_start;
+      probeWindowEnd = normalizedWindow.window_end;
+      if (win.start) newWindowEnd = normalizedWindow.window_end;
+    } catch (err) {
+      if (err?.status === 422) return { error: err.message };
+      throw err;
+    }
+  }
+
+  const customer = await db('customers').where('id', appt.customer_id).first();
 
   // A today target whose effective window already elapsed in ET is unreachable
   // — moving into a past window strands the visit. Same cutoff logic as the
@@ -1823,42 +1881,86 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  const updatedRows = await applyTrackLifecycleCas(
-    db('scheduled_services')
-      .where('id', appointment_id)
-      .where('status', String(appt.status))
-      .where({
-        scheduled_date: observedDate,
-        window_start: appt.window_start ?? null,
-        window_end: appt.window_end ?? null,
-      }),
-    // The full observed tracker/lifecycle snapshot is in the CAS: a
-    // geofence/manual transition between the read and this write can
-    // advance track_state, add stamps to a same-state row, or stamp an
-    // SMS guard — any of it must make this miss instead of moving the
-    // visit on a stale snapshot. See applyTrackLifecycleCas.
-    appt,
-  )
-    .update({
-      scheduled_date: dateStr,
-      window_start: newStart,
-      window_end: newWindowEnd,
-      // A DATE move carries the stop into another tech-day: clear its
-      // route_order (fence-or-clear contract — NULL appends after the
-      // destination day's ordered run; the CAS above already makes a
-      // stale-snapshot write miss). Same-day window changes keep it.
-      ...(dateStr !== observedDate ? { route_order: null } : {}),
-      notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
-      // Public track links live until the day after the visit — refresh onto
-      // the new date, same as schedule-tools' movers.
-      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
-      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
-      // en_route/on_site row would keep a live status on a future date. Land it
-      // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
-      ...(wasLive ? { status: 'confirmed' } : {}),
-      ...liveReset,
-      updated_at: new Date(),
+  // The move runs in a transaction so the gated occupancy guard can fence it
+  // (a bare advisory xact lock outside a trx fences nothing). Rung 1 of
+  // scheduling/occupancy.js's ORDERING CONTRACT — the date-wide lock + the
+  // tech-blind probe — is taken FIRST, before the row write, exactly as the
+  // create path above does; the moving visit excludes itself. The gate
+  // (GATE_ADMIN_SLOT_OVERLAP_GUARD) makes it a no-op while off, so the CAS
+  // semantics are unchanged there. A conflict is surfaced as the tool's
+  // { error } result, never thrown at the Intelligence Bar.
+  let updatedRows = 0;
+  try {
+    await db.transaction(async (trx) => {
+      if (probeWindowStart && probeWindowEnd) {
+        await assertNoSlotOverlap({
+          trx,
+          date: dateStr,
+          windowStart: probeWindowStart,
+          windowEnd: probeWindowEnd,
+          excludeServiceIds: [appointment_id],
+        });
+      }
+      updatedRows = await applyTrackLifecycleCas(
+        trx('scheduled_services')
+          .where('id', appointment_id)
+          .where('status', String(appt.status))
+          .where({
+            scheduled_date: observedDate,
+            window_start: appt.window_start ?? null,
+            window_end: appt.window_end ?? null,
+            // Duration pin, only when this move's window math DEPENDED on the
+            // column: on a row with a start and NO end, apptDuration is the
+            // estimated_duration_minutes fallback, and it sets both the
+            // persisted end of a start-only move and the probed block of a
+            // date-only one. A concurrent duration-only edit changes the block
+            // the visit occupies, so this write must miss and surface the
+            // concurrent-change error rather than land a span built on the
+            // stale value — the same safeguard rebooker.js's CAS applies
+            // (codex #3377 P1). A row with a real stored span never reads the
+            // column, and a WINDOWLESS row (both null) has no block at all, so
+            // both stay out of the predicate. (A stored end without a start is
+            // 422'd by the validator above and never reaches this write.)
+            ...((appt.window_start && !appt.window_end)
+              ? { estimated_duration_minutes: appt.estimated_duration_minutes ?? null }
+              : {}),
+          }),
+        // The full observed tracker/lifecycle snapshot is in the CAS: a
+        // geofence/manual transition between the read and this write can
+        // advance track_state, add stamps to a same-state row, or stamp an
+        // SMS guard — any of it must make this miss instead of moving the
+        // visit on a stale snapshot. See applyTrackLifecycleCas.
+        appt,
+      )
+        .update({
+          scheduled_date: dateStr,
+          window_start: newStart,
+          window_end: newWindowEnd,
+          // A DATE move carries the stop into another tech-day: clear its
+          // route_order (fence-or-clear contract — NULL appends after the
+          // destination day's ordered run; the CAS above already makes a
+          // stale-snapshot write miss). Same-day window changes keep it.
+          ...(dateStr !== observedDate ? { route_order: null } : {}),
+          notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
+          // Public track links live until the day after the visit — refresh onto
+          // the new date, same as schedule-tools' movers. Built off the root
+          // knex on purpose: it is a bound VALUE fragment, not a query — it
+          // executes as part of this trx's UPDATE.
+          track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
+          // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
+          // en_route/on_site row would keep a live status on a future date. Land it
+          // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
+          ...(wasLive ? { status: 'confirmed' } : {}),
+          ...liveReset,
+          updated_at: new Date(),
+        });
     });
+  } catch (err) {
+    // Gated overlap refusal → the tool's { error } result (no throw to the
+    // Intelligence Bar); the trx rolled back, so nothing moved.
+    if (err && err.code === 'SLOT_CONFLICT') return { error: err.message };
+    throw err;
+  }
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }

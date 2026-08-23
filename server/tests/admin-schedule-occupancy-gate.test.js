@@ -195,7 +195,7 @@ describe('PUT /:id/update-details — date/window move', () => {
     expect(rowUpdate.window_end).toBe('14:00');
   });
 
-  test('an end at/before the start never persists — the duration-derived end is stored instead', async () => {
+  test('an end at/before the start never persists — the shared window validator refuses it (422) before the transaction', async () => {
     const updateCalls = [];
     trx.mockImplementation((table) => {
       const c = chain(table === 'scheduled_services' ? { ...SVC } : undefined);
@@ -203,15 +203,16 @@ describe('PUT /:id/update-details — date/window move', () => {
       return c;
     });
 
-    // Derived block 09:00-10:00 equals the stored one, so nothing moves and
-    // no probe runs — but the inverted 08:00 end must not land either.
-    const { status } = await put('svc-1', { windowEnd: '08:00' });
+    // An end-only edit is validated against the STORED start
+    // (scheduling/window-rules.js, fail closed): 08:00 on a 09:00 start is
+    // refused outright rather than silently healed, so nothing is probed
+    // and nothing lands.
+    const { status, body } = await put('svc-1', { windowEnd: '08:00' });
 
-    expect(status).not.toBe(409);
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
     expect(findConflictingVisits).not.toHaveBeenCalled();
-    const rowUpdate = updateCalls.find((d) => d && d.window_end !== undefined);
-    expect(rowUpdate).toBeTruthy();
-    expect(rowUpdate.window_end).toBe('10:00');
+    expect(updateCalls.find((d) => d && d.window_end !== undefined)).toBeUndefined();
   });
 
   test('a duration-only edit on an end-less row widens occupancy — locks and probes', async () => {
@@ -446,5 +447,68 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     }));
     expect(childWrites).toEqual([]);
     expect(trx.commit).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /:id/update-details — presence is not change (legacy off-hour rows stay editable)', () => {
+  // Both schedule editors echo the current date/window/duration on every
+  // save, so a notes / price / service / technician edit arrives carrying the
+  // row's own slot. Validating on PRESENCE made every legacy off-hour visit
+  // (a 07:00 row booked before the on-the-hour/>=08:00 rules) uneditable —
+  // a notes-only save 422'd. The window rules run only when the EFFECTIVE
+  // slot actually differs from the stored one.
+  const LEGACY = {
+    ...SVC, scheduled_date: '2099-07-01', window_start: '07:00:00', window_end: '08:00:00',
+  };
+  beforeEach(() => {
+    db.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...LEGACY } : (table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined)));
+    trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...LEGACY } : (table === 'customers' ? { id: 'cust-1' } : undefined)));
+  });
+
+  test('notes-only save that ECHOES the stored date/window on a legacy 07:00 row is accepted', async () => {
+    const { status, body } = await put('svc-1', {
+      notes: 'gate code updated',
+      scheduledDate: '2099-07-01', windowStart: '07:00', windowEnd: '08:00', estimatedDuration: 60,
+    });
+    expect(status).toBe(200);
+    expect(body.error).toBeUndefined();
+  });
+
+  test('the SAME legacy row moved to a new date is still refused (a 07:00 window must not ride onto another day)', async () => {
+    const { status, body } = await put('svc-1', {
+      notes: 'gate code updated',
+      scheduledDate: '2099-07-05', windowStart: '07:00', windowEnd: '08:00', estimatedDuration: 60,
+    });
+    expect(status).toBe(422);
+    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
+    expect(body.error).toMatch(/before 08:00/);
+  });
+
+  test('a real WINDOW edit on the legacy row is validated (an end past the day end is refused)', async () => {
+    const { status, body } = await put('svc-1', {
+      scheduledDate: '2099-07-01', windowStart: '19:00', windowEnd: '21:00',
+    });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/end by 20:00/);
+  });
+
+  test('a real DURATION edit on the legacy row is validated too', async () => {
+    const { status, body } = await put('svc-1', {
+      scheduledDate: '2099-07-01', windowStart: '07:00', windowEnd: '08:00', estimatedDuration: 120,
+    });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/before 08:00/);
+  });
+
+  test('moving the legacy row to a LEGAL window is accepted and persisted', async () => {
+    const updateCalls = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...LEGACY } : undefined);
+      if (table === 'scheduled_services') c.update = jest.fn(async (data) => { updateCalls.push(data); return 1; });
+      return c;
+    });
+    const { status } = await put('svc-1', { scheduledDate: '2099-07-01', windowStart: '10:00', windowEnd: '11:00' });
+    expect(status).toBe(200);
+    expect(updateCalls.find((d) => d && d.window_start === '10:00' && d.window_end === '11:00')).toBeTruthy();
   });
 });

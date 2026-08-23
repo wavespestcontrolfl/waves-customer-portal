@@ -12094,6 +12094,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');
+const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
 function parseRescheduleWindow(w) {
@@ -12108,6 +12109,116 @@ function normalizeHHMM(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return null;
   return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
+}
+
+function invalidRescheduleWindow(message) {
+  const err = new Error(message);
+  err.status = 422;
+  err.statusCode = 422;
+  err.isOperational = true;
+  err.code = 'INVALID_APPOINTMENT_WINDOW';
+  return err;
+}
+
+// The duration the rebooker persists for this row (window span, else
+// estimated_duration_minutes); null when neither exists.
+function visitDurationMinutes(row) {
+  if (row?.window_start && row?.window_end) {
+    const [h1, m1] = String(row.window_start).split(':').map(Number);
+    const [h2, m2] = String(row.window_end).split(':').map(Number);
+    const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+    if (span > 0) return span;
+  }
+  const d = parseInt(row?.estimated_duration_minutes, 10);
+  return Number.isInteger(d) && d > 0 ? d : null;
+}
+
+// Resolve + validate the window a dispatch reschedule will persist, against
+// the visit's CURRENT row (shared rules: scheduling/window-rules.js):
+//   - absent window (date-only move): the stored window rides onto the new
+//     date, so it must satisfy the rules (a legacy 07:00 row is refused);
+//     a windowless row (both null) still moves;
+//   - { start } without an end: the rebooker persists `win.end ||
+//     service.window_end`, so the end is DERIVED from the row's own
+//     duration here and submitted explicitly (19:00 on a 2-hour visit is
+//     19:00-21:00 — refused — never 19:00-11:00); no derivable duration →
+//     an explicit end is required (422). Covers the RescheduleModal's
+//     deriveWindowFromCurrentVisit opt-in too;
+//   - full window: validated as given. Any supplied value with no start is
+//     malformed (422), never a silent date-only move.
+// The scheduling fields resolveRescheduleWindow's derivation/validation READ,
+// in the shape the rebooker's EXISTING options.expect predicate takes (knex
+// object form renders null as IS NULL). This read happens outside the
+// rebooker's transaction, and the rebooker's own CAS pins status + tracker
+// state (plus the duration only for its own null-end derivation) — not the
+// date/window/duration THIS resolution derived from. So a concurrent resize
+// between the two could make a start-only move persist an end built on the
+// stale duration, and a concurrent edit to an invalid stored window could
+// slip past a date-only move's validation. Feeding those fields into
+// options.expect ANDs them into the rebooker's own UPDATE, so a mismatch is
+// the existing changed-concurrently 409 — no second mechanism.
+function rescheduleExpectPredicate(observed) {
+  if (!observed || !observed.read) return null;
+  const date = observed.scheduled_date instanceof Date
+    ? observed.scheduled_date.toISOString().slice(0, 10)
+    : (observed.scheduled_date ? String(observed.scheduled_date).split('T')[0] : null);
+  return {
+    ...(date ? { scheduled_date: date } : {}),
+    window_start: observed.window_start ?? null,
+    window_end: observed.window_end ?? null,
+    estimated_duration_minutes: observed.estimated_duration_minutes ?? null,
+  };
+}
+
+// `observed`, when passed, is filled with the row this resolution actually
+// read (see rescheduleExpectPredicate) — a full explicit window reads nothing
+// and leaves it untouched.
+async function resolveRescheduleWindow(serviceId, window, observed = null) {
+  const record = (row) => {
+    if (observed && row) Object.assign(observed, row, { read: true });
+    return row;
+  };
+  if (window == null || window === '') {
+    const row = record(await db('scheduled_services').where({ id: serviceId })
+      .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'));
+    // pg TIME values carry seconds — the validator's parser accepts them.
+    // An end-less row is judged on the duration the rebooker persists
+    // (visitDurationMinutes: span → estimated_duration_minutes), so 19:00 +
+    // 120 min is 19:00-21:00 and refused, not a 60-min block.
+    if (row && (row.window_start || row.window_end)) {
+      assertAdminAppointmentWindow({
+        windowStart: row.window_start,
+        windowEnd: row.window_end,
+        durationMinutes: visitDurationMinutes(row) || undefined,
+      });
+    }
+    return window;
+  }
+  const win = parseRescheduleWindow(window);
+  if (!win.start) {
+    throw invalidRescheduleWindow(`Reschedule window must be "HH:MM-HH:MM" or { start, end } — got ${JSON.stringify(window)}`);
+  }
+  let effective = window;
+  if (!win.end) {
+    const row = record(await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'));
+    const dur = visitDurationMinutes(row);
+    if (!dur) {
+      throw invalidRescheduleWindow('This visit has no stored duration — supply an explicit end time (HH:MM) with the new start');
+    }
+    const [sh, sm] = String(win.start).split(':').map(Number);
+    const endTotal = sh * 60 + (sm || 0) + dur;
+    if (endTotal > 23 * 60 + 59) {
+      throw Object.assign(new Error("That start time would run past midnight for this visit's duration — pick an earlier hour"), {
+        statusCode: 409, isOperational: true, code: 'WINDOW_CROSSES_MIDNIGHT',
+      });
+    }
+    win.end = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+    effective = { ...(typeof window === 'object' ? window : {}), start: win.start, end: win.end };
+  }
+  assertAdminAppointmentWindow({ windowStart: win.start, windowEnd: win.end });
+  return effective;
 }
 
 function rescheduleReminderTime(date, window) {
@@ -12599,7 +12710,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // customer pushes the whole cadence) — the rebooker rewinds its
     // tracker lifecycle and frees the tech, same as the single path.
     if (scope === 'series') {
-      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true });
+      // Anchor-level validation here (malformed / pre-8am / past day end);
+      // the RAW window goes to the rebooker so a start-only move derives
+      // EACH occurrence's end from its own duration, and adminWindowRules
+      // validates every landing window inside the series trx (one failing
+      // sibling aborts the whole move).
+      const observedAnchor = {};
+      await resolveRescheduleWindow(req.params.serviceId, newWindow, observedAnchor);
+      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
+        allowLive: true,
+        adminWindowRules: true,
+        // Same staleness fence via the series writer's own expectAnchor
+        // mechanism: the anchor whose window this route just validated must
+        // still be the anchor the trx moves.
+        ...(observedAnchor.read
+          ? {
+            expectAnchor: {
+              ...(observedAnchor.scheduled_date ? { scheduled_date: observedAnchor.scheduled_date } : {}),
+              window_start: observedAnchor.window_start ?? null,
+            },
+          }
+          : {}),
+      });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
       // The rebooker unassigns any shifted sibling whose kept tech would
       // double-book its recomputed date (occ.conflicted). Those rows often
@@ -12761,39 +12893,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
       rescheduleOptions.technicianId = newTechId;
     }
-    // Callers with a possibly-stale board snapshot (the RescheduleModal)
-    // opt in to server-side block derivation: window_end is rebuilt from
-    // the CURRENT row's own span/duration at the submitted start, so a
-    // concurrent duration edit can't be overwritten with a stale block.
-    let effectiveWindow = newWindow;
-    if (req.body.deriveWindowFromCurrentVisit === true && newWindow?.start) {
-      const row = await db('scheduled_services')
-        .where({ id: req.params.serviceId })
-        .first('window_start', 'window_end', 'estimated_duration_minutes');
-      if (row) {
-        const dur = (() => {
-          if (row.window_start && row.window_end) {
-            const [h1, m1] = String(row.window_start).split(':').map(Number);
-            const [h2, m2] = String(row.window_end).split(':').map(Number);
-            const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
-            if (span > 0) return span;
-          }
-          const d = parseInt(row.estimated_duration_minutes, 10);
-          if (Number.isInteger(d) && d > 0) return d;
-          return 60;
-        })();
-        const [sh, sm] = String(effectiveWindow.start).split(':').map(Number);
-        const endTotal = sh * 60 + (sm || 0) + dur;
-        if (endTotal > 23 * 60 + 59) {
-          return res.status(409).json({
-            error: "That start time would run past midnight for this visit's duration — pick an earlier hour",
-            code: 'WINDOW_CROSSES_MIDNIGHT',
-          });
-        }
-        const end = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
-        effectiveWindow = { ...effectiveWindow, end };
-      }
-    }
+    // The window the rebooker will persist, resolved against the CURRENT
+    // row (date-only moves validate the stored window; a start-only window
+    // gets its end derived from the row's own duration — which also covers
+    // the RescheduleModal's deriveWindowFromCurrentVisit opt-in).
+    const observedForMove = {};
+    const effectiveWindow = await resolveRescheduleWindow(req.params.serviceId, newWindow, observedForMove);
+    // Pin the fields that resolution derived from into the rebooker's CAS.
+    const movePin = rescheduleExpectPredicate(observedForMove);
+    if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
@@ -12820,7 +12928,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     }
     res.json(result);
   } catch (err) {
-    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
 });

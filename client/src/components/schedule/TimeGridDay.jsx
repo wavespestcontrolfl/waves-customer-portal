@@ -13,6 +13,7 @@ import {
   useSensors,
   useDraggable,
   useDroppable,
+  useDndContext,
   pointerWithin,
 } from '@dnd-kit/core';
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
@@ -22,7 +23,13 @@ import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// DISPLAY range starts at 6 so existing earlier rows (legacy / lead-created)
+// still render on dispatch; CREATION and MOVES start at 8 — no client
+// appointments before 8am ET (owner rule; the server's window validator,
+// scheduling/window-rules.js, refuses them with a 422). Rows before
+// BOOKABLE_START_HOUR are muted, non-droppable, and not drag-creatable.
 const DAY_START_HOUR = 6;
+const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -463,18 +470,47 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   );
 }
 
+// Appointments are 60-min slots ON THE HOUR: a drop on a half-hour visual
+// row snaps DOWN to its hour (the server refuses :30 starts with a 422).
+export function snapSlotIdxToHourMin(slotIdx) {
+  return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
+}
+
+// A row accepts drops / drag-create only from BOOKABLE_START_HOUR on, AND
+// only if a visit of `durationMin` starting there ends by DAY_END_HOUR —
+// the server refuses an end past the day end with a 422, so a 2-hour visit
+// must not be offered the 19:00 row.
+export function isBookableSlotIdx(slotIdx, durationMin = 60) {
+  const startMin = snapSlotIdxToHourMin(slotIdx);
+  const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
+  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
+}
+
 function SlotDroppable({ techId, slotIdx, onCreateStart }) {
-  const slotMin = DAY_START_HOUR * 60 + slotIdx * SLOT_MIN;
+  const slotMin = snapSlotIdxToHourMin(slotIdx);
+  // The visit being dragged (same payload onDragEnd reads) sizes the fit
+  // check; with nothing in flight the row is judged as a 60-min create.
+  const { active } = useDndContext();
+  const activeSvc = active?.data?.current?.service;
+  const bookable = isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
+    disabled: !bookable,
   });
   const isHour = slotIdx % 2 === 0;
   return (
     <div
-      ref={setNodeRef}
-      onPointerDown={onCreateStart ? (e) => onCreateStart(e, slotIdx) : undefined}
-      className={cn('transition-colors', isOver && 'bg-zinc-100', onCreateStart && 'cursor-crosshair')}
+      ref={bookable ? setNodeRef : undefined}
+      onPointerDown={onCreateStart && bookable ? (e) => onCreateStart(e, slotIdx) : undefined}
+      aria-disabled={bookable ? undefined : true}
+      data-slot-min={slotMin}
+      className={cn(
+        'transition-colors',
+        bookable && isOver && 'bg-zinc-100',
+        bookable && onCreateStart && 'cursor-crosshair',
+        !bookable && 'bg-zinc-50 cursor-not-allowed',
+      )}
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
@@ -511,8 +547,15 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       if (!cur) return;
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
-      const startMin = DAY_START_HOUR * 60 + lo * SLOT_MIN;
-      const endMin = DAY_START_HOUR * 60 + (hi + 1) * SLOT_MIN;
+      // Hour-aligned block: start floors, end ceils to the next hour mark.
+      // A selection dragged up into the pre-opening rows is clamped to 8am.
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
+      const endMin = Math.min(
+        DAY_END_HOUR * 60,
+        Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
+      );
+      // No hour left before the day end — nothing bookable to pre-fill.
+      if (endMin - startMin < 60) return;
       onCreateSlot?.({
         techId: tech.id,
         windowStart: minutesToHHMM(startMin),
@@ -1037,7 +1080,11 @@ export default function TimeGridDay({
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
-    const toMin = drop.slotMin != null ? drop.slotMin : fromMin;
+    const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
+    // Pre-opening rows are disabled droppables; belt-and-braces for a stale
+    // drop payload — the server would 422 it anyway.
+    if (drop.slotMin != null && toMin < BOOKABLE_START_HOUR * 60) return;
+    if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
     if (fromTech === toTech && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);
@@ -1178,10 +1225,15 @@ export default function TimeGridDay({
     try {
       const results = await Promise.allSettled(
         toMove.map((svc) => {
-          const startMin = parseHHMM(svc.windowStart) ?? DAY_START_HOUR * 60;
-          const dur = effectiveDuration(svc);
-          const endMin = parseHHMM(svc.windowEnd) ?? (startMin + dur);
-          const newWindow = `${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`;
+          // Date-only move: a WINDOWLESS visit stays windowless (newWindow
+          // null — the server moves the date and keeps both bounds null).
+          // Synthesizing a grid-start window here used to book 06:00, which
+          // the resolver refuses (< 08:00) — windowless visits could not be
+          // bulk-moved at all. A timed visit carries its own window.
+          const startMin = parseHHMM(svc.windowStart);
+          const newWindow = startMin == null
+            ? null
+            : `${minutesToHHMM(startMin)}-${minutesToHHMM(parseHHMM(svc.windowEnd) ?? (startMin + effectiveDuration(svc)))}`;
           return adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
             method: 'POST',
             body: JSON.stringify({
@@ -1273,10 +1325,10 @@ export default function TimeGridDay({
             .filter((s) => selection.has(s.id))
             .map((s) => {
               // Mirror handleBulkMove's submit derivation exactly: a
-              // windowless visit lands at DAY_START_HOUR and a missing end
-              // becomes start + duration, so the hint checks the window the
-              // move will actually book (not the stored nulls).
-              const startMin = parseHHMM(s.windowStart) ?? DAY_START_HOUR * 60;
+              // windowless visit moves date-only (no window → the conflict
+              // hint skips it); a missing end becomes start + duration.
+              const startMin = parseHHMM(s.windowStart);
+              if (startMin == null) return { id: s.id, windowStart: null, windowEnd: null };
               const endMin = parseHHMM(s.windowEnd) ?? (startMin + effectiveDuration(s));
               return { id: s.id, windowStart: minutesToHHMM(startMin), windowEnd: minutesToHHMM(endMin) };
             })}

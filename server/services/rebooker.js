@@ -9,8 +9,47 @@ const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
-  deriveWindowEnd,
+  deriveWindowEnd, windowDurationMinutes,
 } = require('../utils/datetime-et');
+
+// The window ONE series occurrence lands on, from ITS OWN stored window /
+// duration: a start-only move derives each occurrence's end from its own
+// span (stored span → estimated_duration_minutes → 60) — never the anchor's
+// — so a 60-min and a 120-min sibling each keep their span; a full window
+// applies as given; no window keeps the row's own. With
+// options.adminWindowRules (the dispatch route) every landing window is
+// run through the shared admin validator (scheduling/window-rules.js) and a
+// single failing occurrence — e.g. a legacy 07:00 sibling — aborts the
+// whole series (422, inside the trx, nothing moved).
+function seriesOccurrenceWindow(win, sib, options = {}) {
+  const sibDuration = windowDurationMinutes(sib.window_start, sib.window_end, sib.estimated_duration_minutes);
+  const start = win.start || sib.window_start || null;
+  let end = win.end || null;
+  // A null end that survives the toggle below must be PERSISTED null: the
+  // validator derives a temporary end from the duration to judge the block,
+  // and that derived value must never leak back onto the row when the
+  // rollback switch says "keep the legacy null" (a revert toggle outranks a
+  // derivation).
+  let endStaysNull = false;
+  if (!end) {
+    // REBOOKER_NULL_END_OCCUPANCY=off is the rollback toggle for null-end
+    // derivation — it outranks this derivation too (legacy: keep the row's
+    // own end, null included).
+    const deriveNullEnd = process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off';
+    end = (win.start && deriveNullEnd) ? deriveWindowEnd(win.start, sibDuration) : (sib.window_end || null);
+    endStaysNull = !end;
+  }
+  if (options.adminWindowRules === true && (start || end)) {
+    const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
+    // windowEnd null → the validator derives a TEMPORARY end from the
+    // occurrence's own duration purely to run end > start / end <= day end.
+    const normalized = assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: sibDuration });
+    // Persist the normalized pair only when this move sets a window; a
+    // no-window move keeps the row's own (validated) values untouched.
+    if (win.start) return { start: normalized.window_start, end: endStaysNull ? null : normalized.window_end };
+  }
+  return { start, end };
+}
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
@@ -1064,10 +1103,11 @@ class SmartRebooker {
             ? sib.scheduled_date.toISOString()
             : sib.scheduled_date || '').slice(0, 10);
         const sibRewound = isLiveAnchor || (sibDateChanges && needsLifecycleRewind(sib));
+        const occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
         const updateData = {
           scheduled_date: date,
-          window_start: win.start || sib.window_start,
-          window_end: win.end || sib.window_end,
+          window_start: occurrenceWindow.start,
+          window_end: occurrenceWindow.end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
@@ -1263,7 +1303,9 @@ class SmartRebooker {
               // their span from it (null landing end + gate on): a
               // concurrent duration-only edit must invalidate the match —
               // same rationale as the single-path CAS (codex #3377 P1).
-              ...((!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+              // Also pinned when a start-only move derived this row's end
+              // from its own duration (seriesOccurrenceWindow).
+              ...(((!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off') || (win.start && !win.end))
                 ? { estimated_duration_minutes: sib.estimated_duration_minutes ?? null }
                 : {}),
             }),
@@ -1486,3 +1528,6 @@ module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
+// Exported for tests: the per-occurrence window derivation (rollback toggle +
+// admin window rules) the series mover applies to every sibling.
+module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;

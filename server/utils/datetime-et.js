@@ -216,12 +216,19 @@ function sameDayWindowElapsed(dateStr, cutoff) {
 // admin-schedule convention when either bound is missing or the stored span
 // is non-positive — so preserving a window's length across a move never
 // collapses it to zero.
-function windowDurationMinutes(start, end) {
-  if (!start || !end) return 60;
+// Minutes a visit occupies: the stored span when valid, else the row's
+// estimated_duration_minutes (`fallbackMinutes`), else the flat-60
+// convention — the same precedence the occupancy predicate and the dispatch
+// reschedule derivation use, so a start-only edit on an end-less 120-minute
+// row derives a 2-hour end, not a 1-hour one.
+function windowDurationMinutes(start, end, fallbackMinutes) {
+  const fb = parseInt(fallbackMinutes, 10);
+  const fallback = Number.isInteger(fb) && fb > 0 ? fb : 60;
+  if (!start || !end) return fallback;
   const [sh, sm] = String(start).split(':').map(Number);
   const [eh, em] = String(end).split(':').map(Number);
   const diff = (eh * 60 + em) - (sh * 60 + sm);
-  return diff > 0 ? diff : 60;
+  return diff > 0 ? diff : fallback;
 }
 
 // 'HH:MM' end for a window starting at `start` (HH:MM[:SS]) and lasting

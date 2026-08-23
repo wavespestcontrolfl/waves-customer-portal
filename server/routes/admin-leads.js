@@ -4,6 +4,10 @@ const router = express.Router();
 const db = require('../models/db');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
+// Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
+// overlap guard for this route lives in the trx below (occupancy lock rung 1
+// + findConflictingVisits before insert) — one mechanism, see #3453.
+const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1322,16 +1326,22 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // Compute the time window from start + duration.
     const windowStart = /^\d{2}:\d{2}$/.test(time) ? time : null;
     // Appointment windows start ON THE HOUR (owner rule; Codex #3109 r37 —
-    // this convert path was the remaining bypass; the schedule-appointment
-    // route already rejects). Same rejection shape as that route.
+    // this convert path was the remaining bypass). Same rejection shape as
+    // above, then the SHARED admin window validator
+    // (scheduling/window-rules.js — >= 08:00, end > start, end <= day end,
+    // no midnight wrap) derives the end; its 422 is mapped onto this route's
+    // existing 400 shape for the lead-conversion UI.
     if (windowStart && !windowStart.endsWith(':00')) {
       return res.status(400).json({ error: `Appointment windows start on the hour — got "${time}"; use e.g. "${windowStart.slice(0, 2)}:00"` });
     }
     let windowEnd = null;
     if (windowStart) {
-      const [h, m] = windowStart.split(':').map(Number);
-      const endMin = h * 60 + m + duration;
-      windowEnd = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+      try {
+        ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart, durationMinutes: duration }));
+      } catch (err) {
+        if (err?.status === 422) return res.status(400).json({ error: err.message });
+        throw err;
+      }
     }
 
     // Resolve the customer: reuse the lead's linked customer if it still exists,
@@ -1359,15 +1369,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
-      // ---- SLOT-OVERLAP GUARD, part 1: date lock (merge note for PR #3454
-      // fix/sched-window-guard: that branch calls assertNoSlotOverlap() —
-      // lock + probe together — at the top of this trx. The probe MUST run
-      // after the converted-lead guard and the DUPLICATE_VISIT dedupe (a
-      // retry would otherwise see its own committed booking and return
-      // SLOT_CONFLICT instead of LEAD_ALREADY_CONVERTED / DUPLICATE_VISIT),
-      // so when merging keep ONE mechanism split the same way: window-rules'
-      // acquireAdminSlotLocks({ trx, dates: [date] }) HERE and its probe at
-      // part 2 below.) Rung 1 of occupancy.js's ORDERING CONTRACT: the
+      // ---- SLOT-OVERLAP GUARD, part 1: date lock. Rung 1 of occupancy.js's ORDERING CONTRACT: the
       // date-wide occupancy lock is the FIRST statement of the transaction —
       // coarsest first, before the comms lock and the lead FOR UPDATE.
       const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
