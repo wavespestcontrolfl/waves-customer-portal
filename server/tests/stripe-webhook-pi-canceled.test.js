@@ -119,7 +119,7 @@ test('single-invoice ACH PI canceled after processing: payment canceled, invoice
 
   const reverts = invoiceReverts();
   expect(reverts).toHaveLength(1);
-  expect(reverts[0].wheres).toContainEqual({ id: 'inv-1', status: 'processing' });
+  expect(reverts[0].wheres).toContainEqual({ id: 'inv-1', status: 'processing', stripe_payment_intent_id: 'pi_ach_1' });
   expect(reverts[0].patch).toMatchObject({
     status: 'sent',
     paid_at: null,

@@ -5881,14 +5881,18 @@ async function handlePaymentIntentCanceled(paymentIntent) {
         continue;
       }
     }
-    await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
-      status: nextInvoiceStatusAfterFailedPayment(stampedRow),
-      paid_at: null,
-      stripe_payment_intent_id: null,
-      stripe_charge_id: null,
-      ach_processing_notified_at: null,
-      updated_at: db.fn.now(),
-    });
+    // PI ownership in the predicate: a replacement PI rebinding this invoice
+    // between the read and this write must not have its binding cleared.
+    await db('invoices')
+      .where({ id: stampedRow.id, status: 'processing', stripe_payment_intent_id: piId })
+      .update({
+        status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+        paid_at: null,
+        stripe_payment_intent_id: null,
+        stripe_charge_id: null,
+        ach_processing_notified_at: null,
+        updated_at: db.fn.now(),
+      });
   }
   if (canceledStamped.length) {
     logger.warn(`[stripe-webhook] canceled PI ${piId} — reopened ${canceledStamped.length} invoice(s) from 'processing'`);
