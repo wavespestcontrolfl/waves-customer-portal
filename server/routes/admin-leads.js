@@ -3,7 +3,7 @@ const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1273,6 +1273,10 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
 router.post('/:id/schedule-appointment', async (req, res, next) => {
   try {
     const { date, time, serviceType, serviceId, technicianId, notes, durationMinutes } = req.body;
+    // Explicit repeat booking on an already-converted lead (client sends it
+    // when the card already shows a linked customer). Without it, any convert
+    // of a converted lead is a double-submit/retry and is rejected.
+    const rebook = req.body.rebook === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
@@ -1343,10 +1347,16 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
-      // Row-lock the lead FIRST so two concurrent converts (double-submit /
-      // retry — the client guard is per-tab) serialize here. The second one
-      // sees the first's conversion under the lock and stops instead of
-      // inserting a second customer + visit that the lead can never point at.
+      // LOCK ORDER (utils/customer-comms-lock.js contract #1): when the
+      // customer is already known, take the comms advisory lock FIRST — the
+      // merge-undo holds it as its first lock and later repoints the lead, so
+      // a lead row lock taken before it could deadlock.
+      if (customerId) await lockCustomerComms(trx, customerId);
+
+      // Row-lock the lead so two concurrent converts (double-submit / retry —
+      // the client guard is per-tab) serialize here. The second one sees the
+      // first's conversion under the lock and stops instead of inserting a
+      // second customer + visit that the lead can never point at.
       const lockedLead = await trx('leads')
         .where({ id: lead.id })
         .whereNull('deleted_at')
@@ -1357,17 +1367,28 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         gone.status = 409;
         throw gone;
       }
-      if (!lead.converted_at && lockedLead.converted_at) {
-        const dup = new Error('This lead was already converted by a concurrent request — reload the lead.');
+      const alreadyConverted = (message) => {
+        const dup = new Error(message);
         dup.statusCode = 409;
         dup.status = 409;
         dup.isOperational = true;
         dup.code = 'LEAD_ALREADY_CONVERTED';
         dup.customer_id = lockedLead.customer_id || null;
-        throw dup;
+        return dup;
+      };
+      // Any conversion of an already-converted lead is a retry unless the
+      // client explicitly asked for a repeat booking (a retry that BEGINS
+      // after the first commit sees converted_at on its pre-read too).
+      if (lockedLead.converted_at && !rebook) {
+        throw alreadyConverted('This lead was already converted — reload the lead (or book a repeat visit from the linked customer).');
       }
       if (!customerId && lockedLead.customer_id) {
-        // Linked since the pre-transaction read — reuse, never re-create.
+        // Customer discovered only under the lead lock (rebook on a lead
+        // linked since the pre-read). The blocking comms lock would be out
+        // of contract order here (lead row already held) — use the
+        // non-blocking variant and fail CLOSED if an undo holds it.
+        const fenced = await tryLockCustomerComms(trx, lockedLead.customer_id);
+        if (!fenced) throw alreadyConverted("This lead's customer is being merged/undone right now — reload the lead and try again.");
         existingCustomer = await trx('customers').where({ id: lockedLead.customer_id }).whereNull('deleted_at').first();
         if (existingCustomer) customerId = existingCustomer.id;
       }
@@ -1375,9 +1396,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the appointment
       // insert below resolves comms recipients LIVE from the customer row —
-      // serialize against a concurrent merge-undo BEFORE this trx's
-      // customers-row update and the insert. A customer CREATED inside this
-      // trx cannot be an undo's winner, so only the reuse path locks.
+      // the comms lock for a reused customer is already held (taken above,
+      // before the lead row; re-acquisition is a no-op). A customer CREATED
+      // inside this trx cannot be an undo's winner, so only the reuse path
+      // re-resolves.
       if (!needsCustomer) {
         await lockCustomerComms(trx, customerId);
         // Re-resolve UNDER the lock (r28): a merge-undo that held this key
@@ -1489,7 +1511,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // being unchanged since the locked read (belt-and-braces for the race
       // guard above): a first-time conversion must still be unconverted.
       let convertQuery = trx('leads').where('id', req.params.id).whereNull('deleted_at');
-      if (!lead.converted_at) convertQuery = convertQuery.whereNull('converted_at');
+      if (!lockedLead.converted_at) convertQuery = convertQuery.whereNull('converted_at');
       const converted = await convertQuery.update({
         status: 'won',
         customer_id: customerId,
@@ -1497,15 +1519,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         is_qualified: true,
         updated_at: new Date(),
       });
-      if (!converted) {
-        const dup = new Error('Lead was deleted or already converted while booking — appointment not created');
-        dup.statusCode = 409;
-        dup.status = 409;
-        dup.isOperational = true;
-        dup.code = 'LEAD_ALREADY_CONVERTED';
-        dup.customer_id = lockedLead.customer_id || null;
-        throw dup;
-      }
+      if (!converted) throw alreadyConverted('Lead was deleted or already converted while booking — appointment not created');
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.

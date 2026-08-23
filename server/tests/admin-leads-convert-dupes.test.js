@@ -24,7 +24,6 @@ jest.mock('../services/inspection-credit', () => ({
 }));
 jest.mock('../services/lead-estimate-link', () => ({ linkLeadEstimatesToCustomer: jest.fn(async () => {}) }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
-jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(async () => {}) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -90,7 +89,10 @@ function makeKnex(resolve, calls) {
     return q;
   };
   const knex = jest.fn(builder);
-  knex.raw = jest.fn(async () => ({ rows: [] }));
+  knex.raw = jest.fn(async (sql, bindings) => {
+    calls.push({ table: null, op: 'raw', args: [sql, bindings], ops: [] });
+    return { rows: [{ locked: true }] };
+  });
   knex.transaction = jest.fn(async (fn) => {
     const trx = jest.fn(builder);
     trx.raw = knex.raw;
@@ -115,6 +117,7 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
     if (table === 'scheduled_services' && t.op === 'columnInfo') return { service_id: true };
     if (table === 'customers' && t.op === 'first') {
       if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return emailMatch;
+      if (opsOf(state, 'where').some((o) => o.args[0]?.id === 'cust-linked')) return existingLinked;
       return null;
     }
     if (table === 'customer_accounts' && t.op === 'insert') return [{ id: 'acct-new', ...t.args[0] }];
@@ -126,13 +129,23 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
   };
 }
 
-function post(baseUrl) {
+function post(baseUrl, extra = {}) {
   return fetch(`${baseUrl}/admin/leads/${LEAD_ID}/schedule-appointment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ date: '2027-01-15', time: '10:00', serviceType: 'Pest Control' }),
+    body: JSON.stringify({ date: '2027-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
   });
 }
+
+function install(knex) {
+  db.mockImplementation(knex);
+  Object.assign(db, { raw: knex.raw, transaction: knex.transaction });
+}
+
+const CONVERTED_AT = new Date('2026-01-01T00:00:00Z');
+const linkedLead = () => baseLead({ customer_id: 'cust-linked', converted_at: CONVERTED_AT });
+const lockedLinked = { customer_id: 'cust-linked', converted_at: CONVERTED_AT };
+const existingLinked = { id: 'cust-linked', account_id: 'acct-linked', pipeline_stage: 'won', active: true };
 
 describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers', () => {
   beforeEach(() => db.mockReset());
@@ -225,6 +238,98 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       const custInsert = calls.filter((c) => c.table === 'customers' && c.op === 'insert');
       expect(custInsert).toHaveLength(1);
       expect(custInsert[0].args[0]).toMatchObject({ account_id: 'acct-existing', is_primary_profile: false, profile_label: 'Additional property' });
+    });
+  });
+});
+
+describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebook + lock order', () => {
+  beforeEach(() => db.mockReset());
+
+  it('retry that begins AFTER the first commit (pre-read converted, no rebook) → 409, zero inserts', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('LEAD_ALREADY_CONVERTED');
+      expect(body.customer_id).toBe('cust-linked');
+      expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
+      expect(calls.filter((c) => c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('rebook: true on a converted lead books a visit on the linked customer, no new customer', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.createdCustomer).toBe(false);
+      expect(body.customerId).toBe('cust-linked');
+      expect(calls.filter((c) => c.table === 'customers' && c.op === 'insert')).toHaveLength(0);
+      expect(calls.filter((c) => c.table === 'customer_accounts' && c.op === 'insert')).toHaveLength(0);
+      const visit = calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert');
+      expect(visit).toHaveLength(1);
+      expect(visit[0].args[0].customer_id).toBe('cust-linked');
+      // Already-converted lead: update is NOT gated on converted_at IS NULL.
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at']);
+    });
+  });
+
+  it('rebook: true is ignored for an unconverted lead (plain first conversion, still gated)', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at', 'converted_at']);
+    });
+  });
+
+  it('lock order: customer known from pre-read → comms advisory lock BEFORE the lead FOR UPDATE', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const commsIdx = calls.findIndex((c) => c.op === 'raw' && /pg_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-linked');
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      expect(commsIdx).toBeGreaterThanOrEqual(0);
+      expect(forUpdateIdx).toBeGreaterThan(commsIdx);
+    });
+  });
+
+  it('lock order: customer discovered only under the lead lock → non-blocking try-lock, never the blocking lock first', async () => {
+    const calls = [];
+    // Pre-read: unconverted and unlinked; under lock: linked + converted (rebook requested).
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      const raws = calls.map((c, i) => ({ ...c, i })).filter((c) => c.op === 'raw');
+      const blockingBeforeLead = raws.filter((c) => /pg_advisory_xact_lock/.test(c.args[0]) && c.i < forUpdateIdx);
+      expect(blockingBeforeLead).toHaveLength(0);
+      const tryIdx = raws.find((c) => /pg_try_advisory_xact_lock/.test(c.args[0]));
+      expect(tryIdx).toBeTruthy();
+      expect(tryIdx.i).toBeGreaterThan(forUpdateIdx);
+    });
+  });
+
+  it('try-lock refused (undo in flight) → 409 fail-closed, no visit', async () => {
+    const calls = [];
+    const knex = makeKnex(makeResolver({ preLead: baseLead(), lockedLead: lockedLinked }), calls);
+    knex.raw = jest.fn(async (sql) => ({ rows: [{ locked: !/pg_try_advisory/.test(sql) }] }));
+    install(knex);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('LEAD_ALREADY_CONVERTED');
+      expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
     });
   });
 });

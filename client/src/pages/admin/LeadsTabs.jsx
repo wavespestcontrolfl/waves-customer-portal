@@ -2930,6 +2930,16 @@ export function LeadsSection() {
                                                     apptForm.technicianId ||
                                                     null,
                                                   notes: apptForm.notes,
+                                                  // Card already shows a linked
+                                                  // customer → explicit repeat
+                                                  // booking; a first-time submit
+                                                  // must NOT send this (server
+                                                  // 409s retries on converted
+                                                  // leads).
+                                                  rebook: Boolean(
+                                                    lead.customer_id ||
+                                                      lead.converted_at,
+                                                  ),
                                                 },
                                               },
                                             );
