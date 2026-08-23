@@ -7,6 +7,9 @@
  *     LOCKED row; a hit is the rebooker's SLOT_TAKEN 409 (same shape).
  *   - POST / (admin create) takes rung 1 before the comms lock and probes
  *     before the parent insert; a hit is the same SLOT_TAKEN 409.
+ *   - A recurring POST locks the parent AND every generated child/booster
+ *     date (sorted, first statements of the trx) and probes each timed
+ *     generated row before inserting it; any hit 409s the whole request.
  *   - Terminal rows (record corrections) are not occupancy and skip the probe.
  *   - The moving row excludes itself; cancelled + completed don't occupy.
  *
@@ -32,11 +35,18 @@ jest.mock('../middleware/admin-auth', () => {
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/scheduling/occupancy', () => {
   const actual = jest.requireActual('../services/scheduling/occupancy');
-  return {
+  const mocked = {
     ...actual,
     acquireOccupancyLock: jest.fn().mockResolvedValue(undefined),
     findConflictingVisits: jest.fn().mockResolvedValue([]),
   };
+  // Mirrors the real helper's dedup + ascending order, routed through the
+  // mocked single-date lock so callOrder sees every date.
+  mocked.acquireOccupancyLocks = jest.fn(async (trx, dates) => {
+    const sorted = [...new Set((dates || []).filter(Boolean).map((d) => String(d).split('T')[0]))].sort();
+    for (const d of sorted) await mocked.acquireOccupancyLock(trx, d);
+  });
+  return mocked;
 });
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn().mockResolvedValue(undefined),
@@ -46,7 +56,7 @@ jest.mock('../sockets', () => ({
 }));
 
 const db = require('../models/db');
-const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -253,5 +263,74 @@ describe('POST / — admin create', () => {
       windowEnd: '11:00',
       excludeStatuses: ['cancelled', 'completed'],
     }));
+  });
+
+  const recurringBody = {
+    ...createBody,
+    isRecurring: true,
+    recurringPattern: 'monthly',
+    recurringCount: 3,
+    boosterMonths: [11],
+  };
+  // monthly from Fri 07-03 ×3 anchors on the ordinal weekday → children on
+  // the first Fridays 08-07, 09-04; November booster → 11-03.
+  const generatedDates = ['2099-08-07', '2099-09-04', '2099-11-03'];
+
+  test('recurring create locks the parent + every generated date, sorted, before any insert', async () => {
+    const inserts = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+      if (table === 'scheduled_services') {
+        c.insert = jest.fn((data) => {
+          inserts.push(data);
+          callOrder.push(`insert:${data.scheduled_date}`);
+          return { returning: jest.fn().mockResolvedValue([{ ...SVC, ...data, id: `new-${inserts.length}` }]) };
+        });
+      }
+      return c;
+    });
+
+    const { status } = await post(recurringBody);
+
+    expect(status).not.toBe(409);
+    expect(acquireOccupancyLocks).toHaveBeenCalledTimes(1);
+    expect(acquireOccupancyLocks).toHaveBeenCalledWith(trx, ['2099-07-03', ...generatedDates]);
+    const lockSeq = callOrder.filter((c) => c.startsWith('occupancy:'));
+    expect(lockSeq).toEqual(['occupancy:2099-07-03', 'occupancy:2099-08-07', 'occupancy:2099-09-04', 'occupancy:2099-11-03']);
+    // All locks precede the comms lock and the first insert.
+    const lastLock = callOrder.lastIndexOf('occupancy:2099-11-03');
+    expect(lastLock).toBeLessThan(callOrder.indexOf('comms'));
+    expect(lastLock).toBeLessThan(callOrder.findIndex((c) => c.startsWith('insert:')));
+    // Every generated timed row was probed on its own date.
+    for (const d of ['2099-07-03', ...generatedDates]) {
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        db: trx, date: d, windowStart: '10:00', windowEnd: '11:00', excludeStatuses: ['cancelled', 'completed'],
+      }));
+    }
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
+  });
+
+  test('a conflicting generated child date 409s SLOT_TAKEN (naming the date) and inserts nothing', async () => {
+    const inserts = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+      if (table === 'scheduled_services') {
+        c.insert = jest.fn((data) => {
+          inserts.push(data);
+          return { returning: jest.fn().mockResolvedValue([{ ...SVC, ...data, id: `new-${inserts.length}` }]) };
+        });
+      }
+      return c;
+    });
+    findConflictingVisits.mockImplementation(async ({ date }) => (date === '2099-09-04' ? [{ id: 'svc-other' }] : []));
+
+    const { status, body } = await post(recurringBody);
+
+    expect(status).toBe(409);
+    expect(body).toEqual({ error: expect.stringContaining('2099-09-04'), code: 'SLOT_TAKEN' });
+    // The trx threw, so the parent + 08-07 child inserts that ran before the
+    // 09-04 probe roll back; nothing after the conflict was attempted.
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07']);
+    expect(trx.commit).not.toHaveBeenCalled();
   });
 });

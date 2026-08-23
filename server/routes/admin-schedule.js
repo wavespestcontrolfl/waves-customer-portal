@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -3525,6 +3525,71 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
+    // Track all scheduled_date strings created for this parent series
+    // (parent itself, recurring children, AND boosters). Hoisted so the
+    // booster spawn block below can dedupe against base-series dates —
+    // certain cadence/month combos (e.g. monthly Jan 15 + April booster
+    // → Apr 15 already on the calendar) would otherwise double-book.
+    // Generated BEFORE the transaction so every date the series will write
+    // is known up front: rung 1 must cover all of them (Codex #3443 P1 —
+    // occupancy:<parent-date> does not serialize occupancy:<child-date>).
+    const seriesDates = new Set();
+    seriesDates.add(dateOnly(scheduledDate) || '');
+    const plannedChildDates = [];
+    const plannedBoosterDates = [];
+
+    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
+    const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+    const plannedCount = isRecurring
+      ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+      : 0;
+    const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
+    const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    if (isRecurring && recurringPattern && plannedCount > 1) {
+      // Iterate by inserts, not by attempts: when skip-weekends collapses
+      // consecutive recurrences onto the same shifted weekday (e.g. custom
+      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
+      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
+      // infinite loop if the pattern is degenerate.
+      const maxAttempts = (plannedCount - 1) * 4 + 30;
+      let attempt = 1;
+      while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
+        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
+        attempt++;
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
+        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
+        if (seriesDates.has(nextDateStr)) continue;
+        seriesDates.add(nextDateStr);
+        plannedChildDates.push(nextDateStr);
+      }
+    }
+
+    // Booster months — extra one-off visits on top of the base series
+    // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
+    // months from the initial date.
+    if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+      const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+      const dates = computeBoosterDates(scheduledDate, cleaned, 12);
+      for (const rawDate of dates) {
+        const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
+        // Skip if this date already has a row on the series (parent or
+        // recurring child). Common case: monthly Jan 15 → child Apr 15
+        // PLUS April booster → Apr 15 collision.
+        if (seriesDates.has(boosterDate)) continue;
+        seriesDates.add(boosterDate);
+        plannedBoosterDates.push(boosterDate);
+      }
+    }
+
+    // Same SLOT_TAKEN 409 the parent probe throws, naming the generated
+    // date that collided (dates only — no customer data).
+    const slotTakenError = (conflictDate) => Object.assign(
+      new Error(conflictDate
+        ? `That time slot conflicts with another appointment on the schedule on ${conflictDate}. Pick another time.`
+        : 'That time slot conflicts with another appointment on the schedule. Pick another time.'),
+      { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' },
+    );
+
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
@@ -3532,9 +3597,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // and every row lock below. The admin creator was the one committing
       // writer with no lock and no global probe: its uncommitted insert was
       // invisible to every other writer's tech-blind check, and it never
-      // checked anyone else's. The probe itself runs right before the
-      // parent insert (same trx, after this lock).
-      await acquireOccupancyLock(trx, dateOnly(scheduledDate));
+      // checked anyone else's. Every date this series writes (parent +
+      // generated children + boosters) is locked here, deduped and in
+      // ascending date order, so two multi-date writers sharing any subset
+      // of dates take them in the same relative order. Each timed row is
+      // probed right before its own insert (same trx, under these locks).
+      await acquireOccupancyLocks(trx, [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates]);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
       // customers row lock below: every scheduled_services insert in this
       // trx (parent, recurring children, boosters) serializes against a
@@ -3703,13 +3771,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           windowEnd: insertData.window_end,
           excludeStatuses: ['cancelled', 'completed'],
         });
-        if (adminCreateClash.length) {
-          throw Object.assign(new Error('That time slot conflicts with another appointment on the schedule. Pick another time.'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
+        if (adminCreateClash.length) throw slotTakenError(null);
       }
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
@@ -3724,37 +3786,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         source: 'admin_schedule',
       });
 
-      // Track all scheduled_date strings created for this parent series
-      // (parent itself, recurring children, AND boosters). Hoisted so the
-      // booster spawn block below can dedupe against base-series dates —
-      // certain cadence/month combos (e.g. monthly Jan 15 + April booster
-      // → Apr 15 already on the calendar) would otherwise double-book.
-      const seriesDates = new Set();
-      seriesDates.add(dateOnly(scheduledDate) || '');
-
-      // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-      const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-      const plannedCount = isRecurring
-        ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
-        : 0;
-      if (isRecurring && recurringPattern && plannedCount > 1) {
-      const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
-      const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-      // Iterate by inserts, not by attempts: when skip-weekends collapses
-      // consecutive recurrences onto the same shifted weekday (e.g. custom
-      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
-      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
-      // infinite loop if the pattern is degenerate.
-      const maxAttempts = (plannedCount - 1) * 4 + 30;
-      let attempt = 1;
-      let inserted = 0;
-      while (inserted < plannedCount - 1 && attempt < maxAttempts) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
-        attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
-        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDates.has(nextDateStr)) continue;
-        seriesDates.add(nextDateStr);
+      // Create recurring instances from the dates precomputed (and locked)
+      // above.
+      for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -3802,33 +3836,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
+        // Same global probe as the parent, under this child's own date lock.
+        if (childData.window_start && childData.window_end) {
+          const childClash = await findConflictingVisits({
+            db: trx,
+            date: nextDateStr,
+            windowStart: childData.window_start,
+            windowEnd: childData.window_end,
+            excludeStatuses: ['cancelled', 'completed'],
+          });
+          if (childClash.length) throw slotTakenError(nextDateStr);
+        }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
         if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, childAddonLines, addonCols);
         createdAppointments.push({ id: childRow.id, date: nextDateStr, confirmation: false });
-        inserted++;
-      }
       }
 
-      // Booster months — extra one-off visits on top of the base series
-      // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
-      // months from the initial date; boosters share recurring_parent_id but
-      // are themselves is_recurring=false so the auto-extend path leaves
-      // them alone. A future cron can refresh year-2 boosters from
-      // parent.booster_months.
-      if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-        const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-        const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
-        const dates = computeBoosterDates(scheduledDate, cleaned, 12);
-        for (const rawDate of dates) {
-          const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
-          // Skip if this date already has a row on the series (parent or
-          // recurring child). Common case: monthly Jan 15 → child Apr 15
-          // PLUS April booster → Apr 15 collision.
-          if (seriesDates.has(boosterDate)) continue;
-          seriesDates.add(boosterDate);
+      // Booster months — dates precomputed (and locked) above; boosters
+      // share recurring_parent_id but are themselves is_recurring=false so
+      // the auto-extend path leaves them alone. A future cron can refresh
+      // year-2 boosters from parent.booster_months.
+      if (plannedBoosterDates.length > 0) {
+        for (const boosterDate of plannedBoosterDates) {
           const boosterData = {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
@@ -3879,6 +3911,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
           if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
+          // Same global probe as the parent, under this booster's own date lock.
+          if (boosterData.window_start && boosterData.window_end) {
+            const boosterClash = await findConflictingVisits({
+              db: trx,
+              date: boosterDate,
+              windowStart: boosterData.window_start,
+              windowEnd: boosterData.window_end,
+              excludeStatuses: ['cancelled', 'completed'],
+            });
+            if (boosterClash.length) throw slotTakenError(boosterDate);
+          }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror only add-ons due on this booster date; one-time and
