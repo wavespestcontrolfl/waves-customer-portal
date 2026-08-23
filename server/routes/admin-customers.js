@@ -1520,13 +1520,18 @@ function maskEmail(email) {
 
 async function findAccountByContact(trx, { phone, email, matchEmail = false, confirmEmailAccountId = null }) {
   const digits = phoneLast10(phone);
-  if (digits) {
-    const byCustomerPhone = await trx('customers')
+  const lookupByPhone = () => (digits
+    ? trx('customers')
       .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
       .whereNull('deleted_at')
       .orderBy('is_primary_profile', 'desc')
       .orderBy('created_at', 'asc')
-      .first();
+      .first()
+    : Promise.resolve(null));
+
+  // Unconfirmed path: phone-first precedence, unchanged.
+  if (!confirmEmailAccountId) {
+    const byCustomerPhone = await lookupByPhone();
     if (byCustomerPhone) {
       const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
       return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
@@ -1534,6 +1539,11 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
   }
 
   const normalizedEmail = matchEmail ? cleanEmail(email) : null;
+  if (confirmEmailAccountId && !(normalizedEmail && isEmailLike(normalizedEmail))) {
+    // Confirmed retry with no usable email: the admin's selection cannot be
+    // revalidated at all — never fall through to phone/creation.
+    return { accountId: null, existingCustomer: null, matchType: 'email', requiresConfirmation: true, matchChanged: true, match: null };
+  }
   if (normalizedEmail && isEmailLike(normalizedEmail)) {
     // Shared household/business emails are a supported shape (migration
     // 20260417000010_allow_duplicate_customer_emails). Only reuse when EVERY
@@ -1580,6 +1590,24 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
           },
         };
       }
+      if (confirmEmailAccountId) {
+        // Confirmed retry: the admin chose the EMAIL-selected account. A
+        // phone match that now points at a DIFFERENT account (appeared
+        // between the first request and the confirmation) means the world
+        // changed under the admin — never attach to either; re-confirm.
+        const byCustomerPhone = await lookupByPhone();
+        if (byCustomerPhone && String(byCustomerPhone.account_id || byCustomerPhone.id) !== resolvedAccountId) {
+          return {
+            accountId: null,
+            existingCustomer: null,
+            matchType: 'email',
+            requiresConfirmation: true,
+            matchChanged: true,
+            phoneConflict: true,
+            match: null,
+          };
+        }
+      }
       const accountId = await attachMatchedCustomerToAccount(trx, match);
       return { accountId, existingCustomer: { ...match, account_id: accountId }, matchType: 'email' };
     }
@@ -1594,9 +1622,11 @@ async function ensureCustomerAccount(trx, input) {
   if (existing?.requiresConfirmation) {
     // Fail closed: never silently create OR attach on an unconfirmed email
     // match — the caller must surface the choice to the admin.
-    const err = new Error(existing.matchChanged
-      ? "The customer this lead's email matched has changed since you confirmed — re-open the lead and try again."
-      : "This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
+    const err = new Error(existing.phoneConflict
+      ? "This lead's phone now matches a customer in a DIFFERENT account than the one you confirmed — re-open the lead and try again."
+      : existing.matchChanged
+        ? "The customer this lead's email matched has changed since you confirmed — re-open the lead and try again."
+        : "This lead's email matches an existing customer — confirm whether to attach to that account or create a separate customer.");
     err.statusCode = 409;
     err.status = 409;
     err.isOperational = true;

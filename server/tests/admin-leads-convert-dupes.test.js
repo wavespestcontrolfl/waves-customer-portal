@@ -302,6 +302,25 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
+  it('attachToAccountId A but lead phone now matches a customer on another account → 409 EMAIL_MATCH_CONFIRM, zero writes', async () => {
+    const calls = [];
+    const base = makeResolver({ preLead: baseLead({ phone: '5551234567' }), lockedLead: { customer_id: null, converted_at: null }, emailMatch: existingEmailCustomer });
+    install(makeKnex((table, state) => {
+      if (table === 'customers' && state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) {
+        return { id: 'cust-b', account_id: 'acct-b', phone: '5551234567' };
+      }
+      return base(table, state);
+    }, calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { attachToAccountId: 'acct-existing' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
+      expect(body.error).toMatch(/different account/i);
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
   it('createSeparateAccount: true → email matching skipped, fresh account + primary customer', async () => {
     const calls = [];
     install(emailKnexRoute(calls));
@@ -600,6 +619,51 @@ describe('findAccountByContact email opt-in', () => {
     ], calls);
     const out = await findAccountByContact(knex, { phone: '', email: 'shared@example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email', existingCustomer: { id: 'c1' } });
+  });
+
+  function emailPhoneKnex({ emailRows, phoneRow }, calls) {
+    return makeKnex((table, state) => {
+      if (table !== 'customers') return null;
+      if (opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) return emailRows;
+      if (state.terminal?.op === 'first' && opsOf(state, 'whereRaw').some((o) => /regexp_replace/.test(o.args[0]))) return phoneRow;
+      return null;
+    }, calls);
+  }
+  const emailRowA = { id: 'c1', account_id: 'A', email: 'someone@example.com', first_name: 'Fake', last_name: 'Person' };
+
+  it('confirm id A + phone match now on account B → requiresConfirmation (phoneConflict), zero writes', async () => {
+    const calls = [];
+    const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'cB', account_id: 'B', phone: '5551234567' } }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    expect(out).toMatchObject({ accountId: null, requiresConfirmation: true, matchChanged: true, phoneConflict: true, match: null });
+    expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
+    // Email resolved FIRST on the confirmed path, phone validated after.
+    const emailIdx = calls.findIndex((c) => c.op === 'chain');
+    const phoneIdx = calls.findIndex((c) => c.op === 'first');
+    expect(emailIdx).toBeGreaterThanOrEqual(0);
+    expect(phoneIdx).toBeGreaterThan(emailIdx);
+  });
+
+  it('confirm id A + phone match on A → attaches to A', async () => {
+    const calls = [];
+    const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'c2', account_id: 'A', phone: '5551234567' } }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    expect(out).toMatchObject({ accountId: 'A', matchType: 'email', existingCustomer: { id: 'c1' } });
+  });
+
+  it('confirm id A + no phone match → attaches to A', async () => {
+    const calls = [];
+    const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: null }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true, confirmEmailAccountId: 'A' });
+    expect(out).toMatchObject({ accountId: 'A', matchType: 'email' });
+  });
+
+  it('no confirm id + phone match on B → phone precedence as before (no email lookup)', async () => {
+    const calls = [];
+    const knex = emailPhoneKnex({ emailRows: [emailRowA], phoneRow: { id: 'cB', account_id: 'B', phone: '5551234567' } }, calls);
+    const out = await findAccountByContact(knex, { phone: '5551234567', email: 'someone@example.com', matchEmail: true });
+    expect(out).toMatchObject({ accountId: 'B', matchType: 'phone' });
+    expect(calls.filter((c) => c.op === 'chain')).toHaveLength(0);
   });
 
   it('confirm id supplied but email now unmatched → requiresConfirmation (matchChanged), never null', async () => {
