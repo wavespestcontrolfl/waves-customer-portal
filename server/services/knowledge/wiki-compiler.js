@@ -176,17 +176,17 @@ function resolveKnowledgeSourcePath(input) {
   if (!raw || raw.includes('\0')) throw new Error('file_path is required');
   const roots = knowledgeSourceRoots();
   const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(roots[0], raw);
-  if (!roots.some((r) => isInsideRoot(abs, r))) {
+  // Existing files are judged by their REAL path (symlinks resolved) so a link
+  // planted under wiki/ cannot point elsewhere; not-yet-existing paths are
+  // judged lexically (roots are already realpath'd).
+  let candidate = abs;
+  if (fs.existsSync(abs)) {
+    try { candidate = fs.realpathSync(abs); } catch { candidate = abs; }
+  }
+  if (!roots.some((r) => isInsideRoot(candidate, r))) {
     throw new Error('file_path must be inside the wiki/ folder');
   }
-  if (fs.existsSync(abs)) {
-    const real = fs.realpathSync(abs);
-    if (!roots.some((r) => isInsideRoot(real, r))) {
-      throw new Error('file_path must be inside the wiki/ folder');
-    }
-    return real;
-  }
-  return abs;
+  return candidate;
 }
 
 function assertAllowedSourceFileType(fileType) {

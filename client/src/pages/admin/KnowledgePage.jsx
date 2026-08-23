@@ -669,7 +669,6 @@ function SourcesView() {
               <option value="txt">Text</option>
               <option value="json">JSON</option>
               <option value="js">JavaScript</option>
-              <option value="pdf">PDF</option>{" "}
             </select>{" "}
             <input
               value={addForm.description}

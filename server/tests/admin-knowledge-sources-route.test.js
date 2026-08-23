@@ -6,11 +6,11 @@ jest.mock('../services/knowledge/wiki-linter', () => ({}));
 jest.mock('../config/models', () => ({}));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 
-const requireAdmin = jest.fn((req, res, next) => (req.headers['x-role'] === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })));
+const mockRequireAdmin = jest.fn((req, res, next) => (req.headers['x-role'] === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technicianId = 't1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
-  requireAdmin: (...a) => requireAdmin(...a),
+  requireAdmin: (...a) => mockRequireAdmin(...a),
 }));
 
 const express = require('express');
