@@ -25,19 +25,28 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
   const sibDuration = windowDurationMinutes(sib.window_start, sib.window_end, sib.estimated_duration_minutes);
   const start = win.start || sib.window_start || null;
   let end = win.end || null;
+  // A null end that survives the toggle below must be PERSISTED null: the
+  // validator derives a temporary end from the duration to judge the block,
+  // and that derived value must never leak back onto the row when the
+  // rollback switch says "keep the legacy null" (a revert toggle outranks a
+  // derivation).
+  let endStaysNull = false;
   if (!end) {
     // REBOOKER_NULL_END_OCCUPANCY=off is the rollback toggle for null-end
     // derivation — it outranks this derivation too (legacy: keep the row's
     // own end, null included).
     const deriveNullEnd = process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off';
     end = (win.start && deriveNullEnd) ? deriveWindowEnd(win.start, sibDuration) : (sib.window_end || null);
+    endStaysNull = !end;
   }
   if (options.adminWindowRules === true && (start || end)) {
     const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
+    // windowEnd null → the validator derives a TEMPORARY end from the
+    // occurrence's own duration purely to run end > start / end <= day end.
     const normalized = assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: sibDuration });
     // Persist the normalized pair only when this move sets a window; a
     // no-window move keeps the row's own (validated) values untouched.
-    if (win.start) return { start: normalized.window_start, end: normalized.window_end };
+    if (win.start) return { start: normalized.window_start, end: endStaysNull ? null : normalized.window_end };
   }
   return { start, end };
 }
@@ -1519,3 +1528,6 @@ module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
+// Exported for tests: the per-occurrence window derivation (rollback toggle +
+// admin window rules) the series mover applies to every sibling.
+module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;

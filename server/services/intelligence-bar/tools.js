@@ -1801,9 +1801,8 @@ async function rescheduleAppointment(input) {
   // (supplied-or-stored start, derived-or-stored end, stored duration for an
   // end-less row): >= 08:00, end <= day end. A windowless row (both null)
   // moves date-only. Surfaced as the tool's error result.
-  // TODO(occupancy): this path updates without a transaction (a bare
-  // advisory xact lock here would fence nothing), so the gated overlap
-  // probe is NOT run — the admin dispatch/schedule routes own that guard.
+  // Overlap: the CAS update below now runs inside db.transaction, so the
+  // gated rung-1 lock + probe fences this move too (see below).
   if (newStart || newWindowEnd) {
     try {
       const normalizedWindow = assertAdminAppointmentWindow({
@@ -1872,42 +1871,71 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  const updatedRows = await applyTrackLifecycleCas(
-    db('scheduled_services')
-      .where('id', appointment_id)
-      .where('status', String(appt.status))
-      .where({
-        scheduled_date: observedDate,
-        window_start: appt.window_start ?? null,
-        window_end: appt.window_end ?? null,
-      }),
-    // The full observed tracker/lifecycle snapshot is in the CAS: a
-    // geofence/manual transition between the read and this write can
-    // advance track_state, add stamps to a same-state row, or stamp an
-    // SMS guard — any of it must make this miss instead of moving the
-    // visit on a stale snapshot. See applyTrackLifecycleCas.
-    appt,
-  )
-    .update({
-      scheduled_date: dateStr,
-      window_start: newStart,
-      window_end: newWindowEnd,
-      // A DATE move carries the stop into another tech-day: clear its
-      // route_order (fence-or-clear contract — NULL appends after the
-      // destination day's ordered run; the CAS above already makes a
-      // stale-snapshot write miss). Same-day window changes keep it.
-      ...(dateStr !== observedDate ? { route_order: null } : {}),
-      notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
-      // Public track links live until the day after the visit — refresh onto
-      // the new date, same as schedule-tools' movers.
-      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
-      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
-      // en_route/on_site row would keep a live status on a future date. Land it
-      // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
-      ...(wasLive ? { status: 'confirmed' } : {}),
-      ...liveReset,
-      updated_at: new Date(),
+  // The move runs in a transaction so the gated occupancy guard can fence it
+  // (a bare advisory xact lock outside a trx fences nothing). Rung 1 of
+  // scheduling/occupancy.js's ORDERING CONTRACT — the date-wide lock + the
+  // tech-blind probe — is taken FIRST, before the row write, exactly as the
+  // create path above does; the moving visit excludes itself. The gate
+  // (GATE_ADMIN_SLOT_OVERLAP_GUARD) makes it a no-op while off, so the CAS
+  // semantics are unchanged there. A conflict is surfaced as the tool's
+  // { error } result, never thrown at the Intelligence Bar.
+  let updatedRows = 0;
+  try {
+    await db.transaction(async (trx) => {
+      if (newStart && newWindowEnd) {
+        await assertNoSlotOverlap({
+          trx,
+          date: dateStr,
+          windowStart: newStart,
+          windowEnd: newWindowEnd,
+          excludeServiceIds: [appointment_id],
+        });
+      }
+      updatedRows = await applyTrackLifecycleCas(
+        trx('scheduled_services')
+          .where('id', appointment_id)
+          .where('status', String(appt.status))
+          .where({
+            scheduled_date: observedDate,
+            window_start: appt.window_start ?? null,
+            window_end: appt.window_end ?? null,
+          }),
+        // The full observed tracker/lifecycle snapshot is in the CAS: a
+        // geofence/manual transition between the read and this write can
+        // advance track_state, add stamps to a same-state row, or stamp an
+        // SMS guard — any of it must make this miss instead of moving the
+        // visit on a stale snapshot. See applyTrackLifecycleCas.
+        appt,
+      )
+        .update({
+          scheduled_date: dateStr,
+          window_start: newStart,
+          window_end: newWindowEnd,
+          // A DATE move carries the stop into another tech-day: clear its
+          // route_order (fence-or-clear contract — NULL appends after the
+          // destination day's ordered run; the CAS above already makes a
+          // stale-snapshot write miss). Same-day window changes keep it.
+          ...(dateStr !== observedDate ? { route_order: null } : {}),
+          notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
+          // Public track links live until the day after the visit — refresh onto
+          // the new date, same as schedule-tools' movers. Built off the root
+          // knex on purpose: it is a bound VALUE fragment, not a query — it
+          // executes as part of this trx's UPDATE.
+          track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
+          // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
+          // en_route/on_site row would keep a live status on a future date. Land it
+          // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
+          ...(wasLive ? { status: 'confirmed' } : {}),
+          ...liveReset,
+          updated_at: new Date(),
+        });
     });
+  } catch (err) {
+    // Gated overlap refusal → the tool's { error } result (no throw to the
+    // Intelligence Bar); the trx rolled back, so nothing moved.
+    if (err && err.code === 'SLOT_CONFLICT') return { error: err.message };
+    throw err;
+  }
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }

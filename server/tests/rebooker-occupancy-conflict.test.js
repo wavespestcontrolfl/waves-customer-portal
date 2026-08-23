@@ -491,3 +491,37 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(lockOrders[0]).toBeLessThan(parentUpdate.update.mock.invocationCallOrder[0]);
   });
 });
+
+describe('seriesOccurrenceWindow — REBOOKER_NULL_END_OCCUPANCY=off outranks the validator derivation', () => {
+  const { seriesOccurrenceWindow } = require('../services/rebooker');
+  // End-less sibling: the rollback toggle says "keep the legacy null end".
+  const sib = { window_start: '09:00:00', window_end: null, estimated_duration_minutes: 60 };
+
+  afterEach(() => { delete process.env.REBOOKER_NULL_END_OCCUPANCY; });
+
+  test('switch OFF + start-only admin move: the derived end is TEMPORARY — the persisted end stays null', () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    const out = seriesOccurrenceWindow({ start: '10:00' }, sib, { adminWindowRules: true });
+    expect(out).toEqual({ start: '10:00', end: null });
+  });
+
+  test('switch OFF still VALIDATES against the temporary end — a pre-08:00 start is refused', () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    expect(() => seriesOccurrenceWindow({ start: '07:00' }, sib, { adminWindowRules: true }))
+      .toThrow(/before 08:00/);
+    // …and a derived end past the day end is refused too (120-min sibling).
+    expect(() => seriesOccurrenceWindow({ start: '19:00' }, { ...sib, estimated_duration_minutes: 120 }, { adminWindowRules: true }))
+      .toThrow(/end by 20:00/);
+  });
+
+  test('switch ON (default): the derived end is persisted', () => {
+    const out = seriesOccurrenceWindow({ start: '10:00' }, sib, { adminWindowRules: true });
+    expect(out).toEqual({ start: '10:00', end: '11:00' });
+  });
+
+  test('switch OFF with a sibling that HAS an end keeps (and normalizes) that end', () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    const out = seriesOccurrenceWindow({ start: '10:00' }, { ...sib, window_end: '11:00:00' }, { adminWindowRules: true });
+    expect(out).toEqual({ start: '10:00', end: '11:00' });
+  });
+});

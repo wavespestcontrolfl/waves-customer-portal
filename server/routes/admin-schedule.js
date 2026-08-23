@@ -5710,7 +5710,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
         .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
-      if (updates.window_start || updates.window_end) {
+      // Presence is not change (same ruling the in-trx occupancy probe below
+      // already applies): BOTH schedule editors echo the current date, window
+      // and duration on every save, so a notes / price / service / technician
+      // edit arrives carrying the row's own slot. Validating on presence made
+      // every legacy off-hour visit (a 07:00 row booked before these rules)
+      // uneditable — a notes-only save 422'd. Compare the EFFECTIVE slot
+      // (supplied-or-stored date, start, end, duration) with the stored row
+      // and run the window rules only when the slot actually changes; a
+      // genuine date-only move or a real window/duration edit still
+      // validates (a legacy 07:00 row cannot ride onto a new date).
+      const storedSlotDate = dateOnly(currentRow.scheduled_date) || null;
+      const storedSlotStart = normalizeHHMM(currentRow.window_start) || null;
+      const storedSlotEnd = normalizeHHMM(currentRow.window_end) || null;
+      const storedSlotDuration = parseInt(currentRow.estimated_duration_minutes, 10) || null;
+      const effectiveSlotDate = updates.scheduled_date !== undefined
+        ? (dateOnly(updates.scheduled_date) || null) : storedSlotDate;
+      const effectiveSlotStart = updates.window_start !== undefined
+        ? (normalizeHHMM(updates.window_start) || null) : storedSlotStart;
+      const effectiveSlotEnd = updates.window_end !== undefined
+        ? (normalizeHHMM(updates.window_end) || null) : storedSlotEnd;
+      const effectiveSlotDuration = updates.estimated_duration_minutes !== undefined
+        ? (parseInt(updates.estimated_duration_minutes, 10) || null) : storedSlotDuration;
+      const effectiveSlotUnchanged = effectiveSlotDate === storedSlotDate
+        && effectiveSlotStart === storedSlotStart
+        && effectiveSlotEnd === storedSlotEnd
+        && effectiveSlotDuration === storedSlotDuration;
+      if (!effectiveSlotUnchanged && (updates.window_start || updates.window_end)) {
         // The CAS below is armed only when this pre-read actually fed a
         // derivation/validation (here and in the stored-window branch).
         preReadWindowRow = currentRow;
@@ -5736,7 +5762,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         });
         updates.window_start = normalizedWindow.window_start;
         updates.window_end = normalizedWindow.window_end;
-      } else if (!windowIntake.clearBoth
+      } else if (!effectiveSlotUnchanged && !windowIntake.clearBoth
         && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))
         && (updates.scheduled_date !== undefined || !normalizeHHMM(currentRow.window_end))) {
         // Date-only move (any stored window) or a duration-only edit on an

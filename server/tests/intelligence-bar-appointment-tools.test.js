@@ -765,3 +765,67 @@ describe('reschedule_appointment — shared admin window rules', () => {
     expect(result.error).toMatch(/end by 20:00/);
   });
 });
+
+describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_OVERLAP_GUARD)', () => {
+  // The move used to be a bare non-transactional CAS update, so the gated
+  // occupancy guard could not fence it and the IB could park a visit on an
+  // occupied slot. The update now runs inside db.transaction with rung 1
+  // (date lock + tech-blind probe) taken first, like the create path.
+  const appt = {
+    id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+    window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
+  };
+  const probeHit = () => chain({
+    whereNotIn: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockResolvedValue([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]),
+  });
+
+  afterEach(() => { delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD; });
+
+  test('gate ON: an overlapping visit refuses the move — nothing updated', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), probeHit(), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM',
+    });
+    expect(result.error).toMatch(/overlaps another visit/);
+    expect(result.success).toBeUndefined();
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: a clear slot moves normally and the probe excludes the moving visit', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const updateChain = chain();
+    const probeMiss = chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), probeMiss, updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM',
+    });
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.update).toHaveBeenCalled();
+    // The moving row must not conflict with itself.
+    expect(probeMiss.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
+  });
+
+  test('gate OFF: no probe runs and the move proceeds (a queued probe chain would be consumed)', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM',
+    });
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.update).toHaveBeenCalled();
+  });
+});
