@@ -1225,25 +1225,41 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
 describe('customerScheduledHistoryQuery (customer-detail `scheduled`)', () => {
   const { customerScheduledHistoryQuery, SCHEDULED_HISTORY_LIMIT } = adminCustomersRoute._private;
 
-  test('returns NEWEST-first history under a cap wide enough for long-tenured customers', () => {
+  test('returns the rows NEAREST ET-today (ties newest first) under a cap wide enough for long-tenured customers', () => {
     const calls = [];
     const builder = {
       where: (...a) => { calls.push(['where', ...a]); return builder; },
+      orderByRaw: (...a) => { calls.push(['orderByRaw', ...a]); return builder; },
       orderBy: (...a) => { calls.push(['orderBy', ...a]); return builder; },
       limit: (...a) => { calls.push(['limit', ...a]); return builder; },
     };
     const fakeDb = jest.fn((table) => { calls.push(['from', table]); return builder; });
-    customerScheduledHistoryQuery(fakeDb, 'cust-1');
+    customerScheduledHistoryQuery(fakeDb, 'cust-1', '2026-08-23');
     expect(calls).toEqual([
       ['from', 'scheduled_services'],
       ['where', { customer_id: 'cust-1' }],
+      // Proximity to the ET date (bound, never interpolated) comes FIRST so
+      // the cap keeps the current visit + recent past, not a 24-visit
+      // fixed series' farthest-future rows or a long tenure's oldest rows.
+      ['orderByRaw', 'abs(scheduled_date - ?::date) asc', ['2026-08-23']],
       ['orderBy', 'scheduled_date', 'desc'],
       ['orderBy', 'window_start', 'desc'],
       ['limit', SCHEDULED_HISTORY_LIMIT],
     ]);
-    // No date floor: past AND future rows, all statuses, so history views
-    // work; an ASC order under a cap previously returned only the oldest rows.
+    // No date floor: past AND future rows, all statuses, so history views work.
     expect(calls.some(([op, col, cmp]) => op === 'where' && col === 'scheduled_date' && cmp)).toBe(false);
     expect(SCHEDULED_HISTORY_LIMIT).toBeGreaterThanOrEqual(50);
+  });
+
+  test('defaults `today` to the ET calendar date', () => {
+    const calls = [];
+    const builder = {
+      where: () => builder,
+      orderByRaw: (...a) => { calls.push(a); return builder; },
+      orderBy: () => builder,
+      limit: () => builder,
+    };
+    customerScheduledHistoryQuery(() => builder, 'cust-1');
+    expect(calls[0][1]).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)]);
   });
 });

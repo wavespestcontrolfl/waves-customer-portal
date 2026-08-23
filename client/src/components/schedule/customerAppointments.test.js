@@ -35,8 +35,23 @@ describe('customerAppointments', () => {
     expect(previousAppointments(data, TODAY).map((s) => s.id)).toEqual(['x1', 'h1', 'h2']);
   });
 
-  it('appointmentHistory is newest first and capped', () => {
-    expect(appointmentHistory({ scheduled: history }, 2).map((s) => s.id)).toEqual(['x1', 'u1']);
+  it('appointmentHistory = current + nearest upcoming, then most recent past, capped', () => {
+    expect(appointmentHistory({ scheduled: history }, 3, { today: TODAY }).map((s) => s.id)).toEqual(['t1', 'x1', 'h1']);
     expect(appointmentHistory({}, 3)).toEqual([]);
+  });
+
+  it('a 24-visit future series never crowds out the current visit and recent past', () => {
+    const future = Array.from({ length: 24 }, (_, i) => ({
+      id: `f${i}`, scheduled_date: `2027-${String(1 + (i % 12)).padStart(2, '0')}-${i < 12 ? '05' : '20'}`, status: 'pending',
+    }));
+    const past = Array.from({ length: 5 }, (_, i) => ({ id: `p${i}`, scheduled_date: `2026-0${8 - i}-10`, status: 'completed' }));
+    const current = { id: 'cur', scheduled_date: '2026-09-01', status: 'confirmed' };
+    const data = { scheduled: [...future, ...past, current] };
+    const ids = appointmentHistory(data, 8, { today: TODAY, currentId: 'cur' }).map((s) => s.id);
+    expect(ids).toEqual(['cur', 'p0', 'p1', 'p2', 'p3', 'p4']);
+    // With no current id the nearest upcoming leads, and still no far-future rows.
+    const noCur = appointmentHistory(data, 8, { today: TODAY }).map((s) => s.id);
+    expect(noCur[0]).toBe('cur');
+    expect(noCur.some((id) => id.startsWith('f'))).toBe(false);
   });
 });

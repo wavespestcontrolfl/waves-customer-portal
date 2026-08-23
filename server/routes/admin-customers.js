@@ -135,15 +135,18 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
 ];
 
 // Appointment history for the customer-detail payload (`scheduled`): past +
-// future, all statuses, NEWEST first. Consumers (ScheduleCustomerSidebar,
-// MobileCustomerDetailSheet, SchedulePage history) render the most recent
-// visits; upcoming lists read `upcomingScheduled` instead. Ordering ASC under
-// a cap returned the OLDEST rows for long-tenured customers, so every
-// history view showed ancient visits and the upcoming tab came up empty.
+// future, all statuses, capped to the rows NEAREST ET-today (ties: newest
+// first). Consumers (ScheduleCustomerSidebar, MobileCustomerDetailSheet,
+// SchedulePage history) sort client-side; upcoming lists read
+// `upcomingScheduled` instead. A plain ASC/DESC order under a cap returned
+// only the oldest rows (long-tenured customers) or only the farthest-future
+// rows (24-visit fixed series) — proximity keeps the current visit and the
+// recent past in every case.
 const SCHEDULED_HISTORY_LIMIT = 50;
-function customerScheduledHistoryQuery(dbConn, customerId) {
+function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString()) {
   return dbConn('scheduled_services')
     .where({ customer_id: customerId })
+    .orderByRaw('abs(scheduled_date - ?::date) asc', [today])
     .orderBy('scheduled_date', 'desc')
     .orderBy('window_start', 'desc')
     .limit(SCHEDULED_HISTORY_LIMIT);

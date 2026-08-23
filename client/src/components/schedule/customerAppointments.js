@@ -39,9 +39,20 @@ export function previousAppointments(data, today = etDateString()) {
   return scheduled.filter((s) => !isUpcoming(s, today)).sort(byDateDesc);
 }
 
-// Full history (past + future), newest first, optionally capped.
-export function appointmentHistory(data, limit) {
+// History panel: the current visit (by id) and the nearest upcoming visit
+// first, then the most recent PAST visits, newest first — capped. Never a
+// plain DESC slice: a 24-visit fixed series would fill the cap with its
+// farthest-future rows and hide today's visit and the recent past.
+export function appointmentHistory(data, limit, { today = etDateString(), currentId = null } = {}) {
   const scheduled = Array.isArray(data?.scheduled) ? data.scheduled : [];
-  const sorted = [...scheduled].sort(byDateDesc);
-  return limit ? sorted.slice(0, limit) : sorted;
+  const upcoming = scheduled.filter((s) => isUpcoming(s, today)).sort(byDateAsc);
+  const head = [];
+  const current = currentId != null ? scheduled.find((s) => s.id === currentId) : null;
+  if (current) head.push(current);
+  if (upcoming[0] && !head.includes(upcoming[0])) head.push(upcoming[0]);
+  const past = scheduled
+    .filter((s) => !isUpcoming(s, today) && !head.includes(s))
+    .sort(byDateDesc);
+  const rows = [...head, ...past];
+  return limit ? rows.slice(0, limit) : rows;
 }

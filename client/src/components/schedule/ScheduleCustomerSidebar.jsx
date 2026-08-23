@@ -172,7 +172,7 @@ export default function ScheduleCustomerSidebar({
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;
-    return buildAppointmentHistory(data, 8)
+    return buildAppointmentHistory(data, 8, { currentId })
       .map((item) => ({ ...item, isCurrent: item.id === currentId }));
   }, [data, service?.id]);
 
