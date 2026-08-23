@@ -570,14 +570,15 @@ async function getRevenueBreakdown(input) {
   }
 
   if (group_by === 'tier') {
-    const rows = await db('customers').where({ active: true })
+    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+    const rows = await db('customers').where({ active: true }).whereNull('deleted_at')
       .select('waveguard_tier', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as mrr'))
       .groupBy('waveguard_tier').orderByRaw('SUM(monthly_rate) DESC');
     return { group_by, rows: rows.map(r => ({ tier: r.waveguard_tier || 'None', count: parseInt(r.count), mrr: parseFloat(r.mrr || 0), arr: parseFloat(r.mrr || 0) * 12 })) };
   }
 
   if (group_by === 'city') {
-    const rows = await db('customers').where({ active: true }).whereNotNull('city').where('city', '!=', '')
+    const rows = await db('customers').where({ active: true }).whereNull('deleted_at').whereNotNull('city').where('city', '!=', '')
       .select('city', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as mrr'))
       .groupBy('city').orderByRaw('SUM(monthly_rate) DESC');
     return { group_by, rows: rows.map(r => ({ city: r.city, count: parseInt(r.count), mrr: parseFloat(r.mrr || 0) })) };

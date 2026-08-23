@@ -422,6 +422,8 @@ async function dryRunAutomation(row) {
     let q = db('customers');
     if (cols.created_at) q = q.where('created_at', '>=', since);
     if (cols.active) q = q.where({ active: true });
+    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+    if (cols.deleted_at) q = q.whereNull('deleted_at');
     result.source = 'customers';
     result.candidate_count = await countRows(q);
     return result;

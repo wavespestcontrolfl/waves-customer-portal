@@ -2150,8 +2150,11 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
   try {
     const { cityToZone } = require('../services/event-freshness');
 
-    // Get all customers with emails
+    // Get all live customers with emails. Archive sets only deleted_at (never
+    // active), so without this an archived customer would be (re)subscribed
+    // and emailed — mirrors whereLiveCustomer (services/customer-stages.js).
     const customers = await db('customers')
+      .whereNull('deleted_at')
       .whereNotNull('email')
       .where('email', '!=', '')
       .select('id', 'email', 'first_name', 'last_name', 'city');

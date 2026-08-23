@@ -353,6 +353,8 @@ router.get('/ltv-analysis', async (req, res, next) => {
     // Retention curve
     const customers = await db('customers')
       .where('active', true)
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereNotNull('member_since')
       .select('member_since');
 

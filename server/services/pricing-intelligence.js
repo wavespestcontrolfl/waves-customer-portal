@@ -332,6 +332,8 @@ class PricingIntelligence {
     // Stage 2: Core — WaveGuard recurring revenue
     const recurringCustomers = await db('customers')
       .where('active', true)
+      // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
+      .whereNull('deleted_at')
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
       .select('monthly_rate', 'waveguard_tier');
@@ -356,6 +358,7 @@ class PricingIntelligence {
     // Stage 4: Continuity — retention metrics
     const retainedCustomers = await db('customers')
       .where('active', true)
+      .whereNull('deleted_at')
       .whereNotNull('member_since')
       .select('member_since');
 
