@@ -1635,13 +1635,12 @@ async function findAccountByContact(trx, { phone, email, matchEmail = false, con
           existingCustomer: null,
           matchType: 'email',
           requiresConfirmation: true,
+          // Trimmed to what the confirm dialog shows — no customer id, label,
+          // or street address (this payload can reach a tech-scoped caller).
           match: {
             accountId: resolvedAccountId,
-            customerId: match.id,
             name: [match.first_name, match.last_name].filter(Boolean).join(' '),
             emailMasked: maskEmail(match.email),
-            propertyLabel: match.profile_label || null,
-            addressLine1: match.address_line1 || null,
           },
         };
       }

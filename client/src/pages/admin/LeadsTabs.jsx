@@ -2965,6 +2965,16 @@ export function LeadsSection() {
                                               // attaching is an explicit admin
                                               // choice, never implicit (email is
                                               // not proof of account ownership).
+                                              if (
+                                                e?.code ===
+                                                "EMAIL_MATCH_ADMIN_REQUIRED"
+                                              ) {
+                                                // Technician: show and stop —
+                                                // no attach/create choice.
+                                                alert(e.message);
+                                                setApptSaving(false);
+                                                return;
+                                              }
                                               if (e?.code !== "EMAIL_MATCH_CONFIRM")
                                                 throw e;
                                               const m = e.match || {};

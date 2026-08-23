@@ -9,6 +9,9 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technician = { first_name: 'Ava', last_name: 'Admin' };
     req.technicianId = 'admin-1';
+    // Role comes from the (mocked) auth layer exactly as admin-auth.js sets
+    // req.techRole; tests pick a technician via the x-test-role header.
+    req.techRole = req.headers['x-test-role'] === 'technician' ? 'technician' : 'admin';
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -157,10 +160,10 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
   };
 }
 
-function post(baseUrl, extra = {}) {
+function post(baseUrl, extra = {}, { role = 'admin' } = {}) {
   return fetch(`${baseUrl}/admin/leads/${LEAD_ID}/schedule-appointment`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-test-role': role },
     body: JSON.stringify({ date: '2027-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
   });
 }
@@ -264,15 +267,52 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
       expect(body.code).toBe('EMAIL_MATCH_CONFIRM');
       expect(body.match).toEqual({
         accountId: 'acct-existing',
-        customerId: 'cust-existing',
         name: 'Existing Person',
         emailMasked: 'l***@example.com',
-        propertyLabel: 'Primary',
-        addressLine1: '2 Other St',
       });
+      expect(body.match).not.toHaveProperty('customerId');
+      expect(body.match).not.toHaveProperty('propertyLabel');
+      expect(body.match).not.toHaveProperty('addressLine1');
       expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
       // No comms lock taken on the create path before the 409.
       expect(calls.filter((c) => c.op === 'raw' && /customer-comms/.test(String(c.args[1]?.[0])))).toHaveLength(0);
+    });
+  });
+
+  it('technician role: email match → 409 EMAIL_MATCH_ADMIN_REQUIRED, no match object, zero writes', async () => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, {}, { role: 'technician' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toEqual({ error: "An existing customer matches this lead's email — an admin must book it.", code: 'EMAIL_MATCH_ADMIN_REQUIRED' });
+      expect(body).not.toHaveProperty('match');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it.each([
+    ['attachToAccountId', { attachToAccountId: 'acct-existing' }],
+    ['createSeparateAccount', { attachToAccountId: null, createSeparateAccount: true }],
+  ])('technician role: %s is ignored → still 409 EMAIL_MATCH_ADMIN_REQUIRED, zero writes', async (_label, body) => {
+    const calls = [];
+    install(emailKnexRoute(calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, body, { role: 'technician' });
+      expect(res.status).toBe(409);
+      const json = await res.json();
+      expect(json.code).toBe('EMAIL_MATCH_ADMIN_REQUIRED');
+      expect(json).not.toHaveProperty('match');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
+    });
+  });
+
+  it('technician role: no email match → books normally (role gate only affects the match flow)', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), calls));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, {}, { role: 'technician' })).status).toBe(200);
     });
   });
 
@@ -758,7 +798,8 @@ describe('findAccountByContact email opt-in', () => {
         : null;
     }, calls);
     const unconfirmed = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true });
-    expect(unconfirmed).toMatchObject({ accountId: null, matchType: 'email', requiresConfirmation: true, match: { accountId: 'a1', customerId: 'c1' } });
+    expect(unconfirmed).toMatchObject({ accountId: null, matchType: 'email', requiresConfirmation: true, match: { accountId: 'a1' } });
+    expect(unconfirmed.match).not.toHaveProperty('customerId');
     expect(calls.filter((c) => c.op === 'update' || c.op === 'insert')).toHaveLength(0);
     const out = await findAccountByContact(knex, { ...FENCED, phone: '5551234567', email: '  SomeOne@Example.com', matchEmail: true, confirmEmailAccountId: 'a1' });
     expect(out).toMatchObject({ accountId: 'a1', matchType: 'email' });

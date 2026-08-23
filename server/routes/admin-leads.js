@@ -1281,9 +1281,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     //  - attachToAccountId: attach ONLY if it equals the account the lead's
     //    email resolves to under the lock (re-resolved server-side);
     //  - createSeparateAccount: explicit opt-out of email matching.
-    const attachToAccountId = typeof req.body.attachToAccountId === 'string' && req.body.attachToAccountId.trim()
+    // Account selection is ADMIN-only (same predicate as admin-auth's
+    // requireAdmin: req.techRole === 'admin'). A technician's
+    // attachToAccountId / createSeparateAccount are ignored, and an email
+    // match surfaces as EMAIL_MATCH_ADMIN_REQUIRED with no match details —
+    // the tech-scoped directory never shows other customers' account data.
+    const isAdmin = req.techRole === 'admin';
+    const attachToAccountId = isAdmin && typeof req.body.attachToAccountId === 'string' && req.body.attachToAccountId.trim()
       ? req.body.attachToAccountId.trim() : null;
-    const createSeparateAccount = req.body.createSeparateAccount === true;
+    const createSeparateAccount = isAdmin && req.body.createSeparateAccount === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
@@ -1674,6 +1680,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
   } catch (err) {
     if (err.code === 'EMAIL_MATCH_CONFIRM') {
+      if (req.techRole !== 'admin') {
+        return res.status(409).json({ error: "An existing customer matches this lead's email — an admin must book it.", code: 'EMAIL_MATCH_ADMIN_REQUIRED' });
+      }
       return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
     }
     if (err.code === 'SLOT_CONFLICT') {
