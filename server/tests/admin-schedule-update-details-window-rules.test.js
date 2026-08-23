@@ -310,3 +310,17 @@ describe('effective duration on end-less rows + submitted duration + CAS', () =>
     expect(cas).toContain('preReadWindowRow.estimated_duration_minutes');
   });
 });
+
+describe('duration-only edits on end-less rows', () => {
+  test('estimatedDuration 60→120 on a 19:00 end-less row → 422 (effective 19:00-21:00); with a stored end the duration is not the block', async () => {
+    db.mockImplementation(() => chain({ ...STORED, window_start: '19:00:00', window_end: null, estimated_duration_minutes: 60 }));
+    const { status, body } = await put({ estimatedDuration: 120 });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/end by 20:00/);
+    expect(db.transaction).not.toHaveBeenCalled();
+    // Stored 19:00-20:00 end: the stored span is the block — the duration edit proceeds.
+    db.mockImplementation(() => chain({ ...STORED, window_start: '19:00:00', window_end: '20:00:00', estimated_duration_minutes: 60 }));
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    expect((await put({ estimatedDuration: 120 })).status).toBe(418);
+  });
+});

@@ -176,3 +176,12 @@ test('date-only move of a 19:00 end-less 120-min row is refused (19:00-21:00), a
   expect(r.status).toBe(200);
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
 });
+
+test('series scope hands the RAW window to the rebooker with adminWindowRules so each occurrence derives + validates its own window', async () => {
+  mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };
+  const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '10:00' }, scope: 'series' });
+  expect(status).toBe(200);
+  expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith(
+    expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', { allowLive: true, adminWindowRules: true },
+  );
+});

@@ -5701,13 +5701,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // row and refuses (409 VISIT_CHANGED_RETRY) if the scheduling fields
     // drifted, so a normalized pair derived here can never overwrite a
     // concurrent window edit.
+    // A DURATION-only edit on an END-LESS row changes the block the visit
+    // occupies (start + new duration), so it validates too: 19:00 + 60→120
+    // is 19:00-21:00 and refused.
     let preReadWindowRow = null;
-    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined) {
+    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
+      || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
         .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
-      preReadWindowRow = currentRow;
       if (updates.window_start || updates.window_end) {
+        // The CAS below is armed only when this pre-read actually fed a
+        // derivation/validation (here and in the stored-window branch).
+        preReadWindowRow = currentRow;
         const effectiveStart = updates.window_start || normalizeHHMM(currentRow.window_start);
         if (!effectiveStart) {
           throw Object.assign(
@@ -5731,13 +5737,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         updates.window_start = normalizedWindow.window_start;
         updates.window_end = normalizedWindow.window_end;
       } else if (!windowIntake.clearBoth
-        && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))) {
-        // Date-only move of an end-less row: judged on its effective
-        // duration (stored span → estimated_duration_minutes → 60).
+        && (normalizeHHMM(currentRow.window_start) || normalizeHHMM(currentRow.window_end))
+        && (updates.scheduled_date !== undefined || !normalizeHHMM(currentRow.window_end))) {
+        // Date-only move (any stored window) or a duration-only edit on an
+        // end-less row: judged on the effective block — stored end, else the
+        // SUBMITTED duration, else the stored one, else 60.
+        preReadWindowRow = currentRow;
+        const submittedDuration = Number.isInteger(updates.estimated_duration_minutes) && updates.estimated_duration_minutes > 0
+          ? updates.estimated_duration_minutes
+          : null;
         assertAdminAppointmentWindow({
           windowStart: normalizeHHMM(currentRow.window_start),
           windowEnd: normalizeHHMM(currentRow.window_end),
-          durationMinutes: windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
+          durationMinutes: submittedDuration
+            || windowDurationMinutes(currentRow.window_start, currentRow.window_end, currentRow.estimated_duration_minutes),
         });
       }
     }

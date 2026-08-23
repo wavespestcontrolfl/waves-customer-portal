@@ -432,6 +432,49 @@ describe('live-status reschedule override (allowLive)', () => {
     }));
   });
 
+  test('rescheduleSeries start-only move: EACH occurrence derives its end from its OWN span (60 vs 120 min), never the anchor\'s', async () => {
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '10:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-3', status: 'confirmed', scheduled_date: SIB2, window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90 },
+    ]);
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '13:00' }, 'admin', 'admin',
+      { allowLive: true, adminWindowRules: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '14:00' });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '15:00' });
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '14:30' });
+  });
+
+  test('rescheduleSeries (adminWindowRules): a sibling with a legacy 07:00 window aborts the WHOLE series — 422, nothing moved', async () => {
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '10:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '07:00:00', window_end: '08:00:00' },
+    ]);
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, null, 'admin', 'admin', { allowLive: true, adminWindowRules: true },
+    )).rejects.toMatchObject({ statusCode: 422, code: 'INVALID_APPOINTMENT_WINDOW', message: expect.stringMatching(/before 08:00/) });
+    // Anchor update happens before the sibling is reached — the thrown error
+    // rolls the trx back; assert no COMMIT-side effects and the sibling never
+    // got an update call.
+    expect(updates[1].update).not.toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
+  test('rescheduleSeries without adminWindowRules (customer / rain-out callers) keeps the no-validation contract', async () => {
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '07:00:00', window_end: '08:00:00' },
+    ]);
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, null, 'weather_rain', 'system', { allowLive: true });
+    expect(result.success).toBe(true);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ window_start: '07:00:00', window_end: '08:00:00' });
+  });
+
   test('rescheduleSeries with allowLive still skips a live NON-anchor sibling', async () => {
     const { updates } = wireSeriesMocks('on_site', [
       { id: 'svc-1', status: 'on_site', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },

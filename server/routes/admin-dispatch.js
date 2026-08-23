@@ -12679,8 +12679,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // customer pushes the whole cadence) — the rebooker rewinds its
     // tracker lifecycle and frees the tech, same as the single path.
     if (scope === 'series') {
-      const seriesWindow = await resolveRescheduleWindow(req.params.serviceId, newWindow);
-      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, seriesWindow, reasonCode || 'admin', 'admin', { allowLive: true });
+      // Anchor-level validation here (malformed / pre-8am / past day end);
+      // the RAW window goes to the rebooker so a start-only move derives
+      // EACH occurrence's end from its own duration, and adminWindowRules
+      // validates every landing window inside the series trx (one failing
+      // sibling aborts the whole move).
+      await resolveRescheduleWindow(req.params.serviceId, newWindow);
+      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true, adminWindowRules: true });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
       // The rebooker unassigns any shifted sibling whose kept tech would
       // double-book its recomputed date (occ.conflicted). Those rows often
