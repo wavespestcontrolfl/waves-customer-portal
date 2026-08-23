@@ -32,6 +32,7 @@ jest.mock('../services/conversations', () => ({
 }));
 
 const db = require('../models/db');
+const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
 const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
 
@@ -84,8 +85,15 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       chain({ count: subscribers.length }),                 // 0-recipient guard
       chain({ result: subscribers }),                       // fetch
       // Per-chunk eligibility re-check right before SendGrid (status='active'
-      // + archived-customer anti-join). Default: everyone still eligible.
-      chain({ result: (eligibleAtDispatch || subscribers).map((s) => ({ id: s.id })) }),
+      // + archived-customer anti-join). Selects id AND customer_id — the link
+      // can have moved to a live twin since selection. Default: everyone still
+      // eligible, on the same customer they were selected with.
+      chain({ result: (eligibleAtDispatch || subscribers).map((e) => ({
+        id: e.id,
+        customer_id: e.customer_id !== undefined
+          ? e.customer_id
+          : ((subscribers.find((s) => s.id === e.id) || {}).customer_id ?? null),
+      })) }),
     ],
     newsletter_send_deliveries: [
       chain({}),                                            // insert onConflict
@@ -184,6 +192,65 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_ineligible).toBe(0);
     expect(result.recipients).toBe(2);
     expect(result.accepted).toBe(1);
+  });
+
+  test('a subscriber relinked to its live twin between selection and dispatch: payload personalization AND the touchpoint use the TWIN', async () => {
+    const send = {
+      id: 'send-1', status: 'draft', html_body: '<p>Body {{city}}</p>', text_body: 'Body {{city}}', subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null, subject_b: null, created_by: 'admin-1',
+    };
+    const recheckQuery = chain({ result: [{ id: 1, customer_id: 'cust-twin' }] });
+    const queues = {
+      newsletter_sends: [
+        chain({ first: send }),
+        chain({ returning: [{ id: 'send-1' }] }),                     // atomic claim
+        chain({ updated: 1 }),                                        // per-chunk heartbeat
+        chain({ updated: 1 }),                                        // final update
+        chain({ first: null }),                                       // social-share refetch
+      ],
+      newsletter_subscribers: [
+        chain({ count: 1 }),                                          // 0-recipient guard
+        // Selection: still linked to the profile that is about to be archived.
+        chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-archived', first_name: null }] }),
+        // Dispatch re-check: the archive transaction relinked this subscriber
+        // to the live twin. Still eligible — but on a DIFFERENT customer.
+        recheckQuery,
+      ],
+      newsletter_send_deliveries: [
+        chain({}),                                                    // insert onConflict
+        chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
+        chain({ updated: 1 }),                                        // post-send bulk update
+        chain({ count: 0 }),                                          // final retryable ledger count
+      ],
+      // loadPersonalizationContext: first for the selected (archived) id,
+      // then the top-up for the twin the re-check returned.
+      customers: [
+        chain({ result: [{ id: 'cust-archived', city: 'Archived City', lawn_type: null }] }),
+        chain({ result: [{ id: 'cust-twin', city: 'Twin City', lawn_type: null }] }),
+      ],
+      customer_turf_profiles: [chain({ result: [] }), chain({ result: [] })],
+      newsletter_calendar: [chain({ updated: 1 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(result.accepted).toBe(1);
+    // The re-check must ASK for customer_id — selecting only id would leave
+    // the stale link in place with no way to notice.
+    expect(recheckQuery.select).toHaveBeenCalledWith('id', 'customer_id');
+    // Personalization resolves from the TWIN, not the archived profile.
+    const recipient = mockSendBroadcast.mock.calls[0][0].recipients[0];
+    expect(recipient.email).toBe('a@example.com');
+    expect(recipient.substitutions['{{city}}']).toBe('Twin City');
+    // …and the comms-history touchpoint is filed against the TWIN.
+    expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+    expect(recordTouchpoint.mock.calls[0][0]).toMatchObject({ customerId: 'cust-twin', contactEmail: 'a@example.com' });
   });
 
   test('passes custom_args.delivery_id + send_id on each recipient', async () => {
@@ -406,7 +473,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
           { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
         ] }),
         // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
-        chain({ result: [{ id: 1 }, { id: 2 }] }),
+        chain({ result: [{ id: 1, customer_id: null }, { id: 2, customer_id: null }] }),
       ],
       newsletter_send_deliveries: [
         chain({}),
@@ -667,8 +734,9 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
-        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
-        chain({ result: [{ id: 1 }] }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still
+        // eligible, link unchanged.
+        chain({ result: [{ id: 1, customer_id: null }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender
@@ -738,7 +806,7 @@ describe('resumeCampaign — preconditions', () => {
           onWhereIn: (...args) => { subscriberWhereIn = args; },
         }),
         // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
-        chain({ result: [{ id: 2 }] }),
+        chain({ result: [{ id: 2, customer_id: null }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender
@@ -813,7 +881,7 @@ describe('resumeCampaign — preconditions', () => {
         // anti-join): subscriber 2's customer was archived after the send.
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: 'cust-live' }] }),
         // Per-chunk eligibility re-check right before SendGrid.
-        chain({ result: [{ id: 1 }] }),
+        chain({ result: [{ id: 1, customer_id: 'cust-live' }] }),
       ],
     };
     queues.newsletter_calendar = queues.newsletter_calendar || [chain({ updated: 1 })];
@@ -1022,8 +1090,9 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
-        // Per-chunk eligibility re-check right before SendGrid: everyone still eligible.
-        chain({ result: [{ id: 1 }] }),
+        // Per-chunk eligibility re-check right before SendGrid: everyone still
+        // eligible, link unchanged.
+        chain({ result: [{ id: 1, customer_id: null }] }),
       ],
     };
     // Post-send side effects (PR D): on a successful 'sent' send the sender

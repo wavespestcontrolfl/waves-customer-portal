@@ -743,9 +743,16 @@ async function sendCampaign(sendId, opts = {}) {
       // chunk — and terminally skip anyone no longer eligible: the delivery
       // row becomes 'skipped' (not in RETRYABLE_DELIVERY_STATUSES, so resume
       // never re-queues it) and recipient_count reflects the kept set.
-      const stillEligible = new Set((await excludeArchivedCustomers(excludeGloballySuppressed(
+      // customer_id comes back too, not just id: an archive transaction may
+      // have RELINKED a subscriber to its live twin between selection and now
+      // (relinkSubscribersFromArchivedCustomer). Such a recipient stays
+      // eligible — but the row we selected still carries the OLD (archived)
+      // customer_id, which would personalize the email and file the customer
+      // touchpoint against the archived profile.
+      const freshCustomerBySub = new Map((await excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ).select('id'))).map((r) => r.id));
+      ).select('id', 'customer_id'))).map((r) => [r.id, r.customer_id ?? null]));
+      const stillEligible = freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
         const skippedNow = await skipIneligibleDeliveries(send.id, opts.existingDeliveriesOnly
@@ -762,6 +769,24 @@ async function sendCampaign(sendId, opts = {}) {
         chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         if (!chunkToSend.length) continue;
+      }
+
+      // Adopt the re-check's customer_id for the kept recipients, and top up
+      // the personalization map for the ids that actually changed — through
+      // loadPersonalizationContext, the one loader, not a second query shape.
+      // Copies rather than mutations so the selection snapshot stays intact.
+      const relinkedSubs = chunkToSend.filter((s) => (freshCustomerBySub.get(s.id) ?? null) !== (s.customer_id ?? null));
+      if (relinkedSubs.length) {
+        chunkToSend = chunkToSend.map((s) => (relinkedSubs.includes(s)
+          ? { ...s, customer_id: freshCustomerBySub.get(s.id) ?? null }
+          : s));
+        const needContext = chunkToSend.filter((s) => s.customer_id && !personalizationByCustomer.has(s.customer_id));
+        if (needContext.length) {
+          for (const [customerId, ctx] of await loadPersonalizationContext(needContext)) {
+            personalizationByCustomer.set(customerId, ctx);
+          }
+        }
+        logger.info(`[newsletter] send ${send.id} refreshed ${relinkedSubs.length} recipient link(s) relinked between selection and dispatch (archive relink)`);
       }
 
       const recipients = chunkToSend.map((s) => {
