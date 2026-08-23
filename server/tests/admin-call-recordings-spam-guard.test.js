@@ -4,7 +4,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/call-recording-processor', () => ({}));
+jest.mock('../services/call-recording-processor', () => ({
+  CONTACT_MATCH_PHONE_COLS: ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'],
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -94,11 +96,39 @@ describe('PUT /calls/:id/disposition spam guard', () => {
         method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
       });
       expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('OUTBOUND_CALL');
+      expect((await res.json()).code).toBe('NOT_INBOUND_CALL');
     });
     expect(tables.blocked_numbers).toBeUndefined();
     expect(tables.customers).toBeUndefined();
     for (const q of tables.call_log) expect(q.del).not.toHaveBeenCalled();
+  });
+
+  test('refuses 409 when direction is missing/unknown (fail closed)', async () => {
+    for (const direction of [null, '', 'legacy']) {
+      const tables = setup({ call: { ...CALL, direction } });
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+          method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('NOT_INBOUND_CALL');
+      });
+      expect(tables.blocked_numbers).toBeUndefined();
+    }
+  });
+
+  test('phone lookup covers every pipeline identity column (service-contact slots + secondary)', async () => {
+    const tables = setup({ call: CALL, phoneCustomer: { id: 'cust-3', first_name: 'Tenant', last_name: 'Two' } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
+      });
+      expect(res.status).toBe(409);
+    });
+    const sql = tables.customers.flatMap((q) => q.whereRaw.mock.calls.map((c) => c[0])).join(' ');
+    for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone']) {
+      expect(sql).toContain(`COALESCE(${col}, '')`);
+    }
   });
 
   test('true spam: blocks + deletes the call row, never touches sms_log', async () => {

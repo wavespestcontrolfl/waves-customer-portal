@@ -192,13 +192,16 @@ async function findLiveCustomerForCall(call) {
   }
   const last10 = String(call.from_phone || '').replace(/\D/g, '').slice(-10);
   if (last10.length !== 10) return null;
-  const like = `%${last10}`;
+  // Same identity column set the call pipeline uses (primary phone + the three
+  // service-contact slots it records spouses/tenants into) plus secondary_phone
+  // — mirrors call-recording-processor's identityPhoneCols. Never a subset.
+  const cols = [...(CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS || ['phone']), 'secondary_phone'];
+  const frag = cols
+    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') LIKE ?`)
+    .join(' OR ');
   const byPhone = await db('customers')
     .whereNull('deleted_at')
-    .where(function () {
-      this.whereRaw("regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') LIKE ?", [like])
-        .orWhereRaw("regexp_replace(COALESCE(secondary_phone, ''), '\\D', '', 'g') LIKE ?", [like]);
-    })
+    .whereRaw(`(${frag})`, cols.map(() => `%${last10}`))
     .first('id', 'first_name', 'last_name');
   return byPhone || null;
 }
@@ -228,13 +231,14 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
       // spam from here. A hard_block silently kills every future inbound call
       // and text from a paying customer, and the operator has no way to see
       // that from the call row. Refuse with 409 so the UI can explain.
-      // Only inbound rows carry the caller in from_phone; on an outbound row
-      // from_phone is OUR Twilio number and the contact is to_phone. Blocking
-      // our own number would be catastrophic, so spam is inbound-only.
-      if (String(call.direction || '').toLowerCase() === 'outbound') {
+      // Only INBOUND rows carry the caller in from_phone; on an outbound row
+      // from_phone is OUR Twilio number. `direction` is nullable/unconstrained,
+      // so fail closed: anything other than an explicit 'inbound' is refused
+      // rather than risk hard-blocking a Waves number.
+      if (String(call.direction || '').toLowerCase() !== 'inbound') {
         return res.status(409).json({
           error: 'Spam can only be tagged on inbound calls.',
-          code: 'OUTBOUND_CALL',
+          code: 'NOT_INBOUND_CALL',
         });
       }
       const owner = await findLiveCustomerForCall(call);
