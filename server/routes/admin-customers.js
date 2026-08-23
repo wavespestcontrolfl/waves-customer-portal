@@ -3787,9 +3787,22 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    await db('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
-    await auditCustomerMutation(req, 'customer.archive', req.params.id, { previousDeletedAt: customer.deleted_at || null }, true);
-    logger.info(`[customers] Soft-deleted customer id=${req.params.id}`);
+    // Archive + newsletter relink + critical audit are one transaction: the
+    // subscriber link must move to the live same-email twin (if any) in the
+    // same commit that sets deleted_at, or the sender's archived-customer
+    // anti-join silences the household between the two writes.
+    const { relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
+    const relink = await db.transaction(async (trx) => {
+      await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+      const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
+      await auditCustomerMutation(req, 'customer.archive', req.params.id, {
+        previousDeletedAt: customer.deleted_at || null,
+        newsletterRelinkedTo: result.twinId,
+        newsletterRelinked: result.relinked,
+      }, true, trx);
+      return result;
+    });
+    logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
   } catch (err) { next(err); }
 });

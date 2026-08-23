@@ -310,4 +310,32 @@ async function linkToCustomer(email) {
   );
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+/**
+ * Archive-time relink. Soft-deleting a customer stamps customers.deleted_at
+ * only; the subscriber↔customer link (customer_id, set once by linkToCustomer
+ * and never refreshed) would keep pointing at the archived profile, and the
+ * sender's plain anti-join (newsletter-sender.js excludeArchivedCustomers)
+ * would then stop mailing a multi-property household that archived ONE
+ * property. So at archive time, move every subscriber linked to the archived
+ * customer onto its live twin: same normalized email, canonical live-customer
+ * scope (whereLiveCustomer: active + not deleted + customer pipeline stage),
+ * deterministic — is_primary_profile DESC NULLS LAST, created_at ASC, id ASC.
+ * No twin → link left alone (the anti-join excludes it; restore lifts it).
+ * Runs on the caller's transaction. Returns { twinId, relinked }.
+ */
+async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
+  const { whereLiveCustomer } = require('./customer-stages');
+  const twin = await trx('customers')
+    .whereRaw('LOWER(TRIM(email)) = (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ?)', [archivedCustomerId])
+    .whereNot('id', archivedCustomerId)
+    .modify(whereLiveCustomer)
+    .orderByRaw('is_primary_profile DESC NULLS LAST, created_at ASC, id ASC')
+    .first('id');
+  if (!twin) return { twinId: null, relinked: 0 };
+  const relinked = await trx('newsletter_subscribers')
+    .where({ customer_id: archivedCustomerId })
+    .update({ customer_id: twin.id, updated_at: trx.fn.now() });
+  return { twinId: twin.id, relinked: Number(relinked || 0) };
+}
+
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, relinkSubscribersFromArchivedCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

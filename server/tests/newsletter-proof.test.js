@@ -26,8 +26,10 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../services/newsletter-sender', () => ({
   sendCampaign: mockSendCampaign,
-  // countRecipients() goes through the one audience mechanism.
-  countSegmentRecipients: jest.fn(async () => 606),
+  resolveSegmentCustomerIds: jest.fn(async () => null),
+  buildSubscriberQuery: jest.fn(() => ({
+    count: () => ({ first: async () => ({ c: 606 }) }),
+  })),
   loadPersonalizationContext: jest.fn(async () => new Map()),
 }));
 jest.mock('../services/newsletter-validator', () => ({
