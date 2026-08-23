@@ -7,6 +7,7 @@ const {
   requireTechOrAdmin,
 } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
@@ -180,8 +181,9 @@ const DISPOSITION_LABELS = {
   spam: 'Spam / Wrong Number',
 };
 
-// Last-10-digit match against live customers (primary or secondary phone), or
-// the call's own customer_id link. Returns the customer row or null.
+// Live-customer ownership of the caller number: the call's own customer link,
+// else the shared known-caller identity lookup (same mechanism + column set
+// the pre-connect voice screen uses — utils/known-caller-phone.js).
 async function findLiveCustomerForCall(call) {
   if (call.customer_id) {
     const linked = await db('customers')
@@ -190,20 +192,7 @@ async function findLiveCustomerForCall(call) {
       .first('id', 'first_name', 'last_name');
     if (linked) return linked;
   }
-  const last10 = String(call.from_phone || '').replace(/\D/g, '').slice(-10);
-  if (last10.length !== 10) return null;
-  // Same identity column set the call pipeline uses (primary phone + the three
-  // service-contact slots it records spouses/tenants into) plus secondary_phone
-  // — mirrors call-recording-processor's identityPhoneCols. Never a subset.
-  const cols = [...(CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS || ['phone']), 'secondary_phone'];
-  const frag = cols
-    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') LIKE ?`)
-    .join(' OR ');
-  const byPhone = await db('customers')
-    .whereNull('deleted_at')
-    .whereRaw(`(${frag})`, cols.map(() => `%${last10}`))
-    .first('id', 'first_name', 'last_name');
-  return byPhone || null;
+  return findKnownCallerCustomer(db, call.from_phone);
 }
 
 // PUT /calls/:id/disposition — tag a call

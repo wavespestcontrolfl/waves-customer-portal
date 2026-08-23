@@ -4,9 +4,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/call-recording-processor', () => ({
-  CONTACT_MATCH_PHONE_COLS: ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'],
-}));
+jest.mock('../services/call-recording-processor', () => ({}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -21,7 +19,9 @@ function chain(result) {
   const q = {};
   const self = () => q;
   for (const m of ['where', 'whereNull', 'whereRaw', 'orWhereRaw', 'leftJoin', 'select', 'onConflict', 'ignore', 'update']) q[m] = jest.fn(self);
-  q.first = jest.fn(async () => (typeof result === 'function' ? result() : result));
+  const resolve = () => (typeof result === 'function' ? result() : result);
+  q.first = jest.fn(async () => resolve());
+  q.limit = jest.fn(async () => { const r = resolve(); return r ? [r] : []; });
   q.del = jest.fn(async () => 1);
   q.insert = jest.fn(() => q);
   q.columnInfo = jest.fn(async () => ({ disposition: {} }));

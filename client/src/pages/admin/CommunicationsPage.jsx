@@ -31,7 +31,7 @@
 // - Attach endpoint (POST /attach): multipart upload then sms POST.
 //   Confirm partial upload failure cancels the send (no half-sent
 //   MMS with broken media URL).
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
 import CallRecordingsPanel from "./CallRecordingsPanel";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
@@ -62,8 +62,16 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's reason (e.g. 409 CUSTOMER_NUMBER names the
+      // customer) instead of a bare status code.
+      const body = await r.json().catch(() => null);
+      const err = new Error((body && body.error) || `HTTP ${r.status}`);
+      err.status = r.status;
+      err.code = body && body.code;
+      throw err;
+    }
     return r.json();
   });
 }
@@ -976,6 +984,7 @@ function CallLogTab() {
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
   const [dispositions, setDispositions] = useState({}); // { callId: value }
+  const confirmedDispositions = useRef({});
   const [savingDisp, setSavingDisp] = useState(null);
   const [callFilter, setCallFilter] = useState("all");
   const [callLogSearch, setCallLogSearch] = useState("");
@@ -1033,9 +1042,9 @@ function CallLogTab() {
       )
     )
       return;
-    // Last successfully-saved value (if any) so a rejected update can roll
-    // back to it rather than to whatever the initial load had.
-    const priorOverride = dispositions[callId];
+    // `dispositions` is optimistic state; `confirmedDispositions` holds only
+    // values the server accepted. A rejected save rolls back to the confirmed
+    // value, never to an earlier optimistic one that also failed.
     setDispositions((prev) => ({ ...prev, [callId]: value }));
     setSavingDisp(callId);
     try {
@@ -1049,6 +1058,8 @@ function CallLogTab() {
       if (r.deleted) {
         // Spam — remove from call list
         setCalls((prev) => prev.filter((c) => c.id !== callId));
+      } else {
+        confirmedDispositions.current[callId] = value;
       }
     } catch (e) {
       // Server refuses spam on a live customer's number (409 CUSTOMER_NUMBER);
@@ -1057,8 +1068,9 @@ function CallLogTab() {
         // A newer change on this row already superseded us — leave it alone.
         if (prev[callId] !== value) return prev;
         const next = { ...prev };
-        if (priorOverride === undefined) delete next[callId];
-        else next[callId] = priorOverride;
+        const confirmed = confirmedDispositions.current[callId];
+        if (confirmed === undefined) delete next[callId];
+        else next[callId] = confirmed;
         return next;
       });
       alert("Tag failed: " + e.message);
