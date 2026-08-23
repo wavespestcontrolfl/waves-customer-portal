@@ -4,6 +4,7 @@ const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString } = require('../../utils/datetime-et');
+const { taxPeriodFor } = require('../../utils/tax-period');
 
 const anthropic = new Anthropic();
 
@@ -102,7 +103,7 @@ async function processVendorInvoice(email, classification) {
   const invoiceDate = invoiceDateValid
     ? parsedDate.toISOString().split('T')[0]
     : etDateString();
-  const taxYear = (invoiceDateValid ? parsedDate : new Date()).getFullYear().toString();
+  const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {
     try {
@@ -142,6 +143,7 @@ async function processVendorInvoice(email, classification) {
         vendor_name: vendorName,
         expense_date: invoiceDate,
         tax_year: taxYear,
+        quarter,
         payment_method: 'invoice',
         notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
       }).returning('*');

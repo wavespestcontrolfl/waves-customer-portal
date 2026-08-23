@@ -268,3 +268,19 @@ describe('POST /expenses partial deductions', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('POST /admin/tax/expenses tax period', () => {
+  test('400 on a missing/invalid expenseDate instead of tax_year=NaN', async () => {
+    for (const expenseDate of [undefined, 'garbage']) {
+      const res = await post('/admin/tax/expenses', { categoryId: 'cat-supplies', description: 'x', amount: 5, expenseDate });
+      expect(res.status).toBe(400);
+    }
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('derives tax_year/quarter from the date string', async () => {
+    const res = await post('/admin/tax/expenses', { categoryId: 'cat-supplies', description: 'x', amount: 5, expenseDate: '2026-01-01' });
+    expect(res.status).toBe(200);
+    expect(state.inserted[0]).toMatchObject({ tax_year: '2026', quarter: 'Q1' });
+  });
+});

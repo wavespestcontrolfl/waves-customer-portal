@@ -13,6 +13,8 @@ const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/clien
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const config = require('../config');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
+const { taxPeriodFor } = require('../utils/tax-period');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -57,6 +59,9 @@ router.post('/', async (req, res, next) => {
     } = req.body;
     if (!scheduled_service_id) return res.status(400).json({ error: 'scheduled_service_id required' });
     if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'amount required' });
+    const expenseDate = expense_date || etDateString();
+    const period = taxPeriodFor(expenseDate);
+    if (!period) return res.status(400).json({ error: 'expense_date must be a valid YYYY-MM-DD date' });
 
     const [row] = await db('expenses').insert({
       scheduled_service_id,
@@ -68,7 +73,9 @@ router.post('/', async (req, res, next) => {
       tax_deductible_amount: Number(amount),
       vendor_name: vendor_name || null,
       payment_method: payment_method || null,
-      expense_date: expense_date || new Date(),
+      expense_date: expenseDate,
+      tax_year: period.tax_year,
+      quarter: period.quarter,
       receipt_s3_key: receipt_s3_key || null,
       notes: notes || null,
     }).returning('*');
@@ -90,6 +97,12 @@ router.put('/:id', async (req, res, next) => {
     const fields = ['description', 'amount', 'vendor_name', 'payment_method', 'expense_date', 'receipt_s3_key', 'notes', 'category_id'];
     for (const f of fields) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.amount !== undefined) updates.tax_deductible_amount = Number(updates.amount);
+    if (updates.expense_date !== undefined) {
+      const period = taxPeriodFor(updates.expense_date);
+      if (!period) return res.status(400).json({ error: 'expense_date must be a valid YYYY-MM-DD date' });
+      updates.tax_year = period.tax_year;
+      updates.quarter = period.quarter;
+    }
 
     const existing = await db('expenses').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Not found' });
