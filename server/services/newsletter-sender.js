@@ -513,6 +513,23 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
+  // Repair stale archived links BEFORE anything reads ns.customer_id —
+  // including the 0-recipient guard just below (codex #3472 P1 round 2: a
+  // service-line campaign whose only recipients are re-booked households
+  // would otherwise throw EMPTY_SEGMENT before the sweep ran). The lift in
+  // excludeArchivedCustomers decides DELIVERY, but segment resolution,
+  // personalization, and touchpoint history all key on ns.customer_id —
+  // left pointing at the archived profile, they would classify and record
+  // against the wrong row. Set-based, idempotent, same picker as the
+  // archive/restore relinks. Errors propagate (fail closed): sending with a
+  // stale link is exactly the bug this prevents, and the send needs this
+  // same DB anyway. Runs for fresh sends AND resumes — a resume's retryable
+  // recipients re-read customer_id at dispatch time too.
+  const { relinked: relinkedStaleLinks } = await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+  if (relinkedStaleLinks) {
+    logger.info(`[newsletter] send ${send.id}: relinked ${relinkedStaleLinks} subscriber(s) from archived profiles to their live twins`);
+  }
+
   // 0-recipient guard — runs BEFORE the atomic claim so a no-op send
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
@@ -574,21 +591,6 @@ async function sendCampaign(sendId, opts = {}) {
   let skippedIneligible = 0;
   let skippedAtDispatch = 0;
   const useAb = !!send.subject_b;
-
-  // Repair stale archived links BEFORE selecting the audience (codex #3472
-  // P1): the archived-link lift in excludeArchivedCustomers decides
-  // DELIVERY for re-booked households, but segment resolution,
-  // personalization, and touchpoint history all key on ns.customer_id —
-  // left pointing at the archived profile, they would classify and record
-  // against the wrong row. Set-based, idempotent, same picker as the
-  // archive/restore relinks. Errors propagate (fail closed): sending with a
-  // stale link is exactly the bug this prevents, and the send needs this
-  // same DB anyway. Runs for fresh sends AND resumes — a resume's retryable
-  // recipients re-read customer_id at dispatch time too.
-  const { relinked: relinkedStaleLinks } = await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
-  if (relinkedStaleLinks) {
-    logger.info(`[newsletter] send ${send.id}: relinked ${relinkedStaleLinks} subscriber(s) from archived profiles to their live twins`);
-  }
 
   // Pre-seed per-recipient deliveries with A/B assignment. The onConflict
   // is the idempotency keystone for new sends — existing rows survive the

@@ -224,6 +224,12 @@ describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archi
     const seedAt = src.indexOf('if (!opts.existingDeliveriesOnly) {', sendCampaignAt);
     expect(relinkAt).toBeGreaterThan(sendCampaignAt);
     expect(relinkAt).toBeLessThan(seedAt);
+    // …and BEFORE the 0-recipient preflight (codex round 2): a service-line
+    // campaign whose only recipients are re-booked households must not
+    // throw EMPTY_SEGMENT off the stale links the sweep is about to repair.
+    const emptyGuardAt = src.indexOf("err.code = 'EMPTY_SEGMENT';", sendCampaignAt);
+    expect(emptyGuardAt).toBeGreaterThan(-1);
+    expect(relinkAt).toBeLessThan(emptyGuardAt);
     // Unconditional within sendCampaign — resumes re-read customer_id at
     // dispatch time, so the sweep must not be gated on fresh sends only.
     const between = src.slice(sendCampaignAt, relinkAt);
