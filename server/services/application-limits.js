@@ -57,10 +57,13 @@ class ApplicationLimitChecker {
   }
 
   async evaluateLimit(limit, history, moaHistory, proposedDate, product) {
+    // product_limits.limit_value is a pg decimal — node-pg returns it as a
+    // STRING ('14.0000'); coerce once so `< minDays + 7` etc. stay numeric.
+    const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
     switch (limit.limit_type) {
       case 'annual_max_apps': {
         const count = history.length;
-        const max = limit.limit_value;
+        const max = limitValue;
         if (count >= max) return { violated: true, message: `${product.name}: ${count}/${max} applications this year — LIMIT REACHED.`, current: count, max };
         if (count >= max - 1) return { approaching: true, message: `${product.name}: ${count}/${max} this year — this would be the LAST allowed.`, current: count, max };
         return { violated: false, current: count, max };
@@ -77,7 +80,7 @@ class ApplicationLimitChecker {
         // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
         const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
         const daysSince = Math.floor((proposedDay - lastApp) / 86400000);
-        const minDays = limit.limit_value;
+        const minDays = limitValue;
         if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };
         return { violated: false, current: daysSince, max: minDays };
@@ -85,7 +88,7 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
-        const maxRate = limit.limit_value;
+        const maxRate = limitValue;
         if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
         return { violated: false, current: totalApplied, max: maxRate };
       }
@@ -126,7 +129,7 @@ class ApplicationLimitChecker {
           if (app.moa_group === product.moa_group) consecutive++;
           else break;
         }
-        const max = limit.limit_value;
+        const max = limitValue;
         if (consecutive >= max) {
           const alternatives = await db('products_catalog')
             .where('category', product.category).whereNot('moa_group', product.moa_group)

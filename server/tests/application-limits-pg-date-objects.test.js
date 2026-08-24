@@ -85,7 +85,7 @@ describe('application-limits with pg date columns as JS Date objects', () => {
     const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
     const limit = {
       id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
-      limit_value: 14, severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+      limit_value: '14.0000', severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
     };
     db
       .mockReturnValueOnce(chain({ first: product }))
@@ -104,7 +104,7 @@ describe('application-limits with pg date columns as JS Date objects', () => {
     const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
     const limit = {
       id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
-      limit_value: 14, severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+      limit_value: '14.0000', severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
     };
     db
       .mockReturnValueOnce(chain({ first: product }))
@@ -141,6 +141,22 @@ describe('compliance service with pg date columns as JS Date objects', () => {
     }
   });
 
+  test('getNitrogenStatus: null zip falls back to city classification (Sarasota → blackoutActive in July)', async () => {
+    jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
+    try {
+      db
+        .mockReturnValueOnce(chain({ rows: [blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30'))] }))
+        .mockReturnValueOnce(chain({ rows: [{ id: 'cust-4', first_name: 'G', last_name: 'H', city: 'Sarasota', zip: null, lawn_type: 'Zoysia' }] }))
+        .mockReturnValueOnce(chain({ first: { count: '0' } }));
+
+      const status = await ComplianceService.getNitrogenStatus();
+
+      expect(status.customers[0]).toMatchObject({ county: 'sarasota_county', blackoutActive: true });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('getProductLimits: Date-object blackout window reports blackout_active', async () => {
     jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
     try {
@@ -157,11 +173,32 @@ describe('compliance service with pg date columns as JS Date objects', () => {
     }
   });
 
+  test('(b4) min_interval_days: string limit_value ("14.0000") — day 17 yields "approaching" warning, not a block', async () => {
+    const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
+    const limit = {
+      id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
+      limit_value: '14.0000', severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+    };
+    db
+      .mockReturnValueOnce(chain({ first: product }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', city: 'Bradenton' } }))
+      .mockReturnValueOnce(chain({ rows: [{ id: 'pah-1', product_id: 'prod-h', application_date: pgDate('2026-07-05'), application_rate: '1' }] }))
+      .mockReturnValueOnce(chain({ rows: [limit] }));
+
+    const result = await applicationLimits.checkLimits('cust-1', 'prod-h', pgDate('2026-07-22'));
+
+    expect(result.allowed).toBe(true);
+    expect(result.blocks).toHaveLength(0);
+    // '14.0000' + 7 would concatenate to '14.00007'; 17 < 21 must be numeric.
+    expect(result.warnings[0]).toMatchObject({ type: 'min_interval_days', current: 17, max: 14 });
+    expect(result.warnings[0].message).toContain('Just cleared');
+  });
+
   test('(b3) min_interval_days: proposedDate as a pg DATE object exactly minDays later is not a violation', async () => {
     const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
     const limit = {
       id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
-      limit_value: 14, severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+      limit_value: '14.0000', severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
     };
     db
       .mockReturnValueOnce(chain({ first: product }))

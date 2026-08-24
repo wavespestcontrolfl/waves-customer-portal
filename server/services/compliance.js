@@ -463,7 +463,8 @@ const ComplianceService = {
     const statuses = [];
 
     for (const c of lawnCustomers) {
-      const county = inferCountyFromZipInternal(c.zip);
+      // Same city fallback as getProductLimits — ZIP is nullable.
+      const county = inferCountyFromZipInternal(c.zip) || applicationLimits.getCounty(c);
       const isBlackout = activeBlackouts.some(b => b.jurisdiction === county);
 
       const nApps = await db('property_application_history')
