@@ -1604,11 +1604,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
     );
-    // Funnel BEFORE the timeOfDay preference and BEFORE firstDayAvailability
-    // — the scarcity badge must count the days the customer can actually see.
-    // No route data on this path, so a seed falls back to the soonest day.
-    const { slots: funneledBookable, funnel } = applyZoneDayFunnel(bookable, funnelDays);
-    const selected = selectCustomerFacingSlots(filterTimeOfDay(funneledBookable, opts.timeOfDay), TARGET_TOTAL);
+    // Funnel AFTER the timeOfDay preference (a seed day must be chosen from
+    // days that can actually satisfy the request — seeding a morning-only
+    // day for an afternoon search would return nothing while another day
+    // qualifies) and BEFORE firstDayAvailability, so the scarcity badge
+    // counts only days the customer can see. No route data on this path, so
+    // a seed falls back to the soonest day.
+    const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
+      filterTimeOfDay(bookable, opts.timeOfDay), funnelDays,
+    );
+    const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
     stampSlotRainChances(primary, rainOutlook);
@@ -1622,7 +1627,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         // this payload feeds the PUBLIC token-gated slot picker, which reads
         // none of them — echoing exact lat/lng back out is a location leak.
         // Admin diagnostics use getSlotDebug, which carries coords itself.
-        firstDayAvailability: firstDayAvailability(funneledBookable),
+        // Funnel active → count the (time-filtered) days the customer can
+        // see; inactive → the full bookable pool, exactly as before.
+        firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
@@ -1686,18 +1693,23 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
     serviceProfile,
   );
-  // Funnel BEFORE the timeOfDay preference and BEFORE firstDayAvailability
-  // (the scarcity badge must count visible days). Seed preference follows
-  // find-time's score order — classifiedRaw preserves it per segment — so an
-  // empty-zone window seeds the cheapest-detour day, not just the soonest.
+  // Funnel AFTER the timeOfDay preference (a seed day must come from days
+  // that can satisfy the request — a morning-only seed day for an afternoon
+  // search would return nothing while another day qualifies) and BEFORE
+  // firstDayAvailability (the scarcity badge must count visible days). Seed
+  // preference follows find-time's score order — classifiedRaw preserves it
+  // per segment — so an empty-zone window seeds the cheapest-detour day,
+  // not just the soonest.
   const preferredSeedDates = [];
   for (const s of classifiedRaw) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
   }
-  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates });
+  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
+    filterTimeOfDay(bookable, opts.timeOfDay), funnelDays, { preferredSeedDates },
+  );
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
-  const selected = selectCustomerFacingSlots(filterTimeOfDay(funneledBookable, opts.timeOfDay), TARGET_TOTAL, {
+  const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
@@ -1719,7 +1731,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // this payload feeds the PUBLIC token-gated slot picker, which reads
       // none of them — echoing exact lat/lng back out is a location leak.
       // Admin diagnostics use getSlotDebug, which carries coords itself.
-      firstDayAvailability: firstDayAvailability(funneledBookable),
+      // Funnel active → count the (time-filtered) days the customer can
+      // see; inactive → the full bookable pool, exactly as before.
+      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,

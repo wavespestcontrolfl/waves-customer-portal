@@ -203,14 +203,18 @@ describe('isFunnelZone / zone matching', () => {
     );
   });
 
-  test('rowMatchesZone mirrors filterCollidingSlots: slug OR customer city, legacy slugs via city', () => {
+  test('rowMatchesZone: zone stamp authoritative (legacy slugs by prefix), city decides unstamped rows only', () => {
     const cities = new Set(['venice', 'nokomis', 'north port']);
     const { rowMatchesZone } = funnelInternals;
     expect(rowMatchesZone({ zone: 'venice', customer_city: null }, VENICE_ZONE, 'venice', cities)).toBe(true);
-    // Legacy backfill slug doesn't equal zoneSlugOf output — the city leg catches it.
-    expect(rowMatchesZone({ zone: 'venice_north_port', customer_city: 'Nokomis' }, VENICE_ZONE, 'venice', cities)).toBe(true);
-    expect(rowMatchesZone({ zone: 'venice_north_port', customer_city: null }, VENICE_ZONE, 'venice', cities)).toBe(false);
-    expect(rowMatchesZone({ zone: 'sarasota', customer_city: 'Sarasota' }, VENICE_ZONE, 'venice', cities)).toBe(false);
+    // Legacy backfill slug is an underscore compound of the modern slug.
+    expect(rowMatchesZone({ zone: 'venice_north_port', customer_city: null }, VENICE_ZONE, 'venice', cities)).toBe(true);
+    // Unstamped row: linked-customer city decides.
+    expect(rowMatchesZone({ zone: null, customer_city: 'Nokomis' }, VENICE_ZONE, 'venice', cities)).toBe(true);
+    expect(rowMatchesZone({ zone: '', customer_city: 'Bradenton' }, VENICE_ZONE, 'venice', cities)).toBe(false);
+    // A stop stamped for ANOTHER zone must not become a Venice stop just
+    // because the multi-property customer's primary city is Venice.
+    expect(rowMatchesZone({ zone: 'sarasota', customer_city: 'Venice' }, VENICE_ZONE, 'venice', cities)).toBe(false);
   });
 });
 
@@ -238,8 +242,8 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(result.metadata.firstDayAvailability?.date).toBe('2027-05-20');
   });
 
-  test('clustered via legacy slug + customer city (no modern zone stamp)', async () => {
-    mockDb({ scheduledRows: [zoneStopRow({ zone: 'venice_north_port', customer_city: 'North Port' })] });
+  test('clustered via legacy zone slug (underscore compound of the modern slug)', async () => {
+    mockDb({ scheduledRows: [zoneStopRow({ zone: 'venice_north_port', customer_city: null })] });
     const result = await getAvailableSlots('est-funnel-1', WINDOW);
     const slots = [...(result.primary || []), ...(result.expander || [])];
     expect(slots.length).toBeGreaterThan(0);
@@ -265,6 +269,40 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(slots.length).toBeGreaterThan(0);
     expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-21']));
     expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'seeded', seedDate: '2027-05-21' });
+  });
+
+  test('seeded + timeOfDay: the seed day is chosen from days that satisfy the time preference', async () => {
+    // No Venice stops anywhere; the route-preferred day (05-19) has its
+    // whole afternoon blocked by an out-of-zone visit, so an afternoon
+    // search must seed a different day — not seed 05-19 and return nothing.
+    mockDb({
+      scheduledRows: [zoneStopRow({
+        zone: 'sarasota',
+        customer_city: null,
+        scheduled_date: '2027-05-19',
+        window_start: '12:00:00',
+        window_end: '17:00:00',
+      })],
+    });
+    findAvailableSlots.mockResolvedValue({
+      slots: [{
+        date: '2027-05-19',
+        start_time: '09:00',
+        technician: { id: 'tech-1', name: 'Adam Benetti' },
+        detour_minutes: 4,
+        stops_that_day: 2,
+      }],
+      evaluated: 1,
+      total_feasible: 1,
+    });
+    const result = await getAvailableSlots('est-funnel-1', { ...WINDOW, timeOfDay: 'afternoon' });
+    const slots = [...(result.primary || []), ...(result.expander || [])];
+    expect(slots.length).toBeGreaterThan(0);
+    const dates = new Set(slots.map((s) => s.date));
+    expect(dates.size).toBe(1);
+    expect(dates.has('2027-05-19')).toBe(false);
+    expect(slots.every((s) => Number(s.windowStart.split(':')[0]) >= 12)).toBe(true);
+    expect(result.metadata.zoneDayFunnel?.mode).toBe('seeded');
   });
 
   test('funneled results are never cached: a new zone stop reshapes the very next request', async () => {

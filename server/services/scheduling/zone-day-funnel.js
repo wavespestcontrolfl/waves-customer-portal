@@ -67,14 +67,21 @@ function isFunnelZone(estimateZone) {
   return !!slug && funnelZoneSlugs().has(slug);
 }
 
-// True when a live scheduled_services row belongs to the estimate's zone —
-// the SAME dual match filterCollidingSlots uses (zone slug or customer city):
-// legacy rows carry historical slugs ('venice_north_port'), so the city leg
-// is what catches them.
+// True when a live scheduled_services row belongs to the estimate's zone.
+// Deliberately STRICTER than filterCollidingSlots' unconditional
+// slug-OR-city match (over-inclusion there only hides a window; here it
+// invents a cluster day): a non-empty zone stamp is authoritative — a
+// multi-property customer whose primary city is Venice must not reclassify
+// a stop stamped for another zone as a Venice stop. Legacy backfill slugs
+// are underscore compounds of the modern slug ('venice_north_port' for
+// 'venice'), matched by prefix. Customer city decides only unstamped rows.
 function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
   const rowZone = String(row?.zone || '').toLowerCase();
+  if (rowZone) {
+    return !!zoneSlug && (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`));
+  }
   const rowCity = String(row?.customer_city || '').toLowerCase();
-  return (!!zoneSlug && rowZone === zoneSlug) || (!!rowCity && zoneCities.has(rowCity));
+  return !!rowCity && zoneCities.has(rowCity);
 }
 
 // Statuses whose rows are NOT a planned truck-in-zone that day. Stricter
