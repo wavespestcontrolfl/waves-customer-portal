@@ -1345,6 +1345,26 @@ const InvoiceService = {
       taxAmount = 0;
     } else if (taxRate !== undefined) {
       rate = taxRate;
+      // An explicit rate must not override the customer's VERIFIED tax
+      // exemption: TaxCalculator zeroes tax for a verified certificate
+      // (and preview runs the calculator), so honoring a caller's flat
+      // rate here minted tax the preview never showed and the certificate
+      // forbids. One implementation — the calculator's own helper. Fail
+      // SAFE on lookup error: keep the caller's rate (tax stays charged),
+      // never fail open to 0.
+      if (Number(rate) > 0) {
+        try {
+          const exemption = await TaxCalculator.findVerifiedExemption(
+            customerId,
+            { database },
+          );
+          if (exemption) rate = 0;
+        } catch (err) {
+          logger.warn(
+            `[invoice] verified-exemption check failed for explicit taxRate (customer ${customerId}): ${err.message}`,
+          );
+        }
+      }
       taxAmount = Math.round(afterDiscount * rate * 100) / 100;
     } else {
       try {

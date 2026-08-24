@@ -5297,11 +5297,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
-    // The mint's TAX basis derives from an input (property_type), not from
-    // the amount — hoisted for the same single-derivation reason: the
-    // commit-time money freeze below and createFromService must read one
-    // value (fix round 10).
-    const completionInvoiceTaxRate = svc.property_type === 'commercial' ? 0.07 : 0;
+    // The mint's TAX basis — hoisted for the same single-derivation reason:
+    // the commit-time money freeze below and createFromService must read one
+    // value (fix round 10). CALCULATOR-derived (was a flat per-property_type
+    // hard-code): TaxCalculator owns verified
+    // exemptions, service_taxability, and county tax_rates, and treats
+    // `business` property_type as commercial — the hard-code billed
+    // `business` at 0% and every county at flat 7%. Derived HERE, at the
+    // freeze point, and carried through the frozen money contract unchanged
+    // (frozen backfillMintTaxRate → mintInvoiceTaxRate → createFromService),
+    // so mint == frozen expectation exactly as before; the rate always
+    // satisfies the resume validator (finite, 0 ≤ rate < 1). A calculator
+    // failure falls back to the legacy flat basis (business now included)
+    // so a tax lookup can never block a completion.
+    const completionInvoiceTaxRate = await (async () => {
+      try {
+        const TaxCalculator = require('../services/tax-calculator');
+        const taxResult = await TaxCalculator.calculateTax(
+          svc.customer_id,
+          svc.service_type,
+          Number(invoiceAmount) || 0,
+        );
+        const r = Number(taxResult?.rate);
+        if (Number.isFinite(r) && r >= 0 && r < 1) return r;
+        throw new Error(`calculator returned unusable rate ${taxResult?.rate}`);
+      } catch (taxErr) {
+        logger.warn(`[dispatch] TaxCalculator failed deriving completion tax basis for service ${svc.id} — legacy flat rate used: ${taxErr.message}`);
+        return ['commercial', 'business'].includes(svc.property_type) ? 0.07 : 0;
+      }
+    })();
     // Third-party Bill-To + membership dues coverage — hoisted from the
     // invoice block below (fix round 12): dues coverage is a COMMIT-TIME
     // business suppressor, and the frozen posture must read the REAL value

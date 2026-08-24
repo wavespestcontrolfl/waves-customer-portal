@@ -10,6 +10,23 @@ function todayET() {
 const TaxCalculator = {
 
   /**
+   * The customer's verified, active, unexpired tax exemption row (or null).
+   * ONE implementation — calculateTax's step 1 and InvoiceService.create's
+   * explicit-taxRate guard both read this, so a caller-supplied rate can
+   * never re-tax a customer whose verified certificate the calculator
+   * would honor.
+   */
+  async findVerifiedExemption(customerId, opts = {}) {
+    const conn = opts.database || db;
+    return conn('tax_exemptions')
+      .where({ customer_id: customerId, active: true, verified: true })
+      .where(function () {
+        this.whereNull('expiry_date').orWhere('expiry_date', '>=', todayET());
+      })
+      .first();
+  },
+
+  /**
    * Calculate tax for a customer + service type + subtotal.
    * Checks service_taxability, tax_exemptions, and tax_rates by county.
    *
@@ -25,12 +42,7 @@ const TaxCalculator = {
     if (!customer) return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Customer not found' };
 
     // 1. Check tax exemption
-    const exemption = await conn('tax_exemptions')
-      .where({ customer_id: customerId, active: true, verified: true })
-      .where(function () {
-        this.whereNull('expiry_date').orWhere('expiry_date', '>=', todayET());
-      })
-      .first();
+    const exemption = await this.findVerifiedExemption(customerId, { database: conn });
 
     if (exemption) {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };

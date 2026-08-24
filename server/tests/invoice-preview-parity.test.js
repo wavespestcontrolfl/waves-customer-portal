@@ -22,6 +22,8 @@ jest.mock('../services/logger', () => ({
 // 6.5%; falling back to the 'WDO Inspection' title yields 7.5%. Drift in
 // either direction changes the totals and fails parity.
 jest.mock('../services/tax-calculator', () => ({
+  // No verified exemption by default; individual tests override.
+  findVerifiedExemption: jest.fn(async () => null),
   calculateTax: jest.fn(async (customerId, serviceType, amount) => {
     const rate = serviceType === 'Commercial Pest Control' ? 0.065 : 0.075;
     return { rate, amount: Math.round(amount * rate * 100) / 100 };
@@ -181,6 +183,66 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     expect(TaxCalculator.calculateTax).toHaveBeenCalledWith('cust-1', 'Commercial Pest Control', FEE);
     expect(stored.tax_rate).toBe(0.065);
     expect(stored.tax_amount).toBe(Math.round(FEE * 0.065 * 100) / 100);
+  });
+
+  // Explicit-taxRate path: a caller-supplied rate must still respect the
+  // customer's VERIFIED tax exemption — TaxCalculator (and therefore the
+  // preview) zeroes tax for a verified certificate, so honoring the flat
+  // rate minted tax the preview never showed.
+  async function runCreateExplicitRate(taxRate) {
+    return InvoiceService.create({
+      customerId: 'cust-1',
+      scheduledServiceId: 'sched-1',
+      title: 'WDO Inspection',
+      lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+      taxRate,
+      notes: 'parity test',
+    });
+  }
+
+  test('explicit taxRate + verified exemption: tax mints at ZERO, like the calculator/preview would', async () => {
+    TaxCalculator.findVerifiedExemption.mockResolvedValueOnce({
+      id: 'ex-1', exemption_type: 'nonprofit', certificate_number: 'CERT-1',
+    });
+    const inserted = mockCreateDb();
+    await runCreateExplicitRate(0.07);
+    const stored = inserted[inserted.length - 1];
+
+    expect(TaxCalculator.findVerifiedExemption).toHaveBeenCalledWith('cust-1', expect.anything());
+    expect(stored.tax_rate).toBe(0);
+    expect(stored.tax_amount).toBe(0);
+    expect(stored.total).toBe(FEE);
+  });
+
+  test('explicit taxRate without an exemption: the caller rate is still honored', async () => {
+    const inserted = mockCreateDb();
+    await runCreateExplicitRate(0.07);
+    const stored = inserted[inserted.length - 1];
+
+    expect(TaxCalculator.findVerifiedExemption).toHaveBeenCalledWith('cust-1', expect.anything());
+    expect(stored.tax_rate).toBe(0.07);
+    expect(stored.tax_amount).toBe(Math.round(FEE * 0.07 * 100) / 100);
+    expect(TaxCalculator.calculateTax).not.toHaveBeenCalled();
+  });
+
+  test('explicit taxRate 0 skips the exemption lookup (nothing to zero)', async () => {
+    const inserted = mockCreateDb();
+    await runCreateExplicitRate(0);
+    const stored = inserted[inserted.length - 1];
+
+    expect(TaxCalculator.findVerifiedExemption).not.toHaveBeenCalled();
+    expect(stored.tax_rate).toBe(0);
+    expect(stored.tax_amount).toBe(0);
+  });
+
+  test('exemption lookup failure fails SAFE: the explicit rate stays (tax charged, never fail-open to 0)', async () => {
+    TaxCalculator.findVerifiedExemption.mockRejectedValueOnce(new Error('boom'));
+    const inserted = mockCreateDb();
+    await runCreateExplicitRate(0.07);
+    const stored = inserted[inserted.length - 1];
+
+    expect(stored.tax_rate).toBe(0.07);
+    expect(stored.tax_amount).toBe(Math.round(FEE * 0.07 * 100) / 100);
   });
 
   test('preview keys on the linked service record before the scheduled service', async () => {

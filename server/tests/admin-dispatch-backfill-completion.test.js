@@ -1965,6 +1965,23 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
   describe('route wiring (source contracts)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
+    test('the completion tax basis is CALCULATOR-derived at the freeze point, not a flat property_type hard-code', () => {
+      // TaxCalculator owns verified exemptions, service_taxability, and
+      // county tax_rates, and treats `business` as commercial — the old
+      // `commercial ? 0.07 : 0` hard-code billed `business` at 0% and every
+      // county at flat 7%. The single derivation still feeds both the
+      // frozen backfillMintTaxRate and the live mint (round-10 contract),
+      // and the returned rate is bounded to what the resume validator
+      // accepts (finite, 0 <= rate < 1).
+      expect(source).toMatch(/const completionInvoiceTaxRate = await \(async \(\) => \{[\s\S]{0,400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\);/);
+      expect(source).toMatch(/if \(Number\.isFinite\(r\) && r >= 0 && r < 1\) return r;/);
+      // Calculator failure falls back to the legacy flat basis — with
+      // `business` included — so a tax lookup can never block a completion…
+      expect(source).toMatch(/return \['commercial', 'business'\]\.includes\(svc\.property_type\) \? 0\.07 : 0;/);
+      // …and that fallback is the ONLY flat tax expression left on the route.
+      expect((source.match(/\? 0\.07 : 0/g) || []).length).toBe(1);
+    });
+
     test('a SCHEDULED_PRICE_MOVED refusal restamps the frozen mint cents from the locked price BEFORE releasing for resume (codex #3344 r5 P1)', () => {
       // The refusal's release promises a resume that mints the FROZEN cents
       // with replay disabled and price movement allowed — without the
