@@ -281,6 +281,7 @@ describe('invoice follow-up email sidecar', () => {
         chain({ first: undefined }), // no existing sequence
         sequenceInsert,
       ],
+      payment_plans: [chain({ first: undefined })], // no active plan
       customers: [chain({ first: customer({ id: 'cust-restored' }) })],
       payment_methods: [chain({ first: undefined })],
     });
@@ -291,6 +292,29 @@ describe('invoice follow-up email sidecar', () => {
       invoice_id: 'inv-1',
       customer_id: 'cust-restored',
     }));
+  });
+
+  test('never arms a sequence while the invoice has an ACTIVE payment plan (codex r7 P1)', async () => {
+    // A payment-plan cancel's absent-sequence path calls scheduleForInvoice
+    // post-commit; a concurrent plan creation may have taken the invoice lock
+    // first. The in-trx payment_plans check must refuse to arm dunning.
+    const sequenceInsert = chain({ returning: [{ id: 'seq-new' }] });
+    setDbQueues({
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      invoice_followup_sequences: [
+        chain({ first: undefined }), // no existing sequence
+        sequenceInsert,
+      ],
+      payment_plans: [chain({ first: { id: 'plan-1' } })], // ACTIVE plan
+    });
+
+    const res = await InvoiceFollowUps.scheduleForInvoice('inv-1');
+
+    expect(res).toBeNull();
+    expect(sequenceInsert.insert).not.toHaveBeenCalled();
   });
 
   test('cron excludes every non-sendable invoice status', async () => {

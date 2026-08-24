@@ -338,6 +338,16 @@ async function scheduleForInvoice(invoiceId) {
       return existing;
     }
 
+    // Never arm dunning under an active payment plan (codex r7 P1). Plan
+    // creation stops sequences inside its own invoice-locked transaction —
+    // this check runs under the SAME lock, so whichever writer commits first
+    // the invariant holds (plan first → we refuse here; we commit first → the
+    // plan's stop catches the fresh row).
+    const activePlan = await trx('payment_plans')
+      .where({ invoice_id: invoiceId, status: 'active' })
+      .first('id');
+    if (activePlan) return null;
+
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
     const onAutopay = await customerOnAutopay(customer, { db: trx });
 
