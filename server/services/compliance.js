@@ -356,6 +356,7 @@ const ComplianceService = {
 
     const yearStart = `${etParts().year}-01-01`;
     const today = etDateString();
+    const customerCounty = inferCountyFromZipInternal(customer.zip);
 
     // Get all applications this year for the customer
     const apps = await db('property_application_history')
@@ -398,7 +399,11 @@ const ComplianceService = {
         const inRange = startMMDD <= endMMDD
           ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
           : todayMMDD >= startMMDD || todayMMDD <= endMMDD; // window wraps year boundary
-        if (inRange) status = 'blackout_active';
+        // County ordinances only apply to that county's customers (mirrors
+        // application-limits' jurisdiction scoping: county, 'all', or unset).
+        const j = limit.jurisdiction;
+        const applies = !j || j === 'all' || j === customerCounty;
+        if (inRange && applies) status = 'blackout_active';
       }
 
       results.push({

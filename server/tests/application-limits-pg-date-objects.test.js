@@ -156,4 +156,20 @@ describe('compliance service with pg date columns as JS Date objects', () => {
       jest.useRealTimers();
     }
   });
+
+  test('getProductLimits: another county\'s blackout stays ok for a Charlotte customer', async () => {
+    jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
+    try {
+      db
+        .mockReturnValueOnce(chain({ first: { id: 'cust-2', first_name: 'C', last_name: 'D', zip: '33948' } }))
+        .mockReturnValueOnce(chain({ rows: [] }))
+        .mockReturnValueOnce(chain({ rows: [blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30'))] }));
+
+      const out = await ComplianceService.getProductLimits('cust-2');
+
+      expect(out.limits[0]).toMatchObject({ limitType: 'seasonal_blackout', status: 'ok' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
