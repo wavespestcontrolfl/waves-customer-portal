@@ -324,6 +324,21 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('a scheduling failure after cancel is NOT acknowledged as success (codex r11 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue(null); // no sequence → schedule path
+    const FollowUps = require('../services/invoice-followups');
+    FollowUps.scheduleForInvoice.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      expect(body.error).toMatch(/retry the cancel/i);
+    });
+  });
+
   test('a sequence an admin stopped for an UNRELATED reason stays stopped after cancel (codex r2 P1)', async () => {
     db.followupsQB.first.mockResolvedValue({ id: 'seq-1', status: 'stopped', stopped_reason: 'admin_stop' });
     await withServer(async (baseUrl) => {

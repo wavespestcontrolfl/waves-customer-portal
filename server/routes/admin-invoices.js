@@ -2406,7 +2406,17 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
         const FollowUpsSvc = require('../services/invoice-followups');
         await FollowUpsSvc.scheduleForInvoice(id);
       } catch (err) {
-        logger.warn(`[admin-invoices:payment-plan-cancel] follow-up scheduling failed: ${err.message}`);
+        // Do NOT acknowledge success (codex r11 P1): the plan is already
+        // cancelled, so a 200 here would hide that the reopened invoice has
+        // no dunning armed and nothing would ever retry. A 502 makes the
+        // operator retry; the idempotent already-cancelled path re-runs this
+        // re-arm on that retry.
+        logger.error(`[admin-invoices:payment-plan-cancel] plan ${plan.id} cancelled but follow-up scheduling failed: ${err.message}`);
+        return res.status(502).json({
+          error: 'The payment plan was cancelled, but re-arming invoice reminders failed — retry the cancel to arm them',
+          paymentPlan: plan,
+          alreadyCancelled: true,
+        });
       }
     }
 
