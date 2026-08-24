@@ -8879,55 +8879,57 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-            .first();
-          if (already) return true;
-          // ATOMIC final status check (codex #3456 r8): the refunded row was
-          // read by an unlocked lookup, and refund.failed can restore it to
-          // paid between that read and here. FOR UPDATE serializes with the
-          // webhook's own row update; if the refund bounced back the visit
-          // is covered again — parking a "bill this" alert would instruct a
-          // DUPLICATE collection, so the alert is skipped (returning true:
-          // there is nothing durable owed). Still refunded/terminal (or the
-          // row gone) → the alert parks as designed.
+            .first('id');
+          // ATOMIC revalidation (codex #3456 r8–r11), even when a dedupe
+          // notification already exists — a retry must not preserve stale
+          // advice. All reads happen on THIS transaction:
+          // 1. The refunded row FOR UPDATE (serialized with the webhook's
+          //    row update): restored to paid/prepaid → covered; restored to
+          //    a collectible/in-flight status (refund.failed can reopen a
+          //    failed-ACH invoice via nextInvoiceStatusAfterFailedPayment)
+          //    → still owed, and the reinstated invoice is the row to act
+          //    on. Still refunded → park as designed.
           const terminalNow = await trx('invoices')
             .where({ id: terminalCompletionInvoice.id })
             .forUpdate()
             .first('id', 'invoice_number', 'status');
           const terminalRestored = terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
             ? terminalNow : null;
-          if (terminalRestored && ['paid', 'prepaid'].includes(terminalRestored.status)) {
-            // Refund bounced and the invoice settled — the visit is covered;
-            // an alert saying "collect/bill" would instruct a duplicate.
-            logger.warn(`[dispatch] visit ${svc.id}: invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} left '${terminalCompletionInvoice.status}' (now '${terminalRestored.status}') before the manual-billing alert — visit is covered by the restored invoice; alert skipped`);
-            return true;
-          }
-          // Restored but NOT settled (codex r10): refund.failed can reopen a
-          // failed-ACH invoice to a COLLECTIBLE or in-flight status via
-          // nextInvoiceStatusAfterFailedPayment — money is still owed, so
-          // the durable alert STAYS, and the reinstated invoice itself is
-          // the row the office should act on (it beats any sibling row).
-          // With a LIVE invoice beside the refunded one, the instruction
-          // depends on that row's CURRENT status (re-read under lock — the
-          // lookup snapshot may be stale, codex r9): a SETTLED row means the
-          // visit is already covered, so no billing alert at all (an alert
-          // saying "collect" would instruct a duplicate collection); an
-          // in-flight payment must be verified, not re-collected; only a
-          // genuinely collectible row gets "collect THAT invoice" — never
-          // "bill manually", which would invite a duplicate invoice.
-          let liveBesideNow = terminalRestored || null;
-          if (!liveBesideNow && completionLiveBesideInvoice) {
-            liveBesideNow = await trx('invoices')
+          // 2. A FRESH on-visit live-invoice lookup (not the pre-transaction
+          //    snapshot): a concurrent Charge Now / mint may have created a
+          //    collectible invoice after the unlocked lookups, and a "bill
+          //    manually" alert beside it would invite a duplicate.
+          const freshLiveOnVisit = await completionNewestLiveInvoiceLookup(trx, {
+            serviceRecordId: record.id,
+            scheduledServiceId: svc.id,
+          });
+          // 3. The sibling snapshot row (off-visit — invisible to the
+          //    on-visit lookup) re-read by id.
+          let siblingLiveNow = null;
+          if (!terminalRestored && !freshLiveOnVisit && completionLiveBesideInvoice) {
+            siblingLiveNow = await trx('invoices')
               .where({ id: completionLiveBesideInvoice.id })
               .forUpdate()
               .first('id', 'invoice_number', 'status');
             const resolvedTerminal = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
-            if (liveBesideNow && resolvedTerminal.includes(liveBesideNow.status)) liveBesideNow = null;
+            if (siblingLiveNow && resolvedTerminal.includes(siblingLiveNow.status)) siblingLiveNow = null;
           }
-          if (liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status)) {
-            logger.warn(`[dispatch] visit ${svc.id}: refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} sits beside SETTLED invoice ${liveBesideNow.invoice_number || liveBesideNow.id} (${liveBesideNow.status}) — visit is covered; manual-billing alert skipped`);
+          const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
+          const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
+          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status);
+          if (covered) {
+            // Settled coverage: no NEW alert — and an already-parked one is
+            // rewritten so its "bill/collect" instruction cannot cause a
+            // duplicate collection (codex r11).
+            logger.warn(`[dispatch] visit ${svc.id}: refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is covered by SETTLED invoice ${liveBesideLabel} (${liveBesideNow.status}) — manual-billing alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`,
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
+              });
+            }
             return true;
           }
-          const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
           const liveBesideNote = liveBesideNow
             ? (liveBesideNow.status === 'processing'
               ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
@@ -8935,10 +8937,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
                 : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
             : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
+          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
+          if (already) {
+            // Keep the parked alert's advice CURRENT on every retry — the
+            // situation may have changed since it was written (codex r11).
+            await trx('notifications').where({ id: already.id }).update({
+              body: alertBody,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {})]),
+            });
+            return true;
+          }
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
             'Completed visit needs manual billing — prior invoice was refunded',
-            `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`,
+            alertBody,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
