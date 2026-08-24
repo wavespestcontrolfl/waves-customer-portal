@@ -2211,6 +2211,16 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
           const e = new Error('Invoice no longer exists');
           e.statusCode = 409; throw e;
         }
+        // Re-assert collectibility on the LOCKED row: a record-payment /
+        // apply-credit / webhook settlement can commit while this request
+        // waits on the lock, and inserting a fresh 'active' plan on a
+        // just-settled invoice would edit-lock it all over again with
+        // nothing left to collect (codex r1 P1).
+        try {
+          assertInvoiceCollectible(lockedInvoice.status);
+        } catch (err) {
+          err.statusCode = 409; throw err;
+        }
         const lockedAmountDue = invoiceAmountDue(lockedInvoice);
         const lockedTotalBalance = Math.min(totalBalance, lockedAmountDue);
         if (!(lockedTotalBalance > 0)) {
@@ -2349,6 +2359,20 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     }
 
     const { invoice, plan } = outcome;
+
+    // Plan creation stopped/paused the dunning sequence; cancelling the plan
+    // returns the invoice to normal collection, so re-arm reminders (same
+    // pattern as reverse-prepaid): resumeSequence reactivates an existing
+    // row; scheduleForInvoice creates one if none exists (both no-op on
+    // non-collectible invoices).
+    try {
+      const FollowUpsSvc = require('../services/invoice-followups');
+      await FollowUpsSvc.resumeSequence(id);
+      await FollowUpsSvc.scheduleForInvoice(id);
+    } catch (err) {
+      logger.warn(`[admin-invoices:payment-plan-cancel] follow-up re-arm failed: ${err.message}`);
+    }
+
     await db('activity_log').insert({
       customer_id: plan.customer_id || invoice.customer_id,
       action: 'payment_plan_cancelled',

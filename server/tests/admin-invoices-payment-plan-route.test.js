@@ -33,6 +33,8 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 }));
 jest.mock('../services/invoice-followups', () => ({
   pauseSequence: jest.fn(async () => undefined),
+  resumeSequence: jest.fn(async () => undefined),
+  scheduleForInvoice: jest.fn(async () => undefined),
 }));
 
 const express = require('express');
@@ -174,6 +176,23 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     });
   });
 
+  test('a settlement that lands while waiting on the lock is a 409, not a fresh active plan on a paid invoice', async () => {
+    trxInvoices.first.mockResolvedValue({ ...LOCKED_INVOICE, status: 'paid' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(409);
+      expect(trxPlans.insert).not.toHaveBeenCalled();
+    });
+  });
+
   test('a vanished invoice at lock time is a 409, not a plan attributed from a stale snapshot', async () => {
     trxInvoices.first.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
@@ -260,6 +279,12 @@ describe('POST /:id/payment-plan/cancel', () => {
         cancelled_by: 'admin-1',
         cancelled_at: expect.any(Date),
       }));
+      // Cancelling returns the invoice to normal collection — the dunning
+      // sequence the plan stopped must be re-armed, or "reopens for
+      // collection" is a lie (codex r1 P1).
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1');
+      expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith('inv-1');
     });
   });
 

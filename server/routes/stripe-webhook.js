@@ -1841,11 +1841,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       if (paidInvoice) {
         await require('../services/invoice-followups').stopOnPayment(paidInvoice.id)
           .catch((e) => logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`));
-        await require('../services/payment-plans').completeActivePlansForPaidInvoice(paidInvoice.id, 'stripe_webhook');
         await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(paidInvoice);
       }
     } catch (e) {
       logger.error(`[stripe-webhook] annual prepay activation failed: ${e.message}`);
+    }
+  }
+  // Complete any active payment plan on the settled invoice. OUTSIDE the
+  // invoiceUpdated>0 gate (codex r1 P1): on a webhook retry the invoice is
+  // already paid (invoiceUpdated=0), and the retry must still be able to
+  // recover a plan flip that failed transiently on the first delivery. The
+  // helper is idempotent (WHERE status='active') and best-effort, matching
+  // the neighbouring post-settlement side effects.
+  {
+    const settledInvoice = await db('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .whereIn('status', ['paid', 'prepaid'])
+      .first('id')
+      .catch(() => null);
+    if (settledInvoice) {
+      await require('../services/payment-plans').completeActivePlansForPaidInvoice(settledInvoice.id, 'stripe_webhook');
     }
   }
   // Awaited inline so the side effect runs inside the same processing

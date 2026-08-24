@@ -4167,6 +4167,9 @@ const InvoiceService = {
         updated_at: trx.fn.now(),
       }).returning("*");
       if (!updated) throw new Error("Invoice status changed while settling — re-check and retry");
+      // The coverage settlement closes the invoice — an active payment plan
+      // has nothing left to collect. Same-trx, idempotent (codex r1 P1).
+      await require("./payment-plans").completeActivePlansForInvoice(id, trx);
       settled = updated;
     });
     // Terminally close any dunning sequence, matching voidInvoice and the
