@@ -499,6 +499,22 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // caller PARKS instead of partial-reminting (the acceptance invoice
     // carried the one-time setup fee beside the visit charge).
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null, canceledSetupFee: canceledNewer });
+    // …but ONLY when the canceled row actually carried the fee: a canceled
+    // "first application only" acceptance invoice has no fee to lose and
+    // remints normally (codex P0 — no billing a nonexistent $99).
+    const canceledNoFee = {
+      id: 'inv-canceled-nofee', status: 'canceled', created_at: '2026-08-20',
+      title: 'WaveGuard Membership — First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - first application only.',
+    };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNoFee]))).resolves.toEqual({ invoice: null, liveBeside: null });
+    // line_items are the AUTHORITY when present — notes mentioning the fee
+    // do not park a row whose parsed lines carry no setup-fee entry.
+    const { invoiceContainsSetupFeeLine } = require('../services/estimate-first-application-invoice');
+    expect(invoiceContainsSetupFeeLine({ line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', unit_price: 99 }]) })).toBe(true);
+    expect(invoiceContainsSetupFeeLine({ line_items: JSON.stringify([{ description: 'First service application', unit_price: 120 }]), notes: 'mentions setup fee historically' })).toBe(false);
+    expect(invoiceContainsSetupFeeLine({ line_items: '[]', notes: 'Customer selected pay per application - $99 setup fee plus first application.' })).toBe(true);
+    expect(invoiceContainsSetupFeeLine({ notes: 'first application only' })).toBe(false);
     // A refunded match wins in ANY mint order — there is no reliable
     // refund-event clock, so it always reaches the caller's terminal path
     // instead of a live sibling's pay link going out while the refund
