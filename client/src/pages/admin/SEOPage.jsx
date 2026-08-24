@@ -97,7 +97,7 @@ const thStyle = {
   padding: "10px 14px",
   textAlign: "left",
   fontSize: 12,
-  fontWeight: 600,
+  fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
   textTransform: "uppercase",
@@ -341,7 +341,7 @@ function DashboardTab({ domain }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Top Queries
           </div>{" "}
           <div style={{ display: "flex", gap: 4 }}>
@@ -653,7 +653,7 @@ function AdvisorTab() {
                 background: D.teal,
                 color: "#fff",
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 opacity: generating ? 0.7 : 1,
               }}
             >
@@ -693,7 +693,7 @@ function AdvisorTab() {
               alignItems: "center",
               justifyContent: "center",
               fontSize: 32,
-              fontWeight: 800,
+              fontWeight: 700,
               fontFamily: MONO,
               background: gradeColor(data.grade) + "22",
               color: gradeColor(data.grade),
@@ -707,7 +707,7 @@ function AdvisorTab() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 4,
               }}
@@ -726,7 +726,7 @@ function AdvisorTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -745,7 +745,7 @@ function AdvisorTab() {
               }}
             >
               {" "}
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
                 {rec.action}
               </div>
               {rec.reasoning && (
@@ -808,7 +808,7 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -827,7 +827,7 @@ function GeoStat({ label, value }) {
   return (
     <div>
       <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 600, color: D.heading, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 22, fontWeight: 500, color: D.heading, fontFamily: MONO }}>{value}</div>
     </div>
   );
 }
@@ -892,7 +892,6 @@ function GeoGridTab() {
     selRef.current = { office, keyword };
     setHeat(null);
     loadHeat();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [office, keyword]);
 
   const runScan = async () => {
@@ -1049,7 +1048,7 @@ function GeoGridTab() {
             background: D.heading,
             color: "#fff",
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: running || cfg.gated ? "default" : "pointer",
             opacity: running || cfg.gated ? 0.55 : 1,
           }}
@@ -1066,7 +1065,7 @@ function GeoGridTab() {
             background: D.white,
             color: D.text,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: heat?.pins?.length ? "pointer" : "default",
             opacity: heat?.pins?.length ? 1 : 0.5,
           }}
@@ -1098,7 +1097,7 @@ function GeoGridTab() {
                 background: view === v ? D.heading : D.white,
                 color: view === v ? "#fff" : D.text,
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 textTransform: "capitalize",
               }}
@@ -1131,7 +1130,7 @@ function GeoGridTab() {
                 background: D.heading,
                 color: "#fff",
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: kwSaving ? "default" : "pointer",
                 opacity: kwSaving ? 0.55 : 1,
               }}
@@ -1215,7 +1214,7 @@ function GeoGridTab() {
                     justifyContent: "center",
                     fontFamily: MONO,
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                   }}
                 >
                   {c.label}
@@ -1406,7 +1405,7 @@ function AnnotationChip({ ann }) {
         border: `1px solid ${color}`,
         color,
         fontSize: 10,
-        fontWeight: 600,
+        fontWeight: 500,
         letterSpacing: "0.5px",
         fontFamily: MONO,
         whiteSpace: "nowrap",
@@ -1437,7 +1436,7 @@ function MonitorTable({ title, rows, accent }) {
         style={{
           padding: "14px 16px",
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: accent || D.heading,
           borderBottom: `1px solid ${D.border}`,
         }}
@@ -1491,7 +1490,7 @@ function MonitorTable({ title, rows, accent }) {
                   <td
                     style={{
                       ...tdR,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color:
                         p.movement === "lost"
                           ? D.red
@@ -1863,7 +1862,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 14,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -1935,7 +1934,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 14,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.red,
                   marginBottom: 12,
                 }}
@@ -1971,7 +1970,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 14,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -2017,7 +2016,7 @@ function BacklinksTab() {
           {/* Recently Lost Links */}
           {(data.recentlyLost || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Recently Lost Links</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 12 }}>Recently Lost Links</div>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr>
@@ -2052,7 +2051,7 @@ function BacklinksTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2122,7 +2121,7 @@ function BacklinksTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 12,
             }}
@@ -2171,7 +2170,7 @@ function BacklinksTab() {
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}>{g.source_domain}</span>
                     {g.created_at && new Date(g.created_at) >= new Date(Date.now() - 7 * 86400000) && (
-                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600, background: `${D.green}18`, color: D.green }}>New</span>
+                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 500, background: `${D.green}18`, color: D.green }}>New</span>
                     )}
                   </div>{" "}
                   <span style={{ fontSize: 10, color: D.muted }}>
@@ -2202,7 +2201,7 @@ function BacklinksTab() {
             >
               <div>
                 <div
-                  style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                 >
                   Answer-Engine Visibility (AEO)
                 </div>
@@ -2239,7 +2238,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 10,
                 }}
@@ -2310,7 +2309,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 10,
                 }}
@@ -2348,7 +2347,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 10,
                 }}
@@ -2392,7 +2391,7 @@ function BacklinksTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 10,
                 }}
@@ -2432,7 +2431,7 @@ function BacklinksTab() {
             <div
               style={{
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 10,
               }}
@@ -2591,7 +2590,7 @@ function LinkBuildingBoard({ canRun }) {
             ["Indexing rate", `${stats.indexingRate || 0}%`],
           ].map(([label, val]) => (
             <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 14px", minWidth: 96 }}>
-              <div style={{ fontSize: 18, fontWeight: 600, color: D.heading }}>{val}</div>
+              <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>{val}</div>
               <div style={{ fontSize: 11, color: D.muted }}>{label}</div>
             </div>
           ))}
@@ -2795,7 +2794,7 @@ function OutreachApprovals({ canRun, onChange }) {
       )}
 
       <div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 8 }}>
           Drafts awaiting approval ({drafts.length})
         </div>
         {drafts.length === 0 ? (
@@ -2808,7 +2807,7 @@ function OutreachApprovals({ canRun, onChange }) {
           <div key={p.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div style={{ minWidth: 0, flex: "1 1 320px" }}>
-                <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>
+                <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>
                   {p.target_domain} <span style={{ color: D.muted, fontWeight: 400 }}>· {p.link_type}</span>
                 </div>
                 <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email}</div>
@@ -2828,7 +2827,7 @@ function OutreachApprovals({ canRun, onChange }) {
 
       {reconciles.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.amber, marginBottom: 6 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.amber, marginBottom: 6 }}>
             Needs reconciliation ({reconciles.length})
           </div>
           <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
@@ -2838,7 +2837,7 @@ function OutreachApprovals({ canRun, onChange }) {
             <div key={p.id} style={{ background: D.card, border: `1px solid ${D.amber}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>{p.target_domain}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
                 </div>
                 <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
@@ -2880,7 +2879,7 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
+        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
         <div style={{ fontSize: 11, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
         <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Recipient email</label>
         <input style={field} value={to} onChange={(e) => setTo(e.target.value)} placeholder="editor@example.com" />
@@ -3058,7 +3057,7 @@ function BacklinkAgentPanel() {
             background: D.teal,
             color: "#fff",
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
             opacity: processing || !stats?.pending ? 0.5 : 1,
           }}
@@ -3117,7 +3116,7 @@ function BacklinkAgentPanel() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3150,7 +3149,7 @@ function BacklinkAgentPanel() {
                 background: D.teal,
                 color: "#fff",
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -3190,7 +3189,7 @@ function BacklinkAgentPanel() {
                       style={{
                         fontSize: 13,
                         color: D.heading,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -3233,7 +3232,7 @@ function BacklinkAgentPanel() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3281,7 +3280,7 @@ function BacklinkAgentPanel() {
                 background: D.teal,
                 color: "#fff",
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -3303,7 +3302,7 @@ function BacklinkAgentPanel() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3476,7 +3475,7 @@ function BacklinkAgentPanel() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 12,
               }}
@@ -3616,7 +3615,7 @@ function ContentQATab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3669,7 +3668,7 @@ function ContentQATab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3831,7 +3830,7 @@ function RefreshAuditTab() {
               background: D.white,
               color: D.text,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: batching ? "default" : "pointer",
               opacity: batching ? 0.6 : 1,
               whiteSpace: "nowrap",
@@ -3852,7 +3851,7 @@ function RefreshAuditTab() {
       </div>
 
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
           Refresh candidates
         </div>
         {candidates.length === 0 ? (
@@ -3915,7 +3914,7 @@ function RefreshAuditTab() {
                                     : D.heading,
                             color: "#fff",
                             fontSize: 12,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             cursor: ["queuing", "queued", "no_gsc", "blocked", "already"].includes(st) ? "default" : "pointer",
                             opacity: st === "queuing" ? 0.6 : 1,
                             whiteSpace: "nowrap",
@@ -4115,7 +4114,7 @@ function BySiteTab() {
               borderRadius: 8,
               border: "none",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               background: days === d ? D.teal : D.card,
               color: days === d ? D.white : D.muted,
@@ -4161,7 +4160,7 @@ function BySiteTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -4227,7 +4226,7 @@ function BySiteTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -4265,7 +4264,7 @@ function BySiteTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -4553,7 +4552,7 @@ function AnalyticsTab() {
               borderRadius: 8,
               border: "none",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               background: days === d ? D.teal : D.card,
               color: days === d ? D.white : D.muted,
@@ -4777,7 +4776,7 @@ function AnalyticsTab() {
                     <span style={{
                       color: dmTone(config),
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 700,
                       textTransform: "uppercase",
                     }}>
                       {dmStatus(config)}
@@ -5018,7 +5017,7 @@ function AnalyticsTab() {
                     width: 70,
                     textAlign: "right",
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     fontFamily: MONO,
                     flexShrink: 0,
@@ -5102,7 +5101,7 @@ function SiteAuditTab() {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 8,
           }}
@@ -5120,7 +5119,7 @@ function SiteAuditTab() {
               background: D.teal,
               color: "#fff",
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: running ? 0.5 : 1,
             }}
@@ -5193,7 +5192,7 @@ function SiteAuditTab() {
           <div
             style={{
               fontSize: 36,
-              fontWeight: 800,
+              fontWeight: 700,
               color: scoreColor(parseFloat(run.avg_health_score || 0)),
               fontFamily: MONO,
             }}
@@ -5276,7 +5275,7 @@ function SiteAuditTab() {
               background: D.teal,
               color: "#fff",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: running ? 0.5 : 1,
             }}
@@ -5426,7 +5425,7 @@ function SiteAuditTab() {
                       alignItems: "center",
                       justifyContent: "center",
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 700,
                       color: scoreColor(p.technical_health_score || 0),
                       fontFamily: MONO,
                     }}
@@ -5907,7 +5906,7 @@ function UrlIntelTab({ domain }) {
           </div>
 
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Diagnosis Breakdown</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Diagnosis Breakdown</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
               {data.by_diagnosis.filter((d) => d.count > 0).map((d) => (
                 <div
@@ -5927,7 +5926,7 @@ function UrlIntelTab({ domain }) {
 
           {data.top_issues?.length > 0 && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Top Priority Issues</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Top Priority Issues</div>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr>
@@ -5963,7 +5962,7 @@ function UrlIntelTab({ domain }) {
 
           {data.canonical_conflicts > 0 && (
             <Card style={{ borderLeft: `3px solid ${D.amber}` }}>
-              <div style={{ fontSize: 13, color: D.amber, fontWeight: 600 }}>
+              <div style={{ fontSize: 13, color: D.amber, fontWeight: 500 }}>
                 {data.canonical_conflicts} canonical conflict{data.canonical_conflicts > 1 ? "s" : ""} detected
               </div>
               <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
@@ -5996,7 +5995,7 @@ function UrlIntelTab({ domain }) {
           )}
 
           {subTab === "priority" && (
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
               Priority Queue — highest impact first
             </div>
           )}
@@ -6089,7 +6088,7 @@ function DuplicatesSubTab({ domain }) {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
   return (
     <Card>
-      <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
         Duplicate Content Clusters — body similarity &gt; 80%
       </div>
       {data && data.length > 0 ? (
@@ -6144,7 +6143,7 @@ function IntentSubTab({ domain }) {
   return (
     <Card>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Intent Routing — Query → Page Alignment</div>
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>Intent Routing — Query → Page Alignment</div>
         <select
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
@@ -6282,7 +6281,7 @@ function ActionsTab({ domain }) {
         <Card>
           {subTab === "queue" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Pending Actions — by priority</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Pending Actions — by priority</div>
               {actions.length > 0 ? (
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -6325,7 +6324,7 @@ function ActionsTab({ domain }) {
 
           {subTab === "drafts" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>AI Title/Meta Drafts</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>AI Title/Meta Drafts</div>
               {actions.filter((a) => a.ai_draft).length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                   {actions.filter((a) => a.ai_draft).map((a) => {
@@ -6338,12 +6337,12 @@ function ActionsTab({ domain }) {
                         <div style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}>{a.url}</div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                           <div>
-                            <div style={{ fontSize: 11, color: D.muted, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Current</div>
+                            <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, textTransform: "uppercase", marginBottom: 4 }}>Current</div>
                             <div style={{ fontSize: 13, color: D.text }}>{detail.current_title || "—"}</div>
                             <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{detail.current_meta || "—"}</div>
                           </div>
                           <div>
-                            <div style={{ fontSize: 11, color: D.green, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Proposed</div>
+                            <div style={{ fontSize: 11, color: D.green, fontWeight: 500, textTransform: "uppercase", marginBottom: 4 }}>Proposed</div>
                             <div style={{ fontSize: 13, color: D.text, fontWeight: 500 }}>{draft.title || "—"}</div>
                             <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{draft.meta_description || "—"}</div>
                           </div>
@@ -6367,7 +6366,7 @@ function ActionsTab({ domain }) {
 
           {subTab === "progress" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Execution Status</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Execution Status</div>
               {actions.length > 0 ? (
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -6403,7 +6402,7 @@ function ActionsTab({ domain }) {
 
           {subTab === "experiments" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>SEO Experiments</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>SEO Experiments</div>
               {actions.length > 0 ? (
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -6522,7 +6521,7 @@ function IndexationTab({ domain }) {
         loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
           gapData && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 20 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 20 }}>
                 Indexation Gap — {gapData.domain}
               </div>
               <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
@@ -6542,7 +6541,7 @@ function IndexationTab({ domain }) {
 
               {gapData.by_coverage_state?.length > 0 && (
                 <>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 12 }}>By Coverage State</div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 12 }}>By Coverage State</div>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead><tr>
                       <th style={thStyle}>Coverage State</th>
@@ -6567,7 +6566,7 @@ function IndexationTab({ domain }) {
       {subTab === "conflicts" && (
         loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
               Canonical Conflicts — Hub / Spoke
             </div>
             {conflictsData?.length > 0 ? (
@@ -6613,7 +6612,7 @@ function IndexationTab({ domain }) {
       {subTab === "crawled" && (
         loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
               Not Indexed — Priority URLs
             </div>
             {crawledNotIndexed?.urls?.length > 0 ? (
@@ -6654,7 +6653,7 @@ function IndexationTab({ domain }) {
 
       {subTab === "inspector" && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>URL Inspector</div>
+          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>URL Inspector</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
             <input
               type="text"
@@ -6686,7 +6685,7 @@ function IndexationTab({ domain }) {
                 background: inspectData.primary_status === "healthy" ? `${D.green}0A` : `${D.amber}0A`,
                 border: `1px solid ${inspectData.primary_status === "healthy" ? `${D.green}30` : `${D.amber}30`}`,
               }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{inspectData.url}</div>
+                <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{inspectData.url}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
                   Status: <strong>{inspectData.primary_status}</strong> · Diagnosis: <strong>{inspectData.primary_diagnosis}</strong> · Priority: <strong>{inspectData.priority_score}</strong>
                 </div>
@@ -6695,7 +6694,7 @@ function IndexationTab({ domain }) {
               {/* Detail sections */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }} className="seo-audit-expanded-grid">
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Identity</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Identity</div>
                   {[
                     ["Domain", inspectData.domain],
                     ["Type", inspectData.hub_or_spoke],
@@ -6711,7 +6710,7 @@ function IndexationTab({ domain }) {
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Indexation</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Indexation</div>
                   {[
                     ["Coverage", inspectData.coverage_state || "—"],
                     ["Indexing State", inspectData.indexing_state || "—"],
@@ -6727,7 +6726,7 @@ function IndexationTab({ domain }) {
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Performance (28d)</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Performance (28d)</div>
                   {[
                     ["Clicks", fmt(inspectData.gsc_clicks_28d)],
                     ["Impressions", fmt(inspectData.gsc_impressions_28d)],
@@ -6743,7 +6742,7 @@ function IndexationTab({ domain }) {
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Scores</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Scores</div>
                   {[
                     ["Technical QA", inspectData.technical_qa_score ?? "—"],
                     ["Content QA", inspectData.content_qa_score ?? "—"],
@@ -6762,7 +6761,7 @@ function IndexationTab({ domain }) {
               {/* Recommended action */}
               {inspectData.recommended_action && (
                 <div style={{ padding: 16, borderRadius: 8, background: `${D.heading}08`, border: `1px solid ${D.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 6 }}>RECOMMENDED ACTION</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 6 }}>RECOMMENDED ACTION</div>
                   <div style={{ fontSize: 13, color: D.text }}>{inspectData.recommended_action}</div>
                   {inspectData.alternative_action && (
                     <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>Alt: {inspectData.alternative_action}</div>
@@ -6773,7 +6772,7 @@ function IndexationTab({ domain }) {
               {/* Canonical detail */}
               {(inspectData.user_declared_canonical || inspectData.google_selected_canonical) && (
                 <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>CANONICAL</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 8 }}>CANONICAL</div>
                   <div style={{ fontSize: 12, color: D.muted }}>
                     User declared: <span style={{ color: D.text, fontFamily: MONO }}>{inspectData.user_declared_canonical || "—"}</span>
                   </div>
@@ -6785,7 +6784,7 @@ function IndexationTab({ domain }) {
 
               {/* Title / Meta */}
               <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>CONTENT</div>
+                <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 8 }}>CONTENT</div>
                 <div style={{ fontSize: 12, color: D.muted }}>Title: <span style={{ color: D.text }}>{inspectData.title || "—"}</span></div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>H1: <span style={{ color: D.text }}>{inspectData.h1 || "—"}</span></div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>Meta: <span style={{ color: D.text }}>{inspectData.meta_description || "—"}</span></div>
@@ -6830,7 +6829,7 @@ function SitemapIssuesSubTab({ domain }) {
 
       {data.issues?.length > 0 ? (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Sitemap Issues — {data.domain}</div>
+          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Sitemap Issues — {data.domain}</div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
@@ -6899,7 +6898,7 @@ function SEOWorkspaceNav({ sections, activeKey, onChange }) {
               color: active ? D.white : D.text,
               cursor: "pointer",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               whiteSpace: "nowrap",
               flexShrink: 0,
             }}

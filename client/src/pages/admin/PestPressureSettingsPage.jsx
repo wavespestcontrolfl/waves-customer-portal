@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -93,12 +94,13 @@ function Toggle({ checked, onChange, label, description }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
+        gap: 16,
         padding: "14px 0",
         borderBottom: `1px solid ${D.border}`,
       }}
     >
-      <div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{label}</div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{label}</div>
         {description ? (
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{description}</div>
         ) : null}
@@ -117,6 +119,7 @@ function Toggle({ checked, onChange, label, description }) {
         style={{
           width: 44,
           height: 24,
+          flexShrink: 0,
           borderRadius: 12,
           padding: 2,
           cursor: "pointer",
@@ -531,42 +534,25 @@ export default function PestPressureSettingsPage() {
   return (
     <div style={{ background: D.bg, minHeight: "100vh", padding: 24 }}>
       <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Pest Pressure</h1>
-            <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-              Configure the 0–5 Pest Pressure score that appears on customer service reports.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              onClick={handleRestoreDefaults}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                padding: "8px 14px", borderRadius: 6, border: `1px solid ${D.inputBorder}`,
-                background: D.white, color: D.text, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              }}
-            >
-              <RotateCcw size={14} /> Restore defaults
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={!canSave || saving}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                padding: "8px 14px", borderRadius: 6, border: 0,
-                background: canSave ? D.teal : D.border, color: D.white,
-                fontSize: 13, fontWeight: 600,
-                cursor: canSave && !saving ? "pointer" : "not-allowed",
-                opacity: saving ? 0.7 : 1,
-              }}
-            >
-              <Save size={14} /> {saving ? "Saving…" : "Save changes"}
-            </button>
-          </div>
-        </header>
+        <AdminCommandHeader
+          title="Pest Pressure"
+          icon={ShieldAlert}
+          sticky={false}
+          className="mb-0"
+          actions={[
+            { key: "restore", label: "Restore defaults", icon: RotateCcw, variant: "secondary", onClick: handleRestoreDefaults },
+            {
+              key: "save",
+              label: saving ? "Saving…" : "Save changes",
+              icon: Save,
+              onClick: handleSave,
+              disabled: !canSave || saving,
+            },
+          ]}
+        />
+        <p style={{ fontSize: 13, color: D.muted, margin: "-8px 0 0" }}>
+          Configure the 0–5 Pest Pressure score that appears on customer service reports.
+        </p>
 
         {saveError ? (
           <Card style={{ background: "#FEF2F2", borderColor: "#FECACA" }}>
@@ -623,7 +609,7 @@ export default function PestPressureSettingsPage() {
               options={MISSING_DATA_OPTIONS}
             />
           </div>
-          <div style={{ marginTop: 16, display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 16 }}>
             <Toggle
               label="Allow manual override (admins)"
               checked={config.allowManualOverride}

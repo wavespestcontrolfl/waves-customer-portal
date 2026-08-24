@@ -625,7 +625,7 @@ export default function DocumentTemplatesPage() {
                   focusEditor();
                 }}
                 className={cn(
-                  "w-full px-3 py-3 text-left hover:bg-zinc-50 u-focus-ring",
+                  "w-full appearance-none border-0 px-3 py-3 text-left hover:bg-zinc-50 u-focus-ring",
                   selectedKey === template.templateKey && !newMode ? "bg-zinc-50" : "bg-white",
                 )}
               >

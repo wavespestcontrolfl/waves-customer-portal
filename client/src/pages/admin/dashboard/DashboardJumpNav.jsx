@@ -90,7 +90,7 @@ export default function DashboardJumpNav({
   // header height and let content scroll through a see-through band above the
   // pills). isMobile cutoff is 768px, i.e. Tailwind's md:.
   return (
-    <div className="sticky top-[-16px] md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-1.5 md:pt-2 pb-0 mb-3 md:mb-4 bg-surface-page border-b border-hairline border-zinc-200">
+    <div className="md:sticky md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-1.5 md:pt-2 pb-0 mb-3 md:mb-4 bg-surface-page border-b border-hairline border-zinc-200">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-1.5 md:gap-3">
         {/* Section tabs — a full-width 5-up segmented row on mobile (every tab
             always visible, no scroll), inline pills on desktop. */}

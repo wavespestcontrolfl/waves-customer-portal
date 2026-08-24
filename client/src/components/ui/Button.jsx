@@ -17,7 +17,7 @@ const VARIANTS = {
   secondary:
     'bg-white text-zinc-900 border-hairline border-zinc-300 hover:bg-zinc-50 active:bg-zinc-100',
   ghost:
-    'bg-transparent text-zinc-700 hover:bg-zinc-100 active:bg-zinc-200',
+    'appearance-none border-0 bg-transparent text-zinc-700 hover:bg-zinc-100 active:bg-zinc-200',
   danger:
     'bg-alert-fg text-white hover:bg-alert-hover active:bg-alert-hover border-hairline border-alert-fg',
 };
