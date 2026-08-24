@@ -33,6 +33,7 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
+const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -88,6 +89,17 @@ function excludeGloballySuppressed(query) {
 // send time: exclude any subscriber whose linked customer has deleted_at set.
 // Unlinked rows (customer_id NULL) are untouched. Shared by buildSubscriberQuery
 // AND the resume/retry refetch, like excludeGloballySuppressed.
+//
+// Re-booked households (archived and later re-booked as a NEW customers row —
+// no creation entry point re-runs the twin picker) are handled by the relink
+// SWEEP, not here: countSegmentRecipients and sendCampaign run
+// relinkArchivedLinkedSubscribers before any audience read, so a stale
+// archived link with a live same-email twin is repaired to the live row
+// before this anti-join sees it. Deliberately NO read-side "live twin
+// exists" exception in this predicate (codex #3472 r5): such a lift would
+// make the row eligible while customer_id still points at the archived
+// profile — segmentation, personalization, and touchpoints would then use
+// the archived row. Only successfully RELINKED rows send.
 function excludeArchivedCustomers(query) {
   return query.whereNotExists(function () {
     this.select(db.raw('1'))
@@ -220,6 +232,24 @@ async function loadPersonalizationContext(subscribers) {
     logger.warn(`[newsletter] personalization context load failed: ${err.message}`);
   }
   return map;
+}
+
+/**
+ * Shared 0-recipient preflight — EVERY audience count that gates a send
+ * (manual-send route, proof approval, scheduler claim-validation,
+ * sendCampaign's own guard) must count through here, never through a bare
+ * subscriber-query count (codex #3472 r3). It runs the archived-link
+ * relink sweep FIRST: a service-line segment whose only recipients are
+ * re-booked households would otherwise count zero off stale archived links
+ * the send itself is about to repair — the preflight and the real audience
+ * query must observe the same links.
+ */
+async function countSegmentRecipients(segmentFilter) {
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+  const row = await buildSubscriberQuery(segmentFilter, await resolveSegmentCustomerIds(segmentFilter))
+    .count('* as c')
+    .first();
+  return Number(row?.c || 0);
 }
 
 /**
@@ -495,12 +525,31 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
+  // Repair stale archived links BEFORE anything reads ns.customer_id —
+  // including the 0-recipient guard just below (codex #3472 P1 round 2: a
+  // service-line campaign whose only recipients are re-booked households
+  // would otherwise throw EMPTY_SEGMENT before the sweep ran). The lift in
+  // excludeArchivedCustomers decides DELIVERY, but segment resolution,
+  // personalization, and touchpoint history all key on ns.customer_id —
+  // left pointing at the archived profile, they would classify and record
+  // against the wrong row. Set-based, idempotent, same picker as the
+  // archive/restore relinks. Errors propagate (fail closed): sending with a
+  // stale link is exactly the bug this prevents, and the send needs this
+  // same DB anyway. Runs for fresh sends AND resumes — a resume's retryable
+  // recipients re-read customer_id at dispatch time too.
+  const { relinked: relinkedStaleLinks } = await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+  if (relinkedStaleLinks) {
+    logger.info(`[newsletter] send ${send.id}: relinked ${relinkedStaleLinks} subscriber(s) from archived profiles to their live twins`);
+  }
+
   // 0-recipient guard — runs BEFORE the atomic claim so a no-op send
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
   if (!opts.force) {
-    const c = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
-    if (Number(c?.c || 0) === 0) {
+    // countSegmentRecipients re-runs the (idempotent) relink sweep — that
+    // redundancy with the sweep above is deliberate: this guard must stay
+    // correct even if the calls around it are ever reordered.
+    if (await countSegmentRecipients(send.segment_filter) === 0) {
       const err = new Error('segment matches 0 active subscribers');
       err.code = 'EMPTY_SEGMENT';
       throw err;
@@ -1211,9 +1260,7 @@ async function processScheduledSends() {
         const typedRow = requiresClaimValidation(row.newsletter_type)
           ? row
           : { ...row, newsletter_type: FLAGSHIP_TYPE_KEY };
-        const recipientCount = Number(
-          (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
-        );
+        const recipientCount = await countSegmentRecipients(row.segment_filter);
         const lockedPrices = await lockedPricesForSend(typedRow, db);
         const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
         if (errors.length > 0) {
@@ -1328,4 +1375,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

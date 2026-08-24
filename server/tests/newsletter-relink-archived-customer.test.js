@@ -11,6 +11,7 @@ const db = require('../models/db');
 const {
   liveTwinSubselect, linkToCustomer, linkManyToCustomers,
   relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer,
+  relinkArchivedLinkedSubscribers,
 } = require('../services/newsletter-subscribers');
 
 const SCOPE = /AND c\.deleted_at IS NULL/;
@@ -112,7 +113,10 @@ describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBS
     const trx = fakeTrx(1);
     const out = await relinkSubscribersFromArchivedCustomer(trx, 'archived-1');
     expect(out).toEqual({ relinked: 1 });
-    const [sql, bindings] = trx.raw.mock.calls[0];
+    // Call 0 is the shared relink advisory lock (see the concurrency pin
+    // below); the set-based UPDATE is call 1.
+    expect(trx.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    const [sql, bindings] = trx.raw.mock.calls[1];
     // Rows are found by the archived LINK, never by the customer's current
     // email — that is what catches the stale snapshot.
     expect(sql).toMatch(/WHERE ns\.customer_id = \?/);
@@ -132,7 +136,7 @@ describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBS
     const trx = fakeTrx(0);
     expect(await relinkSubscribersFromArchivedCustomer(trx, 'archived-2')).toEqual({ relinked: 0 });
     expect(await relinkSubscribersFromArchivedCustomer(trx, null)).toEqual({ relinked: 0 });
-    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledTimes(2); // lock + UPDATE for 'archived-2'; the null call never queries
   });
 });
 
@@ -151,7 +155,9 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     const { trx, subs } = fakeTrx('secondary-1');
     const out = await relinkSubscribersForEmail(trx, ' Household@Example.com ');
     expect(out).toEqual({ winnerId: 'secondary-1', relinked: 2 });
-    const [sql, bindings] = trx.raw.mock.calls[0];
+    // Call 0 = the shared relink advisory lock; call 1 = the picker select.
+    expect(trx.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    const [sql, bindings] = trx.raw.mock.calls[1];
     expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \?/);
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
@@ -179,6 +185,93 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     expect(await relinkSubscribersForEmail(trx, 'solo@example.com')).toEqual({ winnerId: null, relinked: 0 });
     expect(subs.update).not.toHaveBeenCalled();
     expect(await relinkSubscribersForEmail(trx, '')).toEqual({ winnerId: null, relinked: 0 });
-    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledTimes(2); // lock + picker for the first call; the empty email never queries
+  });
+});
+
+describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archive-side relink', () => {
+  function fakeConn(rowCount) {
+    // The sweep opens its own transaction and serializes on the shared
+    // relink advisory lock before the set-based UPDATE.
+    const conn = jest.fn();
+    conn.raw = jest.fn(async () => ({ rowCount }));
+    conn.transaction = jest.fn(async (cb) => cb({ raw: conn.raw }));
+    return conn;
+  }
+
+  test('every archived-linked subscriber with a live same-email twin moves — re-booked households relink before an audience is selected', async () => {
+    const conn = fakeConn(3);
+    expect(await relinkArchivedLinkedSubscribers(conn)).toEqual({ relinked: 3 });
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(conn.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock'); // lock first, inside the trx
+    const [sql] = conn.raw.mock.calls[1];
+    // Rows are found by their archived LINK (never the customer's current
+    // email), and each moves to the winner for ITS OWN normalized email —
+    // same shape as relinkSubscribersFromArchivedCustomer, without the
+    // single-customer anchor.
+    expect(sql).toMatch(/JOIN customers ax ON ax\.id = x\.customer_id/);
+    expect(sql).toMatch(/ax\.deleted_at IS NOT NULL/);
+    expect(sql).toMatch(/ns\.customer_id IN \(SELECT ac\.id FROM customers ac WHERE ac\.deleted_at IS NOT NULL\)/);
+    expect(sql).toMatch(/DISTINCT ON \(LOWER\(TRIM\(c\.email\)\)\)/);
+    expect(sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = t\.email_key/);
+    // Same picker scope + ordering; still link semantics, not lifecycle.
+    expect(sql).toMatch(/c\.deleted_at IS NULL/);
+    expect(sql).toMatch(/ORDER BY LOWER\(TRIM\(c\.email\)\), c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC/);
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
+  });
+
+  test('nothing stale → { relinked: 0 }', async () => {
+    expect(await relinkArchivedLinkedSubscribers(fakeConn(0))).toEqual({ relinked: 0 });
+  });
+
+  test('sendCampaign runs the sweep BEFORE seeding/refetching the audience, for fresh sends AND resumes (source contract)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'newsletter-sender.js'), 'utf8');
+    const sendCampaignAt = src.indexOf('async function sendCampaign(');
+    // The helper countSegmentRecipients also sweeps (and sits before
+    // sendCampaign) — this pin is about sendCampaign's OWN unconditional
+    // sweep, so search from the function start.
+    const relinkAt = src.indexOf('await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);', sendCampaignAt);
+    expect(relinkAt).toBeGreaterThan(-1);
+    const seedAt = src.indexOf('if (!opts.existingDeliveriesOnly) {', sendCampaignAt);
+    expect(relinkAt).toBeGreaterThan(sendCampaignAt);
+    expect(relinkAt).toBeLessThan(seedAt);
+    // …and BEFORE the 0-recipient preflight (codex round 2): a service-line
+    // campaign whose only recipients are re-booked households must not
+    // throw EMPTY_SEGMENT off the stale links the sweep is about to repair.
+    const emptyGuardAt = src.indexOf("err.code = 'EMPTY_SEGMENT';", sendCampaignAt);
+    expect(emptyGuardAt).toBeGreaterThan(-1);
+    expect(relinkAt).toBeLessThan(emptyGuardAt);
+    // Unconditional within sendCampaign — resumes re-read customer_id at
+    // dispatch time, so the sweep must not be gated on fresh sends only.
+    const between = src.slice(sendCampaignAt, relinkAt);
+    expect(src.slice(relinkAt - 900, relinkAt)).not.toMatch(/if \(!opts\.existingDeliveriesOnly\) \{\s*$/);
+    expect(between).toContain('validateFlagshipEventSelection'); // after the content gates, before the audience
+  });
+});
+
+describe('countSegmentRecipients is THE shared 0-recipient preflight', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+
+  test('every send-gating audience count routes through countSegmentRecipients (sweep-first), never a bare buildSubscriberQuery().count()', () => {
+    const sender = read('services/newsletter-sender.js');
+    // The helper itself sweeps before counting.
+    const helperAt = sender.indexOf('async function countSegmentRecipients(');
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = sender.slice(helperAt, sender.indexOf('}', sender.indexOf('return Number', helperAt)));
+    expect(helper).toContain('relinkArchivedLinkedSubscribers(db)');
+    // No other .count() over buildSubscriberQuery in the gating files.
+    const senderOutsideHelper = sender.slice(0, helperAt) + sender.slice(helperAt + helper.length);
+    expect(senderOutsideHelper).not.toMatch(/buildSubscriberQuery\([^\n]*\)\.count\(/);
+    expect(read('services/newsletter-proof.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,80}\.count\(/);
+    expect(read('routes/admin-newsletter.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,120}\.count\(/);
+    // Proof approval and the manual-send route both call the shared helper.
+    expect(read('services/newsletter-proof.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
+    expect(read('routes/admin-newsletter.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
+    // Scheduler claim-validation counts through it too.
+    expect(sender).toContain('const recipientCount = await countSegmentRecipients(row.segment_filter);');
   });
 });

@@ -30,6 +30,8 @@ jest.mock('../services/newsletter-sender', () => ({
   buildSubscriberQuery: jest.fn(() => ({
     count: () => ({ first: async () => ({ c: 606 }) }),
   })),
+  // Shared sweep-first preflight — countRecipients delegates here now.
+  countSegmentRecipients: jest.fn(async () => 606),
   loadPersonalizationContext: jest.fn(async () => new Map()),
 }));
 jest.mock('../services/newsletter-validator', () => ({
