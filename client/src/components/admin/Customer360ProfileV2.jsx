@@ -47,6 +47,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Bell,
   CheckCircle2,
@@ -5182,7 +5183,7 @@ export default function Customer360ProfileV2({
     && String(data.customer.id) === String(customerId);
 
   if (loading || (data?.customer && !loadedCustomerMatches))
-    return (
+    return createPortal(
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -5198,10 +5199,10 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    );
+    , document.body);
 
   if (!data || !data.customer)
-    return (
+    return createPortal(
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -5230,7 +5231,7 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    );
+    , document.body);
 
   const c = data.customer;
   // Single seeding path for the edit-customer modal — the desktop pill, the
@@ -5559,7 +5560,7 @@ export default function Customer360ProfileV2({
     { key: "compliance", label: "Compliance" },
   ];
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
@@ -7949,5 +7950,5 @@ export default function Customer360ProfileV2({
         </div>
       )}
     </div>
-  );
+  , document.body);
 }
