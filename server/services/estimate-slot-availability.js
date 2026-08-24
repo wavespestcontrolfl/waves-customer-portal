@@ -1559,17 +1559,25 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // shared helper) for its zone-capacity gate. Degrade to null on failure:
   // offering slots without the zone exclusion beats offering none.
   let estimateZone = null;
+  let zoneResolutionFailed = false;
   try {
     estimateZone = await resolveEstimateZone(db, estimate);
   } catch (zoneErr) {
+    zoneResolutionFailed = true;
     logger.warn(`[estimate-slots] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
   }
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL): for far-south zones,
   // restrict offers to days the calendar already has a live stop in the zone
   // — evaluated over THIS request's window, so a pinned single-date request
-  // seeds that day instead of returning nothing. null = funnel inactive;
-  // the helper fails open on its own.
-  const funnelDays = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  // seeds that day instead of returning nothing. days null = funnel
+  // inactive; the helper fails open on its own.
+  const { days: funnelDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  // Fail-open must stay REQUEST-scoped: when the gate is on and either the
+  // zone resolution or the zone-stop lookup failed, this request may be
+  // serving an unfunneled pool to a funnel-zone estimate — caching that
+  // would extend one transient failure across the whole TTL. Gate off keeps
+  // today's caching untouched.
+  const skipResultCache = isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed);
   const coords = await resolveEstimateCoords(estimate);
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
@@ -1733,7 +1741,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // yesterday's answer for the whole TTL. Funneled-zone estimates are a
   // small slice of traffic; recomputing beats versioning the cache by
   // schedule state. Non-funneled results keep today's caching exactly.
-  if (!funnel) {
+  if (!funnel && !skipResultCache) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;

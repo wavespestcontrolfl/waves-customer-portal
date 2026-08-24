@@ -109,16 +109,19 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
   return dates;
 }
 
-// Set of zone-stop dates when the funnel applies to this estimate's zone,
-// null when it doesn't (gate off, no/other zone, or lookup failure — the
-// null contract is "leave the pool alone").
+// { days, failed }: `days` is the Set of zone-stop dates when the funnel
+// applies to this estimate's zone, null when it doesn't (gate off, no/other
+// zone, or lookup failure — null means "leave the pool alone"). `failed`
+// distinguishes a transient lookup failure from genuinely-inactive so the
+// caller can keep fail-open REQUEST-scoped (e.g. not cache the unfunneled
+// result and extend one bad lookup across the whole cache TTL).
 async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
-  if (!isFunnelZone(estimateZone)) return null;
+  if (!isFunnelZone(estimateZone)) return { days: null, failed: false };
   try {
-    return await zoneStopDates(dbc, estimateZone, dateFrom, dateTo);
+    return { days: await zoneStopDates(dbc, estimateZone, dateFrom, dateTo), failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
-    return null;
+    return { days: null, failed: true };
   }
 }
 

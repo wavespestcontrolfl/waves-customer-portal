@@ -69,8 +69,17 @@ function scheduledServicesChain(rows) {
   };
 }
 
-function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW } = {}) {
+function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstScheduledCall = false } = {}) {
+  let scheduledCalls = 0;
   db.mockImplementation((table) => {
+    if (table === 'scheduled_services' && failFirstScheduledCall && scheduledCalls++ === 0) {
+      // First scheduled_services query per request is the funnel's zone-stop
+      // lookup — simulate a transient failure there only, so the later
+      // collision queries still succeed and the request completes.
+      const failing = scheduledServicesChain([]);
+      failing.select.mockRejectedValue(new Error('transient outage'));
+      return failing;
+    }
     if (table === 'estimates') {
       return {
         where: jest.fn().mockReturnThis(),
@@ -270,6 +279,22 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(second.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
     const slots = [...(second.primary || []), ...(second.expander || [])];
     expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
+  });
+
+  test('fail-open is request-scoped: a transient lookup failure is not cached as non-funneled', async () => {
+    mockDb({ scheduledRows: [zoneStopRow()], failFirstScheduledCall: true });
+    const first = await getAvailableSlots('est-funnel-1', WINDOW);
+    // This request fails open — full multi-day pool, no funnel metadata.
+    expect(first.metadata.zoneDayFunnel).toBeUndefined();
+    const firstDates = new Set([...(first.primary || []), ...(first.expander || [])].map((s) => s.date));
+    expect(firstDates.size).toBeGreaterThan(1);
+    // The very next request (lookup healthy again) must recompute and
+    // funnel — a cached fail-open result would serve unfunneled slots for
+    // the whole TTL.
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const second = await getAvailableSlots('est-funnel-1', WINDOW);
+    expect(second.metadata.cacheHit).toBe(false);
+    expect(second.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
   });
 
   test('non-funneled zone: a Sarasota estimate keeps its multi-day pool', async () => {
