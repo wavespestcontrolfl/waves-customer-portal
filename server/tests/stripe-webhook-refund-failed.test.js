@@ -656,3 +656,59 @@ describe('handleRefundFailed', () => {
     expect(notificationInsert.mock.calls[0][0].body).toContain('deposit ledger');
   });
 });
+
+// Monthly-autopay dues orphans count as collected dues (billing-lane
+// monthlyDuesCollected) while unresolved; a full refund or chargeback on the
+// orphaned PI must terminally classify the row, and a bounced reversal
+// (refund failed / dispute won) must reopen it.
+describe('autopay dues orphan reversal stamps', () => {
+  const {
+    _reverseAutopayDuesOrphan: reverseAutopayDuesOrphan,
+    _restoreAutopayDuesOrphan: restoreAutopayDuesOrphan,
+  } = require('../routes/stripe-webhook');
+
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  function orphanTable() {
+    const q = {
+      where: jest.fn(() => q),
+      whereRaw: jest.fn(() => q),
+      update: jest.fn(async () => 1),
+    };
+    db.mockImplementation((table) => {
+      expect(table).toBe('stripe_orphan_charges');
+      return q;
+    });
+    return q;
+  }
+
+  test('reverse: only an UNRESOLVED monthly_autopay orphan for that PI is marked returned', async () => {
+    const q = orphanTable();
+    await expect(reverseAutopayDuesOrphan('pi_dues', 'charge ch_x fully refunded')).resolves.toBe(1);
+    expect(q.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_dues', resolved: false });
+    expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'type' = ?", ['monthly_autopay']);
+    const patch = q.update.mock.calls[0][0];
+    expect(patch.resolved).toBe(true);
+    expect(patch.resolution_notes).toMatch(/^Autopay dues reversed: /);
+    // The marker text never contains "reconciled" — billing-lane's
+    // collected-orphan predicate must not count a reversed row.
+    expect(patch.resolution_notes).not.toMatch(/reconciled/i);
+  });
+
+  test('restore: reopens only rows carrying the reversal marker', async () => {
+    const q = orphanTable();
+    await expect(restoreAutopayDuesOrphan('pi_dues', 'dispute dp_x WON')).resolves.toBe(1);
+    expect(q.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_dues', resolved: true });
+    expect(q.where).toHaveBeenCalledWith('resolution_notes', 'like', 'Autopay dues reversed:%');
+    expect(q.update.mock.calls[0][0]).toMatchObject({ resolved: false, resolved_at: null });
+  });
+
+  test('never throws: a DB error is logged and the money handler keeps running; no PI is a no-op', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(reverseAutopayDuesOrphan('pi_dues', 'x')).resolves.toBe(0);
+    await expect(restoreAutopayDuesOrphan('pi_dues', 'x')).resolves.toBe(0);
+    db.mockReset();
+    await expect(reverseAutopayDuesOrphan(null, 'x')).resolves.toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
