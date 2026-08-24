@@ -45,13 +45,23 @@ function dowOfDateStr(dateStr) {
 
 // Set of day-of-week ints the business takes off every week. Fail-open
 // (empty set), like the date helpers.
-async function getWeeklyDaysOff(conn = db) {
+// Pure parse of the stored JSON value — malformed config fails open (empty
+// set) without touching the DB, so the strict reader below can share it.
+function parseWeeklyDaysOff(value) {
+  if (!value) return new Set();
   try {
-    const row = await conn('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
-    if (!row || !row.value) return new Set();
-    const parsed = JSON.parse(row.value);
+    const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) return new Set();
     return new Set(parsed.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6));
+  } catch {
+    return new Set();
+  }
+}
+
+async function getWeeklyDaysOff() {
+  try {
+    const row = await db('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
+    return parseWeeklyDaysOff(row && row.value);
   } catch (err) {
     logger.warn(`[blackout-dates] weekly days-off lookup failed (failing open): ${err.message}`);
     return new Set();
@@ -73,21 +83,40 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
 
 // Set of YYYY-MM-DD blackout dates within [fromStr, toStr] (inclusive) —
 // one-off dates plus every weekly-day-off occurrence in the range.
-// `conn` (optional) lets a caller inside a transaction read through its own
-// trx instead of the pool — same fail-open stance either way.
-async function getBlackoutDates(fromStr, toStr, conn = db) {
+async function getBlackoutDates(fromStr, toStr) {
   let dates = new Set();
   try {
-    const rows = await conn('schedule_blackout_dates')
+    const rows = await db('schedule_blackout_dates')
       .whereBetween('date', [fromStr, toStr])
       .select('date');
     dates = new Set(rows.map((r) => toDateStr(r.date)));
   } catch (err) {
     logger.warn(`[blackout-dates] range lookup failed (failing open): ${err.message}`);
   }
-  const weekly = await getWeeklyDaysOff(conn);
+  const weekly = await getWeeklyDaysOff();
   for (const d of expandWeeklyDaysOff(fromStr, toStr, weekly)) dates.add(d);
   return dates;
+}
+
+// Both blackout layers for a series-generation horizon, read through the
+// CALLER's conn: { dates: Set<YYYY-MM-DD>, weeklyDaysOff: Set<dow> }. The
+// weeklyDaysOff layer lets consumers enforce weekly closures on dates past
+// the expanded horizon (long-cadence plans generate years out). `conn` may
+// be a transaction — the reads run in a nested transaction (SAVEPOINT), and
+// unlike the fail-open helpers above this THROWS on a lookup failure, so a
+// failed read rolls the savepoint back instead of leaving the caller's
+// transaction aborted; callers treat the rejection as their fail-open.
+async function getBlackoutLayers(fromStr, toStr, conn = db) {
+  return conn.transaction(async (sp) => {
+    const weeklyRow = await sp('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
+    const weeklyDaysOff = parseWeeklyDaysOff(weeklyRow && weeklyRow.value);
+    const rows = await sp('schedule_blackout_dates')
+      .whereBetween('date', [fromStr, toStr])
+      .select('date');
+    const dates = new Set(rows.map((r) => toDateStr(r.date)));
+    for (const d of expandWeeklyDaysOff(fromStr, toStr, weeklyDaysOff)) dates.add(d);
+    return { dates, weeklyDaysOff };
+  });
 }
 
 // True when a single date is blacked out (one-off or weekly). Accepts
@@ -112,6 +141,8 @@ async function isBlackoutDate(dateVal) {
 
 module.exports = {
   getBlackoutDates,
+  getBlackoutLayers,
+  parseWeeklyDaysOff,
   isBlackoutDate,
   getWeeklyDaysOff,
   expandWeeklyDaysOff,

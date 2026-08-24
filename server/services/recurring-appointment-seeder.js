@@ -7,7 +7,7 @@ const {
   etNthWeekdayOfMonth,
 } = require('../utils/datetime-et');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
-const { clearOfBlackout: nudgeOffBlackoutDates } = require('./scheduling/blackout-nudge');
+const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -103,7 +103,7 @@ function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDat
     if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
     const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
     const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
-    if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
+    if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
   }
   return dateStr;
 }
@@ -383,6 +383,9 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
     const nextDateStr = clampToSeason(clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir)));
+    // A null candidate means the blackout nudge exhausted its bounded search
+    // — skip it rather than book a closure.
+    if (!nextDateStr) continue;
     if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
     if (existingDates.has(nextDateStr)) continue;
     existingDates.add(nextDateStr);

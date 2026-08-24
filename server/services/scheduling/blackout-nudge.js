@@ -14,10 +14,30 @@
 
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
-function clearOfBlackout(dateStr, blackoutDates, { skipWeekends = false } = {}) {
-  if (!dateStr || !(blackoutDates instanceof Set) || blackoutDates.size === 0) return dateStr;
+// `blackout` is either a Set of YYYY-MM-DD strings (the seeder's preloaded
+// shape) or { dates: Set, weeklyDaysOff: Set } (getBlackoutLayers): the
+// weeklyDaysOff day-of-week layer applies to EVERY date, so weekly closures
+// hold even past whatever horizon the dates Set was expanded over.
+function isBlackedOut(dateStr, blackout) {
+  if (!dateStr || !blackout) return false;
+  const dates = blackout instanceof Set ? blackout : blackout.dates;
+  if (dates instanceof Set && dates.has(dateStr)) return true;
+  const weekly = blackout instanceof Set ? null : blackout.weeklyDaysOff;
+  if (weekly instanceof Set && weekly.size > 0) {
+    const { dayOfWeek } = etParts(parseETDateTime(`${dateStr}T12:00`));
+    if (weekly.has(dayOfWeek)) return true;
+  }
+  return false;
+}
+
+// Returns the cleared date, or NULL when the bounded search exhausts (e.g.
+// a run of 3+ consecutive closed weeks, or every weekday configured off):
+// callers must SKIP a null candidate — refusing to generate beats silently
+// booking a business closure.
+function clearOfBlackout(dateStr, blackout, { skipWeekends = false } = {}) {
+  if (!isBlackedOut(dateStr, blackout)) return dateStr;
   let candidate = dateStr;
-  for (let nudge = 0; nudge < 14 && blackoutDates.has(candidate); nudge++) {
+  for (let nudge = 0; nudge < 21; nudge++) {
     let d = addETDays(parseETDateTime(`${candidate}T12:00`), 1);
     if (skipWeekends) {
       const { dayOfWeek } = etParts(d);
@@ -25,8 +45,9 @@ function clearOfBlackout(dateStr, blackoutDates, { skipWeekends = false } = {}) 
       else if (dayOfWeek === 0) d = addETDays(d, 1); // Sun → Mon
     }
     candidate = etDateString(d);
+    if (!isBlackedOut(candidate, blackout)) return candidate;
   }
-  return candidate;
+  return null;
 }
 
-module.exports = { clearOfBlackout };
+module.exports = { clearOfBlackout, isBlackedOut };
