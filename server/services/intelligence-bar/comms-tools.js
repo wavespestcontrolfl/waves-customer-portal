@@ -216,18 +216,40 @@ async function executeCommsTool(toolName, input) {
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
+// A name match must be UNIQUE among live customers before anything acts on
+// it. The old `.first()` (no ORDER BY, no deleted_at filter) let "Smith"
+// resolve to whichever row Postgres returned first — possibly an archived/
+// merged-away customer. Ambiguity is returned as a structured error so the
+// tool can ask the operator to disambiguate instead of guessing.
+function ambiguousCustomerMatch(name, matches) {
+  return {
+    error: `Multiple customers match "${name}". Ask the operator which one, then retry with customer_id.`,
+    ambiguous: true,
+    candidates: matches.map(c => ({
+      id: c.id,
+      name: `${c.first_name} ${c.last_name || ''}`.trim(),
+      phone_last4: (c.phone || '').replace(/\D/g, '').slice(-4) || null,
+    })),
+  };
+}
+
+// Returns a customer row, null (no match), or an { error, ambiguous,
+// candidates } object — callers must pass an error-shaped result through.
 async function resolveCustomer(input) {
   if (input.customer_id) return db('customers').where('id', input.customer_id).first();
   if (input.customer_name) {
-    return db('customers').where(function () {
+    const matches = await db('customers').where(function () {
       const s = `%${input.customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
         .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).first();
+    }).whereNull('deleted_at').limit(2);
+    if (matches.length > 1) return ambiguousCustomerMatch(input.customer_name, matches);
+    return matches[0] || null;
   }
   if (input.phone) {
     const digits = input.phone.replace(/\D/g, '').slice(-10);
-    return db('customers').whereRaw("RIGHT(REPLACE(phone, '+', ''), 10) = ?", [digits]).first();
+    return db('customers').whereRaw("RIGHT(REPLACE(phone, '+', ''), 10) = ?", [digits])
+      .whereNull('deleted_at').first();
   }
   return null;
 }
@@ -305,6 +327,7 @@ async function getConversationThread(input) {
   } else {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
+    if (customer.error) return customer;
     phone = customer.phone;
   }
 
@@ -529,6 +552,7 @@ async function sendSms(input) {
   if (!custId && !phone) {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
+    if (customer.error) return customer;
     customerName = `${customer.first_name} ${customer.last_name}`;
     custId = customer.id;
     phone = customer.phone;
@@ -544,6 +568,7 @@ async function sendSms(input) {
     if (inputDigits.length === 10) {
       const customer = await db('customers')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [inputDigits])
+        .whereNull('deleted_at')
         .first();
       if (customer) {
         customerName = `${customer.first_name} ${customer.last_name}`;
@@ -641,6 +666,7 @@ async function sendSms(input) {
 async function draftSmsReply(input) {
   const customer = await resolveCustomer(input);
   if (!customer) return { error: 'Customer not found' };
+  if (customer.error) return customer;
   if (!customer.phone) return { error: 'Customer has no phone number' };
 
   const digits = customer.phone.replace(/\D/g, '').slice(-10);
@@ -1025,4 +1051,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer };

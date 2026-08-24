@@ -468,23 +468,43 @@ async function getResponseTimes(days) {
 }
 
 
+// Resolve a lead for a status write. A name must match exactly ONE active
+// lead — the old `.first()` (no ORDER BY, no ambiguity check) silently
+// flipped whichever matching lead Postgres returned first. Returns a lead
+// row, null, or a structured { error, ambiguous, candidates } object.
+async function resolveLeadForUpdate({ lead_id, lead_name }) {
+  if (lead_id) return db('leads').where('id', lead_id).whereNull('deleted_at').first();
+  if (!lead_name) return null;
+  const matches = await db('leads').where(function () {
+    const s = `%${lead_name}%`;
+    this.whereILike('first_name', s).orWhereILike('last_name', s)
+      .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+  }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').limit(2);
+  if (matches.length > 1) {
+    return {
+      error: `Multiple active leads match "${lead_name}". Ask the operator which one, then retry with lead_id.`,
+      ambiguous: true,
+      candidates: matches.map(l => ({
+        id: l.id,
+        name: `${l.first_name} ${l.last_name || ''}`.trim(),
+        status: l.status,
+        phone_last4: (l.phone || '').replace(/\D/g, '').slice(-4) || null,
+      })),
+    };
+  }
+  return matches[0] || null;
+}
+
+
 async function updateLeadStatus(input) {
-  const { lead_id, lead_name, new_status, lost_reason, notes } = input;
+  const { new_status, lost_reason, notes } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
-  let lead;
-  if (lead_id) {
-    lead = await db('leads').where('id', lead_id).whereNull('deleted_at').first();
-  } else if (lead_name) {
-    lead = await db('leads').where(function () {
-      const s = `%${lead_name}%`;
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').first();
-  }
+  const lead = await resolveLeadForUpdate(input);
   if (!lead) return { error: 'Lead not found' };
+  if (lead.error) return lead;
 
   const oldStatus = lead.status;
   const updates = { status: new_status, updated_at: new Date() };
@@ -516,22 +536,39 @@ async function updateLeadStatus(input) {
 }
 
 
+// Confirm-time executions must operate on the SAME set the operator saw on
+// the card — pinned `lead_ids` intersect the criteria, so the executed set is
+// always a subset of the previewed one (a lead whose status changed after the
+// preview drops out instead of being clobbered).
+const BULK_LEAD_UPDATE_CAP = 500;
+
+async function matchBulkLeads({ current_status, older_than_days, lead_ids }) {
+  const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
+  let query = db('leads').where('status', current_status).whereNull('deleted_at');
+  if (cutoff) query = query.where('updated_at', '<', cutoff);
+  if (Array.isArray(lead_ids)) query = query.whereIn('id', lead_ids.slice(0, BULK_LEAD_UPDATE_CAP));
+  return query.select('id', 'first_name', 'last_name', 'status', 'updated_at');
+}
+
+// Read-only preview of a bulk update — the route runs this at proposal time
+// to pin the matched ids into the stored pending-action params.
+async function previewBulkLeadUpdate(input) {
+  return bulkUpdateLeads({ ...input, dry_run: true });
+}
+
 async function bulkUpdateLeads(input) {
-  const { current_status, older_than_days, new_status, lost_reason, dry_run = true } = input;
+  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, lead_ids } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
-  const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
 
-  let query = db('leads').where('status', current_status).whereNull('deleted_at');
-  if (cutoff) query = query.where('updated_at', '<', cutoff);
-
-  const matching = await query.clone().select('id', 'first_name', 'last_name', 'status', 'updated_at');
+  const matching = await matchBulkLeads({ current_status, older_than_days, lead_ids });
 
   if (dry_run) {
     return {
       dry_run: true,
       matches: matching.length,
+      matched_ids: matching.map(l => l.id),
       preview: matching.slice(0, 10).map(l => ({
         name: `${l.first_name} ${l.last_name || ''}`.trim(),
         current_status: l.status,
@@ -575,4 +612,4 @@ async function bulkUpdateLeads(input) {
 }
 
 
-module.exports = { LEADS_TOOLS, executeLeadsTool };
+module.exports = { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP };
