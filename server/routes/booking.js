@@ -7,6 +7,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -147,8 +148,19 @@ function fallbackZoneCenter(city) {
   // Used only when no address/coords provided. Resolves via service_zones table.
   return db('service_zones').first().then(async () => {
     const zones = await db('service_zones').select('*');
-    const match = zones.find(z => (z.cities || []).some(c => c.toLowerCase() === (city || '').toLowerCase()));
-    if (match && match.center_lat && match.center_lng) {
+    const hasCoords = (z) => z && z.center_lat && z.center_lng;
+    // Deep-south cities keep the retained Port Charlotte row's CENTER even
+    // though the consolidation moved their zone ownership to the Venice row
+    // (whose cities scan would otherwise hand back Venice coords ~25mi
+    // north) — see fallbackCenterZoneName in zone-day-funnel.js.
+    const aliasName = fallbackCenterZoneName(city);
+    const aliased = aliasName
+      ? zones.find(z => String(z.zone_name || '').trim().toLowerCase() === aliasName)
+      : null;
+    const match = hasCoords(aliased)
+      ? aliased
+      : zones.find(z => (z.cities || []).some(c => c.toLowerCase() === (city || '').toLowerCase()));
+    if (hasCoords(match)) {
       return { lat: parseFloat(match.center_lat), lng: parseFloat(match.center_lng), zone: match };
     }
     return null;

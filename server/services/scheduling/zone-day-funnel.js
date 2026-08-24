@@ -75,6 +75,30 @@ function isFunnelZone(estimateZone) {
   return !!slug && funnelZoneSlugs().has(slug);
 }
 
+// The 2026-08-24 consolidation moved zone OWNERSHIP of the deep-south
+// cities into the Venice / North Port row, but the retained Port Charlotte
+// row's center stays the right coordinate FALLBACK for them — Venice's
+// center sits ~25mi north, and handing it to a coord-less deep-south
+// booking distorts detour scoring. The fallbackZoneCenter consumers
+// (booking.js, estimate-slot-availability.js) resolve city → zone via
+// service_zones.cities, which can no longer reach the emptied Port
+// Charlotte row, so they consult this alias BEFORE the cities scan.
+// Englewood is deliberately absent: it never lived in the Port Charlotte
+// row (pre-consolidation it resolved to no center at all) and sits
+// mid-corridor between the two centers.
+const DEEP_SOUTH_CENTER_ZONE_NAME = 'port charlotte';
+const DEEP_SOUTH_CENTER_CITIES = new Set([
+  'port charlotte', 'punta gorda', 'murdock',
+  'rotonda west', 'placida', 'boca grande',
+]);
+
+// zone_name (lowercased) whose center should serve as the coordinate
+// fallback for `city`, or null when the normal cities scan should decide.
+function fallbackCenterZoneName(city) {
+  const c = String(city || '').trim().toLowerCase();
+  return DEEP_SOUTH_CENTER_CITIES.has(c) ? DEEP_SOUTH_CENTER_ZONE_NAME : null;
+}
+
 // True when a live scheduled_services row belongs to the estimate's zone.
 // Deliberately STRICTER than filterCollidingSlots' unconditional
 // slug-OR-city match (over-inclusion there only hides a window; here it
@@ -207,6 +231,7 @@ module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
   isFunnelZone,
+  fallbackCenterZoneName,
   // Exposed for tests.
   _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDates },
 };

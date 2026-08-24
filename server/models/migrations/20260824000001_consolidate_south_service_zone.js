@@ -17,7 +17,9 @@
  *     dedupe).
  *   - Port Charlotte row: loses exactly the cities now owned by the Venice
  *     row (no other admin-added cities are touched). The row itself is
- *     KEPT — its center coords still serve fallbackZoneCenter, and
+ *     KEPT — its center coords still serve fallbackZoneCenter (which
+ *     reaches the emptied row via fallbackCenterZoneName in
+ *     zone-day-funnel.js, since the cities scan no longer can), and
  *     DEFAULT_FUNNEL_ZONE_SLUGS includes 'port charlotte' so anything
  *     still resolving to it funnels too.
  *

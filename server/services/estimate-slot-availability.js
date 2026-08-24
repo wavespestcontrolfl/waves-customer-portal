@@ -32,7 +32,7 @@ const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
-const { getZoneFunnelDays, applyZoneDayFunnel } = require('./scheduling/zone-day-funnel');
+const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -759,14 +759,34 @@ async function fallbackZoneCenter(city) {
   if (!normalizedCity) return null;
   try {
     const zones = await db('service_zones').select('zone_name', 'cities', 'center_lat', 'center_lng');
-    const match = zones.find((zone) => {
+    const validCoords = (zone) => {
+      const lat = zone?.center_lat != null ? Number(zone.center_lat) : null;
+      const lng = zone?.center_lng != null ? Number(zone.center_lng) : null;
+      return Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0
+        ? { lat, lng }
+        : null;
+    };
+    // Deep-south cities keep the retained Port Charlotte row's CENTER even
+    // though the consolidation moved their zone ownership to the Venice row
+    // (whose cities scan would otherwise hand back Venice coords ~25mi
+    // north) — see fallbackCenterZoneName in zone-day-funnel.js. A missing
+    // or coord-less alias row falls through to the normal cities scan.
+    const aliasName = fallbackCenterZoneName(normalizedCity);
+    const candidates = [];
+    if (aliasName) {
+      candidates.push(zones.find(
+        (zone) => String(zone.zone_name || '').trim().toLowerCase() === aliasName,
+      ));
+    }
+    candidates.push(zones.find((zone) => {
       const cities = Array.isArray(zone.cities) ? zone.cities : [];
       return cities.some((candidate) => String(candidate || '').trim().toLowerCase() === normalizedCity);
-    });
-    const lat = match?.center_lat != null ? Number(match.center_lat) : null;
-    const lng = match?.center_lng != null ? Number(match.center_lng) : null;
-    if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
-      return { lat, lng, source: 'service_zone_fallback', city, zoneName: match.zone_name || null };
+    }));
+    for (const match of candidates) {
+      const coords = validCoords(match);
+      if (coords) {
+        return { ...coords, source: 'service_zone_fallback', city, zoneName: match.zone_name || null };
+      }
     }
   } catch (err) {
     logger.warn(`[estimate-slots] service-zone fallback failed: ${err.message}`);

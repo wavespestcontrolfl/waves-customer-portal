@@ -30,6 +30,7 @@ const { getAvailableSlots } = estimateSlotAvailability;
 const {
   applyZoneDayFunnel,
   isFunnelZone,
+  fallbackCenterZoneName,
   _internals: funnelInternals,
 } = require('../services/scheduling/zone-day-funnel');
 
@@ -156,6 +157,20 @@ describe('applyZoneDayFunnel (pure)', () => {
     const out = applyZoneDayFunnel([], new Set(['2027-05-20']));
     expect(out.slots).toEqual([]);
     expect(out.funnel).toBeNull();
+  });
+});
+
+describe('fallbackCenterZoneName (deep-south coordinate-fallback alias)', () => {
+  test('deep-south cities alias to the retained Port Charlotte row, case/whitespace-insensitive', () => {
+    for (const city of ['Port Charlotte', 'punta gorda', '  MURDOCK ', 'Rotonda West', 'Placida', 'Boca Grande']) {
+      expect(fallbackCenterZoneName(city)).toBe('port charlotte');
+    }
+  });
+
+  test('Venice-proper and mid-corridor cities stay on the normal cities scan', () => {
+    for (const city of ['Venice', 'North Port', 'Nokomis', 'Osprey', 'Englewood', 'Sarasota', 'nowhere', '', null, undefined]) {
+      expect(fallbackCenterZoneName(city)).toBeNull();
+    }
   });
 });
 
