@@ -90,28 +90,22 @@ function excludeGloballySuppressed(query) {
 // Unlinked rows (customer_id NULL) are untouched. Shared by buildSubscriberQuery
 // AND the resume/retry refetch, like excludeGloballySuppressed.
 //
-// EXCEPT when the household came back: a customer archived and later
-// re-booked gets a NEW customers row (12 creation entry points, none of
-// which re-runs the twin picker), so the subscriber's customer_id keeps
-// pointing at the archived row forever and the anti-join would silence a
-// CURRENT customer for good. A live profile carrying the subscriber's own
-// email — the same scope liveTwinSubselect uses (deleted_at IS NULL only;
-// link semantics, not lifecycle) — lifts the suppression: the person we'd
-// mail is a live contact again, whichever row they're linked to. The stale
-// link itself is repaired by the archive/restore relink helpers; this is
-// the send-time read that must not depend on that hygiene.
+// Re-booked households (archived and later re-booked as a NEW customers row —
+// no creation entry point re-runs the twin picker) are handled by the relink
+// SWEEP, not here: countSegmentRecipients and sendCampaign run
+// relinkArchivedLinkedSubscribers before any audience read, so a stale
+// archived link with a live same-email twin is repaired to the live row
+// before this anti-join sees it. Deliberately NO read-side "live twin
+// exists" exception in this predicate (codex #3472 r5): such a lift would
+// make the row eligible while customer_id still points at the archived
+// profile — segmentation, personalization, and touchpoints would then use
+// the archived row. Only successfully RELINKED rows send.
 function excludeArchivedCustomers(query) {
   return query.whereNotExists(function () {
     this.select(db.raw('1'))
       .from('customers as ac')
       .whereRaw('ac.id = newsletter_subscribers.customer_id')
-      .whereNotNull('ac.deleted_at')
-      .whereNotExists(function () {
-        this.select(db.raw('1'))
-          .from('customers as lt')
-          .whereRaw('LOWER(TRIM(lt.email)) = LOWER(TRIM(newsletter_subscribers.email))')
-          .whereNull('lt.deleted_at');
-      });
+      .whereNotNull('ac.deleted_at');
   });
 }
 
