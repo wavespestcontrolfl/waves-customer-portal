@@ -58,7 +58,7 @@ async function withServer(fn) {
 function makeChain(table, resolve) {
   const q = { _table: table, _calls: [] };
   [
-    'where', 'whereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy',
+    'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy',
     'join', 'leftJoin', 'limit', 'offset', 'forUpdate', 'returning', 'groupBy',
   ].forEach((m) => {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
@@ -176,6 +176,13 @@ describe('recalcBestPrice', () => {
   function wireBestPrice({ rows, product }) {
     const catalogUpdates = [];
     const pricingUpdates = [];
+    // recalcBestPrice serializes via a product-scoped advisory xact lock —
+    // callers without a transaction open one, so the mock trx proxies the
+    // table builder and stubs raw() (the lock).
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
     db.mockImplementation((table) => makeChain(table, (q) => {
       if (table === 'vendor_pricing') {
         if (q.called('update')) {
@@ -214,11 +221,75 @@ describe('recalcBestPrice', () => {
     // Backing/cache fields move atomically with the winner (pricing-engine
     // db-bridge only trusts best_price when best_vendor_pricing_id matches).
     expect(catalogUpdates[0].best_vendor_pricing_id).toBe('vp-a');
-    expect(catalogUpdates[0].best_price_amount_cached).toBe(50);
+    // Cache = the winning row's RAW amount (control-layer contract), while
+    // best_price stays scaled to the catalog container.
+    expect(catalogUpdates[0].best_price_amount_cached).toBe(100);
     expect(catalogUpdates[0].best_price_vendor_id_cached).toBe('v-a');
     expect(catalogUpdates[0].best_price_status).toBe('current');
     const flagged = pricingUpdates.find((u) => u.update.is_best_price === true);
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
+  });
+
+  test('ranks by LANDED per-oz when present — cheap sticker + heavy shipping must not win', async () => {
+    // Vendor A: $50/64 oz sticker ($0.78/oz) but $30 shipping → landed $1.25/oz.
+    // Vendor B: $60/64 oz delivered → landed $0.9375/oz. B wins the ordering;
+    // persistence keeps the sticker-per-oz canonical-container contract.
+    const { catalogUpdates, pricingUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 50, quantity: '64 oz', landed_unit_price: 1.25, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 60, quantity: '64 oz', landed_unit_price: 0.9375, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor B' },
+      ],
+      product: { unit_size_oz: 64 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor B');
+    // Persisted from the winner's STICKER per-oz, scaled to the product size.
+    expect(catalogUpdates[0].best_price).toBe(60);
+    const flagged = pricingUpdates.find((u) => u.update.is_best_price === true);
+    expect(flagged.where).toEqual([{ id: 'vp-b' }]);
+  });
+
+  test('a landed-only row (no quantity, no normalized price) never enters the sized pool', async () => {
+    // The report contract allows landed_unit_price without size info — such a
+    // row has nothing to scale to the catalog container, so it must not win
+    // the sized pool and persist its raw pack price as best_price.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', landed_unit_price: null, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 30, quantity: null, landed_unit_price: 0.10, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Landed Only' },
+      ],
+      product: { unit_size_oz: 64 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
+    expect(catalogUpdates[0].best_price).toBe(50); // 100/128 * 64 — scaled, never vp-b's raw 30
+  });
+
+  test('a non-positive landed_unit_price never poisons the ordering — falls back to sticker per-oz', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', landed_unit_price: 0, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 40, quantity: '32 oz', landed_unit_price: null, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor B' },
+      ],
+      product: { unit_size_oz: 64 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor A'); // 0.78/oz beats 1.25/oz
+    expect(catalogUpdates[0].best_price).toBe(50);
+  });
+
+  test("a 'lb'-normalized stored cost converts to per-oz — never treated as $/oz", async () => {
+    // LESCO-style row: $0.6758/lb with unit_normalized='lb' → $0.0422/oz.
+    // Treated as $/oz it would beat (and grossly misprice) everything.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 0, price_amount: 33.79, quantity: null, unit_normalized: 'lb', normalized_unit_price: 0.6758, price_per_oz: null, landed_unit_price: null, vendor_name: 'LESCO' },
+      ],
+      product: { unit_size_oz: 800 },
+    });
+    await recalcBestPrice('prod-1');
+    // 0.6758/16 = 0.04224/oz × 800 oz = 33.79 — not 540.64.
+    expect(catalogUpdates[0].best_price).toBe(33.79);
   });
 
   test('uses stored normalized_unit_price when the quantity is unparseable', async () => {
@@ -275,7 +346,7 @@ describe('recalcBestPrice', () => {
           pricingUpdates.push(q.args('update')[0]);
           return 1;
         }
-        filterCalls.push(q._calls.filter(([m]) => ['where', 'whereIn', 'whereNull'].includes(m)));
+        filterCalls.push(q._calls.filter(([m]) => ['where', 'whereIn', 'whereNull', 'whereRaw'].includes(m)));
         return [];
       }
       if (table === 'products_catalog') {
@@ -291,8 +362,10 @@ describe('recalcBestPrice', () => {
     const calls = filterCalls[0];
     expect(calls).toContainEqual(['where', ['vendor_pricing.is_active', true]]);
     expect(calls).toContainEqual(['whereIn', ['vendor_pricing.approval_status', ['approved', 'auto_approved']]]);
-    // priced + unexpired guards are grouped where-callbacks
-    expect(calls.filter(([m, args]) => m === 'where' && typeof args[0] === 'function').length).toBeGreaterThanOrEqual(2);
+    // positivity guard = COALESCE whereRaw (authoritative-first); the
+    // unexpired guard stays a grouped where-callback
+    expect(calls.some(([m, args]) => m === 'whereRaw' && /COALESCE\(vendor_pricing\.price_amount, vendor_pricing\.price\) > 0/.test(String(args[0])))).toBe(true);
+    expect(calls.filter(([m, args]) => m === 'where' && typeof args[0] === 'function').length).toBeGreaterThanOrEqual(1);
     // No eligible rows: the stale winner must be invalidated, not left current.
     expect(catalogUpdates).toHaveLength(1);
     expect(catalogUpdates[0]).toEqual(expect.objectContaining({
@@ -359,6 +432,7 @@ describe('POST /approvals/bulk', () => {
     // Approvals run inside one transaction per id (claim + price + history + recalc).
     const trx = (table) => makeChain(table, route);
     trx.fn = { now: jest.fn(() => 'NOW()') };
+    trx.raw = jest.fn(async () => ({})); // product-scoped advisory lock
     db.transaction.mockImplementation(async (fn) => fn(trx));
     db.mockImplementation((table) => makeChain(table, route));
 

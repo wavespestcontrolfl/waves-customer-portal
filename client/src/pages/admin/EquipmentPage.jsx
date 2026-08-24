@@ -852,7 +852,7 @@ function TankMixTab({ showToast }) {
                         fontFamily: MONO,
                         fontSize: 18,
                         fontWeight: 700,
-                        color: D.green,
+                        color: m.cost_incomplete ? D.amber : D.green,
                       }}
                     >
                       {fmt(m.cost_per_tank)}/tank
@@ -862,6 +862,11 @@ function TankMixTab({ showToast }) {
                     >
                       {fmt(m.cost_per_1000sf)}/1000sf
                     </div>{" "}
+                    {m.cost_incomplete && (
+                      <div style={{ fontSize: 11, color: D.amber }}>
+                        incomplete — unpriced component excluded
+                      </div>
+                    )}{" "}
                   </div>{" "}
                   <button
                     onClick={() => recalculate(m.id)}

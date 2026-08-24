@@ -338,6 +338,42 @@ async function queryVendors(input) {
 }
 
 
+// Per-oz comparison basis (codex GH r3 P1): raw pack prices mislead when
+// pack sizes differ — rank vendor rows exactly like recalcBestPrice
+// (landed per-oz when present, else sticker per-oz; unrankable rows last,
+// ties by raw price). Uses the router's exported primitives so the
+// comparison can never drift from the canonical writer.
+// Eligibility mirror of recalcBestPrice (r3-push P1): recommendations must
+// never surface pending/rejected/inactive/expired or unpriced rows.
+function eligibleVendorRows(qb) {
+  return qb
+    .whereRaw('COALESCE(vendor_pricing.price_amount, vendor_pricing.price) > 0')
+    .where('vendor_pricing.is_active', true)
+    .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
+    .where(function unexpired() {
+      this.whereNull('vendor_pricing.expires_at').orWhere('vendor_pricing.expires_at', '>', new Date());
+    });
+}
+
+function rankVendorRows(rows) {
+  const adminInventoryRoute = require('../../routes/admin-inventory');
+  const scored = rows.map((row) => {
+    const perOz = adminInventoryRoute.vendorRowPricePerOz(row);
+    // Unit-aware landed conversion (r22-push P0) — never assume $/oz.
+    const landed = adminInventoryRoute.storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
+    const rank = landed != null ? landed : perOz;
+    const price = Number(row.price_amount ?? row.price) || 0;
+    return { row, perOz, rank, price };
+  });
+  scored.sort((a, b) => {
+    if (a.rank == null && b.rank == null) return a.price - b.price;
+    if (a.rank == null) return 1;
+    if (b.rank == null) return -1;
+    return (a.rank - b.rank) || (a.price - b.price);
+  });
+  return scored;
+}
+
 async function compareVendorPricing(input) {
   const { product_name, product_id } = input;
 
@@ -349,16 +385,17 @@ async function compareVendorPricing(input) {
   }
   if (!product) return { error: `Product "${product_name}" not found` };
 
-  const pricing = await db('vendor_pricing')
-    .where('product_id', product.id)
+  const rows = await eligibleVendorRows(db('vendor_pricing').where('product_id', product.id))
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
-    .select('vendor_pricing.*', 'vendors.name as vendor_name', 'vendors.website')
-    .orderBy('vendor_pricing.price');
+    .select('vendor_pricing.*', 'vendors.name as vendor_name', 'vendors.website');
 
-  const cheapest = pricing.length > 0 ? pricing[0] : null;
-  const mostExpensive = pricing.length > 0 ? pricing[pricing.length - 1] : null;
-  const savings = cheapest && mostExpensive && pricing.length > 1
-    ? parseFloat(mostExpensive.price) - parseFloat(cheapest.price)
+  // Ordered by UNIT cost, not raw pack price — a $40/32 oz offer must not
+  // present as "cheaper" than a $50/64 oz one.
+  const ranked = rankVendorRows(rows);
+  const cheapest = ranked.length > 0 ? ranked[0] : null;
+  const dearest = ranked.length > 0 ? ranked[ranked.length - 1] : null;
+  const perOzSpread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
+    ? dearest.rank - cheapest.rank
     : 0;
 
   return {
@@ -368,19 +405,25 @@ async function compareVendorPricing(input) {
       current_best_price: product.best_price ? parseFloat(product.best_price) : null,
       current_best_vendor: product.best_vendor,
     },
-    vendor_prices: pricing.map(p => ({
+    vendor_prices: ranked.map(({ row: p, perOz }) => ({
       vendor: p.vendor_name,
-      price: parseFloat(p.price || 0),
+      price: parseFloat(p.price_amount ?? p.price ?? 0),
       quantity: p.quantity,
-      price_per_oz: p.price_per_oz ? parseFloat(p.price_per_oz) : null,
+      price_per_oz: perOz != null ? Math.round(perOz * 10000) / 10000 : null,
+      landed_price_per_oz: (() => {
+        const adminInventoryRoute2 = require('../../routes/admin-inventory');
+        return adminInventoryRoute2.storedUnitCostPerOz(p.landed_unit_price, p.unit_normalized);
+      })(),
       is_best: p.is_best_price,
       url: p.vendor_product_url,
       last_checked: p.last_checked_at,
     })),
-    cheapest_vendor: cheapest?.vendor_name,
-    cheapest_price: cheapest ? parseFloat(cheapest.price) : null,
-    price_range: savings > 0 ? `$${savings.toFixed(2)} spread across ${pricing.length} vendors` : null,
-    vendor_count: pricing.length,
+    cheapest_vendor: cheapest?.row.vendor_name,
+    cheapest_price: cheapest ? parseFloat(cheapest.row.price_amount ?? cheapest.row.price ?? 0) : null,
+    cheapest_price_per_oz: cheapest?.perOz != null ? Math.round(cheapest.perOz * 10000) / 10000 : null,
+    price_range: perOzSpread > 0 ? `$${perOzSpread.toFixed(4)}/oz spread across ${ranked.length} vendors` : null,
+    vendor_count: ranked.length,
+    comparison_basis: 'per-oz unit cost (landed when known)',
   };
 }
 
@@ -403,23 +446,33 @@ async function findCheapestVendor(input) {
 
   const results = [];
   for (const p of products) {
-    const prices = await db('vendor_pricing')
-      .where('product_id', p.id)
+    const rows = await eligibleVendorRows(db('vendor_pricing').where('product_id', p.id))
       .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
-      .select('vendors.name as vendor', 'vendor_pricing.price', 'vendor_pricing.quantity')
-      .orderBy('vendor_pricing.price').limit(3);
+      .select('vendor_pricing.*', 'vendors.name as vendor_name');
 
+    // Same per-oz basis as compareVendorPricing (GH r3 P1).
+    const ranked = rankVendorRows(rows).slice(0, 3);
+    const asEntry = (r) => (r ? {
+      vendor: r.row.vendor_name,
+      price: parseFloat(r.row.price_amount ?? r.row.price ?? 0),
+      price_per_oz: r.perOz != null ? Math.round(r.perOz * 10000) / 10000 : null,
+    } : null);
     results.push({
       product: p.name,
       category: p.category,
       container_size: p.container_size,
-      cheapest: prices[0] ? { vendor: prices[0].vendor, price: parseFloat(prices[0].price) } : null,
-      runner_up: prices[1] ? { vendor: prices[1].vendor, price: parseFloat(prices[1].price) } : null,
-      savings_vs_next: prices.length >= 2 ? parseFloat(prices[1].price) - parseFloat(prices[0].price) : 0,
+      cheapest: asEntry(ranked[0]),
+      runner_up: asEntry(ranked[1]),
+      // Savings on the SAME basis the ranking used (r16-push P1): rank is
+      // landed per-oz when known — sticker deltas could go negative under
+      // heavy shipping despite a correct winner.
+      savings_per_oz_vs_next: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
+        ? Math.round((ranked[1].rank - ranked[0].rank) * 10000) / 10000
+        : null,
     });
   }
 
-  return { results, total: results.length };
+  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known)' };
 }
 
 
@@ -561,6 +614,7 @@ async function getApprovalQueue(input) {
     .join('vendors', 'price_approvals.vendor_id', 'vendors.id')
     .select('price_approvals.*', 'products_catalog.name as product_name',
       'products_catalog.category', 'products_catalog.best_price as current_best',
+      'products_catalog.unit_size_oz as catalog_unit_size_oz',
       'vendors.name as vendor_name')
     .orderBy('price_approvals.created_at', 'desc');
 
@@ -578,7 +632,17 @@ async function getApprovalQueue(input) {
       old_price: a.old_price ? parseFloat(a.old_price) : null,
       current_best: a.current_best ? parseFloat(a.current_best) : null,
       change_pct: a.price_change_pct ? parseFloat(a.price_change_pct) : null,
-      is_better_than_current: a.current_best ? parseFloat(a.new_price) < parseFloat(a.current_best) : true,
+      // Per-oz basis (GH r3 P1): best_price is now scaled to the catalog
+      // container, so a raw comparison against a differently sized pack
+      // lies. null = not derivable (unknown), never a raw-price guess.
+      is_better_than_current: (() => {
+        if (!a.current_best) return true;
+        const adminInventoryRoute = require('../../routes/admin-inventory');
+        const newOz = adminInventoryRoute.quantityToOz(a.new_quantity);
+        const unitOz = parseFloat(a.catalog_unit_size_oz);
+        if (!newOz || !(unitOz > 0)) return null;
+        return (parseFloat(a.new_price) / newOz) < (parseFloat(a.current_best) / unitOz);
+      })(),
       quantity: a.new_quantity,
       source_url: a.source_url,
       status: a.status,
@@ -597,39 +661,19 @@ async function approvePrice(input) {
   if (!approval) return { error: 'Approval not found' };
 
   if (action === 'approve') {
-    // Update the approval
-    await db('price_approvals').where('id', approval_id).update({
-      status: 'approved', reviewed_by: 'intelligence_bar', reviewed_at: new Date(), notes,
+    // ONE atomic approval writer (codex r4-push P1): the shared
+    // applyPriceApproval claims the still-pending row, applies the vendor
+    // price with the approved-field refresh, records history, and runs the
+    // canonical best-price recalculation in a single transaction — the old
+    // inline sequence here decided the approval BEFORE the pricing writes,
+    // so a failure left a decided approval with partial state, and a stale
+    // AI action could overwrite a concurrently rejected approval.
+    const adminInventoryRoute = require('../../routes/admin-inventory');
+    const applied = await adminInventoryRoute.applyPriceApproval(approval, 'intelligence_bar', {
+      notes, historySource: 'ai_approved',
     });
-
-    // Update vendor pricing
-    const existing = await db('vendor_pricing')
-      .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
-
-    if (existing) {
-      await db('vendor_pricing').where('id', existing.id).update({
-        previous_price: existing.price, price: approval.new_price,
-        quantity: approval.new_quantity || existing.quantity,
-        source: 'ai_approved', last_checked_at: new Date(), updated_at: new Date(),
-      });
-    } else {
-      await db('vendor_pricing').insert({
-        product_id: approval.product_id, vendor_id: approval.vendor_id,
-        price: approval.new_price, quantity: approval.new_quantity,
-        source: 'ai_approved', last_checked_at: new Date(),
-      });
-    }
-
-    // Check if this is the new best price
-    const allPrices = await db('vendor_pricing').where('product_id', approval.product_id).orderBy('price');
-    if (allPrices.length > 0) {
-      const best = allPrices[0];
-      await db('vendor_pricing').where('product_id', approval.product_id).update({ is_best_price: false });
-      await db('vendor_pricing').where('id', best.id).update({ is_best_price: true });
-      const bestVendor = await db('vendors').where('id', best.vendor_id).first();
-      await db('products_catalog').where('id', approval.product_id).update({
-        best_price: best.price, best_vendor: bestVendor?.name, needs_pricing: false,
-      });
+    if (!applied) {
+      return { error: 'Approval was already decided by another reviewer — refresh the queue' };
     }
 
     const product = await db('products_catalog').where('id', approval.product_id).first();
@@ -637,9 +681,10 @@ async function approvePrice(input) {
   }
 
   if (action === 'reject') {
-    await db('price_approvals').where('id', approval_id).update({
+    const claimed = await db('price_approvals').where({ id: approval_id, status: 'pending' }).update({
       status: 'rejected', reviewed_by: 'intelligence_bar', reviewed_at: new Date(), notes,
     });
+    if (!claimed) return { error: 'Approval was already decided by another reviewer — refresh the queue' };
     return { success: true, action: 'rejected', approval_id };
   }
 

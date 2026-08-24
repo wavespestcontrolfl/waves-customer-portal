@@ -55,11 +55,26 @@ function approvedPerOzFields(price, quantity) {
     unit_normalized: perOz != null ? 'oz' : null,
     price_per_oz: perOz,
     normalized_unit_price: perOz,
+    // Control-layer readers prefer price_amount — keep it in lockstep with
+    // the approved price (codex #3465 r2-push P1).
+    price_amount: priceNum,
+    // The approved price/pack invalidates any landed cost derived from the
+    // OLD price — and landed_unit_price now DRIVES best-price ordering, so
+    // a stale value would select the wrong vendor. No shipping info rides
+    // an approval, so clear it; ranking falls back to the fresh sticker
+    // per-oz until a price-sync snapshot re-supplies the landed cost.
+    landed_unit_price: null,
     // These writes ARE approvals; without this a new insert keeps the
     // column default approval_status='pending' and recalcBestPrice
     // (which only trusts approved rows) would never see it.
     approval_status: 'approved',
     is_active: true,
+    // A freshly approved price is CURRENT — clear any scrape expiry left on
+    // the row (codex GH r3 P1): the eligibility predicate excludes expired
+    // rows, so a stale expires_at would make the just-approved price
+    // invisible to the recalculation (or invalidate the whole catalog
+    // entry when it was the only vendor).
+    expires_at: null,
   };
 }
 
@@ -2114,6 +2129,9 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
     }
     let stale = false;
     await db.transaction(async (trx) => {
+      // Product advisory lock FIRST — same lock-order contract as
+      // applyPriceApproval (r4-push P1).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(approval.product_id)]);
       const approvedBy = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
       // Claim atomically: only a still-pending event may be approved, so a
       // superseded (auto-rejected) or stale queue tab cannot re-apply an
@@ -2154,6 +2172,15 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
           pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price ?? null;
           pricingUpdate.landed_unit_price = snapshot.landed_unit_price ?? null;
           pricingUpdate.quantity = snapshot.quantity ?? null;
+          // The unit the normalized/landed figures are DENOMINATED in must
+          // move with them (r23-push P1): the scorer divides through
+          // unit_normalized, so an 'oz' snapshot over a row previously
+          // normalized in pounds would rank ~16x cheap.
+          pricingUpdate.unit_normalized = snapshot.normalized_unit ?? null;
+          // Expiry follows the APPLIED snapshot (codex GH r3 P1): a stale
+          // expires_at from a prior scrape would immediately hide the
+          // freshly approved price from the eligibility predicate.
+          pricingUpdate.expires_at = snapshot.expires_at ?? null;
         }
         if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
         if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
@@ -2217,7 +2244,10 @@ router.put('/:productId/pricing', async (req, res, next) => {
     if (!UUID_RE.test(String(vendorId || ''))) return res.status(400).json({ error: 'vendorId must be a uuid' });
     const priceNum = Number(price);
     if (!Number.isFinite(priceNum) || priceNum <= 0) return res.status(400).json({ error: 'price must be greater than 0' });
-    const sizeOz = normalizeQuantityToOz(quantity);
+    // Robust parser (GH r3 P1): normalizeQuantityToOz alone drops supported
+    // multipack forms ("4 x 32 oz"), leaving normalized/landed unit costs
+    // null and the recalculation blind to entered shipping/tax.
+    const sizeOz = quantityToOz(quantity);
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
     const landedPerOz = sizeOz && landed != null ? Math.round(landed / sizeOz * 10000) / 10000 : perOz;
@@ -2258,6 +2288,12 @@ router.put('/:productId/pricing', async (req, res, next) => {
       expires_at: expiresAt || null,
     };
     await db.transaction(async (trx) => {
+      // Product advisory lock FIRST (shared lock-order contract), and the
+      // canonical recalculation rides THIS transaction (codex GH r3-push
+      // P1): committing the vendor write before a separate recalc left a
+      // changed price beside a catalog still pointing at the old winner
+      // whenever the recalc failed.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
       const existing = await trx('vendor_pricing')
         .where({ product_id: productId, vendor_id: vendorId }).forUpdate().first();
       if (existing) {
@@ -2286,6 +2322,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
         });
         await trx('price_history').insert({ product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual' });
       }
+      await recalcBestPrice(productId, trx);
     });
 
     try {
@@ -2326,8 +2363,6 @@ router.put('/:productId/pricing', async (req, res, next) => {
       }
     } catch { /* snapshot table may not exist on older installs */ }
 
-    // Recalculate best price
-    await recalcBestPrice(productId);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2406,11 +2441,20 @@ router.get('/approvals', async (req, res, next) => {
 // price. A failure anywhere rolls the whole approval back (still pending, no
 // partial price state), so it can simply be retried. Returns false when the
 // approval was already decided by a concurrent request.
-async function applyPriceApproval(approval, reviewedBy) {
+async function applyPriceApproval(approval, reviewedBy, { notes, historySource = 'scrape_approved' } = {}) {
   return db.transaction(async (trx) => {
+    // Product advisory lock FIRST (r4-push P1): recalcBestPrice re-acquires
+    // it (re-entrant in-session no-op), and taking it before any
+    // vendor_pricing row lock keeps every writer in the same lock order —
+    // the inverse order (row locks, then advisory) deadlocks against a
+    // standalone recalculation holding the advisory lock.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(approval.product_id)]);
     const claimed = await trx('price_approvals')
       .where({ id: approval.id, status: 'pending' })
-      .update({ status: 'approved', reviewed_by: reviewedBy, reviewed_at: new Date() });
+      .update({
+        status: 'approved', reviewed_by: reviewedBy, reviewed_at: new Date(),
+        ...(notes !== undefined && notes !== null ? { notes } : {}),
+      });
     if (!claimed) return false;
 
     const existing = await trx('vendor_pricing')
@@ -2435,7 +2479,8 @@ async function applyPriceApproval(approval, reviewedBy) {
 
     await trx('price_history').insert({
       product_id: approval.product_id, vendor_id: approval.vendor_id,
-      price: approval.new_price, quantity: approval.new_quantity, source: 'scrape_approved',
+      price: approval.new_price, quantity: approval.new_quantity,
+      source: historySource,
     });
 
     await recalcBestPrice(approval.product_id, trx);
@@ -2463,10 +2508,14 @@ router.post('/approvals/:id/approve', async (req, res, next) => {
 // =========================================================================
 router.post('/approvals/:id/reject', async (req, res, next) => {
   try {
-    await db('price_approvals').where({ id: req.params.id }).update({
+    // Pending-only claim, same as approve/bulk/IB (r6-push P1): a stale
+    // reject after a concurrent approval must not flip a row whose vendor
+    // price and catalog winner already applied.
+    const claimed = await db('price_approvals').where({ id: req.params.id, status: 'pending' }).update({
       status: 'rejected', reviewed_by: req.adminUser?.name || 'admin',
       reviewed_at: new Date(), notes: req.body.notes || null,
     });
+    if (!claimed) return res.status(409).json({ error: 'Approval was already decided; refresh the queue' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2495,9 +2544,13 @@ router.post('/approvals/bulk', async (req, res, next) => {
           const applied = await applyPriceApproval(approval, reviewedBy);
           if (!applied) { skipped.push(id); continue; }
         } else {
-          await db('price_approvals').where({ id }).update({
+          // Claim-guarded like approve (r5-push P1): a reject racing a
+          // concurrent approval must not flip a row whose vendor price and
+          // catalog winner already applied; zero rows = decided elsewhere.
+          const claimed = await db('price_approvals').where({ id, status: 'pending' }).update({
             status: 'rejected', reviewed_by: reviewedBy, reviewed_at: new Date(),
           });
+          if (!claimed) { skipped.push(id); continue; }
         }
         processed++;
       } catch (err) {
@@ -3159,9 +3212,16 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
-      if (action !== 'receive' && status === 'received') {
-        // Reopening a received request would leave the stock it added in place.
-        const err = new Error('Restock request was already received and cannot be reopened');
+      if (action !== 'receive' && ['received', 'cancelled'].includes(status)) {
+        // Terminal statuses never reopen (r5-push P1): a received request's
+        // stock is already added, and a stale tab's mark_ordered on a
+        // cancelled request would resurrect a closed order.
+        const err = new Error(`Restock request is already ${status} and cannot be reopened`);
+        err.statusCode = 409;
+        throw err;
+      }
+      if (action === 'mark_ordered' && status !== 'open') {
+        const err = new Error(`Only an open request can be marked ordered (this one is ${status}); refresh the list`);
         err.statusCode = 409;
         throw err;
       }
@@ -3250,12 +3310,29 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
 // update price/quantity without refreshing normalized_unit_price/price_per_oz,
 // so the stored per-oz fields can be stale. Stored values are only trusted
 // when the quantity cannot be parsed (nothing to validate against).
+// Stored unit-cost → per-oz, honoring the ROW's unit_normalized (codex
+// r22-push P0): normalized/landed unit prices are not always $/oz — a
+// canonical 'lb' row stores $/lb, and treating it as $/oz inflates the
+// scaled catalog price ~16x. Unknown/unconvertible units return null
+// rather than a wrong number.
+function storedUnitCostPerOz(value, unitNormalized) {
+  const v = numberOrNull(value);
+  if (v == null || v <= 0) return null;
+  const ozPerUnit = convertToOz(1, String(unitNormalized || 'oz'));
+  if (!ozPerUnit || ozPerUnit <= 0) return null;
+  return v / ozPerUnit;
+}
+
 function vendorRowPricePerOz(row) {
   const oz = quantityToOz(row.quantity);
-  const price = numberOrNull(row.price) ?? numberOrNull(row.price_amount);
+  // price_amount is the control-layer's authoritative column (the worker
+  // and its migration read price_amount ?? price) — prefer it (r3-push P1).
+  const price = numberOrNull(row.price_amount) ?? numberOrNull(row.price);
   if (oz && oz > 0 && price != null) return price / oz;
-  const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
-  return stored != null && stored > 0 ? stored : null;
+  // price_per_oz is per-oz BY NAME; normalized_unit_price converts via the
+  // row's unit_normalized (r22-push P0).
+  return storedUnitCostPerOz(row.normalized_unit_price, row.unit_normalized)
+    ?? (numberOrNull(row.price_per_oz) > 0 ? numberOrNull(row.price_per_oz) : null);
 }
 
 // ── Helper: recalculate best price for a product ──
@@ -3268,6 +3345,23 @@ function vendorRowPricePerOz(row) {
 // (no normalized price and an unparseable quantity) only compete on raw
 // price when no sized row exists, and are persisted as the raw price.
 async function recalcBestPrice(productId, dbc = db) {
+  // Serialized per product (r3-push P1): concurrent approvals for
+  // different vendors each read candidates before the other's write
+  // commits, and the LAST catalog update could persist the more expensive
+  // winner. A product-scoped advisory xact lock makes candidate read +
+  // winner/flag writes one critical section; callers already inside a
+  // transaction (legacy approval) take the lock on their own connection.
+  if (dbc !== db) {
+    await dbc.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
+    return recalcBestPriceLocked(productId, dbc);
+  }
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
+    return recalcBestPriceLocked(productId, trx);
+  });
+}
+
+async function recalcBestPriceLocked(productId, dbc) {
   // Eligibility mirrors the control-layer contract (see the review-queue
   // approve path): only active, approved/auto-approved, unexpired rows may
   // become the catalog best price — a pending or rejected scrape must never
@@ -3275,9 +3369,10 @@ async function recalcBestPrice(productId, dbc = db) {
   // legacy rows to approved/is_active=true, so this excludes nothing valid.
   const rows = await dbc('vendor_pricing')
     .where({ product_id: productId })
-    .where(function priced() {
-      this.where('vendor_pricing.price', '>', 0).orWhere('vendor_pricing.price_amount', '>', 0);
-    })
+    // Authoritative-first positivity (r21-push P1): the coalesced value the
+    // scorer actually uses must be positive — a positive legacy price must
+    // not admit a row whose authoritative price_amount is zero/negative.
+    .whereRaw('COALESCE(vendor_pricing.price_amount, vendor_pricing.price) > 0')
     .where('vendor_pricing.is_active', true)
     .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
     .where(function unexpired() {
@@ -3302,18 +3397,56 @@ async function recalcBestPrice(productId, dbc = db) {
     return;
   }
 
-  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz').first();
+  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price').first();
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
-  const scored = rows.map((row) => ({
-    row,
-    perOz: vendorRowPricePerOz(row),
-    price: numberOrNull(row.price) ?? numberOrNull(row.price_amount),
-  }));
+  const scored = rows.map((row) => {
+    // Landed cost converts through the row's unit too (r22-push P0).
+    const landedPerOz = storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
+    const perOz = vendorRowPricePerOz(row);
+    return {
+      row,
+      perOz,
+      // Landed per-oz cost (incl. shipping/fees) drives ORDERING when
+      // present — the price-sync contract (integrations-vendor-price-
+      // worker.js: COALESCE(landed_unit_price, normalized per-oz) ASC).
+      // A $50 pack with $30 shipping must not beat a delivered $60 pack.
+      // Persistence keeps the sticker-per-oz canonical-container contract.
+      rankPerOz: landedPerOz ?? perOz,
+      price: numberOrNull(row.price_amount) ?? numberOrNull(row.price),
+    };
+  });
+  // Sized = a derivable STICKER per-oz only (codex r3 P1): a landed-only
+  // row (landed_unit_price with no quantity/normalized price — allowed by
+  // the report contract) has nothing to scale to the catalog container, so
+  // letting it win the sized pool would persist its raw pack price as
+  // best_price and corrupt per-oz costing downstream.
   const sized = scored.filter((s) => s.perOz != null);
   const pool = sized.length ? sized : scored;
-  pool.sort((a, b) => (sized.length ? a.perOz - b.perOz : a.price - b.price) || a.price - b.price);
+  pool.sort((a, b) => (sized.length ? a.rankPerOz - b.rankPerOz : a.price - b.price) || a.price - b.price);
   const best = pool[0];
-  const bestPrice = best.perOz != null && unitSizeOz > 0
+  const scalable = best.perOz != null && unitSizeOz > 0;
+  // COUNT-BASED / unscalable products (codex r19-push P0, the HexPro 10x
+  // COGS bug): when neither the winner nor the product yields a per-oz
+  // conversion, the raw PACK price cannot be reconciled to the catalog's
+  // unit semantics — an intentional per-unit price ($8.69/station) must
+  // never be overwritten by the pack price ($86.94/10). Persist the raw
+  // pack price only when the catalog has NOTHING (best_price null);
+  // otherwise leave the catalog row untouched and keep the winner flags
+  // in place as-is.
+  if (!scalable && numberOrNull(product?.best_price) != null) {
+    // …but never silently: the changed vendor price means the kept catalog
+    // figure may be stale (r20-push P1). Flag it 'stale' (CHECK-constraint-legal) and clear the
+    // winner flags so the pricing-engine bridge stops trusting the backing
+    // row — displayed price preserved, silent consumption stopped.
+    await dbc('products_catalog').where({ id: productId }).update({
+      best_price_status: 'stale',
+      needs_pricing: true,
+      best_price_updated_at: new Date(),
+    });
+    await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+    return;
+  }
+  const bestPrice = scalable
     ? Math.round(best.perOz * unitSizeOz * 100) / 100
     : best.price;
 
@@ -3326,7 +3459,10 @@ async function recalcBestPrice(productId, dbc = db) {
     best_price: bestPrice,
     best_vendor: best.row.vendor_name,
     best_vendor_pricing_id: best.row.id,
-    best_price_amount_cached: bestPrice,
+    // The cache column is the winning row's RAW price_amount by the
+    // control-layer migration's definition (r6-push P1) — never the
+    // catalog-scaled figure; best_price stays the scaled costing value.
+    best_price_amount_cached: best.price,
     best_price_vendor_id_cached: best.row.vendor_id,
     best_price_updated_at: new Date(),
     best_price_status: 'current',
@@ -3728,5 +3864,19 @@ router._test = {
 // Shared with the Intelligence Bar stock tools (update_restock_request
 // receive) so both receive paths run the same WaveGuard readiness recheck.
 router.syncLawnReadinessAfterRestock = syncLawnReadinessAfterRestock;
+// The ONE best-price writer (codex #3465 r2 P1): every approval surface —
+// review queue, legacy approvals, Intelligence Bar — must recalculate the
+// catalog through this instead of writing best_price by hand.
+router.recalcBestPrice = recalcBestPrice;
+router.approvedPerOzFields = approvedPerOzFields;
+// The ONE atomic legacy-approval writer (claim pending → vendor price →
+// history → canonical recalc, one transaction) — the Intelligence Bar
+// approve_price tool reuses it instead of re-implementing the sequence.
+router.applyPriceApproval = applyPriceApproval;
+// Per-oz ranking primitives for read-side consumers (IB comparisons must
+// use the same normalized/landed basis the recalculation ranks by).
+router.vendorRowPricePerOz = vendorRowPricePerOz;
+router.storedUnitCostPerOz = storedUnitCostPerOz;
+router.quantityToOz = quantityToOz;
 
 module.exports = router;
