@@ -222,6 +222,14 @@ describe('isFunnelZone / zone matching', () => {
     // A stop stamped for ANOTHER zone must not become a Venice stop just
     // because the multi-property customer's primary city is Venice.
     expect(rowMatchesZone({ zone: 'sarasota', customer_city: 'Venice' }, VENICE_ZONE, 'venice', cities)).toBe(false);
+    // 'lakewood_ranch' is admin-schedule getZone()'s fallthrough default —
+    // NOT authoritative against a city match: a historical Port Charlotte
+    // appointment mis-stamped with it must still count via its city, while
+    // a genuine Lakewood Ranch row stays excluded through the city leg.
+    const southCities = new Set([...cities, 'port charlotte', 'punta gorda', 'englewood']);
+    expect(rowMatchesZone({ zone: 'lakewood_ranch', customer_city: 'Port Charlotte' }, VENICE_ZONE, 'venice', southCities)).toBe(true);
+    expect(rowMatchesZone({ zone: 'lakewood_ranch', service_city: 'Punta Gorda', customer_city: 'Lakewood Ranch' }, VENICE_ZONE, 'venice', southCities)).toBe(true);
+    expect(rowMatchesZone({ zone: 'lakewood_ranch', customer_city: 'Lakewood Ranch' }, VENICE_ZONE, 'venice', southCities)).toBe(false);
     // Unstamped multi-property call booking: the visit's service city
     // outranks the customer's primary city, both ways.
     expect(rowMatchesZone({ zone: null, service_city: 'Venice', customer_city: 'Sarasota' }, VENICE_ZONE, 'venice', cities)).toBe(true);

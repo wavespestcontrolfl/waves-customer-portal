@@ -87,9 +87,16 @@ function isFunnelZone(estimateZone) {
 // call bookings stamp the DESTINATION in service_address_city and leave
 // zone null — call-recording-processor's insert); customer city is the
 // fallback only when no service city was stamped.
+// admin-schedule's getZone() returns this for ANY city it doesn't
+// recognize, so a 'lakewood_ranch' stamp is the one stamp that is NOT
+// authoritative evidence against a city match — historical south-city
+// appointments carry it (getZone's list predates the deep-south corridor).
+// A genuine Lakewood Ranch row still stays excluded through the city leg.
+const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
+
 function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
   const rowZone = String(row?.zone || '').toLowerCase();
-  if (rowZone) {
+  if (rowZone && rowZone !== FALLTHROUGH_ZONE_STAMP) {
     return !!zoneSlug && (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`));
   }
   const rowCity = String(row?.service_city || row?.customer_city || '').trim().toLowerCase();
