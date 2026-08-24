@@ -83,6 +83,27 @@ describe('completionSupersededTerminalInvoiceLookup (replacement provenance, cod
   });
 });
 
+describe('sibling first-application invoices are OUT of the replacement mechanism (status quo)', () => {
+  const dispatchSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+  const siblingSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-first-application-invoice.js'), 'utf8');
+
+  test('the sibling lookup keeps its pre-PR void-only filter (a refunded sibling still suppresses, never remints)', () => {
+    expect(siblingSrc).toContain(".whereNot('i.status', 'void')");
+    expect(siblingSrc).not.toContain('CANCELLED_SERVICE_RESOLVED_STATUSES');
+    expect(siblingSrc).toMatch(/INTENTIONALLY retains refunded\/cancelled rows/);
+  });
+
+  test('the marker lookup only ever scopes to the CURRENT visit (service_record_id / scheduled_service_id), never the sibling lookup', () => {
+    const fn = dispatchSrc.slice(dispatchSrc.indexOf('async function completionSupersededTerminalInvoiceLookup'), dispatchSrc.indexOf('router.post', dispatchSrc.indexOf('async function completionSupersededTerminalInvoiceLookup')));
+    expect(fn).not.toMatch(/source_estimate_id|first_visit|findFirstApplicationInvoiceForEstimateService/);
+    const calls = dispatchSrc.match(/completionSupersededTerminalInvoiceLookup\(db, \{ [a-z_]+: [a-z.]+ \}\)/g);
+    expect(calls).toEqual([
+      'completionSupersededTerminalInvoiceLookup(db, { service_record_id: record.id })',
+      'completionSupersededTerminalInvoiceLookup(db, { scheduled_service_id: svc.id })',
+    ]);
+  });
+});
+
 describe('completion mint stamps replaces_invoice_id (source contract)', () => {
   const dispatchSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
   const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');

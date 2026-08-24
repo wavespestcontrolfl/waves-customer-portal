@@ -14,8 +14,8 @@ function makeKnex(rows = []) {
       calls.push(['where', ...args]);
       return chain;
     }),
-    whereNotIn: jest.fn((...args) => {
-      calls.push(['whereNotIn', ...args]);
+    whereNot: jest.fn((...args) => {
+      calls.push(['whereNot', ...args]);
       return chain;
     }),
     orderBy: jest.fn((...args) => {
@@ -83,7 +83,24 @@ describe('estimate first-application invoice lookup', () => {
     expect(knex.calls).toContainEqual(['where', 'i.customer_id', 'customer-1']);
     expect(knex.calls).toContainEqual(['where', 'first_visit.source_estimate_id', 'est-1']);
     expect(knex.calls).toContainEqual(['where', 'first_visit.scheduled_date', '2026-06-08']);
-    expect(knex.calls).toContainEqual(['whereNotIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled']]);
+    expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
+  });
+
+  test('a REFUNDED sibling first-application invoice still suppresses (status quo — cross-visit provenance/lock is a follow-up)', async () => {
+    const refunded = {
+      id: 'inv-sib', status: 'refunded', scheduled_service_id: 'sibling-visit',
+      title: 'WaveGuard Membership Setup + First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - $99 setup fee plus first application.',
+    };
+    const knex = makeKnex([refunded]);
+    const found = await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex,
+    );
+    expect(found).toBe(refunded);
+    // Only void is filtered here — deliberately NOT the terminal vocabulary.
+    expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
+    expect(knex.calls.some((c) => c[0] === 'whereNotIn')).toBe(false);
   });
 
   test('does not query when the service is not linked to an estimate date', async () => {
