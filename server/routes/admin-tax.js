@@ -8,7 +8,7 @@ const { taxPeriodFor } = require('../utils/tax-period');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, salesTaxCollectedForWindow,
   rateAsOf, dateCellStr, prorateAssetDepreciation, annotateMidQuarter,
-  outflowTransactionsQuery, buildQuarterlyEstimate,
+  outflowTransactionsQuery, buildQuarterlyEstimate, missingTableOnly,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1122,14 +1122,18 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       salesTaxCollectedForWindow(db, ytdStart, endDate),
       db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate])
         .select(db.raw("COALESCE(SUM(LEAST(amount, GREATEST(0, COALESCE(tax_deductible_amount, amount))))::text, '0') as total"))
-        .first().catch(() => ({ total: '0' })),
+        // Missing table tolerated in dev ONLY — any real DB failure must be a
+        // 500. Swallowing it to $0 would inflate taxable income silently.
+        .first().catch(missingTableOnly({ total: '0' })),
       qNum > 1
         ? db('tax_filing_calendar')
           .where('filing_type', '1040es_quarterly')
           .whereIn('status', ['filed', 'paid'])
           .whereIn('period_label', Array.from({ length: qNum - 1 }, (_, i) => `Q${i + 1} ${year}`))
           .select(db.raw("COALESCE(SUM(amount_paid)::text, '0') as total"))
-          .first().catch(() => ({ total: '0' }))
+          // Same: a swallowed filing-calendar failure would zero the credit
+          // and tell the operator to pay an already-paid installment again.
+          .first().catch(missingTableOnly({ total: '0' }))
         : Promise.resolve({ total: '0' }),
     ]);
 
@@ -1148,7 +1152,7 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       salesTaxCollected,
       ...est,
       dueDate: dueDates[quarter],
-      note: `Estimates assume a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as filed/paid on the filing calendar for earlier ${year} quarters are credited. Consult CPA for precise figures.`,
+      note: `Rough projection, not the IRS Form 2210 annualized-income worksheet (which uses periods ending Mar/May/Aug/Dec and factors 4/2.4/1.5/1). Assumes a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} calendar months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as filed/paid on the filing calendar for earlier ${year} quarters are credited. Consult CPA for precise figures.`,
     });
   } catch (err) { next(err); }
 });

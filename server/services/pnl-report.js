@@ -748,6 +748,16 @@ async function paidRevenueForWindow(db, startDate, endDate) {
  * paid_at, same ET-day rule as the paid-invoice gap query. Fully refunded
  * invoices flip to status 'refunded' (their cash is netted by the outflow
  * ledger), so only status='paid' rows carry a live liability here.
+ *
+ * KNOWN LIMITATIONS (invoice-level, not refund-event-level): tax is
+ * recognized by the invoice's paid_at while receipts recognize by
+ * payments.payment_date and refund outflows by their Stripe date, so a
+ * delayed webhook or cross-period refund can place the tax and its cash in
+ * adjacent periods; a PARTIAL refund leaves the invoice 'paid' and its full
+ * tax_amount excluded from revenue even if part of the refunded cash was
+ * tax (income slightly understated, never overstated). Invoices carry no
+ * per-refund tax split, so proportional refund-event attribution isn't
+ * computable from portal data — disclosed here and in the PR for the CPA.
  */
 async function salesTaxCollectedForWindow(db, startDate, endDate) {
   const row = await db('invoices')
@@ -771,7 +781,10 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
  * the annual liability, less 1040-ES payments already made this year.
  * Owner-approved assumptions: flat 22% federal bracket, SE tax 15.3% on
  * 92.35% of net earnings, half of SE tax deducted before income tax; no
- * standard deduction or QBI.
+ * standard deduction or QBI. This is a calendar-quarter projection, NOT the
+ * IRS Form 2210 annualized-income worksheet (periods ending Mar/May/Aug/Dec
+ * with factors 4/2.4/1.5/1 and 22.5/45/67.5/90% required percentages) —
+ * the response note says so, and the CPA applies the worksheet if elected.
  */
 function buildQuarterlyEstimate({ qNum, ytdRevenue = 0, ytdExpenses = 0, priorPayments = 0 } = {}) {
   const q = Math.min(4, Math.max(1, parseInt(qNum, 10) || 1));

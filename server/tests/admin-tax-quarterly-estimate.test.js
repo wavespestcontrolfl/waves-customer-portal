@@ -24,7 +24,9 @@ const rawCalls = [];
 function stage(table, ...results) { (queues[table] = queues[table] || []).push(...results); }
 function nextFor(table) {
   const q = queues[table] || [];
-  return q.length ? q.shift() : null;
+  const v = q.length ? q.shift() : null;
+  if (v instanceof Error) throw v;
+  return v;
 }
 function makeBuilder(rawTable) {
   // knex accepts aliased sources ('invoices as i') — queue by the base table.
@@ -35,7 +37,7 @@ function makeBuilder(rawTable) {
     'whereBetween', 'whereExists', 'whereNotExists', 'leftJoin', 'join',
     'groupBy', 'orderBy', 'select', 'sum', 'count', 'limit',
   ].forEach((m) => { b[m] = jest.fn(() => b); });
-  b.first = jest.fn(() => Promise.resolve(nextFor(table)));
+  b.first = jest.fn(() => new Promise((res) => res(nextFor(table))));
   // Awaiting the builder directly (list queries) resolves the staged value too.
   b.then = (res, rej) => Promise.resolve(nextFor(table)).then(res, rej);
   b.catch = (fn) => Promise.resolve(nextFor(table)).catch(fn);
@@ -135,6 +137,21 @@ describe('GET /admin/tax/revenue/quarterly-estimate', () => {
     expect(res.body.quarterlyPayment).toBeCloseTo(
       Math.max(0, res.body.requiredCumulative - 2000), 2,
     );
+  });
+
+  test('a real expenses DB failure is a 500, never a silent $0 that inflates the estimate', async () => {
+    stageRevenueWindow();
+    stage('expenses', new Error('connection reset'));
+    const res = await get('/admin/tax/revenue/quarterly-estimate?quarter=Q1&year=2026');
+    expect(res.status).toBe(500);
+  });
+
+  test('a filing-calendar failure is a 500 — a zeroed credit would re-bill a paid installment', async () => {
+    stageRevenueWindow();
+    stage('expenses', { total: '5000' });
+    stage('tax_filing_calendar', new Error('connection reset'));
+    const res = await get('/admin/tax/revenue/quarterly-estimate?quarter=Q2&year=2026');
+    expect(res.status).toBe(500);
   });
 
   test('rejects a bad quarter', async () => {
