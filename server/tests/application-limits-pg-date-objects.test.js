@@ -99,6 +99,26 @@ describe('application-limits with pg date columns as JS Date objects', () => {
     expect(result.blocks[0]).toMatchObject({ type: 'min_interval_days', current: 10, max: 14 });
     expect(result.blocks[0].message).not.toContain('NaN');
   });
+
+  test('(b2) min_interval_days: first legal ET day before 08:00 ET counts whole calendar days (not blocked)', async () => {
+    const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
+    const limit = {
+      id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
+      limit_value: 14, severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+    };
+    db
+      .mockReturnValueOnce(chain({ first: product }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', city: 'Bradenton' } }))
+      .mockReturnValueOnce(chain({ rows: [{ id: 'pah-1', product_id: 'prod-h', application_date: pgDate('2026-07-05'), application_rate: '1' }] }))
+      .mockReturnValueOnce(chain({ rows: [limit] }));
+
+    // 2026-07-19 04:00Z is 00:00 ET on July 19 — exactly 14 calendar days later.
+    const result = await applicationLimits.checkLimits('cust-1', 'prod-h', new Date('2026-07-19T04:00:00Z'));
+
+    expect(result.allowed).toBe(true);
+    expect(result.blocks).toHaveLength(0);
+    expect(result.warnings[0]).toMatchObject({ type: 'min_interval_days', current: 14, max: 14 });
+  });
 });
 
 describe('compliance service with pg date columns as JS Date objects', () => {
