@@ -2540,8 +2540,19 @@ router.get('/', async (req, res, next) => {
         if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
       } catch { /* non-blocking */ }
       let duesPaidThisMonth = null;
+      // Visit-month dues for the coverage prediction — keyed on the VISIT's
+      // date like completion is (a week spanning month-end must not read
+      // this month's dues as covering next month's visit); the current-month
+      // flag above stays the card's "dues paid" indicator. Lookup errors
+      // predict as not-collected (never widen coverage).
+      let visitMonthDuesCollected = false;
       if (lane.mode === 'monthly_membership') {
         try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        if (!autopayActive) {
+          try {
+            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`));
+          } catch { visitMonthDuesCollected = false; }
+        }
       }
       const billingLane = {
         mode: lane.mode,
@@ -2567,6 +2578,7 @@ router.get('/', async (req, res, next) => {
           prepaidAmount: s.prepaid_amount,
           prepaidMethod: s.prepaid_method || null,
           annualCoverageValidated,
+          duesCollectedThisMonth: visitMonthDuesCollected,
         }),
       };
       // Payment-capture flag — the tech needs to know at the doorstep that
@@ -3038,8 +3050,15 @@ router.get('/week', async (req, res, next) => {
           if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
         } catch { /* non-blocking */ }
         let duesPaidThisMonth = null;
+        // Visit-month dues for the prediction (see day view).
+        let visitMonthDuesCollected = false;
         if (lane.mode === 'monthly_membership') {
           try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+          if (!autopayActive) {
+            try {
+              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`));
+            } catch { visitMonthDuesCollected = false; }
+          }
         }
         // Same attached-invoice precedence as the day payload — the week
         // sheet must not quote a fresh computation when completion will
@@ -3076,6 +3095,7 @@ router.get('/week', async (req, res, next) => {
             prepaidAmount: s.prepaid_amount,
             prepaidMethod: s.prepaid_method || null,
             annualCoverageValidated,
+            duesCollectedThisMonth: visitMonthDuesCollected,
           }),
         };
         return {
