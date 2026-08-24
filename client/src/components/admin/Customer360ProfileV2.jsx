@@ -5185,7 +5185,7 @@ export default function Customer360ProfileV2({
   if (loading || (data?.customer && !loadedCustomerMatches))
     return createPortal(
       <div
-        className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
+        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
       >
         {" "}
@@ -5204,7 +5204,7 @@ export default function Customer360ProfileV2({
   if (!data || !data.customer)
     return createPortal(
       <div
-        className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
+        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
       >
         {" "}
@@ -5562,7 +5562,10 @@ export default function Customer360ProfileV2({
 
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
+      // Portaled to <body>, so the overlay leaves the admin shell's DOM
+      // scope — restate .admin-shell-v2 here to keep the forced-Roboto and
+      // border-box form-control rules from index.css applying inside it.
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
       {" "}
