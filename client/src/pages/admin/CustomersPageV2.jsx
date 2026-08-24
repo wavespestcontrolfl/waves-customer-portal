@@ -472,9 +472,16 @@ function QuickAddModalV2({
     normalizeQuickAddInitialValues(initialValues),
   );
   useEffect(() => {
-    if (open) setForm(normalizeQuickAddInitialValues(initialValues));
+    if (open) {
+      setForm(normalizeQuickAddInitialValues(initialValues));
+      setPhoneMatch(null);
+    }
   }, [open, initialValues]);
   const [submitting, setSubmitting] = useState(false);
+  // 409 phone-match conflict from POST /admin/customers ({ code, match }) —
+  // the admin picks attach / duplicate / separate account, and we resubmit
+  // with the matching confirm flag.
+  const [phoneMatch, setPhoneMatch] = useState(null);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
   const selectedTags = Array.isArray(form.tags) ? form.tags : [];
@@ -510,9 +517,7 @@ function QuickAddModalV2({
     set("customTag", "");
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!form.firstName.trim() || !form.phone.trim()) return;
+  const submitCustomer = async (extraFlags = {}) => {
     setSubmitting(true);
     try {
       const body = {
@@ -520,6 +525,7 @@ function QuickAddModalV2({
         addressLine1: form.address,
         profileLabel: resolvedProfileLabel || undefined,
         tags: selectedTags,
+        ...extraFlags,
       };
       delete body.customProfileLabel;
       delete body.customTag;
@@ -533,9 +539,20 @@ function QuickAddModalV2({
       });
       if (!r.ok) {
         const errorBody = await r.json().catch(() => ({}));
+        // Live phone match (server confirm gate): surface the choice instead
+        // of a failure — the admin resubmits with the chosen confirm flag.
+        if (
+          r.status === 409 &&
+          (errorBody.code === "DUPLICATE_PROFILE" ||
+            errorBody.code === "PHONE_MATCH_CONFIRM")
+        ) {
+          setPhoneMatch(errorBody);
+          return;
+        }
         throw new Error(errorBody.message || errorBody.error || `HTTP ${r.status}`);
       }
       const data = await r.json().catch(() => ({}));
+      setPhoneMatch(null);
       onCreated(data);
       onClose();
     } catch (err) {
@@ -543,6 +560,12 @@ function QuickAddModalV2({
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.firstName.trim() || !form.phone.trim()) return;
+    await submitCustomer();
   };
 
   const INPUT_CLS =
@@ -562,6 +585,59 @@ function QuickAddModalV2({
         {" "}
         <DialogBody className="flex flex-col gap-3">
           {" "}
+          {phoneMatch && (
+            <div
+              className="rounded-sm border-hairline border-zinc-300 bg-zinc-50 p-3 flex flex-col gap-2"
+              role="status"
+            >
+              <div className="text-13 text-zinc-900">
+                This phone belongs to{" "}
+                <strong>{phoneMatch.match?.name || "an existing customer"}</strong>
+                {phoneMatch.match?.address
+                  ? ` at ${phoneMatch.match.address}`
+                  : ""}
+                .{" "}
+                {phoneMatch.code === "DUPLICATE_PROFILE"
+                  ? "They already have a profile at this address — submitting again would create a duplicate."
+                  : "Attach this address to their account as an additional property, or create a separate account."}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="primary"
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitCustomer(
+                      phoneMatch.code === "DUPLICATE_PROFILE"
+                        ? { confirmDuplicate: true }
+                        : { confirmAttach: true },
+                    )
+                  }
+                >
+                  {phoneMatch.code === "DUPLICATE_PROFILE"
+                    ? "Create duplicate profile"
+                    : "Attach as additional property"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitCustomer({ forceNewAccount: true, ignorePhoneMatch: true })
+                  }
+                >
+                  Create separate account
+                </Button>
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={() => setPhoneMatch(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             {" "}
             <div>
@@ -1059,9 +1135,23 @@ export default function CustomersPageV2() {
   // close handler must not clobber the just-created profile's URL, so the
   // created ID rides a ref for closeAddCustomer to preserve.
   const createdCustomerIdRef = useRef(null);
+  // Transient notice after an admin-confirmed attach: names the account the
+  // new profile landed on so the attach is never silent.
+  const [attachNotice, setAttachNotice] = useState(null);
+  const attachNoticeTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(attachNoticeTimerRef.current), []);
   const handleQuickAddCreated = (customer) => {
     loadCustomers();
     if (view === "pipeline") loadPipeline();
+    if (customer?.attachedToExistingAccount) {
+      setAttachNotice(
+        customer.existingCustomerName
+          ? `Added as an additional property on ${customer.existingCustomerName}'s account`
+          : "Added as an additional property on an existing customer's account",
+      );
+      clearTimeout(attachNoticeTimerRef.current);
+      attachNoticeTimerRef.current = setTimeout(() => setAttachNotice(null), 6000);
+    }
     if (customer?.id) {
       createdCustomerIdRef.current = String(customer.id);
       // Deep-link into the newly created profile.
@@ -2218,6 +2308,14 @@ export default function CustomersPageV2() {
           initialValues={quickAddPreset}
           onCreated={handleQuickAddCreated}
         />
+      )}
+      {attachNotice && (
+        <div
+          role="status"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[130] rounded-sm bg-zinc-900 text-white text-13 px-4 py-2 shadow-lg"
+        >
+          {attachNotice}
+        </div>
       )}
 
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
