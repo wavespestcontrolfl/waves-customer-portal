@@ -193,7 +193,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const idx = src.indexOf('refundedOnVisit = await completionTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
     const chainStart = src.indexOf('let existingCompletionInvoice = null;');
-    const siblingAt = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);', chainStart);
+    const siblingAt = src.indexOf('const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);', chainStart);
     expect(chainStart).toBeLessThan(idx);
     expect(idx).toBeLessThan(siblingAt);
     // Unconditional (not gated on the suppressors finding nothing) — an
@@ -249,7 +249,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const refundedOnVisit = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: svc.id });
     let terminal;
     ({ existing, terminal } = reconcileLiveVsRefunded(existing, refundedOnVisit));
-    if (!existing && !terminal) existing = await findFirstApplicationInvoiceForEstimateService(svc, knex);
+    if (!existing && !terminal) existing = (await findFirstApplicationInvoiceForEstimateService(svc, knex)).invoice;
 
     expect(existing).toBeFalsy();
     expect(terminal).toEqual({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded', created_at: '2026-08-20' });
@@ -263,7 +263,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
       createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 120, serviceType: 'Pest Control', isCallback: false,
     })).toBe(false);
     // Sanity: WITHOUT the reorder the sibling fallback WOULD return the refunded own row.
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, knex)).resolves.toBe(refundedOwn);
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, knex)).resolves.toEqual({ invoice: refundedOwn, liveBeside: null });
   });
 
   test('a REFUNDED sibling first-application row is routed to the manual path; a canceled sibling is dropped from reuse and the mint proceeds (splitTerminalCompletionInvoice)', () => {
@@ -276,10 +276,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(splitTerminalCompletionInvoice(live)).toEqual({ existing: live, terminal: null });
     expect(splitTerminalCompletionInvoice(null)).toEqual({ existing: null, terminal: null });
     // Wired right after the sibling lookup, before anything reads the row.
-    const at = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);');
-    expect(src.slice(at, at + 400)).toContain('const split = splitTerminalCompletionInvoice(existingCompletionInvoice);');
-    expect(src.slice(at, at + 400)).toContain('existingCompletionInvoice = split.existing;');
-    expect(src.slice(at, at + 400)).toContain('if (split.terminal) terminalCompletionInvoice = split.terminal;');
+    const at = src.indexOf('const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);');
+    expect(src.slice(at, at + 700)).toContain('const split = splitTerminalCompletionInvoice(existingCompletionInvoice);');
+    expect(src.slice(at, at + 700)).toContain('existingCompletionInvoice = split.existing;');
+    expect(src.slice(at, at + 700)).toContain('terminalCompletionInvoice = split.terminal;');
+    // The refunded sibling's live match is named in the alert (codex r7).
+    expect(src.slice(at, at + 900)).toContain('completionLiveBesideInvoice = siblingFirstApplication.liveBeside || null;');
   });
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
@@ -440,18 +442,19 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     }
     const canceledNewer = { id: 'inv-canceled', status: 'canceled', created_at: '2026-08-20', ...matchFields };
     const liveOlder = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01', ...matchFields };
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toBe(liveOlder);
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toEqual({ invoice: liveOlder, liveBeside: null });
     // Only canceled matches → nothing suppresses, the mint proceeds.
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toBeNull();
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null });
     // A refunded match wins in ANY mint order — there is no reliable
     // refund-event clock, so it always reaches the caller's terminal path
     // instead of a live sibling's pay link going out while the refund
     // could still bounce.
     const refundedNewer = { id: 'inv-refunded', status: 'refunded', created_at: '2026-08-25', ...matchFields };
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([refundedNewer, liveOlder]))).resolves.toBe(refundedNewer);
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([refundedNewer, liveOlder]))).resolves.toEqual({ invoice: refundedNewer, liveBeside: liveOlder });
     const liveNewer = { id: 'inv-live-new', status: 'sent', token: 't2', created_at: '2026-08-20', ...matchFields };
     const refundedOlder = { id: 'inv-ref-old', status: 'refunded', created_at: '2026-08-01', ...matchFields };
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedOlder]))).resolves.toBe(refundedOlder);
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedOlder]))).resolves.toEqual({ invoice: refundedOlder, liveBeside: liveNewer });
+    // …and the live match rides along so the caller's alert names it.
   });
 });
 

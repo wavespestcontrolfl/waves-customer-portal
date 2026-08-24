@@ -8694,11 +8694,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     try {
       if (!existingCompletionInvoice && !terminalCompletionInvoice) {
-        existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
+        const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);
+        existingCompletionInvoice = siblingFirstApplication.invoice;
         if (!recapReviewOnly) {
           const split = splitTerminalCompletionInvoice(existingCompletionInvoice);
           existingCompletionInvoice = split.existing;
-          if (split.terminal) terminalCompletionInvoice = split.terminal;
+          if (split.terminal) {
+            terminalCompletionInvoice = split.terminal;
+            // A live first-application sibling beside the refunded one —
+            // the manual-billing alert names it (codex #3456 r7), same as
+            // the own-visit reconciliation's liveBeside.
+            completionLiveBesideInvoice = siblingFirstApplication.liveBeside || null;
+          }
         }
       }
       if (existingCompletionInvoice) {

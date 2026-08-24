@@ -77,7 +77,7 @@ describe('estimate first-application invoice lookup', () => {
       scheduled_date: '2026-06-08',
     }, knex);
 
-    expect(result).toBe(firstApplicationInvoice);
+    expect(result).toEqual({ invoice: firstApplicationInvoice, liveBeside: null });
     expect(knex.calls).toContainEqual(['table', 'invoices as i']);
     expect(knex.calls).toContainEqual(['join', 'scheduled_services as first_visit', 'i.scheduled_service_id', 'first_visit.id']);
     expect(knex.calls).toContainEqual(['where', 'i.customer_id', 'customer-1']);
@@ -97,7 +97,7 @@ describe('estimate first-application invoice lookup', () => {
       { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
       knex,
     );
-    expect(found).toBe(refunded);
+    expect(found).toEqual({ invoice: refunded, liveBeside: null });
     // Only void is filtered here — deliberately NOT the terminal vocabulary.
     expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
     expect(knex.calls.some((c) => c[0] === 'whereNotIn')).toBe(false);
@@ -109,7 +109,7 @@ describe('estimate first-application invoice lookup', () => {
     await expect(findFirstApplicationInvoiceForEstimateService({
       customer_id: 'customer-1',
       scheduled_date: '2026-06-08',
-    }, knex)).resolves.toBeNull();
+    }, knex)).resolves.toEqual({ invoice: null, liveBeside: null });
 
     expect(knex).not.toHaveBeenCalled();
   });
