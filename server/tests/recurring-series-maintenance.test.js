@@ -125,6 +125,7 @@ function ongoingScenario({
   // the caller's conn): weekly days-off JSON + one-off blackout rows.
   weeklyValue = null, blackoutRows = [],
   latestDate = '2098-07-15', seriesDates = ['2098-01-15', '2098-04-15', '2098-07-15'],
+  addonRows = [],
 }) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -138,6 +139,7 @@ function ongoingScenario({
   const inserted = [];
   const alertInserts = [];
   const reminderWrites = [];
+  const addonInserts = [];
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
       if (op === 'columnInfo') return COLS;
@@ -165,7 +167,8 @@ function ongoingScenario({
     }
     if (table === 'scheduled_service_addons') {
       if (op === 'columnInfo') return {};
-      return [];
+      if (op === 'insert' || op === 'insertReturning') { addonInserts.push(data); return [1]; }
+      return addonRows;
     }
     if (table === 'appointment_reminders') {
       // Only the race re-check writes here (update chains resolve via 'await').
@@ -186,7 +189,7 @@ function ongoingScenario({
     }
     return null;
   };
-  return { conn: makeConn(handler), inserted, alertInserts, reminderWrites, parent };
+  return { conn: makeConn(handler), inserted, alertInserts, reminderWrites, addonInserts, parent };
 }
 
 describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
@@ -324,6 +327,23 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     expect(inserted[0].scheduled_date).toBe('2098-10-16');
+  });
+
+  test('an add-on due on the nudged occurrence still rides the visit (blackout-aware add-on matching)', async () => {
+    // The quarterly add-on is due on the raw Oct 15 occurrence; the visit is
+    // nudged to Oct 16 by the one-off blackout — the add-on mirror must
+    // follow it, not silently drop the line.
+    const { conn, inserted, addonInserts } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      blackoutRows: ['2098-10-15'],
+      addonRows: [{ id: 'ad-1', service_id: 'svc-9', service_name: 'Flea Add-On', recurring_pattern: 'quarterly' }],
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date).toBe('2098-10-16');
+    expect(addonInserts).toHaveLength(1);
+    expect(addonInserts[0]).toMatchObject({ service_name: 'Flea Add-On' });
   });
 
   test('weekly days off (Sat+Sun closed) are honored even with skip_weekends=false — business closures beat row preferences', async () => {

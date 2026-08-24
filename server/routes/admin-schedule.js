@@ -1895,7 +1895,11 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
   }
 }
 
-function lineDueOnRecurringDate(line, baseDateStr, targetDateStr) {
+// `blackoutDates` must be the same layers the visit-date generator used:
+// a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
+// on that occurrence, so the add-on walk applies the same nudge before the
+// exact-date match.
+function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null) {
   const pattern = line?.recurringPattern || line?.recurring_pattern || null;
   if (!pattern) return true;
   if (pattern === 'one_time') return false;
@@ -1912,16 +1916,17 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr) {
   const dir = (line.weekendShift || line.weekend_shift) === 'back' ? 'back' : 'forward';
   for (let i = 1; i <= 120; i++) {
     const raw = nextRecurringDate(base, pattern, i, opts);
-    const due = seasonalSafeShift(raw, pattern, !!skip, dir);
+    const due = seasonalSafeShift(raw, pattern, !!skip, dir, blackoutDates);
+    if (!due) continue;
     if (due === target) return true;
     if (due > target) return false;
   }
   return false;
 }
 
-function filterAddonLinesForDate(addons, baseDateStr, targetDateStr) {
+function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null) {
   return (Array.isArray(addons) ? addons : [])
-    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr));
+    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates));
 }
 
 function calculateAppointmentDiscountDollars(discount, subtotal) {
@@ -4277,7 +4282,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
         if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
-        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr);
+        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
         // operator turns a re-service into a repeating cadence, every future
@@ -4343,7 +4348,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
-          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
+          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
@@ -7339,7 +7344,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
-              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
+              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               if (memberSeriesCovered && cols.estimated_price) {
                 // Dues cover the base visit — keep an ADD-ON-ONLY stamp when
@@ -7385,7 +7390,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (parentAddons.length > 0 && childRow?.id) {
               try {
                 const addonCols = await db('scheduled_service_addons').columnInfo();
-                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
+                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
                 for (const addon of dueAddons) {
                   const addonData = {
                     scheduled_service_id: childRow.id,
@@ -9050,7 +9055,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates);
     applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
@@ -9332,7 +9337,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
           } catch { parentAddons = []; }
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
+          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates);
           applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
@@ -13761,6 +13766,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
   let parent = null;
   let parentAddons = [];
   let ongoingStopped = 0;
+  // Hoisted: the post-commit add-on mirror needs the same blackout layers
+  // the in-trx date generators used.
+  let alertBlackoutDates = null;
   const spawned = []; // committed inserts → post-commit addon/reminder steps
 
   const runLocked = async (trx) => {
@@ -13861,7 +13869,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
     const seriesDateSeed = await loadActiveSeriesDates(trx, parentId);
     seriesDateSeed.add(baseDateStr);
-    const alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
+    alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
 
     let created = 0;
     if (action === 'extend') {
@@ -13897,7 +13905,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -13954,7 +13962,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -14024,7 +14032,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
     try {
       const addonCols = await conn('scheduled_service_addons').columnInfo();
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate);
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates);
       for (const addon of dueAddons) {
         const addonData = {
           scheduled_service_id: childId,
