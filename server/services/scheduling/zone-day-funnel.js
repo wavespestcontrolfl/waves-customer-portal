@@ -78,13 +78,17 @@ function isFunnelZone(estimateZone) {
 // multi-property customer whose primary city is Venice must not reclassify
 // a stop stamped for another zone as a Venice stop. Legacy backfill slugs
 // are underscore compounds of the modern slug ('venice_north_port' for
-// 'venice'), matched by prefix. Customer city decides only unstamped rows.
+// 'venice'), matched by prefix. For unstamped rows, the visit-level
+// service city outranks the linked customer's primary city (multi-property
+// call bookings stamp the DESTINATION in service_address_city and leave
+// zone null — call-recording-processor's insert); customer city is the
+// fallback only when no service city was stamped.
 function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
   const rowZone = String(row?.zone || '').toLowerCase();
   if (rowZone) {
     return !!zoneSlug && (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`));
   }
-  const rowCity = String(row?.customer_city || '').toLowerCase();
+  const rowCity = String(row?.service_city || row?.customer_city || '').trim().toLowerCase();
   return !!rowCity && zoneCities.has(rowCity);
 }
 
@@ -112,6 +116,7 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',
+      'scheduled_services.service_address_city as service_city',
       'customers.city as customer_city',
     );
 

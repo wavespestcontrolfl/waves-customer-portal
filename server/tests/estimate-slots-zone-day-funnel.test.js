@@ -215,6 +215,11 @@ describe('isFunnelZone / zone matching', () => {
     // A stop stamped for ANOTHER zone must not become a Venice stop just
     // because the multi-property customer's primary city is Venice.
     expect(rowMatchesZone({ zone: 'sarasota', customer_city: 'Venice' }, VENICE_ZONE, 'venice', cities)).toBe(false);
+    // Unstamped multi-property call booking: the visit's service city
+    // outranks the customer's primary city, both ways.
+    expect(rowMatchesZone({ zone: null, service_city: 'Venice', customer_city: 'Sarasota' }, VENICE_ZONE, 'venice', cities)).toBe(true);
+    expect(rowMatchesZone({ zone: null, service_city: 'Sarasota', customer_city: 'Venice' }, VENICE_ZONE, 'venice', cities)).toBe(false);
+    expect(rowMatchesZone({ zone: null, service_city: null, customer_city: 'Venice' }, VENICE_ZONE, 'venice', cities)).toBe(true);
   });
 });
 
