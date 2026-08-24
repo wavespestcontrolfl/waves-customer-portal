@@ -158,7 +158,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
 
   test('the own-visit terminal lookup runs after the direct suppressors and BEFORE the sibling first-application fallback, which is skipped when a terminal invoice exists', () => {
-    const idx = src.indexOf('const refundedOnVisit = await completionTerminalInvoiceLookup(db, {');
+    const idx = src.indexOf('refundedOnVisit = await completionTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
     const chainStart = src.indexOf('let existingCompletionInvoice = null;');
     const siblingAt = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);', chainStart);
@@ -166,8 +166,15 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(idx).toBeLessThan(siblingAt);
     // Unconditional (not gated on the suppressors finding nothing) — an
     // older live row must not mask a newer refunded one.
-    expect(src.slice(idx - 60, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*$/);
-    expect(src.slice(idx, idx + 400)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit)');
+    expect(src.slice(idx - 120, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*let refundedOnVisit = null;\s*try \{\s*$/);
+    expect(src.slice(idx, idx + 1600)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit)');
+    // Fail CLOSED: outside the non-blocking suppressor try (that catch sits
+    // BEFORE this lookup), and its own failure releases the attempt + 503.
+    const directCatch = src.indexOf('} catch (e) { invoiceLookupFailed = true; /* non-blocking */ }', chainStart);
+    expect(directCatch).toBeLessThan(idx);
+    expect(src.slice(idx, idx + 1600)).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);');
+    expect(src.slice(idx, idx + 1600)).toContain("code: 'terminal_invoice_lookup_failed',");
+    expect(src.slice(idx, idx + 1600)).not.toContain('invoiceLookupFailed = true');
     expect(src.slice(siblingAt - 100, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice\) \{\s*$/);
     expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
     const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));

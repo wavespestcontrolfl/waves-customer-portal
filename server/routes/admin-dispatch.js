@@ -8594,25 +8594,51 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
       }
-      // Own-visit refunded check right after the direct suppressors and
-      // BEFORE the sibling first-application fallback (pre-push P0): that
-      // fallback matches the current visit too (same customer/estimate/
-      // date) and filters only 'void', so it would hand back this visit's
-      // own refunded invoice as a dead pay link and skip the alert. Runs
-      // UNCONDITIONALLY (not only when the suppressors found nothing) and
-      // reconciles by recency: a refunded invoice NEWER than the live row
-      // the suppressor found wins (manual path, older live row not reused);
-      // an older refunded one is history. Siblings are consulted only when
-      // neither a live nor a refunded own-visit invoice stands.
-      if (!recapReviewOnly) {
-        const refundedOnVisit = await completionTerminalInvoiceLookup(db, {
+    } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+    // Own-visit refunded check right after the direct suppressors and
+    // BEFORE the sibling first-application fallback (pre-push P0): that
+    // fallback matches the current visit too (same customer/estimate/
+    // date) and filters only 'void', so it would hand back this visit's
+    // own refunded invoice as a dead pay link and skip the alert. Runs
+    // UNCONDITIONALLY (not only when the suppressors found nothing) and
+    // reconciles by recency: a refunded invoice NEWER than the live row
+    // the suppressor found wins (manual path, older live row not reused);
+    // an older refunded one is history. Siblings are consulted only when
+    // neither a live nor a refunded own-visit invoice stands.
+    // OUTSIDE the non-blocking try above and FAIL CLOSED (pre-push P0):
+    // invoiceLookupFailed only blocks the typed-required lane, so a
+    // swallowed failure here would let every other billable lane mint
+    // beside an unseen refunded invoice that refund.failed may restore to
+    // paid. The service_record is already committed, so a failure releases
+    // the attempt for resume and 503s — the same exit as a required mint
+    // failure; the retry re-runs this check.
+    if (!recapReviewOnly) {
+      let refundedOnVisit = null;
+      try {
+        refundedOnVisit = await completionTerminalInvoiceLookup(db, {
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
         });
-        const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit);
-        existingCompletionInvoice = reconciled.existing;
-        terminalCompletionInvoice = reconciled.terminal;
+      } catch (lookupErr) {
+        logger.error(`[dispatch] refunded-invoice check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The refunded-invoice check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The refunded-invoice check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'terminal_invoice_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
       }
+      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit);
+      existingCompletionInvoice = reconciled.existing;
+      terminalCompletionInvoice = reconciled.terminal;
+    }
+    try {
       if (!existingCompletionInvoice && !terminalCompletionInvoice) {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
         if (!recapReviewOnly) {
@@ -8640,7 +8666,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           else invoiceCreated = true;
         }
       }
-    } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+    } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
