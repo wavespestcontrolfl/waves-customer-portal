@@ -4245,6 +4245,33 @@ function completionSuppressorInvoiceLookup(conn, where) {
     .first();
 }
 
+// Terminal statuses that BLOCK the completion mint instead of being
+// re-billed (codex #3456): a refunded/canceled invoice's money may still
+// come back (refund.failed at the bank), and a replacement minted in that
+// window can never be reconciled safely against the restored original.
+// So the completion mints NOTHING for a visit that carries one of these
+// and reuses NOTHING either (no pay link to a dead invoice) — it parks the
+// visit on the admin billing bell for a human to bill once the refund is
+// final. 'void' is deliberately NOT here: a voided invoice is an operator
+// decision that nothing restores, so a mint after it is a plain invoice.
+const COMPLETION_TERMINAL_INVOICE_STATUSES = ['refunded', 'canceled', 'cancelled'];
+
+// The terminal invoice on THIS visit (its own service_record_id /
+// scheduled_service_id — never the sibling first-application lookup), or
+// null. Newest wins across both identifiers in one ordered query.
+async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId) return null;
+  return (await conn('invoices')
+    .where((qb) => {
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
+    .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('id', 'invoice_number', 'status')) || null;
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -8506,6 +8533,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     let existingCompletionInvoice = null;
+    // A refunded/canceled invoice on THIS visit (codex #3456): the suppressor
+    // above skips it (it collects nothing), but a fresh mint beside it is
+    // unsafe while its refund can still bounce — so it blocks the mint via
+    // shouldAutoInvoiceCompletion and parks a manual-billing alert below.
+    // Never assigned to `invoice` / `payUrl` (no pay link to a dead invoice).
+    let terminalCompletionInvoice = null;
     try {
       existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
@@ -8520,6 +8553,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       if (!existingCompletionInvoice) {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
+      }
+      if (!existingCompletionInvoice && !recapReviewOnly) {
+        terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {
+          serviceRecordId: record.id,
+          scheduledServiceId: svc.id,
+        });
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
@@ -8601,6 +8640,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopayCoversVisit,
       preMintedInvoice,
       existingCompletionInvoice,
+      // Refunded/canceled invoice on this visit → never mint a replacement
+      // (codex #3456); the manual-billing alert below owns the follow-up.
+      terminalInvoiceOnVisit: !!terminalCompletionInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -8642,6 +8684,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (annualPrepayBilling && !shouldInvoice && !recapReviewOnly && !prepaidCovered && !alreadyPaid
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
+    }
+    // Terminal invoice blocked the mint (codex #3456): the visit ran and is
+    // owed money, but its prior invoice was refunded/canceled and NO
+    // replacement is minted (a bounced refund could restore the original
+    // beside it). Park it on the admin billing bell — same notification
+    // mechanism and dedupe pattern as the dues-covered alert below — so a
+    // human bills it once the refund is final. Skipped when something else
+    // already covers the money (paid / prepaid / dues / pre-minted).
+    if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
+      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {
+      logger.warn(`[dispatch] visit ${svc.id}: prior invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status} — NO replacement invoice minted; manual billing alert parked`);
+      try {
+        const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first();
+          if (already) return;
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Completed visit needs manual billing — prior invoice was refunded/canceled',
+            `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link. Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).`,
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+          );
+        });
+      } catch (e) { logger.warn(`[dispatch] terminal-invoice manual-billing alert failed: ${e.message}`); }
     }
     // Membership dues suppressed a PRICED recurring visit: log + park a
     // one-bell-per-series review alert. Emitted only here — after the
@@ -13818,6 +13888,10 @@ function shouldAutoInvoiceCompletion({
   autopayCoversVisit,
   preMintedInvoice,
   existingCompletionInvoice,
+  // A refunded/canceled invoice on the visit (codex #3456): suppresses like
+  // an existing invoice — no replacement is ever minted — but the route
+  // parks a manual-billing alert instead of reusing it.
+  terminalInvoiceOnVisit = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -13864,6 +13938,11 @@ function shouldAutoInvoiceCompletion({
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
+  // Refunded/canceled invoice on the visit (codex #3456): a suppressor like
+  // the ones above — sits ABOVE the governed posture too, because even a
+  // frozen REQUIRED mint must not cut a replacement beside an invoice whose
+  // refund can still bounce; the route parks the manual-billing alert.
+  if (terminalInvoiceOnVisit) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every
@@ -14132,6 +14211,8 @@ module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
+  completionTerminalInvoiceLookup,
+  COMPLETION_TERMINAL_INVOICE_STATUSES,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,

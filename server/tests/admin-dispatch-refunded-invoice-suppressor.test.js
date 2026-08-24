@@ -14,7 +14,12 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { completionSuppressorInvoiceLookup } = require('../routes/admin-dispatch')._test;
+const {
+  completionSuppressorInvoiceLookup,
+  completionTerminalInvoiceLookup,
+  COMPLETION_TERMINAL_INVOICE_STATUSES,
+  shouldAutoInvoiceCompletion,
+} = require('../routes/admin-dispatch')._test;
 const InvoiceService = require('../services/invoice');
 
 function makeKnex(rows) {
@@ -58,6 +63,136 @@ describe('completionSuppressorInvoiceLookup', () => {
     expect(InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).toEqual(
       expect.arrayContaining(['void', 'refunded', 'canceled', 'cancelled'])
     );
+  });
+});
+
+describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS visit blocks the mint)', () => {
+  function makeOrderedKnex(rows) {
+    let scopes = [];
+    let included = null;
+    const orders = [];
+    const chain = {
+      where: jest.fn((arg) => {
+        if (typeof arg === 'function') {
+          const qb = { orWhere: jest.fn((cond) => { scopes.push(cond); return qb; }) };
+          arg(qb);
+        }
+        return chain;
+      }),
+      whereIn: jest.fn((col, list) => { included = list; return chain; }),
+      orderBy: jest.fn((col, dir) => { orders.push([col, dir]); return chain; }),
+      first: jest.fn(async () => {
+        const matches = rows.filter((r) => included.includes(r.status)
+          && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
+        matches.sort((a, b) => (b.created_at.localeCompare(a.created_at)) || String(b.id).localeCompare(String(a.id)));
+        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status } : undefined;
+      }),
+    };
+    const knex = jest.fn(() => chain);
+    knex.scopes = () => scopes; knex.orders = orders;
+    return knex;
+  }
+
+  test.each(['refunded', 'canceled', 'cancelled'])('finds the %s invoice on the visit', async (status) => {
+    const knex = makeOrderedKnex([{ id: `inv-${status}`, invoice_number: 'WPC-1', status, scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
+    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toEqual({ id: `inv-${status}`, invoice_number: 'WPC-1', status });
+    expect(knex.scopes()).toEqual([{ scheduled_service_id: 'svc-1' }]);
+  });
+
+  test('one ordered query across both identifiers — newest wins', async () => {
+    const knex = makeOrderedKnex([
+      { id: 'inv-old', status: 'refunded', service_record_id: 'rec-1', created_at: '2026-08-01' },
+      { id: 'inv-new', status: 'canceled', scheduled_service_id: 'svc-1', created_at: '2026-08-20' },
+    ]);
+    const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
+    expect(found.id).toBe('inv-new');
+    expect(knex.scopes()).toEqual([{ service_record_id: 'rec-1' }, { scheduled_service_id: 'svc-1' }]);
+    expect(knex.orders).toEqual([['created_at', 'desc'], ['id', 'desc']]);
+    expect(knex).toHaveBeenCalledTimes(1);
+  });
+
+  test('a VOID invoice does not block (nothing restores a void); a live one is not terminal', async () => {
+    expect(COMPLETION_TERMINAL_INVOICE_STATUSES).not.toContain('void');
+    const voidKnex = makeOrderedKnex([{ id: 'inv-void', status: 'void', service_record_id: 'rec-1', created_at: '2026-08-20' }]);
+    await expect(completionTerminalInvoiceLookup(voidKnex, { serviceRecordId: 'rec-1' })).resolves.toBeNull();
+    const liveKnex = makeOrderedKnex([{ id: 'inv-sent', status: 'sent', service_record_id: 'rec-1', created_at: '2026-08-20' }]);
+    await expect(completionTerminalInvoiceLookup(liveKnex, { serviceRecordId: 'rec-1' })).resolves.toBeNull();
+    const none = makeOrderedKnex([]);
+    await expect(completionTerminalInvoiceLookup(none, {})).resolves.toBeNull();
+    expect(none).not.toHaveBeenCalled();
+  });
+});
+
+describe('shouldAutoInvoiceCompletion: a terminal invoice on the visit suppresses the mint', () => {
+  const billable = {
+    recapReviewOnly: false, alreadyPaid: false, prepaidCovered: false, autopayCoversVisit: false,
+    preMintedInvoice: null, existingCompletionInvoice: null,
+    createInvoiceOnComplete: true, waveguardTier: null, perApplicationBilling: false, annualPrepayBilling: false,
+    hasVisitPrice: true, invoiceAmount: 120, autoInvoicePricedVisits: false, serviceType: 'Pest Control', isCallback: false,
+  };
+  test('baseline: the same visit without a terminal invoice mints', () => {
+    expect(shouldAutoInvoiceCompletion({ ...billable })).toBe(true);
+  });
+  test('terminalInvoiceOnVisit → false (no replacement is ever minted)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...billable, terminalInvoiceOnVisit: true })).toBe(false);
+  });
+});
+
+describe('completion route: terminal invoice → no mint, no pay link, manual-billing alert, report-only SMS (source contract)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+
+  test('the terminal lookup runs only after the whole suppressor chain (incl. the sibling lookup) resolved null, own-visit identifiers only', () => {
+    const idx = src.indexOf('terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {');
+    expect(idx).toBeGreaterThan(-1);
+    expect(src.slice(idx - 300, idx)).toMatch(/findFirstApplicationInvoiceForEstimateService\(svc, db\);[\s\S]*if \(!existingCompletionInvoice && !recapReviewOnly\) \{\s*$/);
+    expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
+    const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));
+    expect(fn).not.toMatch(/source_estimate_id|first_visit|findFirstApplicationInvoiceForEstimateService/);
+  });
+
+  test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
+    expect(src).not.toMatch(/invoice = terminalCompletionInvoice/);
+    expect(src).not.toMatch(/terminalCompletionInvoice\.token/);
+    expect(src).not.toMatch(/payUrl = [^;]*terminalCompletionInvoice/);
+    expect(src).not.toMatch(/invoiceCreated = true;[^\n]*terminal/);
+  });
+
+  test('it feeds shouldAutoInvoiceCompletion as terminalInvoiceOnVisit and the helper treats it as a suppressor', () => {
+    expect(src).toContain('terminalInvoiceOnVisit: !!terminalCompletionInvoice,');
+    const gateAt = src.indexOf('|| preMintedInvoice || existingCompletionInvoice) {');
+    const terminalAt = src.indexOf('if (terminalInvoiceOnVisit) return false;');
+    const governAt = src.indexOf('if (backfillMintRequired === true) return true;');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(terminalAt).toBeGreaterThan(gateAt);
+    // Above the governed REQUIRED posture: a frozen required mint must not
+    // cut a replacement beside a refundable invoice either.
+    expect(governAt).toBeGreaterThan(terminalAt);
+  });
+
+  test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
+    const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at - 900, at + 1800);
+    expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
+    expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {');
+    expect(block).toContain("require('../services/notification-service').notifyAdmin(");
+    expect(block).toContain("'billing',");
+    expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded/canceled');
+    expect(block).toContain('bell: true');
+    expect(block).toMatch(/whereRaw\("metadata->>'dedupeKey' = \?", \[dedupeKey\]\)/);
+    // Same mechanism as the dues-covered alert (not a parallel one).
+    expect(src).toContain("const dedupeKey = `dues_covered_priced_series:${svc.recurring_parent_id || svc.id}`;");
+  });
+
+  test('the completion SMS pay-link branch requires an invoice the completion created — with none, the report-only template is used', () => {
+    expect(src).toContain('} else if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {');
+    expect(src).toContain("let body = await renderTemplate('service_complete', {");
+  });
+
+  test('the sibling first-application lookup keeps its pre-PR void-only filter (a refunded sibling still suppresses)', () => {
+    const sibling = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-first-application-invoice.js'), 'utf8');
+    expect(sibling).toContain(".whereNot('i.status', 'void')");
+    expect(sibling).not.toContain('CANCELLED_SERVICE_RESOLVED_STATUSES');
   });
 });
 
