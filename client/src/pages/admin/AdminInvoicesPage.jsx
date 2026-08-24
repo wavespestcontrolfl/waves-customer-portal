@@ -4374,10 +4374,14 @@ function PaymentPlanModal({
 
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
-  // Set when POST /admin/invoices succeeded but /schedule-send failed: the
-  // invoice row EXISTS, so the primary button must retry delivery of that
-  // same row — creating again would duplicate the invoice.
+  // Set ({ invoice, reason }) when POST /admin/invoices succeeded but
+  // /schedule-send failed: the invoice row EXISTS, so the editable builder
+  // must not render for it again — every editable-retry variant leaked
+  // (duplicate create on customer reselect, un-synced fields/attachments).
+  // A recovery panel replaces the form and operates only on the persisted
+  // row: adjust time + retry schedule, send now, or keep as draft.
   const [pendingScheduleInvoice, setPendingScheduleInvoice] = useState(null);
+  const [retryScheduleAt, setRetryScheduleAt] = useState("");
   const editMode = !!editInvoice;
   // Editing an invoice the customer already received: the copy in their inbox
   // is stale until Adam resends, so the form shows a reminder and the save
@@ -4974,33 +4978,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         dueDate,
       };
 
-      // A pending schedule retry means the invoice row already exists —
-      // reuse it and only re-attempt the delivery step below.
-      let invoice = pendingScheduleInvoice;
-      if (!invoice) {
-        invoice = await adminFetch("/admin/invoices", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-      } else {
-        // The form stayed editable while parked in retry mode — persist any
-        // edits BEFORE delivering, or the scheduled invoice could differ
-        // from what the form shows. Same PUT contract handleSave uses (the
-        // server retotals from line items); a refused edit throws into the
-        // outer catch, the builder stays in retry mode with the reason.
-        invoice = await adminFetch(`/admin/invoices/${invoice.id}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            notes: notes || null,
-            email_message: emailMessage || null,
-            due_date: dueDate,
-            line_items: body.lineItems,
-          }),
-        });
-        setPendingScheduleInvoice(invoice);
-      }
+      const invoice = await adminFetch("/admin/invoices", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
 
-      if (!pendingScheduleInvoice && queuedAttachments.length > 0 && invoice.id) {
+      if (queuedAttachments.length > 0 && invoice.id) {
         try {
           await uploadInvoiceAttachments(invoice.id, queuedAttachments);
         } catch (attachmentErr) {
@@ -5058,18 +5041,21 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             }),
           });
         } catch (schedErr) {
-          // Post-create failure, but the operator's schedule choice must
-          // survive (the resend dialog only sends immediately). Keep the
-          // builder open in retry mode: the primary button re-attempts
-          // delivery of this same invoice — create is skipped, so a second
-          // click can never duplicate the row.
-          setPendingScheduleInvoice(invoice);
+          // Post-create failure: the row exists, so the editable builder
+          // must never render for it again (a second Create would duplicate
+          // it, and stale form edits would drift from the persisted row).
+          // Swap to the recovery panel below.
+          setRetryScheduleAt(invoiceScheduledFor() || "");
+          setPendingScheduleInvoice({
+            invoice,
+            reason: schedErr.message || "Scheduling failed",
+          });
           showToast(
             invoiceCreatedSendFailedToast(
               invoice.invoice_number,
               "scheduled",
               schedErr,
-              "Adjust the time and press the button again to schedule this same invoice.",
+              "Pick a new time to retry, send now, or keep it as a draft.",
             ),
           );
           setSaving(false);
@@ -5219,27 +5205,72 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     borderRadius: 10,
     ...style,
   });
-  // A different customer selection invalidates a pending schedule retry —
-  // the next Create is a genuinely new invoice for the new customer.
-  useEffect(() => {
-    setPendingScheduleInvoice(null);
-  }, [selectedCustomer?.id]);
+  // Recovery-panel actions: each one targets ONLY the already-persisted row.
+  const retryReviewBody = () => ({
+    requestReview,
+    reviewDelayMinutes: reviewDelayMinutes(),
+    reviewTiming,
+    reviewScheduledFor: reviewTiming === "custom" ? reviewCustomAt : null,
+  });
+
+  const retrySchedule = async () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    if (!pInv || !retryScheduleAt || saving) return;
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/invoices/${pInv.id}/schedule-send`, {
+        method: "POST",
+        body: JSON.stringify({
+          scheduledFor: retryScheduleAt,
+          ...retryReviewBody(),
+        }),
+      });
+      showToast(`Invoice scheduled: ${pInv.invoice_number}`);
+      onCreated();
+    } catch (err) {
+      setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+      showToast(`Still not scheduled: ${err.message}`);
+    }
+    setSaving(false);
+  };
+
+  const retrySendNow = async () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    if (!pInv || saving) return;
+    setSaving(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${pInv.id}/send`, {
+        method: "POST",
+        body: JSON.stringify(retryReviewBody()),
+      });
+      showToast(invoiceCreatedSendToast(pInv.invoice_number, res));
+      onCreated();
+    } catch (err) {
+      setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+      showToast(`Send failed: ${err.message}`);
+    }
+    setSaving(false);
+  };
+
+  const keepAsDraft = () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    showToast(
+      `Invoice created: ${pInv?.invoice_number || ""} (draft) — edit or send it from the list`,
+    );
+    onCreated();
+  };
 
   const primaryActionLabel = editMode
     ? saving
       ? "Saving..."
       : "Save Changes"
-    : pendingScheduleInvoice
-      ? saving
-        ? "Retrying..."
-        : `Retry — ${pendingScheduleInvoice.invoice_number} already created`
-      : saving
-        ? "Creating..."
-        : sendTiming === "now"
-          ? "Send Invoice"
-          : sendTiming === "draft"
-            ? "Create Draft"
-            : "Schedule Invoice";
+    : saving
+      ? "Creating..."
+      : sendTiming === "now"
+        ? "Send Invoice"
+        : sendTiming === "draft"
+          ? "Create Draft"
+          : "Schedule Invoice";
   const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
   const queuedAttachmentHelpId = "invoice-create-attachments-help";
   const queuedAttachmentStatusId = "invoice-create-attachments-status";
@@ -5260,6 +5291,64 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     textAlign: "right",
     whiteSpace: "nowrap",
   };
+
+  if (pendingScheduleInvoice && !editMode) {
+    const pInv = pendingScheduleInvoice.invoice;
+    return (
+      <div style={panelStyle({ padding: isMobile ? 14 : 16, maxWidth: 560 })}>
+        <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
+          Invoice {pInv.invoice_number} created — scheduling failed
+        </div>
+        <div style={{ color: D.muted, marginTop: 6, marginBottom: 12 }}>
+          {pendingScheduleInvoice.reason}
+        </div>
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4 }}>
+            New send time
+          </span>
+          <input
+            type="datetime-local"
+            value={retryScheduleAt}
+            onChange={(e) => setRetryScheduleAt(e.target.value)}
+            style={{ padding: 8 }}
+          />
+        </label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={retrySchedule}
+            disabled={saving || !retryScheduleAt}
+            style={{
+              ...sBtn(D.heading, D.white, isMobile),
+              opacity: saving || !retryScheduleAt ? 0.5 : 1,
+            }}
+          >
+            {saving ? "Working..." : "Retry schedule"}
+          </button>
+          <button
+            onClick={retrySendNow}
+            disabled={saving}
+            style={{
+              ...sBtn("#111", D.white, isMobile),
+              opacity: saving ? 0.5 : 1,
+            }}
+          >
+            Send now
+          </button>
+          <button
+            onClick={keepAsDraft}
+            disabled={saving}
+            style={sBtn("transparent", D.text, isMobile)}
+          >
+            Keep as draft
+          </button>
+        </div>
+        <div style={{ color: D.muted, fontSize: 13, marginTop: 10 }}>
+          Need to change the invoice itself? Keep it as a draft, then edit it
+          from the list.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
