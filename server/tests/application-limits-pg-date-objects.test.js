@@ -69,6 +69,18 @@ describe('application-limits with pg date columns as JS Date objects', () => {
     expect(result.blocks[0].message).toContain('06/01 — 09/30');
   });
 
+  test('(a2) pg DATE proposedDate: Jun 1 (first blackout day) is blocked, Oct 1 (first day after) is allowed', async () => {
+    mockNitrogenCheck(blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30')));
+    const jun1 = await applicationLimits.checkLimits('cust-1', 'prod-n', pgDate('2026-06-01'));
+    expect(jun1.allowed).toBe(false);
+    expect(jun1.blocks[0]).toMatchObject({ type: 'seasonal_blackout', current: 'in_blackout' });
+
+    mockNitrogenCheck(blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30')));
+    const oct1 = await applicationLimits.checkLimits('cust-1', 'prod-n', pgDate('2026-10-01'));
+    expect(oct1.allowed).toBe(true);
+    expect(oct1.blocks).toHaveLength(0);
+  });
+
   test('(c) string season window still works and dates outside the window are allowed', async () => {
     mockNitrogenCheck(blackoutLimit('2026-06-01', '2026-09-30'));
     const inside = await applicationLimits.checkLimits('cust-1', 'prod-n', new Date('2026-07-15T16:00:00Z'));

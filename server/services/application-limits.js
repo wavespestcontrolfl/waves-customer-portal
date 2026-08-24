@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { etParts, etDateString, etCalendarDayOf } = require('../utils/datetime-et');
+const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 
 class ApplicationLimitChecker {
   async checkLimits(customerId, productId, proposedDate = new Date()) {
@@ -97,7 +97,9 @@ class ApplicationLimitChecker {
         if (!limit.season_start || !limit.season_end) return { violated: false };
         // Compare ET calendar days (YYYY-MM-DD), not Date objects — blackout
         // windows are legal calendar dates, not absolute timestamps.
-        const proposedYMD = etDateString(proposedDate);
+        // proposedDate may be a hydrated pg DATE (UTC midnight) — keep its
+        // literal calendar day rather than shifting to the prior ET day.
+        const proposedYMD = etCalendarDayOf(proposedDate);
         // season_start/season_end are pg `date` columns → JS Date objects;
         // String(date).slice(5, 10) yields "Jun 0", never a MM-DD.
         const startMMDD = etCalendarDayOf(limit.season_start).slice(5, 10);
