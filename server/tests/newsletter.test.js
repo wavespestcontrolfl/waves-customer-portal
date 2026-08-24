@@ -131,6 +131,22 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).toMatch(/"ac"\."deleted_at" is not null/);
   });
 
+  // Regression (#3449 hunt finding): an archived customer re-booked as a NEW
+  // customers row (create paths never re-run the twin picker) left the
+  // subscriber linked to the archived row and silenced forever. The fix is
+  // the relink SWEEP (relinkArchivedLinkedSubscribers, run by every gating
+  // count and by sendCampaign before any audience read) — deliberately NOT
+  // a read-side lift in this predicate: a lift would let a still-stale link
+  // send with the archived profile driving segmentation/personalization/
+  // touchpoints (codex #3472 r5). The anti-join stays strict; only
+  // successfully relinked rows send.
+  test('NO read-side live-twin lift inside the archived anti-join — the relink sweep owns re-booked households', () => {
+    const { sql } = excludeArchivedCustomers(
+      db('newsletter_subscribers').where({ status: 'active' }),
+    ).toSQL();
+    expect(sql).not.toMatch(/lt\.email|LOWER\(TRIM\(newsletter_subscribers\.email\)\)/);
+  });
+
   test('customersOnly adds customer_id IS NOT NULL', () => {
     const { sql } = shapeOf({ customersOnly: true });
     expect(sql).toMatch(/"customer_id" is not null/);

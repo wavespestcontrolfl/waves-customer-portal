@@ -7338,7 +7338,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Nitrogen
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.nApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7353,7 +7353,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Phosphorus
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.pApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7368,7 +7368,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Potassium
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.kApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7383,7 +7383,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Entries
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {nutrientSummary.entries || 0}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">

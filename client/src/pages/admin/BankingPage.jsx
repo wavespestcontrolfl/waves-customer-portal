@@ -128,7 +128,7 @@ function Badge({ children, color }) {
         padding: "2px 10px",
         borderRadius: 9999,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         background: `${color || D.muted}22`,
         color: color || D.muted,
         textTransform: "capitalize",
@@ -465,7 +465,7 @@ function PayoutsTab() {
                                         fontSize: 12,
                                         textAlign: "right",
                                         fontFamily: MONO,
-                                        fontWeight: 600,
+                                        fontWeight: 500,
                                       }}
                                     >
                                       {t.net != null ? fmtM(t.net) : "--"}
@@ -971,7 +971,7 @@ function ReconciliationTab() {
             >
               <div style={{ flex: 1, minWidth: 150 }}>
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {fmtD(item.date || item.created)}
                 </div>{" "}
@@ -1073,7 +1073,7 @@ function ReconciliationTab() {
                       padding: "8px 14px",
                       color: "#fff",
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       cursor:
                         reconciling === item.id || !actuals[item.id]
                           ? "not-allowed"
@@ -1182,7 +1182,7 @@ function ExportsTab() {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 14,
           }}
@@ -1329,7 +1329,7 @@ function ExportsTab() {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
             }}
@@ -1361,7 +1361,7 @@ function ExportsTab() {
                       ...tdStyle,
                       textAlign: "right",
                       fontFamily: MONO,
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {fmtM(p.amount)}
@@ -1656,7 +1656,7 @@ function PayoutModal({
               justifyContent: "space-between",
             }}
           >
-            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
               Net Transfer
             </span>{" "}
             <span
@@ -1854,7 +1854,7 @@ export default function BankingPage() {
               padding: "12px 28px",
               color: D.white,
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: balanceError || !available || available <= 0 ? "not-allowed" : "pointer",
               opacity: balanceError || !available || available <= 0 ? 0.4 : 1,
               minHeight: 44,
@@ -1877,7 +1877,7 @@ export default function BankingPage() {
               padding: "12px 24px",
               color: D.text,
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: !instantPayoutAvailable ? "not-allowed" : "pointer",
               opacity: !instantPayoutAvailable ? 0.4 : 1,
               minHeight: 44,

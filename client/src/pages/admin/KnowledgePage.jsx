@@ -189,7 +189,7 @@ function QAModal({ onClose }) {
               background: D.teal,
               color: "#fff",
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: loading ? 0.5 : 1,
             }}
@@ -466,7 +466,7 @@ function HealthCheck() {
             alignItems: "center",
             justifyContent: "center",
             fontSize: 24,
-            fontWeight: 800,
+            fontWeight: 700,
             fontFamily: MONO,
             background: scoreColor + "22",
             color: scoreColor,
@@ -477,7 +477,7 @@ function HealthCheck() {
         </div>{" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Wiki Health Score
           </div>{" "}
           <div style={{ fontSize: 13, color: D.muted }}>
@@ -499,7 +499,7 @@ function HealthCheck() {
               }}
             >
               {" "}
-              <span style={{ color: D.heading, fontWeight: 600 }}>
+              <span style={{ color: D.heading, fontWeight: 500 }}>
                 {issue.title || issue.article}
               </span>{" "}
               <span style={{ color: D.muted, marginLeft: 8 }}>
@@ -624,7 +624,7 @@ function SourcesView() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -757,7 +757,7 @@ function SourcesView() {
           {" "}
           <div>
             {" "}
-            <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+            <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
               {s.filename}
             </div>{" "}
             <div style={{ fontSize: 11, color: D.muted }}>
@@ -939,7 +939,7 @@ export default function KnowledgePage({ embedded = false }) {
                   <div
                     style={{
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       textTransform: "capitalize",
                     }}
@@ -985,7 +985,7 @@ export default function KnowledgePage({ embedded = false }) {
               <div
                 style={{
                   fontSize: 18,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}
@@ -1024,7 +1024,7 @@ export default function KnowledgePage({ embedded = false }) {
                       <div
                         style={{
                           fontSize: 14,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -1087,7 +1087,7 @@ export default function KnowledgePage({ embedded = false }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.teal,
                     marginBottom: 6,
                   }}

@@ -312,7 +312,7 @@ const sPanelTitle = {
 const sLabel = {
   display: "block",
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   color: C.gray,
   marginBottom: 6,
   textTransform: "uppercase",
@@ -431,7 +431,7 @@ const sTierDetail = {
 };
 const sTierPrice = {
   fontFamily: "'JetBrains Mono', monospace",
-  fontWeight: 600,
+  fontWeight: 500,
   fontSize: 16,
   color: C.green,
   textAlign: "right",
@@ -2948,7 +2948,7 @@ function EstimateToolView() {
                               color: C.teal,
                               textAlign: "center",
                               marginTop: 2,
-                              fontWeight: 600,
+                              fontWeight: 500,
                             }}
                           >
                             Micro
@@ -2975,7 +2975,7 @@ function EstimateToolView() {
                               color: C.teal,
                               textAlign: "center",
                               marginTop: 2,
-                              fontWeight: 600,
+                              fontWeight: 500,
                             }}
                           >
                             Ultra
@@ -3079,7 +3079,7 @@ function EstimateToolView() {
                         style={{
                           fontSize: 12,
                           color: C.red,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           padding: "6px 10px",
                           background: "rgba(239,68,68,0.1)",
                           borderRadius: 6,
@@ -3718,7 +3718,7 @@ function EstimateToolView() {
               {hasAnyTermiteSelection && (
                 <div style={sSubOpts}>
                   {" "}
-                  <div style={{ fontSize: 13, fontWeight: 600, color: C.heading, marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: C.heading, marginBottom: 6 }}>
                     Termite Measurements
                   </div>
                   <div style={{ fontSize: 11, color: C.gray, marginBottom: 12 }}>
@@ -4471,7 +4471,7 @@ function EstimateToolView() {
                         color: C.teal,
                         cursor: "pointer",
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         textDecoration: "underline",
                       }}
                     >
@@ -4674,7 +4674,7 @@ function EstimateToolView() {
                         borderRadius: 8,
                         color: C.teal,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                       onClick={nextEstimate}
@@ -4689,7 +4689,7 @@ function EstimateToolView() {
                         borderRadius: 8,
                         color: C.gray,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                       onClick={() => {
@@ -5061,7 +5061,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontSize: 11,
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   fontFamily: "'JetBrains Mono', monospace",
                                   color:
                                     m.type === "up"
@@ -5671,7 +5671,7 @@ function EstimateToolView() {
                             </div>
                           ))}
                           {marginNotes.map((note, i) => (
-                            <div key={`margin-${i}`} style={{ color: C.ink, fontWeight: 600 }}>
+                            <div key={`margin-${i}`} style={{ color: C.ink, fontWeight: 500 }}>
                               {note}
                             </div>
                           ))}
@@ -5864,7 +5864,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   color: C.green,
                                 }}
                               >
@@ -5888,7 +5888,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   color: C.green,
                                 }}
                               >
@@ -5912,7 +5912,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   color: C.green,
                                 }}
                               >
@@ -5944,7 +5944,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   color: C.green,
                                 }}
                               >
@@ -5973,7 +5973,7 @@ function EstimateToolView() {
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   color: C.green,
                                 }}
                               >
@@ -6003,7 +6003,7 @@ function EstimateToolView() {
                                 <span
                                   style={{
                                     fontFamily: "'JetBrains Mono', monospace",
-                                    fontWeight: 600,
+                                    fontWeight: 500,
                                     color: C.green,
                                   }}
                                 >
@@ -6106,7 +6106,7 @@ function EstimateToolView() {
                             <span
                               style={{
                                 fontFamily: "'JetBrains Mono', monospace",
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 color: C.green,
                               }}
                             >
@@ -6127,7 +6127,7 @@ function EstimateToolView() {
                             <span
                               style={{
                                 fontFamily: "'JetBrains Mono', monospace",
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 color: C.green,
                               }}
                             >
@@ -6306,7 +6306,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
         <label
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: C.gray,
             textTransform: "uppercase",
             letterSpacing: 0.8,
@@ -6338,7 +6338,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
               background: "transparent",
               color: C.gray,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -6430,7 +6430,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
         <label
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: C.gray,
             textTransform: "uppercase",
             letterSpacing: 0.8,
@@ -6488,7 +6488,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
               background: "transparent",
               color: C.gray,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -6812,7 +6812,7 @@ function EstimatePipelineView() {
                 background: isActive ? f.color : C.card,
                 color: isActive ? "#fff" : f.color,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 transition: "all 0.15s",
                 border: `1px solid ${isActive ? f.color : C.border}`,
               }}
@@ -6908,7 +6908,7 @@ function EstimatePipelineView() {
                     <span
                       style={{
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: C.heading,
                       }}
                     >
@@ -6958,7 +6958,7 @@ function EstimatePipelineView() {
                           borderRadius: 4,
                           background: `${C.blue}22`,
                           color: C.blue,
-                          fontWeight: 600,
+                          fontWeight: 500,
                         }}
                       >
                         Switching from: {competitor}
@@ -6973,7 +6973,7 @@ function EstimatePipelineView() {
                           borderRadius: 4,
                           background: `${C.red}15`,
                           color: C.red,
-                          fontWeight: 600,
+                          fontWeight: 500,
                         }}
                       >
                         {e.declineReason}
@@ -7109,7 +7109,7 @@ function EstimatePipelineView() {
                       background: e.isPriority ? `${C.red}22` : "transparent",
                       color: e.isPriority ? C.red : C.gray,
                       fontSize: 11,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       lineHeight: 1,
                     }}
                   >
@@ -7137,7 +7137,7 @@ function EstimatePipelineView() {
                         background: C.teal,
                         color: "#fff",
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Send
@@ -7158,7 +7158,7 @@ function EstimatePipelineView() {
                           : `${C.amber}22`,
                         color: urgency ? urgency.color : C.amber,
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Follow Up
@@ -7194,7 +7194,7 @@ function EstimatePipelineView() {
                         background: "transparent",
                         color: C.teal,
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Resend
@@ -7213,7 +7213,7 @@ function EstimatePipelineView() {
                         background: "transparent",
                         color: C.red,
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Mark Lost
@@ -7235,7 +7235,7 @@ function EstimatePipelineView() {
                         background: "transparent",
                         color: C.gray,
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Copy Link
@@ -7351,7 +7351,7 @@ function WebsiteQuotesView() {
               }}
             >
               {" "}
-              <span style={{ fontSize: 14, fontWeight: 600, color: C.heading }}>
+              <span style={{ fontSize: 14, fontWeight: 500, color: C.heading }}>
                 {e.customerName || "Unknown"}
               </span>{" "}
               <span style={{ fontSize: 16 }}>{sourceIcon(e.source)}</span>{" "}

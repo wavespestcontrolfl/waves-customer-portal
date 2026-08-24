@@ -80,7 +80,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -89,7 +89,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 const sInput = {
@@ -357,6 +357,13 @@ function DashboardTab({ showToast }) {
     0,
   );
   const weekOT = Math.max(0, weekShiftMin - 2400);
+  // Only show techs with activity — hide inactive techs with 0 hours/jobs
+  const liveTechs = allTechs.filter((tech) => {
+    const active = activeShifts.find((s) => s.technician_id === tech.id);
+    const summary = todaySummaries.find((s) => s.technician_id === tech.id);
+    const hasWeekActivity = weekDailies.some((d) => d.technician_id === tech.id);
+    return active || summary || hasWeekActivity;
+  });
 
   return (
     <div>
@@ -364,7 +371,7 @@ function DashboardTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -381,21 +388,12 @@ function DashboardTab({ showToast }) {
           marginBottom: 24,
         }}
       >
-        {allTechs
-          .filter((tech) => {
-            // Only show techs with activity — hide inactive techs with 0 hours/jobs
-            const active = activeShifts.find(
-              (s) => s.technician_id === tech.id,
-            );
-            const summary = todaySummaries.find(
-              (s) => s.technician_id === tech.id,
-            );
-            const hasWeekActivity = weekDailies.some(
-              (d) => d.technician_id === tech.id,
-            );
-            return active || summary || hasWeekActivity;
-          })
-          .map((tech) => {
+        {liveTechs.length === 0 && (
+          <div style={{ fontSize: 14, color: D.muted, padding: "4px 0" }}>
+            No one clocked in
+          </div>
+        )}
+        {liveTechs.map((tech) => {
             const active = activeShifts.find(
               (s) => s.technician_id === tech.id,
             );
@@ -438,7 +436,7 @@ function DashboardTab({ showToast }) {
                       boxShadow: active ? `0 0 8px ${D.green}` : "none",
                     }}
                   />{" "}
-                  <div style={{ fontWeight: 600, color: D.heading, flex: 1 }}>
+                  <div style={{ fontWeight: 500, color: D.heading, flex: 1 }}>
                     {tech.name}
                   </div>{" "}
                   <span
@@ -488,7 +486,7 @@ function DashboardTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -526,7 +524,7 @@ function DashboardTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -859,7 +857,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
         </button>{" "}
         <span
           style={{
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             fontFamily: MONO,
             fontSize: 14,
@@ -934,7 +932,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                   style={{ borderBottom: `1px solid ${D.border}` }}
                 >
                   {" "}
-                  <td style={{ ...tdStyle, fontWeight: 600, color: D.heading }}>
+                  <td style={{ ...tdStyle, fontWeight: 500, color: D.heading }}>
                     {tech.name}
                   </td>
                   {DAYS.map((_, i) => {
@@ -966,7 +964,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                       >
                         {" "}
                         <span
-                          style={{ color, fontFamily: MONO, fontWeight: 600 }}
+                          style={{ color, fontFamily: MONO, fontWeight: 500 }}
                         >
                           {hrs}
                         </span>{" "}
@@ -1017,7 +1015,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -1109,7 +1107,7 @@ const thStyle = {
   textAlign: "left",
   color: D.muted,
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   borderBottom: `1px solid ${D.border}`,
 };
 const tdStyle = { padding: "8px 6px", color: D.text, fontSize: 12 };
@@ -1868,7 +1866,7 @@ function AnalyticsTab() {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -1915,7 +1913,7 @@ function AnalyticsTab() {
                     style={{ borderBottom: `1px solid ${D.border}` }}
                   >
                     {" "}
-                    <td style={{ ...tdStyle, fontWeight: 600 }}>
+                    <td style={{ ...tdStyle, fontWeight: 500 }}>
                       {s.svc_type}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
@@ -1962,7 +1960,7 @@ function AnalyticsTab() {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -2034,7 +2032,7 @@ function AnalyticsTab() {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -2084,7 +2082,7 @@ function AnalyticsTab() {
                     style={{ borderBottom: `1px solid ${D.border}` }}
                   >
                     {" "}
-                    <td style={{ ...tdStyle, fontWeight: 600 }}>{name}</td>{" "}
+                    <td style={{ ...tdStyle, fontWeight: 500 }}>{name}</td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
                       {fmt(latest?.avg_rpmh)}
                     </td>{" "}
@@ -2111,7 +2109,7 @@ function AnalyticsTab() {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -2129,7 +2127,7 @@ function AnalyticsTab() {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -2545,7 +2543,7 @@ export function TeamTab({ showToast }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2648,7 +2646,7 @@ export function TeamTab({ showToast }) {
               border: "none",
               color: D.teal,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               marginBottom: 8,
               textAlign: "left",
@@ -2991,7 +2989,7 @@ export function TeamTab({ showToast }) {
                         alignItems: "center",
                         justifyContent: "center",
                         fontSize: 11,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       {(t.name || "?")
@@ -3008,7 +3006,7 @@ export function TeamTab({ showToast }) {
                     padding: "10px 12px",
                     borderBottom: `1px solid ${D.border}`,
                     color: D.heading,
-                    fontWeight: 600,
+                    fontWeight: 500,
                   }}
                 >
                   {" "}
@@ -3341,7 +3339,7 @@ function EarningsBlock({ label, data }) {
         <span
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.muted,
             textTransform: "uppercase",
             letterSpacing: 0.5,
@@ -3723,7 +3721,7 @@ function DocumentsTab({ showToast }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3911,7 +3909,7 @@ function DocumentsTab({ showToast }) {
                 <div
                   style={{
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 10,
                   }}
@@ -4063,7 +4061,7 @@ function DocumentsTab({ showToast }) {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                       overflow: "hidden",
@@ -4182,7 +4180,7 @@ function DocumentsTab({ showToast }) {
                     borderRadius: 6,
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -4241,7 +4239,7 @@ function DocumentsTab({ showToast }) {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 6,
             }}
@@ -4662,7 +4660,7 @@ function ApprovalsTab({ showToast }) {
                     <div
                       style={{
                         fontSize: 13,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 8,
                       }}
@@ -4741,7 +4739,7 @@ function ApprovalsTab({ showToast }) {
                           <div
                             style={{
                               fontSize: 13,
-                              fontWeight: 600,
+                              fontWeight: 500,
                               color: D.red,
                               marginBottom: 8,
                             }}

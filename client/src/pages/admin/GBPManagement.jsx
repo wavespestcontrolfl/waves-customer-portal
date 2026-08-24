@@ -49,7 +49,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
   fontFamily: "'Roboto', Arial, sans-serif",
 });
@@ -74,7 +74,7 @@ const sLabel = {
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
-  fontWeight: 600,
+  fontWeight: 500,
   marginBottom: 4,
   display: "block",
 };
@@ -84,7 +84,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 
@@ -356,7 +356,7 @@ export default function GBPManagement() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: selectedLoc?.id === l.id ? D.teal : D.heading,
               }}
             >
@@ -572,7 +572,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -612,7 +612,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
               style={{
                 fontSize: 12,
                 color: D.muted,
-                fontWeight: 600,
+                fontWeight: 500,
                 textTransform: "uppercase",
                 letterSpacing: 0.5,
                 minWidth: 120,
@@ -661,7 +661,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
           <div
             style={{
               fontSize: 48,
-              fontWeight: 800,
+              fontWeight: 700,
               color: D.amber,
               fontFamily: "'JetBrains Mono', monospace",
             }}
@@ -707,7 +707,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -778,7 +778,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.amber,
                 marginBottom: 4,
               }}
@@ -862,7 +862,7 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1060,7 +1060,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1126,7 +1126,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Special Hours
           </div>{" "}
           <button onClick={addSpecialHour} style={sBtn(D.teal, D.white)}>
@@ -1299,7 +1299,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1390,7 +1390,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Google Suggestions
           </div>{" "}
           <button
@@ -1459,7 +1459,7 @@ function PhotosTab({ loc, gbp }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           {loc.name} Photos ({photos.length})
         </div>{" "}
         <a
@@ -1560,7 +1560,7 @@ function UpdateQueueTab({
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           Pending Updates ({updates.length})
         </div>
         {selectedIds.size > 0 && (
@@ -1625,7 +1625,7 @@ function UpdateQueueTab({
                     <span
                       style={{
                         fontSize: 13,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                       }}
                     >
@@ -1670,7 +1670,7 @@ function UpdateQueueTab({
                       style={{
                         fontSize: 10,
                         color: D.red,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         marginBottom: 4,
                       }}
                     >
@@ -1700,7 +1700,7 @@ function UpdateQueueTab({
                       style={{
                         fontSize: 10,
                         color: D.green,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         marginBottom: 4,
                       }}
                     >
@@ -1773,7 +1773,7 @@ function ChangeHistoryTab({
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           Change History
         </div>{" "}
         <div style={{ display: "flex", gap: 4 }}>
@@ -1960,7 +1960,7 @@ function BulkEditTab({ locations, onSave, showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -2137,7 +2137,7 @@ function NotificationsTab({ showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}

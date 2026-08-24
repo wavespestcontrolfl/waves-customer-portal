@@ -13,13 +13,37 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const PricingIntelligence = require('../services/pricing-intelligence');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
-router.use(adminAuthenticate);
+// Admin-only: this router edits pricing/offer config and can send marketing
+// SMS. adminAuthenticate alone admits any active technician.
+router.use(adminAuthenticate, requireAdmin);
+
+// Explicit column allowlists for the PUT handlers (migration 071). Never
+// accept id / created_at / times_triggered / times_converted from the body.
+const OFFER_PACKAGE_COLUMNS = [
+  'name', 'description', 'target_market', 'core_services', 'bonuses',
+  'guarantee_type', 'guarantee_text', 'scarcity_type', 'scarcity_text',
+  'urgency_text', 'anchor_price', 'offer_price', 'perceived_value', 'status',
+  'conversion_rate',
+];
+const UPSELL_RULE_COLUMNS = [
+  'name', 'trigger_event', 'condition', 'offer_type', 'offer_service',
+  'discount_pct', 'message_template', 'enabled',
+];
+
+function pickColumns(body, allowed) {
+  const out = {};
+  if (!body || typeof body !== 'object') return out;
+  for (const col of allowed) {
+    if (Object.prototype.hasOwnProperty.call(body, col)) out[col] = body[col];
+  }
+  return out;
+}
 
 // =========================================================================
 // MONEY MODEL DASHBOARD
@@ -89,11 +113,13 @@ router.post('/offers', async (req, res, next) => {
 
 router.put('/offers/:id', async (req, res, next) => {
   try {
-    const updates = { ...req.body, updated_at: new Date() };
+    const picked = pickColumns(req.body, OFFER_PACKAGE_COLUMNS);
+    if (Object.keys(picked).length === 0) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+    const updates = { ...picked, updated_at: new Date() };
     if (updates.core_services) updates.core_services = JSON.stringify(updates.core_services);
     if (updates.bonuses) updates.bonuses = JSON.stringify(updates.bonuses);
-    delete updates.id;
-    delete updates.created_at;
 
     const [offer] = await db('offer_packages').where('id', req.params.id).update(updates).returning('*');
     if (!offer) return res.status(404).json({ error: 'Offer not found' });
@@ -149,10 +175,19 @@ router.post('/upsell-rules', async (req, res, next) => {
 
 router.put('/upsell-rules/:id', async (req, res, next) => {
   try {
-    const updates = { ...req.body };
+    const updates = pickColumns(req.body, UPSELL_RULE_COLUMNS);
     if (updates.condition) updates.condition = JSON.stringify(updates.condition);
-    delete updates.id;
-    delete updates.created_at;
+    if (Object.prototype.hasOwnProperty.call(updates, 'discount_pct') && updates.discount_pct !== null) {
+      const pct = Number(updates.discount_pct);
+      if (typeof updates.discount_pct === 'boolean' || String(updates.discount_pct).trim() === ''
+        || !Number.isFinite(pct) || pct < 0 || pct > 100) {
+        return res.status(400).json({ error: 'discount_pct must be a number between 0 and 100' });
+      }
+      updates.discount_pct = pct;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
 
     const [rule] = await db('upsell_rules').where('id', req.params.id).update(updates).returning('*');
     if (!rule) return res.status(404).json({ error: 'Rule not found' });
@@ -236,6 +271,18 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     }
     if (!customer.phone) return res.status(400).json({ error: 'Customer has no phone number' });
 
+    // Marketing-grade send: consent must come from the customer's STORED
+    // preferences (same basis the drafts/campaign senders assert), never
+    // asserted by the admin action itself. Fail closed before any send.
+    const prefs = await db('notification_prefs').where('customer_id', customer.id).first();
+    if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips === false) {
+      return res.status(422).json({
+        error: 'Customer has not opted in to marketing SMS — no outreach.',
+        code: 'NO_MARKETING_CONSENT',
+      });
+    }
+    const consentCapturedAt = new Date(prefs.updated_at || prefs.created_at || Date.now()).toISOString();
+
     const upsell = await PricingIntelligence.findBestUpsell(customer.id);
     if (!upsell) return res.status(404).json({ error: 'No upsell opportunity found for this customer' });
 
@@ -263,11 +310,6 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       });
     }
 
-    // Allow custom message override
-    if (req.body.message) {
-      message = req.body.message;
-    }
-
     const smsResult = await sendCustomerMessage({
       to: customer.phone,
       body: message,
@@ -279,8 +321,8 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       entryPoint: 'admin_pricing_strategy_upsell',
       consentBasis: {
         status: 'opted_in',
-        source: 'admin_pricing_strategy',
-        capturedAt: new Date().toISOString(),
+        source: 'customer_marketing_preferences',
+        capturedAt: consentCapturedAt,
       },
       metadata: {
         original_message_type: 'upsell',

@@ -55,7 +55,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -64,7 +64,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
 });
 const sInput = {
   width: "100%",
@@ -484,7 +484,7 @@ function EquipmentTab({ showToast, editing, setEditing }) {
                 <div style={{ minWidth: 0, flex: 1 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {CAT_ICONS[e.category] || ""} {e.name}
                   </div>{" "}
@@ -601,7 +601,7 @@ function EquipmentTab({ showToast, editing, setEditing }) {
                     marginTop: 8,
                     fontSize: 11,
                     color: D.amber,
-                    fontWeight: 600,
+                    fontWeight: 500,
                   }}
                 >
                   Service due in {Math.round(hoursLeft)} hours —{" "}
@@ -639,7 +639,7 @@ function EquipmentEditModal({
         style={{
           fontSize: 11,
           color: D.muted,
-          fontWeight: 600,
+          fontWeight: 500,
           marginBottom: 4,
           textTransform: "uppercase",
           letterSpacing: 0.5,
@@ -834,7 +834,7 @@ function TankMixTab({ showToast }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 15, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 15, fontWeight: 500, color: D.heading }}
                   >
                     {m.name}
                   </div>{" "}
@@ -1072,7 +1072,7 @@ function JobCostTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -1162,7 +1162,7 @@ function MaintenanceTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -1198,7 +1198,7 @@ function MaintenanceTab({ showToast }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {e.name}
                   </div>{" "}

@@ -77,7 +77,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -86,7 +86,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 const sInput = {
@@ -504,7 +504,7 @@ function BrowseTab({ showToast, onRefresh, isMobile }) {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                     }}
@@ -852,7 +852,7 @@ function CreateTab({ showToast, onCreated, isMobile }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1045,7 +1045,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 8,
           }}
@@ -1118,7 +1118,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -1151,7 +1151,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                   >
                     {r.title}
                   </div>{" "}
@@ -1253,7 +1253,7 @@ function TokensTab({ showToast, isMobile }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             API Token Health
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
@@ -1298,7 +1298,7 @@ function TokensTab({ showToast, isMobile }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {token.platform}
                   </div>{" "}
@@ -1528,7 +1528,7 @@ function FieldIntelligenceTab({ showToast, isMobile }) {
       }}
     >
       <div style={{ cursor: "pointer", minWidth: 0 }} onClick={() => openPage(page.slug)}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{page.title}</div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>{page.title}</div>
         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
           {page.data_point_count} data points - {page.confidence} confidence
           {parseRiskFlags(page.risk_flags).map((f) => (
@@ -1732,7 +1732,7 @@ function FieldIntelligenceTab({ showToast, isMobile }) {
                 }}
               >
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {page.title}
                   </div>
                   <div style={{ fontSize: 11, color: D.muted }}>

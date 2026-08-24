@@ -329,3 +329,24 @@ describe('membershipDuesCoverVisit', () => {
     })).toBe(false);
   });
 });
+
+// Wiring guard: the completion route feeds the visit-month dues lookup into
+// the ONE coverage derivation (the same one the frozen expected-mint posture
+// reads), keyed on the row's scheduled_date, and never widens coverage on a
+// lookup error.
+describe('completion route wires dues-collected coverage', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+  test('monthlyDuesCollected is keyed on the visit month and passed into membershipDuesCoverVisit', () => {
+    expect(source).toMatch(/duesCollectedThisMonth = await monthlyDuesCollected\(\s*\n\s*db, svc\.customer_id, new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),/);
+    expect(source).toMatch(/const autopayCoversVisit = membershipDuesCoverVisit\(\{\s*\n\s*visitIsPayerBilled,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*customerAutopayActive,\s*\n\s*duesCollectedThisMonth,/);
+    const lookupAt = source.indexOf('duesCollectedThisMonth = await monthlyDuesCollected(');
+    const coverageAt = source.indexOf('const autopayCoversVisit = membershipDuesCoverVisit({');
+    const freezeAt = source.indexOf('const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({');
+    expect(lookupAt).toBeGreaterThan(-1);
+    expect(coverageAt).toBeGreaterThan(lookupAt);
+    expect(freezeAt).toBeGreaterThan(coverageAt);
+  });
+});

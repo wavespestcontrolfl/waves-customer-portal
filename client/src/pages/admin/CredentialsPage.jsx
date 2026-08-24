@@ -409,9 +409,7 @@ export default function CredentialsPage({ embedded = false }) {
         {embedded ? (
           <h2 className="text-20 font-medium text-ink-primary">Credentials</h2>
         ) : (
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-            Credentials
-          </h1>
+          <h2 className="text-16 font-medium text-ink-primary">Credentials</h2>
         )}{" "}
         <Button
           variant="primary"

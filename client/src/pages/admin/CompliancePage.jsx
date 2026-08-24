@@ -9,10 +9,19 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminAuthToken, getAdminUser } from "../../lib/adminAuth";
+import { formatETDateOnly } from "../../lib/timezone";
 import CredentialsPage from "./CredentialsPage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API = "/api/admin/compliance-v2";
+// "manatee_county" → "Manatee County" (API jurisdictions are snake_case).
+const titleCaseCounty = (s) =>
+  String(s || "")
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+const fmtDay = (v) => formatETDateOnly(v) || v || "";
 const headers = (token) => ({
   Authorization: `Bearer ${token}`,
   "Content-Type": "application/json",
@@ -52,7 +61,7 @@ const sInput = {
 const thS = {
   fontSize: 11,
   color: D.muted,
-  fontWeight: 600,
+  fontWeight: 500,
   textAlign: "left",
   padding: "12px 14px",
   background: "#F8F8F8",
@@ -97,7 +106,7 @@ function StatCard({ label, value, sub, accent = D.ink }) {
         style={{
           color: D.muted,
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           textTransform: "uppercase",
           letterSpacing: 0.4,
         }}
@@ -190,7 +199,7 @@ function DashboardTab({ token }) {
         </div>
         {nData?.blackoutPeriods?.map((b, i) => (
           <div key={i} style={{ color: D.text, fontSize: 13, marginBottom: 4 }}>
-            {b.jurisdiction?.replace("_", " ")}: {b.start} to {b.end}
+            {titleCaseCounty(b.jurisdiction)}: {fmtDay(b.start)} to {fmtDay(b.end)}
           </div>
         ))}
       </div>
@@ -220,8 +229,8 @@ function DashboardTab({ token }) {
           <tbody>
             {data.recentApplications?.map((a) => (
               <tr key={a.id}>
-                <td style={tdS}>{a.date}</td>
-                <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                <td style={{ ...tdS, whiteSpace: "nowrap" }}>{fmtDay(a.date)}</td>
+                <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                   {a.product || "—"}
                 </td>
                 <td style={tdS}>{a.customer || "—"}</td>
@@ -331,7 +340,7 @@ function ApplicationLogTab({ token }) {
             borderRadius: 8,
             padding: "8px 16px",
             cursor: "pointer",
-            fontWeight: 600,
+            fontWeight: 500,
             fontSize: 13,
           }}
         >
@@ -378,7 +387,7 @@ function ApplicationLogTab({ token }) {
                       <td style={{ ...tdS, whiteSpace: "nowrap" }}>
                         {a.applicationDate}
                       </td>
-                      <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                      <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                         {a.productName}
                       </td>
                       <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
@@ -532,7 +541,7 @@ function ProductLimitsTab({ token }) {
             padding: "8px 16px",
             cursor: "pointer",
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
           }}
         >
           Check Limits
@@ -575,17 +584,17 @@ function ProductLimitsTab({ token }) {
                 {result.limits.map((l, i) => (
                   <tr key={i}>
                     <td style={tdS}>{l.limitType?.replace(/_/g, " ")}</td>
-                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                    <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                       {l.limitValue}
                     </td>
-                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                    <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                       {l.currentUsage}
                     </td>
                     <td style={tdS}>
                       <span
                         style={{
                           color: statusColor(l.status),
-                          fontWeight: 600,
+                          fontWeight: 500,
                           fontSize: 11,
                           textTransform: "uppercase",
                           letterSpacing: 0.4,
@@ -656,10 +665,10 @@ function ProductLimitsTab({ token }) {
                   <td style={tdS}>{c.customerName}</td>
                   <td style={{ ...tdS, color: D.muted }}>{c.city}</td>
                   <td style={{ ...tdS, color: D.muted }}>
-                    {c.county?.replace("_", " ")}
+                    {titleCaseCounty(c.county)}
                   </td>
                   <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>
-                  <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                  <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                     {c.nitrogenAppsYTD}
                   </td>
                   <td style={tdS}>
@@ -667,7 +676,7 @@ function ProductLimitsTab({ token }) {
                     <span
                       style={{
                         color: c.blackoutActive ? D.red : D.green,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         fontSize: 11,
                         textTransform: "uppercase",
                         letterSpacing: 0.4,
@@ -724,7 +733,7 @@ function LicensesTab({ token }) {
       <span
         style={{
           color: colors[s] || D.muted,
-          fontWeight: 600,
+          fontWeight: 500,
           fontSize: 11,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -761,7 +770,7 @@ function LicensesTab({ token }) {
         <tbody>
           {data?.technicians?.map((t) => (
             <tr key={t.id}>
-              <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+              <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                 {t.name}
               </td>
               {editing === t.id ? (
@@ -808,7 +817,7 @@ function LicensesTab({ token }) {
                         cursor: "pointer",
                         marginRight: 6,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Save
@@ -851,7 +860,7 @@ function LicensesTab({ token }) {
                         padding: "6px 12px",
                         cursor: "pointer",
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       Edit

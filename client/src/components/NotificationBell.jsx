@@ -270,7 +270,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         {unreadCount > 0 && (
           <span style={{
             position: 'absolute', top: 4, right: 2,
-            background: colors.badge, color: '#fff', fontSize: 10, fontWeight: 800,
+            background: colors.badge, color: '#fff', fontSize: 10,
+            fontWeight: type === 'admin' ? 700 : 800,
             minWidth: 18, height: 18, borderRadius: 9, display: 'flex',
             alignItems: 'center', justifyContent: 'center', padding: '0 4px',
           }}>
@@ -343,7 +344,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         padding: '8px 20px', borderRadius: 999, border: 'none',
                         background: active ? '#FFFFFF' : 'transparent',
                         color: active ? '#18181B' : '#71717A',
-                        fontSize: 14, fontWeight: 600, cursor: 'pointer',
+                        fontSize: 14, fontWeight: type === 'admin' ? 500 : 600, cursor: 'pointer',
                         boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
                       }}
                     >{label}</button>
@@ -357,6 +358,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 the error message that ensurePushSubscription throws. */}
             {showPushStrip && (
               <PushEnableStrip
+                admin={type === 'admin'}
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
@@ -372,7 +374,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: '#71717A' }}>Notifications couldn&apos;t be loaded.</div>
                   <button type="button" onClick={loadNotifications} style={{
                     marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
-                    background: '#fff', color: '#04395E', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                    background: '#fff', color: '#04395E', fontSize: 14,
+                    fontWeight: type === 'admin' ? 700 : 800, cursor: 'pointer',
                   }}>Try again</button>
                 </div>
               )}
@@ -462,7 +465,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 {unreadCount > 0 && (
                   <button onClick={markAllRead} style={{
                     background: 'none', border: 'none', color: colors.teal,
-                    fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '4px 8px',
+                    fontSize: 12, fontWeight: type === 'admin' ? 500 : 600, cursor: 'pointer', padding: '4px 8px',
                   }}>Mark all read</button>
                 )}
                 <button onClick={() => setOpen(false)} aria-label="Close notifications" style={{
@@ -477,6 +480,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 subscribed on this device. */}
             {showPushStrip && (
               <PushEnableStrip
+                admin={type === 'admin'}
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
@@ -577,7 +581,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 // requirement is surfaced via the error-message path inside
 // ensurePushSubscription, not pre-emptively here, so Android/desktop
 // users don't see an irrelevant warning.
-function PushEnableStrip({ enabling, error, onClick }) {
+function PushEnableStrip({ admin, enabling, error, onClick }) {
   return (
     <div style={{
       padding: '12px 16px',
@@ -587,7 +591,7 @@ function PushEnableStrip({ enabling, error, onClick }) {
       color: '#18181B',
     }}>
       <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontWeight: 600 }}>Get push notifications on this device</span>
+        <span style={{ fontWeight: admin ? 500 : 600 }}>Get push notifications on this device</span>
       </div>
       <div style={{ marginBottom: 8, color: '#52525B', fontSize: 12 }}>
         Banner alerts for failed payments, overdue invoices, unmapped calls, and more.

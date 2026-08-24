@@ -179,10 +179,10 @@ function KpiCard({ label, value, tone }) {
   const color = tone === "good" ? D.green : tone === "bad" ? D.red : D.heading;
   return (
     <div style={{ ...cardStyle, padding: 16, minHeight: 86 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 8 }}>
+      <div style={{ fontSize: 12, color: D.muted, fontWeight: 500, marginBottom: 8 }}>
         {label}
       </div>
-      <div style={{ fontSize: 24, color, fontWeight: 750, lineHeight: 1.1 }}>
+      <div style={{ fontSize: 24, color, fontWeight: 700, lineHeight: 1.1 }}>
         {value}
       </div>
     </div>
@@ -247,7 +247,7 @@ function SegmentTable({ segments }) {
           <tbody>
             {rows.map((row) => (
               <tr key={row.key} style={{ borderBottom: `1px solid ${D.border}80` }}>
-                <td style={{ padding: "10px 12px", color: D.heading, fontWeight: 650 }}>{row.label}</td>
+                <td style={{ padding: "10px 12px", color: D.heading, fontWeight: 700 }}>{row.label}</td>
                 <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.serviceCount}</td>
                 <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.avgQuotedMinutes)}</td>
                 <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.avgActualMinutes)}</td>
@@ -255,7 +255,7 @@ function SegmentTable({ segments }) {
                   {fmtMinutes(row.avgVarianceMinutes)}
                 </td>
                 <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtPercent(row.weightedPercentVariance)}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.totalDollarMarginImpact), fontWeight: 750 }}>
+                <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.totalDollarMarginImpact), fontWeight: 700 }}>
                   {fmtMoney(row.totalDollarMarginImpact)}
                 </td>
                 <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.avgDollarMarginImpact) }}>
@@ -314,14 +314,14 @@ function OutliersTable({ outliers }) {
                   <td style={{ padding: "10px 12px", textAlign: "right", whiteSpace: "nowrap" }}>
                     {fmtETDate(row.completedAt)}
                   </td>
-                  <td style={{ padding: "10px 12px", fontWeight: 650, color: D.heading }}>
+                  <td style={{ padding: "10px 12px", fontWeight: 700, color: D.heading }}>
                     <a href={`/admin/dispatch?serviceId=${encodeURIComponent(row.serviceId)}`} style={{ color: D.heading }}>
                       {row.serviceId}
                     </a>
                   </td>
                   <td style={{ padding: "10px 12px", minWidth: 180 }}>
                     {link ? (
-                      <a href={link} style={{ color: D.heading, fontWeight: 650 }}>
+                      <a href={link} style={{ color: D.heading, fontWeight: 700 }}>
                         {row.customerName || row.propertyLabel || row.customerId}
                       </a>
                     ) : (
@@ -339,7 +339,7 @@ function OutliersTable({ outliers }) {
                     {fmtMinutes(row.varianceMinutes)}
                   </td>
                   <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtPercent(row.percentVariance)}</td>
-                  <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.dollarMarginImpact), fontWeight: 750 }}>
+                  <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.dollarMarginImpact), fontWeight: 700 }}>
                     {fmtMoney(row.dollarMarginImpact)}
                   </td>
                   <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtNumber(row.zScore, 2)}</td>
@@ -398,7 +398,7 @@ export default function PricingRealityCheckPage() {
     <div style={{ maxWidth: 1320, margin: "0 auto", color: D.text }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 18, flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 28, color: D.heading, fontWeight: 760 }}>Audit</h1>
+          <h1 style={{ margin: 0, fontSize: 28, color: D.heading, fontWeight: 700 }}>Audit</h1>
           <div style={{ marginTop: 5, color: D.muted, fontSize: 13 }}>
             Read-only comparison of quoted pricing minutes vs Bouncie actual on-site minutes.
           </div>
@@ -411,7 +411,7 @@ export default function PricingRealityCheckPage() {
           type="button"
           onClick={refresh}
           disabled={loading}
-          style={{ minHeight: 40, display: "inline-flex", alignItems: "center", gap: 8, border: `1px solid ${D.border}`, borderRadius: 6, background: D.card, color: D.heading, padding: "0 12px", fontSize: 13, fontWeight: 650, cursor: loading ? "wait" : "pointer" }}
+          style={{ minHeight: 40, display: "inline-flex", alignItems: "center", gap: 8, border: `1px solid ${D.border}`, borderRadius: 6, background: D.card, color: D.heading, padding: "0 12px", fontSize: 13, fontWeight: 700, cursor: loading ? "wait" : "pointer" }}
         >
           <RefreshCw size={15} strokeWidth={2} />
           Refresh
@@ -436,7 +436,7 @@ export default function PricingRealityCheckPage() {
               key={option.key}
               type="button"
               onClick={() => setGroupBy(option.key)}
-              style={{ minHeight: 36, border: `1px solid ${groupBy === option.key ? D.ink : D.border}`, borderRadius: 6, background: groupBy === option.key ? D.ink : D.card, color: groupBy === option.key ? "#FFFFFF" : D.text, padding: "0 11px", fontSize: 13, fontWeight: 650, cursor: "pointer" }}
+              style={{ minHeight: 36, border: `1px solid ${groupBy === option.key ? D.ink : D.border}`, borderRadius: 6, background: groupBy === option.key ? D.ink : D.card, color: groupBy === option.key ? "#FFFFFF" : D.text, padding: "0 11px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
             >
               {option.label}
             </button>
@@ -445,7 +445,7 @@ export default function PricingRealityCheckPage() {
       </div>
 
       {error && (
-        <div style={{ ...cardStyle, background: D.softRed, borderColor: "#FCA5A5", color: D.red, padding: 14, marginBottom: 14, display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 650 }}>
+        <div style={{ ...cardStyle, background: D.softRed, borderColor: "#FCA5A5", color: D.red, padding: 14, marginBottom: 14, display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700 }}>
           <AlertTriangle size={16} strokeWidth={2} />
           {error}
         </div>

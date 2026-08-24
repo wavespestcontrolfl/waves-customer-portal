@@ -42,7 +42,7 @@ export default function WeatherBar({ date }) {
         <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
           {weather.alerts.map((alert, i) => (
             <span key={i} style={{
-              padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+              padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 500,
               background: alert.level === 'red' ? D.red : D.amber,
               color: D.white,
             }}>

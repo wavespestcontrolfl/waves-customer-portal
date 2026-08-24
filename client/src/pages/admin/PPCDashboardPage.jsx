@@ -118,7 +118,7 @@ function KPI({ value, label, sub, color = C.blue }) {
       <div
         style={{
           fontSize: 28,
-          fontWeight: 800,
+          fontWeight: 700,
           color,
           letterSpacing: "-0.02em",
           lineHeight: 1.1,
@@ -130,7 +130,7 @@ function KPI({ value, label, sub, color = C.blue }) {
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: C.text2,
           textTransform: "uppercase",
           letterSpacing: "0.08em",
@@ -204,7 +204,7 @@ function Pill({ label, active, onClick }) {
         background: active ? C.blueGlow : "transparent",
         color: active ? C.blue : C.text3,
         fontSize: 12,
-        fontWeight: 600,
+        fontWeight: 500,
         fontFamily: "'Roboto', Arial, sans-serif",
         transition: "all 0.15s",
       }}
@@ -253,7 +253,7 @@ function QualityDots({ score }) {
       <span
         style={{
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
           color,
           fontFamily: "'Roboto', Arial, sans-serif",
         }}
@@ -382,7 +382,7 @@ function DonutChart({
         <div
           style={{
             fontSize: 22,
-            fontWeight: 800,
+            fontWeight: 700,
             color: C.text,
             fontFamily: "'Roboto', Arial, sans-serif",
           }}
@@ -392,7 +392,7 @@ function DonutChart({
         <div
           style={{
             fontSize: 10,
-            fontWeight: 600,
+            fontWeight: 500,
             color: C.text3,
             textTransform: "uppercase",
             letterSpacing: "0.05em",
@@ -533,7 +533,7 @@ export default function WavesPPCDashboard() {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             color: C.heading,
             marginBottom: 8,
           }}
@@ -847,7 +847,7 @@ export default function WavesPPCDashboard() {
                     {" "}
                     <div>
                       <div
-                        style={{ fontSize: 20, fontWeight: 800, color: C.blue }}
+                        style={{ fontSize: 20, fontWeight: 700, color: C.blue }}
                       >
                         {fmtMoney(sp)}
                       </div>
@@ -857,7 +857,7 @@ export default function WavesPPCDashboard() {
                       <div
                         style={{
                           fontSize: 20,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: C.green,
                         }}
                       >
@@ -871,7 +871,7 @@ export default function WavesPPCDashboard() {
                       <div
                         style={{
                           fontSize: 20,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: C.purple,
                         }}
                       >
@@ -883,7 +883,7 @@ export default function WavesPPCDashboard() {
                     </div>{" "}
                     <div>
                       <div
-                        style={{ fontSize: 20, fontWeight: 800, color: C.cyan }}
+                        style={{ fontSize: 20, fontWeight: 700, color: C.cyan }}
                       >
                         {sp > 0 ? (rv / sp).toFixed(1) + "x" : "--"}
                       </div>
@@ -909,7 +909,7 @@ export default function WavesPPCDashboard() {
               {" "}
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 {" "}
-                <span style={{ fontSize: 12, color: C.text3, fontWeight: 600 }}>
+                <span style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}>
                   Service:
                 </span>
                 {services.map((s) => (
@@ -923,7 +923,7 @@ export default function WavesPPCDashboard() {
               </div>{" "}
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 {" "}
-                <span style={{ fontSize: 12, color: C.text3, fontWeight: 600 }}>
+                <span style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}>
                   City:
                 </span>
                 {cities.map((c) => (
@@ -939,7 +939,7 @@ export default function WavesPPCDashboard() {
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   {" "}
                   <span
-                    style={{ fontSize: 12, color: C.text3, fontWeight: 600 }}
+                    style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}
                   >
                     Platform:
                   </span>
@@ -1032,7 +1032,7 @@ export default function WavesPPCDashboard() {
                         <td
                           style={{
                             padding: "10px 8px",
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: C.text,
                             whiteSpace: "nowrap",
                             maxWidth: 220,
@@ -1063,7 +1063,7 @@ export default function WavesPPCDashboard() {
                           style={{
                             padding: "10px 8px",
                             textAlign: "right",
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: C.text,
                           }}
                         >
@@ -1073,7 +1073,7 @@ export default function WavesPPCDashboard() {
                           style={{
                             padding: "10px 8px",
                             textAlign: "right",
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: C.green,
                           }}
                         >
@@ -1193,7 +1193,7 @@ export default function WavesPPCDashboard() {
                     {" "}
                     <div>
                       <div
-                        style={{ fontSize: 18, fontWeight: 800, color: C.blue }}
+                        style={{ fontSize: 18, fontWeight: 700, color: C.blue }}
                       >
                         {fmt(funnelData.totalLeads)}
                       </div>
@@ -1205,7 +1205,7 @@ export default function WavesPPCDashboard() {
                       <div
                         style={{
                           fontSize: 18,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: C.green,
                         }}
                       >
@@ -1219,7 +1219,7 @@ export default function WavesPPCDashboard() {
                       <div
                         style={{
                           fontSize: 18,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: funnelData.roas >= 2 ? C.green : C.yellow,
                         }}
                       >
@@ -1413,7 +1413,7 @@ export default function WavesPPCDashboard() {
                             >
                               {" "}
                               <td
-                                style={{ padding: "10px 8px", fontWeight: 600 }}
+                                style={{ padding: "10px 8px", fontWeight: 500 }}
                               >
                                 {row.city}
                               </td>{" "}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -77,7 +78,7 @@ function SectionHeading({ icon: Icon, label, description }) {
     <div style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {Icon ? <Icon size={16} color={D.heading} /> : null}
-        <h2 style={{ fontSize: 16, fontWeight: 600, color: D.heading, margin: 0 }}>{label}</h2>
+        <h2 style={{ fontSize: 16, fontWeight: 500, color: D.heading, margin: 0 }}>{label}</h2>
       </div>
       {description ? (
         <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{description}</p>
@@ -93,12 +94,13 @@ function Toggle({ checked, onChange, label, description }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
+        gap: 16,
         padding: "14px 0",
         borderBottom: `1px solid ${D.border}`,
       }}
     >
-      <div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{label}</div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{label}</div>
         {description ? (
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{description}</div>
         ) : null}
@@ -117,6 +119,7 @@ function Toggle({ checked, onChange, label, description }) {
         style={{
           width: 44,
           height: 24,
+          flexShrink: 0,
           borderRadius: 12,
           padding: 2,
           cursor: "pointer",
@@ -256,7 +259,7 @@ function Pill({ tone = "neutral", children }) {
         padding: "2px 8px",
         borderRadius: 999,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         background: c.bg,
         color: c.text,
       }}
@@ -531,42 +534,25 @@ export default function PestPressureSettingsPage() {
   return (
     <div style={{ background: D.bg, minHeight: "100vh", padding: 24 }}>
       <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Pest Pressure</h1>
-            <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-              Configure the 0–5 Pest Pressure score that appears on customer service reports.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              onClick={handleRestoreDefaults}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                padding: "8px 14px", borderRadius: 6, border: `1px solid ${D.inputBorder}`,
-                background: D.white, color: D.text, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              }}
-            >
-              <RotateCcw size={14} /> Restore defaults
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={!canSave || saving}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                padding: "8px 14px", borderRadius: 6, border: 0,
-                background: canSave ? D.teal : D.border, color: D.white,
-                fontSize: 13, fontWeight: 600,
-                cursor: canSave && !saving ? "pointer" : "not-allowed",
-                opacity: saving ? 0.7 : 1,
-              }}
-            >
-              <Save size={14} /> {saving ? "Saving…" : "Save changes"}
-            </button>
-          </div>
-        </header>
+        <AdminCommandHeader
+          title="Pest Pressure"
+          icon={ShieldAlert}
+          sticky={false}
+          className="mb-0"
+          actions={[
+            { key: "restore", label: "Restore defaults", icon: RotateCcw, variant: "secondary", onClick: handleRestoreDefaults },
+            {
+              key: "save",
+              label: saving ? "Saving…" : "Save changes",
+              icon: Save,
+              onClick: handleSave,
+              disabled: !canSave || saving,
+            },
+          ]}
+        />
+        <p style={{ fontSize: 13, color: D.muted, margin: "-8px 0 0" }}>
+          Configure the 0–5 Pest Pressure score that appears on customer service reports.
+        </p>
 
         {saveError ? (
           <Card style={{ background: "#FEF2F2", borderColor: "#FECACA" }}>
@@ -623,7 +609,7 @@ export default function PestPressureSettingsPage() {
               options={MISSING_DATA_OPTIONS}
             />
           </div>
-          <div style={{ marginTop: 16, display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 16 }}>
             <Toggle
               label="Allow manual override (admins)"
               checked={config.allowManualOverride}
@@ -928,7 +914,7 @@ export default function PestPressureSettingsPage() {
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
-                  <tr style={{ textAlign: "left", color: D.muted, fontWeight: 600 }}>
+                  <tr style={{ textAlign: "left", color: D.muted, fontWeight: 500 }}>
                     <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Date</th>
                     <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Customer</th>
                     <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Line</th>
@@ -960,7 +946,7 @@ export default function PestPressureSettingsPage() {
                         <td style={{ padding: "8px 8px", color: D.muted, textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>
                           {row.calculated_score == null ? "—" : Number(row.calculated_score).toFixed(1)}
                         </td>
-                        <td style={{ padding: "8px 8px", color: D.heading, textAlign: "right", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                        <td style={{ padding: "8px 8px", color: D.heading, textAlign: "right", fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                           {row.displayed_score == null ? "—" : Number(row.displayed_score).toFixed(1)}
                         </td>
                         <td style={{ padding: "8px 8px", color: D.text }}>{row.label_name || "—"}</td>
@@ -1067,7 +1053,7 @@ export default function PestPressureSettingsPage() {
         >
           <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: D.heading }}>Override Pest Pressure score</h2>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Override Pest Pressure score</h2>
               <button type="button" onClick={closeOverrideModal} aria-label="Close" style={{ background: "none", border: 0, cursor: "pointer", color: D.muted }}>
                 <X size={18} />
               </button>
@@ -1118,7 +1104,7 @@ export default function PestPressureSettingsPage() {
                 disabled={overrideSaving}
                 style={{
                   padding: "8px 14px", border: 0, background: D.teal, color: D.white,
-                  borderRadius: 6, fontSize: 13, fontWeight: 600,
+                  borderRadius: 6, fontSize: 13, fontWeight: 500,
                   cursor: overrideSaving ? "not-allowed" : "pointer", opacity: overrideSaving ? 0.7 : 1,
                 }}
               >

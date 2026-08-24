@@ -56,7 +56,7 @@ const sBtn = (bg, c) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, c) => ({
@@ -65,7 +65,7 @@ const sBadge = (bg, c) => ({
   borderRadius: 4,
   background: bg,
   color: c,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 const sInput = {
@@ -83,7 +83,7 @@ const sInput = {
 const thS = {
   fontSize: 11,
   color: D.muted,
-  fontWeight: 600,
+  fontWeight: 500,
   textAlign: "left",
   padding: "12px 14px",
   background: "#F8F8F8",
@@ -482,7 +482,7 @@ function DiscountsSection() {
                     <tr key={d.id} style={{ opacity: d.is_active ? 1 : 0.45 }}>
                       {" "}
                       <td style={tdS}>{d.icon || ""}</td>{" "}
-                      <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                      <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                         {d.name}
                       </td>{" "}
                       <td style={tdS}>
@@ -494,7 +494,7 @@ function DiscountsSection() {
                         style={{
                           ...tdS,
                           textAlign: "right",
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -663,7 +663,7 @@ function DiscountsSection() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.muted,
                   marginBottom: 8,
                 }}
@@ -749,7 +749,7 @@ function DiscountsSection() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.muted,
                   marginBottom: 8,
                 }}
@@ -808,7 +808,7 @@ function DiscountsSection() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.muted,
                   marginBottom: 8,
                 }}
@@ -1030,7 +1030,7 @@ function DiscountsSection() {
                     {" "}
                     <div>
                       <span style={{ marginRight: 8 }}>{d.icon}</span>
-                      <span style={{ color: D.heading, fontWeight: 600 }}>
+                      <span style={{ color: D.heading, fontWeight: 500 }}>
                         {d.name}
                       </span>{" "}
                       <span style={sBadge(tc.bg, tc.c)}>
@@ -1042,7 +1042,7 @@ function DiscountsSection() {
                             : "Free"}
                       </span>
                     </div>{" "}
-                    <div style={{ color: D.red, fontWeight: 600 }}>
+                    <div style={{ color: D.red, fontWeight: 500 }}>
                       -${d.discount_dollars.toFixed(2)}
                     </div>{" "}
                   </div>
@@ -1097,7 +1097,7 @@ function DiscountsSection() {
                 {stats.discounts.map((d) => (
                   <tr key={d.id}>
                     {" "}
-                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                    <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                       {d.name}
                     </td>{" "}
                     <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>

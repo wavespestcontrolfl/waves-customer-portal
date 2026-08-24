@@ -106,11 +106,18 @@ function impliedMonthlyStampForWrite(before = {}, after = {}) {
 // customers. A priced ONE-OFF visit (isRecurring=false: add-on treatment,
 // WDO, special) still bills its price; callback pricing stays with
 // completionInvoiceAmount.
+// Dues ALREADY COLLECTED for the visit's month (duesCollectedThisMonth, from
+// monthlyDuesCollected) cover the visit exactly like an active autopay
+// method does: the cron charged the month's dues on the 1st, so a card that
+// expired / was removed / autopay paused mid-month must not turn every
+// remaining plan visit into a full monthly_rate invoice on top of the dues
+// the customer already paid (2-3x double-billing).
 function membershipDuesCoverVisit({
   visitIsPayerBilled,
   perApplicationBilling,
   annualPrepayBilling,
   customerAutopayActive,
+  duesCollectedThisMonth = false,
   hasVisitPrice,
   isRecurring,
   waveguardTier,
@@ -122,7 +129,7 @@ function membershipDuesCoverVisit({
   return !visitIsPayerBilled
     && !perApplicationBilling
     && !annualPrepayBilling
-    && !!customerAutopayActive
+    && (!!customerAutopayActive || !!duesCollectedThisMonth)
     && (!hasVisitPrice || !!isRecurring)
     && (explicitMember || isMembershipTier(waveguardTier))
     && Number(monthlyRate || 0) > 0;
@@ -191,6 +198,7 @@ function predictCompletionBilling({
   prepaidMethod,
   annualCoverageValidated,
   billingMode,
+  duesCollectedThisMonth = false,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
@@ -257,6 +265,7 @@ function predictCompletionBilling({
     perApplicationBilling: false,
     annualPrepayBilling: false,
     customerAutopayActive: autopayActive,
+    duesCollectedThisMonth,
     hasVisitPrice,
     isRecurring,
     waveguardTier: lane === 'monthly_membership',

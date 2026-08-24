@@ -109,7 +109,7 @@ export default function PestProductionDiagnosticsPanel({ diagnostics }) {
         <div
           style={{
             fontSize: 12,
-            fontWeight: 800,
+            fontWeight: 700,
             color: COLORS.ink,
             textTransform: "uppercase",
             letterSpacing: 0.8,
@@ -125,7 +125,7 @@ export default function PestProductionDiagnosticsPanel({ diagnostics }) {
             borderRadius: 999,
             padding: "3px 8px",
             fontSize: 10,
-            fontWeight: 800,
+            fontWeight: 700,
             textTransform: "uppercase",
             letterSpacing: 0.6,
             whiteSpace: "nowrap",
@@ -180,7 +180,7 @@ export default function PestProductionDiagnosticsPanel({ diagnostics }) {
             <div
               style={{
                 fontSize: 11,
-                fontWeight: 800,
+                fontWeight: 700,
                 color: COLORS.muted,
                 textTransform: "uppercase",
                 letterSpacing: 0.6,
@@ -229,7 +229,7 @@ export default function PestProductionDiagnosticsPanel({ diagnostics }) {
             <div
               style={{
                 fontSize: 11,
-                fontWeight: 800,
+                fontWeight: 700,
                 color: COLORS.muted,
                 textTransform: "uppercase",
                 letterSpacing: 0.6,

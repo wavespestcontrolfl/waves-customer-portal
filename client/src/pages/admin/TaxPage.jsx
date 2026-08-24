@@ -73,7 +73,7 @@ function Badge({ children, color, small, fontSize }) {
         // fontSize override: newer surfaces hold the repo's 14px floor
         // without disturbing the legacy tabs' compact badges
         fontSize: fontSize || (small ? 10 : 11),
-        fontWeight: 600,
+        fontWeight: 500,
         background: `${color || D.muted}22`,
         color: color || D.muted,
         textTransform: "capitalize",
@@ -249,7 +249,7 @@ function TaxRatesTab() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}
@@ -418,7 +418,7 @@ function ServiceTaxabilityTab() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 4,
         }}
@@ -457,7 +457,7 @@ function ServiceTaxabilityTab() {
           />{" "}
           <div style={{ flex: 1 }}>
             {" "}
-            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
               {s.serviceLabel}
             </span>{" "}
             <span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>
@@ -595,7 +595,7 @@ function EquipmentTab() {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
             Equipment & Depreciation Register
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted }}>
@@ -611,7 +611,7 @@ function EquipmentTab() {
             padding: "6px 14px",
             color: "#fff",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -806,7 +806,7 @@ function EquipmentTab() {
               padding: "6px 14px",
               color: "#fff",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -854,7 +854,7 @@ function EquipmentTab() {
               <span
                 style={{
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   flex: 1,
                 }}
@@ -878,7 +878,7 @@ function EquipmentTab() {
                       padding: "2px 8px",
                       color: D.amber,
                       fontSize: 11,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       cursor: "pointer",
                     }}
                     title="Depreciation won't compute until business use and §280F exemption are confirmed"
@@ -1042,7 +1042,7 @@ function ExpensesTab() {
         {" "}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {" "}
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
             Business Expenses
           </div>{" "}
           <select
@@ -1074,7 +1074,7 @@ function ExpensesTab() {
               padding: "6px 14px",
               color: D.amber,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: categorizing ? 0.5 : 1,
             }}
@@ -1093,7 +1093,7 @@ function ExpensesTab() {
             padding: "6px 14px",
             color: "#fff",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -1205,7 +1205,7 @@ function ExpensesTab() {
               padding: "6px 14px",
               color: "#fff",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -1381,7 +1381,7 @@ function FilingCalendarTab() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 14,
         }}
@@ -1440,7 +1440,7 @@ function FilingCalendarTab() {
               <span
                 style={{
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   flex: 1,
                 }}
@@ -1639,7 +1639,7 @@ function AdvisorTab() {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
             AI Tax Advisor
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted }}>
@@ -1656,7 +1656,7 @@ function AdvisorTab() {
             padding: "6px 16px",
             color: D.heading,
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: running ? "not-allowed" : "pointer",
             opacity: running ? 0.6 : 1,
           }}
@@ -1677,7 +1677,7 @@ function AdvisorTab() {
             }}
           >
             {" "}
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>
+            <div style={{ fontSize: 12, fontWeight: 500, color: D.heading }}>
               Action Items
             </div>
             {["new", "reviewed", "acted_on", "dismissed"].map((s) => (
@@ -1735,7 +1735,7 @@ function AdvisorTab() {
                 <span
                   style={{
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     flex: 1,
                   }}
@@ -1883,7 +1883,7 @@ function AdvisorTab() {
                 style={{
                   fontFamily: MONO,
                   fontSize: 32,
-                  fontWeight: 800,
+                  fontWeight: 700,
                   color: gradeColor,
                 }}
               >
@@ -1892,7 +1892,7 @@ function AdvisorTab() {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                 >
                   {r.period}
                 </div>{" "}
@@ -1912,7 +1912,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}
@@ -1934,7 +1934,7 @@ function AdvisorTab() {
                   <div
                     style={{
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                     }}
@@ -1964,7 +1964,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}
@@ -1993,7 +1993,7 @@ function AdvisorTab() {
                     <span
                       style={{
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                         flex: 1,
                       }}
@@ -2027,7 +2027,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}
@@ -2075,7 +2075,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}
@@ -2120,7 +2120,7 @@ function AdvisorTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 6,
             }}
@@ -2161,7 +2161,7 @@ function ExemptionsTab() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 4,
         }}
@@ -2201,7 +2201,7 @@ function ExemptionsTab() {
               <span
                 style={{
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   flex: 1,
                 }}
@@ -2456,7 +2456,7 @@ function MileageTab() {
                 border: "none",
                 borderRadius: 6,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 opacity: classifying ? 0.5 : 1,
               }}
@@ -2473,7 +2473,7 @@ function MileageTab() {
                 border: `1px solid ${D.border}`,
                 borderRadius: 6,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 opacity: classifying ? 0.5 : 1,
               }}
@@ -2505,7 +2505,7 @@ function MileageTab() {
             border: "none",
             borderRadius: 8,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
             opacity: syncing ? 0.5 : 1,
           }}
@@ -2588,7 +2588,7 @@ function MileageTab() {
               border: "none",
               borderRadius: 6,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -2926,7 +2926,7 @@ function RevenueTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3132,7 +3132,7 @@ function PnlTab() {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
             Profit & Loss Statement
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted }}>
@@ -3163,7 +3163,7 @@ function PnlTab() {
             padding: "6px 14px",
             color: "#fff",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -3391,14 +3391,14 @@ function PnlTab() {
             }}
           >
             {" "}
-            <span style={{ fontSize: 16, fontWeight: 800, color: D.heading }}>
+            <span style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
               NET INCOME
             </span>{" "}
             <span
               style={{
                 fontFamily: MONO,
                 fontSize: 18,
-                fontWeight: 800,
+                fontWeight: 700,
                 color: pnl.netIncome >= 0 ? D.green : D.red,
               }}
             >
@@ -3658,7 +3658,7 @@ function ExportsTab() {
                   justifyContent: "center",
                   fontFamily: MONO,
                   fontSize: 14,
-                  fontWeight: 800,
+                  fontWeight: 700,
                   color: exp.color,
                 }}
               >
@@ -3667,7 +3667,7 @@ function ExportsTab() {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {exp.label}
                 </div>{" "}
@@ -3691,7 +3691,7 @@ function ExportsTab() {
                 padding: "6px 12px",
                 color: exp.color,
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: downloading === exp.type ? "not-allowed" : "pointer",
                 marginTop: "auto",
               }}
@@ -3801,7 +3801,7 @@ function AccountsReceivableTab() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 4,
         }}
@@ -3980,7 +3980,7 @@ function AccountsReceivableTab() {
                             padding: "3px 10px",
                             color: D.amber,
                             fontSize: 10,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             cursor:
                               sending === inv.id ? "not-allowed" : "pointer",
                           }}
@@ -4255,7 +4255,7 @@ function BankImportTab() {
             background: D.heading,
             color: D.white,
             border: "none",
-            fontWeight: 600,
+            fontWeight: 500,
           }}
         >
           {busy === "upload" ? "Importing…" : "Upload statement CSV"}
@@ -4263,7 +4263,7 @@ function BankImportTab() {
         </label>
         <button
           type="button"
-          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 500 }}
           disabled={!!busy}
           onClick={() =>
             act("match", "/admin/tax/bank-import/match").then((r) => {
@@ -4278,7 +4278,7 @@ function BankImportTab() {
         </button>
         <button
           type="button"
-          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 500 }}
           disabled={!!busy}
           onClick={() => {
             // scoped to the rows on screen — a global oldest-first pass can
@@ -4366,7 +4366,7 @@ function BankImportTab() {
               <button
                 type="button"
                 disabled={!!busy || !Object.values(dupPicks).some(Boolean)}
-                style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginTop: 6 }}
+                style={{ ...bankInput, cursor: "pointer", fontWeight: 500, marginTop: 6 }}
                 onClick={forceImportDuplicates}
                 title="Imports only the checked rows as additional transactions"
               >
@@ -4417,7 +4417,7 @@ function BankImportTab() {
           <thead>
             <tr style={{ color: D.muted, textAlign: "left" }}>
               {["Date", "Account", "Description", "Amount", "Status", "Suggestion", ""].map((h) => (
-                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 600, textTransform: "uppercase", fontSize: 14, letterSpacing: 0.5 }}>
+                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 500, textTransform: "uppercase", fontSize: 14, letterSpacing: 0.5 }}>
                   {h}
                 </th>
               ))}
@@ -4591,7 +4591,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 500, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() =>
                         act("link", `/admin/tax/bank-import/${r.id}/link-expense`, { expenseId: linkPick[r.id] }).then((res) => {
                           if (res)
@@ -4610,7 +4610,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 500, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() => {
                         // the pick's p:/r: prefix says which route it belongs
                         // to — both lists can be parked on one credit
@@ -4659,7 +4659,7 @@ function BankImportTab() {
                       <button
                         type="button"
                         disabled={!!busy}
-                        style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
+                        style={{ ...bankInput, cursor: "pointer", fontWeight: 500, marginRight: 6 }}
                         onClick={() =>
                           // an operator-picked category overrides the AI
                           // suggestion (and skips the AI-verify note)
@@ -4739,7 +4739,7 @@ function BankImportTab() {
           <div style={{ padding: 12, textAlign: "center" }}>
             <button
               type="button"
-              style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+              style={{ ...bankInput, cursor: "pointer", fontWeight: 500 }}
               onClick={() => loadRows(rows.length)}
             >
               Load 200 more
@@ -4922,7 +4922,7 @@ export default function TaxPage() {
                     color: D.purple,
                     textTransform: "uppercase",
                     letterSpacing: 1,
-                    fontWeight: 600,
+                    fontWeight: 500,
                   }}
                 >
                   AI Tax Advisor
@@ -4931,7 +4931,7 @@ export default function TaxPage() {
                   style={{
                     fontFamily: MONO,
                     fontSize: 16,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     color:
                       { A: D.green, B: D.teal, C: D.amber }[
                         d.latestReport.grade
@@ -4957,7 +4957,7 @@ export default function TaxPage() {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 8,
                 }}

@@ -28,8 +28,14 @@
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; color: #0F172A; }
-      h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
-      h2, h3, h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
+      /* Customer/tech brand headings. Scoped away from the admin surface so
+         portaled admin sheets/dialogs (rendered outside .admin-shell-v2) don't
+         inherit Anton/Montserrat — admin stays Roboto (see index.css). The
+         scope sits in :where() so specificity stays (0,0,1): page-level
+         heading overrides (e.g. the service report's .sr-section h2 serif in
+         pdf/static mode) must still win. */
+      :where(html:not(.admin-app)) h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
+      :where(html:not(.admin-app)) h2, :where(html:not(.admin-app)) h3, :where(html:not(.admin-app)) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
       h5, h6 { font-family: 'Inter', system-ui, sans-serif; }
       input::placeholder, textarea::placeholder { color: #64748B; }
     </style>

@@ -397,9 +397,23 @@ async function linkManyToCustomers(emails, conn = db) {
  * sender's anti-join excludes archived links; a later restore lifts it).
  * Returns { winnerId, relinked }.
  */
+// Every subscriber-relink WRITER (archive, restore, and the pre-send sweep)
+// serializes on this advisory xact lock (codex #3472 r4): the sweep's UPDATE
+// computes its winners from one MVCC snapshot, and without the lock it could
+// interleave between a restore's canonical relink and that restore's commit —
+// overwriting the restored primary with a stale pre-restore winner that later
+// sweeps can never repair (the wrong link is live). With the lock, whichever
+// writer runs second takes a fresh statement snapshot and converges on the
+// canonical picker result. Single deterministic key → no lock-ordering
+// deadlocks among the three.
+async function acquireRelinkLock(trx) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['newsletter_subscriber_relink']);
+}
+
 async function relinkSubscribersForEmail(trx, email) {
   const key = String(email || '').trim().toLowerCase();
   if (!key) return { winnerId: null, relinked: 0 };
+  await acquireRelinkLock(trx);
   const twin = liveTwinSubselect('?');
   const picked = await trx.raw(`SELECT ${twin.sql} AS id`, [key, ...twin.bindings]);
   const winnerId = picked?.rows?.[0]?.id ?? null;
@@ -429,6 +443,7 @@ async function relinkSubscribersForEmail(trx, email) {
  */
 async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
   if (!archivedCustomerId) return { relinked: 0 };
+  await acquireRelinkLock(trx);
   const res = await trx.raw(
     `UPDATE newsletter_subscribers ns
         SET customer_id = t.twin_id, updated_at = NOW()
@@ -449,4 +464,47 @@ async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
   return { relinked: Number(res?.rowCount || 0) };
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+/**
+ * Sweep relink: repoint EVERY subscriber whose link is an archived customer
+ * at that email's live twin, when one exists. The archive/restore relinks
+ * repair links at archive/restore TIME — but a customer re-booked LATER gets
+ * a brand-new customers row and none of the ~12 creation entry points
+ * re-runs the picker, so the stale archived link survives until the next
+ * archive/restore touches that email (i.e. usually forever). Run before
+ * selecting a send audience: the sender's archived-link lift decides
+ * DELIVERY, but segment resolution, personalization, and touchpoint history
+ * all key on ns.customer_id and must read the live profile.
+ * Same picker scope (deleted_at IS NULL only) + ordering as
+ * liveTwinSubselect, keyed on the SUBSCRIBER's normalized email (the stored
+ * email is a signup-time snapshot — see relinkSubscribersFromArchivedCustomer).
+ * Set-based, idempotent, no-op when nothing is stale. Returns { relinked }.
+ */
+async function relinkArchivedLinkedSubscribers(conn = db) {
+  // Own transaction so the advisory xact lock brackets exactly this UPDATE
+  // (a caller already inside a transaction nests as a savepoint; the lock
+  // then rides the outer transaction, which is also correct).
+  return conn.transaction(async (trx) => {
+    await acquireRelinkLock(trx);
+    const res = await trx.raw(
+      `UPDATE newsletter_subscribers ns
+        SET customer_id = t.twin_id, updated_at = NOW()
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE c.deleted_at IS NULL
+            AND LOWER(TRIM(c.email)) IN (
+              SELECT LOWER(TRIM(x.email))
+                FROM newsletter_subscribers x
+                JOIN customers ax ON ax.id = x.customer_id
+               WHERE ax.deleted_at IS NOT NULL
+            )
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
+      WHERE LOWER(TRIM(ns.email)) = t.email_key
+        AND ns.customer_id IN (SELECT ac.id FROM customers ac WHERE ac.deleted_at IS NOT NULL)`,
+    );
+    return { relinked: Number(res?.rowCount || 0) };
+  });
+}
+
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

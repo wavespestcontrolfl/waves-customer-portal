@@ -251,7 +251,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
             if (customerId) onViewCustomer?.(service);
           }}
           className={cn(
-            'text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
             'text-inherit bg-transparent border-0 p-0 cursor-pointer'
           )}
           title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
@@ -556,7 +556,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
             if (customerId) onViewCustomer?.(service);
           }}
           className={cn(
-            'text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
             'text-inherit bg-transparent border-0 p-0 cursor-pointer'
           )}
           title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}

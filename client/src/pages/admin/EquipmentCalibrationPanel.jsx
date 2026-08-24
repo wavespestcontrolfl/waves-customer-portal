@@ -55,7 +55,7 @@ const btnStyle = (bg) => ({
   borderRadius: 8,
   padding: "10px 14px",
   fontSize: 14,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 
@@ -328,7 +328,7 @@ export default function EquipmentCalibrationPanel() {
             >
               {" "}
               <div
-                style={{ fontWeight: 600, color: D.heading, marginBottom: 4 }}
+                style={{ fontWeight: 500, color: D.heading, marginBottom: 4 }}
               >
                 Current active calibration
               </div>{" "}
@@ -464,7 +464,7 @@ export default function EquipmentCalibrationPanel() {
                     }}
                   >
                     <span style={{ color: D.muted }}>Verified carrier:</span>{" "}
-                    <span style={{ fontFamily: MONO, fontWeight: 800 }}>
+                    <span style={{ fontFamily: MONO, fontWeight: 700 }}>
                       {verificationComputedRate != null
                         ? `${verificationComputedRate} gal/1,000 sqft`
                         : "—"}
@@ -521,7 +521,7 @@ export default function EquipmentCalibrationPanel() {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -576,7 +576,7 @@ export default function EquipmentCalibrationPanel() {
             style={{
               fontFamily: MONO,
               fontSize: 24,
-              fontWeight: 800,
+              fontWeight: 700,
               color: computedRate != null ? D.green : D.muted,
             }}
           >
@@ -858,7 +858,7 @@ function SummaryTile({ label, value, color = D.heading }) {
       <div style={{ fontSize: 10, color: D.muted, marginBottom: 4 }}>
         {label}
       </div>
-      <div style={{ fontSize: 20, fontWeight: 800, color }}>{value}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color }}>{value}</div>
     </div>
   );
 }
@@ -880,7 +880,7 @@ function IssueSection({ title, rows }) {
               fontSize: 12,
             }}
           >
-            <div style={{ color: D.text, fontWeight: 600 }}>{row.label}</div>
+            <div style={{ color: D.text, fontWeight: 500 }}>{row.label}</div>
             <div style={{ color: D.muted, marginTop: 2 }}>{row.detail}</div>
           </div>
         ))}
