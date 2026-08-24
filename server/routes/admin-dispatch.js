@@ -8875,6 +8875,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // insert rolls back but the flag stays true) and would let the
         // closeout finalize without its only durable follow-up.
         manualBillingAlerted = true === await db.transaction(async (trx) => {
+          // Shared mint serialization FIRST (codex r12 P1): every
+          // scheduled-service invoice writer keys on the schedule.invoice.mint
+          // advisory lock — holding it here means no Charge Now / scheduled
+          // mint can insert a live invoice between the fresh lookup below
+          // and this transaction's commit. Taken BEFORE the dedupe lock so
+          // the lock order is deterministic across retries.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, svc.id);
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
@@ -8893,7 +8901,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where({ id: terminalCompletionInvoice.id })
             .forUpdate()
             .first('id', 'invoice_number', 'status');
-          const terminalRestored = terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+          // "Restored" means LEFT the refunded state for a non-resolved one —
+          // a concurrently canceled/cancelled/void row is dead, not restored
+          // (codex r12 P1): naming it "collect THAT invoice" would point
+          // staff at a non-collectible row. Resolved-away rows fall through
+          // to the fresh-live/sibling/generic note, whose "bill manually"
+          // instruction is then exactly right (no invoice stands).
+          const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+          const terminalRestored = terminalNow
+            && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+            && !terminalResolvedAway.includes(terminalNow.status)
             ? terminalNow : null;
           // 2. A FRESH on-visit live-invoice lookup (not the pre-transaction
           //    snapshot): a concurrent Charge Now / mint may have created a

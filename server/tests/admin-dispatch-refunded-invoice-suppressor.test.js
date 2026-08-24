@@ -345,6 +345,14 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // a concurrently minted invoice is seen, and even a pre-existing dedupe
     // notification is rewritten so stale "bill/collect" advice cannot stand.
     expect(block).toContain('await completionNewestLiveInvoiceLookup(trx, {');
+    // Shared mint serialization (codex r12): the alert transaction holds the
+    // SAME schedule.invoice.mint advisory lock every invoice writer takes —
+    // before the dedupe lock — so no mint can land mid-revalidation.
+    expect(block).toContain('await acquireScheduledInvoiceMintLock(trx, svc.id);');
+    expect(block.indexOf('acquireScheduledInvoiceMintLock')).toBeLessThan(block.indexOf('pg_advisory_xact_lock(hashtext(?))'));
+    // A concurrently canceled/void refunded row is DEAD, not restored —
+    // never named as collectible (codex r12).
+    expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');
     expect(block).toContain('RESOLVED — no action needed');
     expect(block).toContain('body: alertBody,');
     expect(block).toContain('const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;');
