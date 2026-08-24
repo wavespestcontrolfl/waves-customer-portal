@@ -457,6 +457,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
+  // In-flight guard: a double-click on a confirm action must not pass the
+  // same confirmation twice and insert two profiles.
+  const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
   // A pending confirmation is only valid for the phone/address it was shown
   // for — editing either invalidates it.
   const setQuickAddField = (k, v) => {
@@ -1112,7 +1115,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // `handleQuickAdd` stays the zero-arg onClick handler so a click event
   // never leaks into the request body.
   const submitQuickAdd = async (extraFlags = {}) => {
+    if (quickAddSubmitting) return;
     if (!quickAdd.firstName || !quickAdd.lastName || !quickAdd.phone) return;
+    setQuickAddSubmitting(true);
     try {
       const r = await adminFetch('/admin/customers/quick-add', {
         method: 'POST',
@@ -1128,6 +1133,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const conflict = quickAddConflictFromError(e);
       if (conflict) { setQuickAddConflict(conflict); return; }
       alert('Failed to add customer: ' + e.message);
+    } finally {
+      setQuickAddSubmitting(false);
     }
   };
   const handleQuickAdd = () => submitQuickAdd();
@@ -2137,18 +2144,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           ? 'They already have a profile at this address — adding again would create a duplicate.'
                           : 'Attach this address to their account as an additional property, or create a separate account.'}
                       </div>
-                      <button type="button" onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict))} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44 }}>
+                      <button type="button" disabled={quickAddSubmitting} onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict))} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44, opacity: quickAddSubmitting ? 0.6 : 1 }}>
                         {quickAddConflict.code === 'DUPLICATE_PROFILE' ? 'Create duplicate profile' : 'Attach as additional property'}
                       </button>
-                      <button type="button" onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict, { separateAccount: true }))} style={{ padding: '10px 16px', background: '#F4F4F5', color: '#18181B', border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44 }}>
+                      <button type="button" disabled={quickAddSubmitting} onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict, { separateAccount: true }))} style={{ padding: '10px 16px', background: '#F4F4F5', color: '#18181B', border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44, opacity: quickAddSubmitting ? 0.6 : 1 }}>
                         Create separate account
                       </button>
-                      <button type="button" onClick={() => setQuickAddConflict(null)} style={{ padding: '10px 16px', background: 'none', color: '#18181B', border: '1px solid #E4E4E7', borderRadius: 6, fontSize: 13, cursor: 'pointer', minHeight: 44 }}>
+                      <button type="button" disabled={quickAddSubmitting} onClick={() => setQuickAddConflict(null)} style={{ padding: '10px 16px', background: 'none', color: '#18181B', border: '1px solid #E4E4E7', borderRadius: 6, fontSize: 13, cursor: 'pointer', minHeight: 44 }}>
                         Cancel
                       </button>
                     </div>
                   )}
-                  <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add customer</button>
+                  <button onClick={handleQuickAdd} disabled={quickAddSubmitting} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%', opacity: quickAddSubmitting ? 0.6 : 1 }}>{quickAddSubmitting ? 'Adding…' : 'Add customer'}</button>
                 </div>
               )}
             </div>

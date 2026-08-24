@@ -1852,8 +1852,46 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
 // unit-stripped, so "123 Main St" keys with "123 Main Street" but not with
 // "123 Main Ave". Both flags are admin-parsed at the route (requireAdmin
 // already guards these routes, so the match payload never reaches a tech).
+// Add-Property from a specific profile passes the originating customer id
+// (admin-only, codex #3469 r3 P1): multiple live accounts can legitimately
+// share a phone (admin-created separate accounts), and the phone-first
+// `.first()` pick could resolve a DIFFERENT account than the profile the
+// admin started from — splitting history again. The explicit origin wins,
+// but only when its live row still matches the submitted phone (all inside
+// the create transaction); otherwise the hint is ignored and the standard
+// visible confirm flow applies.
+async function resolveExplicitAttachTarget(trx, account, attachToCustomerId, submittedPhone) {
+  if (!attachToCustomerId) return account;
+  const origin = await trx('customers').where({ id: attachToCustomerId }).whereNull('deleted_at').first();
+  if (!origin) return account;
+  const digits = phoneLast10(submittedPhone);
+  if (!digits || phoneLast10(origin.phone) !== digits) return account;
+  const originKey = String(origin.account_id || origin.id);
+  if (account?.accountId && String(account.accountId) === originKey) return account;
+  const accountId = await attachMatchedCustomerToAccount(trx, origin);
+  return { accountId, existingCustomer: { ...origin, account_id: accountId }, matchType: 'phone' };
+}
+
 async function assertPhoneAttachConfirmed(trx, account, { streetLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId }) {
   if (!account?.existingCustomer || account.matchType !== 'phone') return;
+  // Row-lock the matched customer BEFORE relying on the match (codex #3469
+  // r3 P2): the advisory comms fence only stops writers that take that lock
+  // — a phone-only PUT /:id does not. FOR UPDATE serializes against any
+  // update of the matched row for the rest of this transaction, and the
+  // locked re-read verifies the row still carries the matched phone and
+  // account; any drift fails closed with zero writes.
+  const matched = account.existingCustomer;
+  const lockedRow = await trx('customers').where({ id: matched.id }).whereNull('deleted_at').forUpdate().first();
+  if (!lockedRow
+    || String(lockedRow.account_id || lockedRow.id) !== String(account.accountId)
+    || phoneLast10(lockedRow.phone) !== phoneLast10(matched.phone)) {
+    const busyErr = new Error('That customer record is being updated — retry in a moment.');
+    busyErr.statusCode = 409;
+    busyErr.status = 409;
+    busyErr.isOperational = true;
+    busyErr.code = 'CUSTOMER_BUSY';
+    throw busyErr;
+  }
   // A confirm flag is honored only for the account the admin actually saw:
   // the 409 payload carries match.accountId, the client echoes it back as
   // confirmMatchedAccountId, and it is re-checked here against the account
@@ -2065,12 +2103,15 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
     const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
       ? req.body.confirmMatchedAccountId.trim() : null;
+    const attachToCustomerId = isAdmin && typeof req.body.attachToCustomerId === 'string' && req.body.attachToCustomerId.trim()
+      ? req.body.attachToCustomerId.trim() : null;
 
     const customer = await db.transaction(async (trx) => {
       // fenceAttach: same concurrency fence as POST / below — lock + re-
       // resolve the matched row inside this transaction, CUSTOMER_BUSY on
       // any drift.
-      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
@@ -3218,6 +3259,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // admin-leads.js's attachToAccountId).
     const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
       ? req.body.confirmMatchedAccountId.trim() : null;
+    // Add-Property origin: which profile the admin pressed "Add Property"
+    // on — see resolveExplicitAttachTarget.
+    const attachToCustomerId = isAdmin && typeof req.body.attachToCustomerId === 'string' && req.body.attachToCustomerId.trim()
+      ? req.body.attachToCustomerId.trim() : null;
 
     // Billing lane at create (#3140 resolution — the inferred-monthly
     // vector): a create with a real membership tier + a positive rate and
@@ -3261,7 +3306,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // concurrent phone/account edit between lookup and insert fails closed
       // with CUSTOMER_BUSY instead of attaching on stale match data. Safe
       // here because this caller always runs inside db.transaction.
-      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({

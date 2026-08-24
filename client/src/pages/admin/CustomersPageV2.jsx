@@ -2349,6 +2349,9 @@ export default function CustomersPageV2() {
           onAddProperty={(customer) => {
             closeCustomerProfile();
             openAddCustomer({
+              // Originating profile — the server pins the attach to THIS
+              // profile's account when the phone matches several accounts.
+              attachToCustomerId: customer.id ? String(customer.id) : "",
               firstName: customer.firstName || "",
               lastName: customer.lastName || "",
               phone: customer.phone || "",

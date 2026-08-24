@@ -41,6 +41,16 @@ function makeDb(state) {
     q.first = async () => {
       if (table === 'customers') {
         if (q._count) return { count: state.accountProfiles.length };
+        const idWhere = q._ops.find((o) => o.op === 'where' && o.args[0] && typeof o.args[0] === 'object' && o.args[0].id);
+        // assertPhoneAttachConfirmed's FOR UPDATE re-read of the matched row;
+        // `lockedMatchRow` lets a test drift it (phone edited under our feet).
+        if (q._ops.some((o) => o.op === 'forUpdate')) {
+          if ('lockedMatchRow' in state) return state.lockedMatchRow;
+          const id = idWhere && idWhere.args[0].id;
+          return (state.customersById && state.customersById[id]) || state.phoneMatchRow;
+        }
+        // resolveExplicitAttachTarget's origin lookup by id.
+        if (idWhere) return (state.customersById && state.customersById[idWhere.args[0].id]) || null;
         // findAccountByContact's phone lookup (last-10-digits regexp). The
         // fenceAttach lane re-runs it after the advisory lock; a fixture can
         // make the re-resolve drift to exercise the CUSTOMER_BUSY fail-close.
@@ -114,6 +124,7 @@ function freshState({ phoneMatch = true } = {}) {
   return {
     phoneMatchRow: phoneMatch ? { ...MATCH_ROW } : null,
     accountProfiles: phoneMatch ? [{ ...MATCH_ROW }] : [],
+    customersById: phoneMatch ? { 'cust-exist': { ...MATCH_ROW } } : {},
     inserts: [],
     updates: [],
   };
@@ -226,6 +237,50 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
       expect((await res.json()).code).toBe('CUSTOMER_BUSY');
     });
     expect(customersInserts(state)).toHaveLength(0);
+  });
+
+  it('matched row edited after the fence (FOR UPDATE re-read drifts) → 409 CUSTOMER_BUSY, no insert', async () => {
+    const state = freshState();
+    state.lockedMatchRow = { ...MATCH_ROW, phone: '+19998887777' };
+    install(state);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', confirmAttach: true, confirmMatchedAccountId: 'acct-1' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CUSTOMER_BUSY');
+    });
+    expect(customersInserts(state)).toHaveLength(0);
+  });
+
+  it('attachToCustomerId pins the attach to the originating account when several accounts share the phone', async () => {
+    const state = freshState();
+    // First-sorted phone match resolves acct-1, but the admin pressed
+    // "Add Property" on acct-2's profile (a separate account sharing the phone).
+    const second = { ...MATCH_ROW, id: 'cust-second', account_id: 'acct-2', address_line1: '789 Pine Rd' };
+    state.customersById['cust-second'] = second;
+    state.accountProfiles = [second];
+    install(state);
+    await withServer(async (baseUrl) => {
+      const blocked = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', attachToCustomerId: 'cust-second' });
+      expect(blocked.status).toBe(409);
+      const conflict = await blocked.json();
+      expect(conflict.code).toBe('PHONE_MATCH_CONFIRM');
+      expect(conflict.match.accountId).toBe('acct-2');
+    });
+    const state2 = freshState();
+    const second2 = { ...MATCH_ROW, id: 'cust-second', account_id: 'acct-2', address_line1: '789 Pine Rd' };
+    state2.customersById['cust-second'] = second2;
+    state2.accountProfiles = [second2];
+    install(state2);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', attachToCustomerId: 'cust-second', confirmAttach: true, confirmMatchedAccountId: 'acct-2' });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.attachedToExistingAccount).toBe(true);
+      expect(body.existingCustomerId).toBe('cust-second');
+    });
+    const inserts = customersInserts(state2);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({ account_id: 'acct-2', is_primary_profile: false });
   });
 
   it('no live phone match → plain create (fresh account, primary profile), no confirmation', async () => {

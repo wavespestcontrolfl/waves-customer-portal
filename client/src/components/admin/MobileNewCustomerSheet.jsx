@@ -46,6 +46,9 @@ function formFromInitialValues(initialValues = null) {
     pipelineStage: initialValues?.pipelineStage || "new_lead",
     tags: Array.isArray(initialValues?.tags) ? initialValues.tags : [],
     notes: initialValues?.notes || "",
+    // Add-Property origin: the server pins the attach to this profile's
+    // account when the phone matches several accounts.
+    attachToCustomerId: initialValues?.attachToCustomerId || "",
   };
 }
 
@@ -127,6 +130,7 @@ export default function MobileNewCustomerSheet({
           pipelineStage: form.pipelineStage,
           tags: form.tags,
           notes: form.notes.trim() || undefined,
+          attachToCustomerId: form.attachToCustomerId || undefined,
           ...extraFlags,
         }),
       });
@@ -326,7 +330,10 @@ export default function MobileNewCustomerSheet({
             placeholder="Address line 1"
             value={form.addressLine1}
             onChange={(value) => set("addressLine1", value)}
-            onSelect={(parts) =>
+            onSelect={(parts) => {
+              // Autocomplete bypasses `set`, so clear the pending phone-match
+              // confirmation here too — it was shown for the old address.
+              setPhoneMatch(null);
               setForm((p) => ({
                 ...p,
                 addressLine1: parts.line1 || parts.formatted || p.addressLine1,
@@ -334,8 +341,8 @@ export default function MobileNewCustomerSheet({
                 city: parts.city || p.city,
                 state: parts.state || p.state || "FL",
                 zip: parts.zip || p.zip,
-              }))
-            }
+              }));
+            }}
           />{" "}
           <input
             className={ringClass()}
