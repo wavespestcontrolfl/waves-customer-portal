@@ -348,8 +348,15 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // Shared mint serialization (codex r12): the alert transaction holds the
     // SAME schedule.invoice.mint advisory lock every invoice writer takes —
     // before the dedupe lock — so no mint can land mid-revalidation.
-    expect(block).toContain('await acquireScheduledInvoiceMintLock(trx, svc.id);');
+    // The lock SET is this visit plus every estimate/date sibling, in
+    // sorted order (codex r13: own-then-other would ABBA-deadlock between
+    // two sibling completions), taken before the dedupe lock.
+    expect(block).toContain('const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();');
+    expect(block).toContain('await acquireScheduledInvoiceMintLock(trx, lockId);');
     expect(block.indexOf('acquireScheduledInvoiceMintLock')).toBeLessThan(block.indexOf('pg_advisory_xact_lock(hashtext(?))'));
+    // The sibling set is RE-DERIVED on the transaction (never a remembered
+    // single row): the fresh sibling lookup runs on trx.
+    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx);');
     // A concurrently canceled/void refunded row is DEAD, not restored —
     // never named as collectible (codex r12).
     expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');

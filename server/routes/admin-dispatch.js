@@ -8882,7 +8882,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // and this transaction's commit. Taken BEFORE the dedupe lock so
           // the lock order is deterministic across retries.
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-          await acquireScheduledInvoiceMintLock(trx, svc.id);
+          // Estimate/date SIBLING visits can carry the first-application
+          // invoice, and a sibling mint contends on the SIBLING's lock key —
+          // so the lock set is this visit PLUS its siblings, acquired in
+          // sorted order (codex r13: two sibling completions locking
+          // own-then-other would ABBA-deadlock; a global sort cannot).
+          let alertSiblingServiceIds = [];
+          if (svc.source_estimate_id) {
+            const { dateOnly } = require('../services/estimate-first-application-invoice');
+            alertSiblingServiceIds = await trx('scheduled_services')
+              .where({ source_estimate_id: svc.source_estimate_id, customer_id: svc.customer_id })
+              .where('scheduled_date', dateOnly(svc.scheduled_date))
+              .pluck('id');
+          }
+          const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
+          for (const lockId of alertMintLockIds) {
+            await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
@@ -8920,16 +8936,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceRecordId: record.id,
             scheduledServiceId: svc.id,
           });
-          // 3. The sibling snapshot row (off-visit — invisible to the
-          //    on-visit lookup) re-read by id.
+          // 3. The COMPLETE estimate/date sibling set, re-queried on this
+          //    transaction under the sibling mint locks taken above (codex
+          //    r13) — a sibling first-application invoice minted after the
+          //    unlocked lookup has no snapshot id to re-read, so the set is
+          //    re-derived, never a single remembered row.
           let siblingLiveNow = null;
-          if (!terminalRestored && !freshLiveOnVisit && completionLiveBesideInvoice) {
-            siblingLiveNow = await trx('invoices')
-              .where({ id: completionLiveBesideInvoice.id })
-              .forUpdate()
-              .first('id', 'invoice_number', 'status');
-            const resolvedTerminal = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
-            if (siblingLiveNow && resolvedTerminal.includes(siblingLiveNow.status)) siblingLiveNow = null;
+          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
+            const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx);
+            siblingLiveNow = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
+              ? (siblingNow.liveBeside || null)
+              : (siblingNow.invoice || null);
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
