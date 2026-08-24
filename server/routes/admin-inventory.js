@@ -27,6 +27,22 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Approvals change price/quantity, so the stored per-oz unit costs must be
+// refreshed in the same write — otherwise best-price scoring and the per-unit
+// price display keep computing against the pre-approval pack size (codex r1).
+function approvedPerOzFields(price, quantity) {
+  const oz = normalizeQuantityToOz(quantity);
+  const priceNum = numberOrNull(price);
+  const perOz = oz && oz > 0 && priceNum != null
+    ? Math.round((priceNum / oz) * 10000) / 10000
+    : null;
+  return {
+    unit_normalized: perOz != null ? 'oz' : null,
+    price_per_oz: perOz,
+    normalized_unit_price: perOz,
+  };
+}
+
 function numberOrNull(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -2394,15 +2410,18 @@ router.post('/approvals/:id/approve', async (req, res, next) => {
       .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
 
     if (existing) {
+      const quantity = approval.new_quantity || existing.quantity;
       await db('vendor_pricing').where({ id: existing.id }).update({
         previous_price: existing.price, price: approval.new_price,
-        quantity: approval.new_quantity || existing.quantity,
+        quantity,
+        ...approvedPerOzFields(approval.new_price, quantity),
         last_checked_at: db.fn.now(),
       });
     } else {
       await db('vendor_pricing').insert({
         product_id: approval.product_id, vendor_id: approval.vendor_id,
         price: approval.new_price, quantity: approval.new_quantity,
+        ...approvedPerOzFields(approval.new_price, approval.new_quantity),
         vendor_product_url: approval.source_url, last_checked_at: db.fn.now(),
       });
     }
@@ -2457,15 +2476,18 @@ router.post('/approvals/bulk', async (req, res, next) => {
           const existing = await db('vendor_pricing')
             .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
           if (existing) {
+            const quantity = approval.new_quantity || existing.quantity;
             await db('vendor_pricing').where({ id: existing.id }).update({
               previous_price: existing.price, price: approval.new_price,
-              quantity: approval.new_quantity || existing.quantity,
+              quantity,
+              ...approvedPerOzFields(approval.new_price, quantity),
               last_checked_at: db.fn.now(),
             });
           } else {
             await db('vendor_pricing').insert({
               product_id: approval.product_id, vendor_id: approval.vendor_id,
               price: approval.new_price, quantity: approval.new_quantity,
+              ...approvedPerOzFields(approval.new_price, approval.new_quantity),
               vendor_product_url: approval.source_url, last_checked_at: db.fn.now(),
             });
           }
@@ -3226,13 +3248,16 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
 });
 
 // ── Helper: per-oz price of a vendor_pricing row (null when size unknown) ──
+// Rederives from the CURRENT price + quantity first: legacy approval paths
+// update price/quantity without refreshing normalized_unit_price/price_per_oz,
+// so the stored per-oz fields can be stale. Stored values are only trusted
+// when the quantity cannot be parsed (nothing to validate against).
 function vendorRowPricePerOz(row) {
-  const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
-  if (stored != null && stored > 0) return stored;
   const oz = normalizeQuantityToOz(row.quantity);
   const price = numberOrNull(row.price);
-  if (!oz || oz <= 0 || price == null) return null;
-  return price / oz;
+  if (oz && oz > 0 && price != null) return price / oz;
+  const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
+  return stored != null && stored > 0 ? stored : null;
 }
 
 // ── Helper: recalculate best price for a product ──
@@ -3262,8 +3287,20 @@ async function recalcBestPrice(productId) {
     ? Math.round(best.perOz * unitSizeOz * 100) / 100
     : best.price;
 
+  // Update the control-layer backing/cache fields atomically with the winner:
+  // the pricing-engine DB bridge only trusts best_price when
+  // best_vendor_pricing_id references the (active, approved) winning row, so
+  // leaving it pointed at the previous row would strand or misattribute the
+  // price. best_price_amount_cached mirrors the persisted best_price.
   await db('products_catalog').where({ id: productId }).update({
-    best_price: bestPrice, best_vendor: best.row.vendor_name, needs_pricing: false,
+    best_price: bestPrice,
+    best_vendor: best.row.vendor_name,
+    best_vendor_pricing_id: best.row.id,
+    best_price_amount_cached: bestPrice,
+    best_price_vendor_id_cached: best.row.vendor_id,
+    best_price_updated_at: new Date(),
+    best_price_status: 'current',
+    needs_pricing: false,
   });
   await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
   await db('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });

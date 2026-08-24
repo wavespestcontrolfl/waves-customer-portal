@@ -201,8 +201,8 @@ describe('recalcBestPrice', () => {
     // Vendor B: $40 for a 32 oz container → $1.25/oz. Raw ordering would pick B.
     const { catalogUpdates, pricingUpdates } = wireBestPrice({
       rows: [
-        { id: 'vp-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
-        { id: 'vp-b', price: 40, quantity: '32 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor B' },
+        { id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 40, quantity: '32 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor B' },
       ],
       product: { unit_size_oz: 64 },
     });
@@ -211,21 +211,43 @@ describe('recalcBestPrice', () => {
     // best_price is scaled to the product's own 64 oz container: 100/128 * 64 = 50
     expect(catalogUpdates[0].best_price).toBe(50);
     expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
+    // Backing/cache fields move atomically with the winner (pricing-engine
+    // db-bridge only trusts best_price when best_vendor_pricing_id matches).
+    expect(catalogUpdates[0].best_vendor_pricing_id).toBe('vp-a');
+    expect(catalogUpdates[0].best_price_amount_cached).toBe(50);
+    expect(catalogUpdates[0].best_price_vendor_id_cached).toBe('v-a');
+    expect(catalogUpdates[0].best_price_status).toBe('current');
     const flagged = pricingUpdates.find((u) => u.update.is_best_price === true);
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
   });
 
-  test('prefers stored normalized_unit_price over parsing quantity', async () => {
+  test('uses stored normalized_unit_price when the quantity is unparseable', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [
-        { id: 'vp-a', price: 90, quantity: null, normalized_unit_price: 0.5, price_per_oz: 0.5, vendor_name: 'Vendor A' },
-        { id: 'vp-b', price: 10, quantity: null, normalized_unit_price: 0.9, price_per_oz: 0.9, vendor_name: 'Vendor B' },
+        { id: 'vp-a', vendor_id: 'v-a', price: 90, quantity: null, normalized_unit_price: 0.5, price_per_oz: 0.5, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 10, quantity: null, normalized_unit_price: 0.9, price_per_oz: 0.9, vendor_name: 'Vendor B' },
       ],
       product: { unit_size_oz: 100 },
     });
     await recalcBestPrice('prod-1');
     expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
     expect(catalogUpdates[0].best_price).toBe(50); // 0.5/oz * 100 oz
+  });
+
+  test('rederives per-oz from current price+quantity over a stale stored value', async () => {
+    // vp-a was approved from $100/128oz down to $40/32oz but the legacy
+    // approval write left normalized_unit_price at the old 0.78125/oz.
+    // The current price/quantity say $1.25/oz, so vp-b ($1.00/oz) must win.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 40, quantity: '32 oz', normalized_unit_price: 0.78125, price_per_oz: 0.78125, vendor_name: 'Vendor A' },
+        { id: 'vp-b', vendor_id: 'v-b', price: 64, quantity: '64 oz', normalized_unit_price: 1, price_per_oz: 1, vendor_name: 'Vendor B' },
+      ],
+      product: { unit_size_oz: 64 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor B');
+    expect(catalogUpdates[0].best_price).toBe(64); // 1.00/oz * 64 oz
   });
 
   test('falls back to raw price only when no row has size info', async () => {
@@ -290,6 +312,10 @@ describe('POST /approvals/bulk', () => {
         price: 25,
         quantity: '32 oz',
         vendor_product_url: 'https://vendor.example/p1',
+        // per-oz unit costs refreshed in the same write as the new price
+        price_per_oz: 0.7813,
+        normalized_unit_price: 0.7813,
+        unit_normalized: 'oz',
       }));
       expect(body.processed).toBe(1);
       expect(body.failed).toEqual(['ap-2']);
