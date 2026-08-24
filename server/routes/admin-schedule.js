@@ -494,24 +494,32 @@ async function loadSeriesBlackoutDates(conn, anchorDateStr) {
 // dates — walking unfloored from a months-old anchor is what used to seed
 // past-dated pending children whose reminders texted customers about visits
 // that never happen.
-function seriesExtendAnchor(latest, pattern, rOpts) {
+// Last cadence occurrence on or before today, walking from `baseDateStr`
+// with the series' own recurrence options; returns baseDateStr unchanged
+// when it is already today-or-future. Bounded pure walk (~19 years of
+// weekly steps; `next <= anchor` guards degenerate non-advancing patterns).
+// If the walk exhausts with the anchor still in the past (e.g. a daily
+// cadence dead 1,000+ days) it falls back to today: phase is sacrificed
+// rather than letting the callers' future-only floors reject every
+// candidate in their attempt budgets and silently stall the series.
+function fastForwardCadenceAnchor(baseDateStr, pattern, rOpts) {
   const today = etDateString();
-  const latestStr = dateOnly(latest?.scheduled_date) || '';
-  if (!latestStr) return today;
-  if (latestStr >= today) return latestStr;
-  let anchor = latestStr;
-  // Bounded pure walk (~19 years of weekly steps); `next <= anchor` guards
-  // degenerate non-advancing patterns.
+  const base = dateOnly(baseDateStr) || '';
+  if (!base) return today;
+  if (base >= today) return base;
+  let anchor = base;
   for (let i = 1; i <= 1000; i++) {
-    const next = dateOnly(nextRecurringDate(latestStr, pattern, i, rOpts)) || '';
+    const next = dateOnly(nextRecurringDate(base, pattern, i, rOpts)) || '';
     if (!next || next > today || next <= anchor) return anchor;
     anchor = next;
   }
-  // Walk exhausted with the anchor still in the past (e.g. a daily cadence
-  // dead 1,000+ days): give up on phase and re-anchor to today rather than
-  // let the extension loops' future-only floor reject every candidate and
-  // silently stall the series.
   return anchor >= today ? anchor : today;
+}
+
+function seriesExtendAnchor(latest, pattern, rOpts) {
+  const latestStr = dateOnly(latest?.scheduled_date) || '';
+  if (!latestStr) return etDateString();
+  return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -650,16 +658,23 @@ function planCadenceRewriteTargets({
 }) {
   const childTargets = new Map();
   const boosterTargets = new Map();
+  // A stale parent (cadence edited on an old series) would burn the whole
+  // placement budget below on candidates the future-only floor rejects,
+  // silently leaving children on the old cadence — fast-forward the phase
+  // to the last occurrence on or before today first. This also bases the
+  // 12-month booster walk on the current cadence year. A future parent
+  // passes through unchanged.
+  const planBase = fastForwardCadenceAnchor(baseDateStr, pattern, rOpts);
   const maxAttempts = pendingChildren.length * 4 + 30;
   let attempt = 1;
   for (const child of pendingChildren) {
     let nextDateStr = null;
     while (!nextDateStr && attempt < maxAttempts) {
-      const rawNext = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
+      const rawNext = nextRecurringDate(planBase, pattern, attempt, rOpts);
       attempt++;
       const candidate = seasonalSafeShift(rawNext, pattern, skip, dir, blackoutDates);
       if (!candidate) continue;
-      if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, candidate)) continue;
+      if (recurringCandidateTooCloseToAnchor(planBase, pattern, candidate)) continue;
       // A cadence/anchor edit on an older parent must never re-date pending
       // children into the past (mirror of the extend planner's floor).
       if (candidate <= etDateString()) continue;
@@ -673,7 +688,7 @@ function planCadenceRewriteTargets({
   if (pendingBoosters.length > 0) {
     let recomputedTargetIndex = 0;
     if (boosterMonths.length > 0) {
-      for (const rawDate of computeBoosterDates(baseDateStr, boosterMonths, 12)) {
+      for (const rawDate of computeBoosterDates(planBase, boosterMonths, 12)) {
         const targetBooster = pendingBoosters[recomputedTargetIndex];
         if (!targetBooster) break;
         const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });

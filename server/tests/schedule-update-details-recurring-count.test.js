@@ -559,6 +559,31 @@ describe('planCadenceRewriteTargets — cadence edits stay future-only and clear
     for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
   });
 
+  test('a years-stale parent still re-dates every pending child — the plan base fast-forwards to the current cadence phase', () => {
+    // Four years back on monthly cadence: without the fast-forward, all
+    // (2*4+30) attempts land on/before today and childTargets stays empty,
+    // silently leaving the children on the old cadence.
+    const base = new Date(`${TODAY}T12:00:00Z`);
+    base.setUTCDate(base.getUTCDate() - 1460);
+    const { childTargets } = planCadenceRewriteTargets({
+      baseDateStr: base.toISOString().slice(0, 10),
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [
+        { id: 'c1', scheduled_date: daysOut(5) },
+        { id: 'c2', scheduled_date: daysOut(35) },
+      ],
+      pendingBoosters: [],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(childTargets.size).toBe(2);
+    for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
   test('booster rewrites of an older parent never target a past date', () => {
     // Base 60 days back with a booster month covering roughly today: the
     // recomputed booster walk emits candidates on/before today, which must
