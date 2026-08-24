@@ -6041,8 +6041,15 @@ async function restoreStatementCascadeForDispute(statementId, disputedPi) {
     const now = new Date();
     await trx('payer_statements').where({ id: statementId })
       .update({ status: 'paid', paid_at: now, stripe_payment_intent_id: disputedPi || stmt.stripe_payment_intent_id || null, updated_at: now });
-    await trx('invoices').where({ payer_statement_id: statementId }).whereNotIn('status', ['void', 'paid'])
-      .update({ status: 'paid', paid_at: now, updated_at: now });
+    const restoredIds = await trx('invoices').where({ payer_statement_id: statementId }).whereNotIn('status', ['void', 'paid'])
+      .update({ status: 'paid', paid_at: now, updated_at: now })
+      .returning('id');
+    // Dispute-won restore is a settlement too — complete any active payment
+    // plan on the restored invoices in the SAME trx (codex r8 P1; payer
+    // invoices refuse plan creation, so this is a defensive no-op today).
+    for (const restored of restoredIds || []) {
+      await require('../services/payment-plans').completeActivePlansForInvoice(restored.id || restored, trx);
+    }
   });
   logger.info(`[stripe-webhook] statement S-${statementId} dispute won — cascade restored to paid`);
 }
@@ -7001,6 +7008,11 @@ async function handleDisputeClosed(dispute) {
               if (restoredRows > 0) {
                 restoredCount += 1;
                 restoredThisPass = true;
+                // The reinstated share settled the invoice again — complete
+                // any plan created while the dispute had it reopened (codex
+                // r8 P1). Throwing variant: a failure fails the event and
+                // Stripe redelivery recovers.
+                await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
               } else {
                 logger.warn(`[stripe-webhook] dispute ${dispute.id} won — invoice ${invId} binding changed before the restore committed; parking the reinstated share`);
                 await db('stripe_orphan_charges')
@@ -7283,6 +7295,9 @@ async function handleDisputeClosed(dispute) {
               stripe_payment_intent_id: feePi,
               stripe_charge_id: payment.stripe_charge_id || null,
             });
+            // Restored settlement completes any plan created while the
+            // dispute had the invoice reopened (codex r8 P1). Same trx.
+            await require('../services/payment-plans').completeActivePlansForInvoice(wonInvoice.id, trx);
           }
         } else if (status === 'lost') {
           await trx('payments').where({ id: payment.id }).update({
@@ -7360,6 +7375,10 @@ async function handleDisputeClosed(dispute) {
           stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
           stripe_charge_id: payment.stripe_charge_id || null,
         });
+        // Restored settlement completes any plan created while the dispute
+        // had the invoice reopened (codex r8 P1). Throwing variant — a
+        // failure fails the event and Stripe redelivery recovers.
+        await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
       }
       // Annual-prepay sync on the restored money: a paid PREPAY invoice
       // re-activates its dispute-suspended term (payment_pending → active)
