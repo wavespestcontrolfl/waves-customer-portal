@@ -4274,17 +4274,41 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
     .first('id', 'invoice_number', 'status', 'created_at')) || null;
 }
 
+// The newest LIVE (collectible-or-settled) invoice on THIS visit across
+// both identifiers in one ordered query — the comparison row for the
+// refunded reconciliation below. The suppressor chain itself checks
+// service_record_id first and scheduled_service_id only as a fallback, so
+// the row it hands back is not necessarily the newest live row.
+async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId) return null;
+  const InvoiceService = require('../services/invoice');
+  return (await conn('invoices')
+    .where((qb) => {
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('id', 'status', 'created_at')) || null;
+}
+
 // Invoices are not unique per visit (pre-push P0): a NEWER refunded
 // invoice can coexist with an OLDER live one, and the status-filtered
 // suppressor would hand back the older row and skip the refunded check —
 // its pay link goes out, and if the newer refund bounces Stripe restores
 // that invoice to paid beside it. Classify by the newest row across both:
-// a refunded invoice newer than the live one wins (manual path, live row
-// not reused); an older refunded one is history and the live row stands.
-function reconcileLiveVsRefunded(existing, refunded) {
+// a refunded invoice newer than the NEWEST live row wins (manual path, the
+// live row the chain found is not reused); a refunded invoice older than
+// the newest live row is history and the chain's row stands. `newestLive`
+// (completionNewestLiveInvoiceLookup) is the comparison row — the chain's
+// `existing` may be an OLDER row reached through service_record_id while a
+// newer live row hangs off scheduled_service_id (pre-push P0 round 2).
+function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
   if (!refunded) return { existing, terminal: null };
   if (!existing) return { existing: null, terminal: refunded };
-  const liveAt = new Date(existing.created_at || 0).getTime();
+  const compareRow = newestLive || existing;
+  const liveAt = new Date(compareRow.created_at || 0).getTime();
   const refundedAt = new Date(refunded.created_at || 0).getTime();
   // Ties go to the refunded row (pre-push P1): rows minted in one
   // transaction share created_at and JS Date truncates sub-millisecond
@@ -8614,11 +8638,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // failure; the retry re-runs this check.
     if (!recapReviewOnly) {
       let refundedOnVisit = null;
+      let newestLiveOnVisit = null;
       try {
         refundedOnVisit = await completionTerminalInvoiceLookup(db, {
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
         });
+        if (refundedOnVisit && existingCompletionInvoice) {
+          newestLiveOnVisit = await completionNewestLiveInvoiceLookup(db, {
+            serviceRecordId: record.id,
+            scheduledServiceId: svc.id,
+          });
+        }
       } catch (lookupErr) {
         logger.error(`[dispatch] refunded-invoice check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
@@ -8634,7 +8665,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           serviceRecordId: record.id,
         });
       }
-      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit);
+      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit);
       existingCompletionInvoice = reconciled.existing;
       terminalCompletionInvoice = reconciled.terminal;
     }
@@ -14336,6 +14367,7 @@ module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
+  completionNewestLiveInvoiceLookup,
   splitTerminalCompletionInvoice,
   reconcileLiveVsRefunded,
   COMPLETION_TERMINAL_INVOICE_STATUSES,

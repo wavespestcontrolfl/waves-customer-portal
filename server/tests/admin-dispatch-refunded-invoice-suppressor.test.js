@@ -17,6 +17,7 @@ const path = require('path');
 const {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
+  completionNewestLiveInvoiceLookup,
   splitTerminalCompletionInvoice,
   reconcileLiveVsRefunded,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
@@ -139,6 +140,36 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
   });
 });
 
+describe('completionNewestLiveInvoiceLookup (comparison row for the refunded reconciliation)', () => {
+  test('one ordered query across both identifiers, live statuses only, newest wins', async () => {
+    const scopes = [];
+    const orders = [];
+    let excluded = [];
+    const rows = [
+      { id: 'inv-rec-old', status: 'sent', service_record_id: 'rec-1', created_at: '2026-08-01' },
+      { id: 'inv-ss-new', status: 'draft', scheduled_service_id: 'svc-1', created_at: '2026-08-25' },
+      { id: 'inv-refunded', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-30' },
+    ];
+    const chain = {
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg({ orWhere: (c) => { scopes.push(c); return { orWhere: (c2) => { scopes.push(c2); } }; } }); return chain; }),
+      whereNotIn: jest.fn((col, list) => { excluded = list; return chain; }),
+      orderBy: jest.fn((col, dir) => { orders.push([col, dir]); return chain; }),
+      first: jest.fn(async () => {
+        const m = rows.filter((r) => !excluded.includes(r.status) && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
+        m.sort((a, b) => b.created_at.localeCompare(a.created_at) || String(b.id).localeCompare(String(a.id)));
+        return m[0] ? { id: m[0].id, status: m[0].status, created_at: m[0].created_at } : undefined;
+      }),
+    };
+    const knex = jest.fn(() => chain);
+    const found = await completionNewestLiveInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
+    expect(found).toEqual({ id: 'inv-ss-new', status: 'draft', created_at: '2026-08-25' });
+    expect(excluded).toEqual(InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    expect(orders).toEqual([['created_at', 'desc'], ['id', 'desc']]);
+    expect(knex).toHaveBeenCalledTimes(1);
+    await expect(completionNewestLiveInvoiceLookup(knex, {})).resolves.toBeNull();
+  });
+});
+
 describe('shouldAutoInvoiceCompletion: a terminal invoice on the visit suppresses the mint', () => {
   const billable = {
     recapReviewOnly: false, alreadyPaid: false, prepaidCovered: false, autopayCoversVisit: false,
@@ -166,15 +197,16 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(idx).toBeLessThan(siblingAt);
     // Unconditional (not gated on the suppressors finding nothing) — an
     // older live row must not mask a newer refunded one.
-    expect(src.slice(idx - 120, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*let refundedOnVisit = null;\s*try \{\s*$/);
-    expect(src.slice(idx, idx + 1600)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit)');
+    expect(src.slice(idx - 160, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*let refundedOnVisit = null;\s*let newestLiveOnVisit = null;\s*try \{\s*$/);
+    expect(src.slice(idx, idx + 2000)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit)');
+    expect(src.slice(idx, idx + 600)).toContain('newestLiveOnVisit = await completionNewestLiveInvoiceLookup(db, {');
     // Fail CLOSED: outside the non-blocking suppressor try (that catch sits
     // BEFORE this lookup), and its own failure releases the attempt + 503.
     const directCatch = src.indexOf('} catch (e) { invoiceLookupFailed = true; /* non-blocking */ }', chainStart);
     expect(directCatch).toBeLessThan(idx);
-    expect(src.slice(idx, idx + 1600)).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);');
-    expect(src.slice(idx, idx + 1600)).toContain("code: 'terminal_invoice_lookup_failed',");
-    expect(src.slice(idx, idx + 1600)).not.toContain('invoiceLookupFailed = true');
+    expect(src.slice(idx, idx + 2000)).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);');
+    expect(src.slice(idx, idx + 2000)).toContain("code: 'terminal_invoice_lookup_failed',");
+    expect(src.slice(idx, idx + 2000)).not.toContain('invoiceLookupFailed = true');
     expect(src.slice(siblingAt - 100, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice\) \{\s*$/);
     expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
     const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));
@@ -277,6 +309,13 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const refundedTie = { id: 'inv-ref-tie', status: 'refunded', created_at: '2026-08-01T00:00:00Z' };
     expect(reconcileLiveVsRefunded(live, refundedTie)).toEqual({ existing: null, terminal: refundedTie });
     expect(reconcileLiveVsRefunded(null, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
+    // The chain may hand back an OLDER live row (service_record_id first)
+    // while a NEWER live row hangs off scheduled_service_id — compare the
+    // refund against the NEWEST live row, not the chain's row.
+    const newestLive = { id: 'inv-live-2', status: 'sent', created_at: '2026-08-25T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLive)).toEqual({ existing: live, terminal: null });
+    const newestLiveOlderThanRefund = { id: 'inv-live-2', status: 'sent', created_at: '2026-08-10T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLiveOlderThanRefund)).toEqual({ existing: null, terminal: refundedNewer });
     expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });
     expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null });
   });
