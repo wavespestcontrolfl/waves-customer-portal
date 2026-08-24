@@ -286,7 +286,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 4400);
+    const block = src.slice(at, at + 6200);
     expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
@@ -324,6 +324,21 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(reconcileLiveVsRefunded(null, refunded)).toEqual({ existing: null, terminal: refunded, liveBeside: null });
     expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null, liveBeside: null });
     expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null, liveBeside: null });
+  });
+
+  test('the alert transaction re-verifies the refunded row FOR UPDATE — a bounced refund (restored to paid) skips the alert instead of instructing a duplicate bill', () => {
+    const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
+    const block = src.slice(at, at + 6200);
+    const recheckAt = block.indexOf('.forUpdate()');
+    const notifyAt = block.indexOf("notifyAdmin(");
+    expect(recheckAt).toBeGreaterThan(-1);
+    // Inside the alert transaction (after the advisory lock), BEFORE the
+    // notification insert — serialized with the webhook's row update.
+    expect(recheckAt).toBeGreaterThan(block.indexOf('pg_advisory_xact_lock'));
+    expect(recheckAt).toBeLessThan(notifyAt);
+    expect(block).toContain('!COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)');
+    // Skip = success (nothing durable owed), not the fail-closed 503 leg.
+    expect(block.slice(recheckAt, notifyAt)).toContain('return true;');
   });
 
   test('the manual-billing alert names the live-beside invoice instead of instructing a manual (duplicate) bill', () => {
@@ -366,7 +381,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 2800);
+    const block = src.slice(at - 1600, at + 4200);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
@@ -401,7 +416,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 4400);
+    const block = src.slice(at, at + 6200);
     expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
     // No assignment inside the callback: success is signalled by returning
     // true, which only reaches the flag after the commit resolves.

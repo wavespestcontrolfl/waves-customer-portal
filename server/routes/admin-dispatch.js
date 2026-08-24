@@ -8881,6 +8881,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
             .first();
           if (already) return true;
+          // ATOMIC final status check (codex #3456 r8): the refunded row was
+          // read by an unlocked lookup, and refund.failed can restore it to
+          // paid between that read and here. FOR UPDATE serializes with the
+          // webhook's own row update; if the refund bounced back the visit
+          // is covered again — parking a "bill this" alert would instruct a
+          // DUPLICATE collection, so the alert is skipped (returning true:
+          // there is nothing durable owed). Still refunded/terminal (or the
+          // row gone) → the alert parks as designed.
+          const terminalNow = await trx('invoices')
+            .where({ id: terminalCompletionInvoice.id })
+            .forUpdate()
+            .first('id', 'status');
+          if (terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)) {
+            logger.warn(`[dispatch] visit ${svc.id}: invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} left '${terminalCompletionInvoice.status}' (now '${terminalNow.status}') before the manual-billing alert — refund bounced back; alert skipped, visit is covered by the restored invoice`);
+            return true;
+          }
           // With a LIVE invoice beside the refunded one, the instruction is
           // "collect that one" — never "bill manually", which would invite a
           // duplicate invoice while the live row stays payable.
