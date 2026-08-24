@@ -11,6 +11,21 @@ exports.up = async function up(knex) {
     t.timestamp('cancelled_at');
     t.string('cancelled_by', 200);
   });
+  // Backfill: plans never transitioned before these columns existed, so an
+  // invoice that already settled still carries an 'active' plan that blocks
+  // edits / credit reversal / auto-credit. Complete those historical rows.
+  if (await knex.schema.hasTable('invoices')) {
+    await knex.raw(`
+      UPDATE payment_plans pp
+         SET status = 'completed',
+             completed_at = NOW(),
+             updated_at = NOW()
+        FROM invoices i
+       WHERE pp.invoice_id = i.id
+         AND pp.status = 'active'
+         AND i.status IN ('paid', 'prepaid')
+    `);
+  }
 };
 
 exports.down = async function down(knex) {

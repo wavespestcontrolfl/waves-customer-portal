@@ -5421,6 +5421,11 @@ const StripeService = {
         if (!invoiceRowsUpdated) {
           throw new Error('Invoice has a different active payment');
         }
+        if (invoiceStatus === 'paid') {
+          // Settled synchronously (webhook may be delayed/absent) — complete
+          // any active payment plan on the SAME trx (codex r3 P1).
+          await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+        }
 
         const paymentPayload = {
           customer_id: invoice.customer_id,

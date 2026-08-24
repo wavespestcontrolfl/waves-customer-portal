@@ -2339,6 +2339,15 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           .forUpdate()
           .first();
         if (!plan) {
+          // Idempotent retry (codex r3 P1): the plan may already be cancelled
+          // from a previous call whose post-commit follow-up re-arm failed.
+          // Surface that plan so the re-arm below runs again instead of 409ing
+          // the operator into a permanently reminder-less invoice.
+          const lastCancelled = await trx('payment_plans')
+            .where({ invoice_id: id, status: 'cancelled' })
+            .orderBy('cancelled_at', 'desc')
+            .first();
+          if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
         const now = new Date();
@@ -2358,7 +2367,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       throw err;
     }
 
-    const { invoice, plan } = outcome;
+    const { invoice, plan, alreadyCancelled } = outcome;
 
     // Plan creation stopped the dunning sequence; cancelling the plan returns
     // the invoice to normal collection, so re-arm reminders — but ONLY a
@@ -2378,7 +2387,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       logger.warn(`[admin-invoices:payment-plan-cancel] follow-up re-arm failed: ${err.message}`);
     }
 
-    await db('activity_log').insert({
+    if (!alreadyCancelled) await db('activity_log').insert({
       customer_id: plan.customer_id || invoice.customer_id,
       action: 'payment_plan_cancelled',
       description: `Payment plan cancelled for invoice ${invoice.invoice_number || invoice.id}`
@@ -2390,7 +2399,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       },
     }).catch((err) => logger.warn(`[admin-invoices:payment-plan-cancel] activity_log insert failed: ${err.message}`));
 
-    res.json({ ok: true, paymentPlan: plan });
+    res.json({ ok: true, paymentPlan: plan, ...(alreadyCancelled ? { alreadyCancelled: true } : {}) });
   } catch (err) {
     logger.error(`[admin-invoices] payment-plan cancel failed: ${err.message}`);
     next(err);

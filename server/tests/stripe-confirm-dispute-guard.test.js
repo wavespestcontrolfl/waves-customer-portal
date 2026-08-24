@@ -27,6 +27,7 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
   let paymentsInsert;
   let paymentsUpdate;
   let paymentsUpdateResult;
+  let planUpdate;
 
   const PI_ID = 'pi_disputed_replay';
 
@@ -69,6 +70,7 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     paymentsInsert = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'pay_new', status: 'paid' }]) }));
     paymentsUpdateResult = [{ id: 'pay_existing', status: 'paid' }];
     paymentsUpdate = jest.fn(() => ({ returning: jest.fn(async () => paymentsUpdateResult) }));
+    planUpdate = jest.fn(async () => 0);
 
     stripeClient = {
       paymentIntents: { retrieve: jest.fn(async () => makePi()) },
@@ -109,6 +111,14 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
             insert: paymentsInsert,
           };
           return q;
+        }
+        if (table === 'payment_plans') {
+          // A paid confirm completes active plans on the same trx.
+          const pq = {
+            where: jest.fn(() => pq),
+            update: planUpdate,
+          };
+          return pq;
         }
         throw new Error(`Unexpected trx table: ${table}`);
       });
@@ -156,6 +166,8 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(invoiceUpdate).toHaveBeenCalledTimes(1);
     expect(invoiceUpdate.mock.calls[0][0]).toMatchObject({ status: 'paid' });
     expect(paymentsInsert).toHaveBeenCalledTimes(1);
+    // The synchronous settle also completes any active payment plan in-trx.
+    expect(planUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 
   test('an existing non-terminal row is updated through the terminal-status filter', async () => {

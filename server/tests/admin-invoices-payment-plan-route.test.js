@@ -305,6 +305,25 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('retrying after a committed cancel re-arms the sequence instead of 409ing (idempotent)', async () => {
+    // First lookup (active) → none; second lookup (latest cancelled) → the plan.
+    trxPlans.first
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...CANCELLED_PLAN, cancelled_at: new Date() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      // No second cancel write — but the re-arm runs again for the retry.
+      expect(trxPlans.update).not.toHaveBeenCalled();
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
   test('409 when the invoice has no active plan', async () => {
     trxPlans.first.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
