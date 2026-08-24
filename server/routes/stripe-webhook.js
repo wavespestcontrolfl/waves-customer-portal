@@ -4142,6 +4142,17 @@ async function handleRefundFailed(refund) {
     if (feeUnwindLockKey) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feeUnwindLockKey]);
     }
+    // Serialize with every scheduled-service invoice writer on the shared
+    // ['schedule.invoice.mint', svc.id] advisory lock (codex #3456 pre-push
+    // P0): the restore + replacement scan below must not interleave with a
+    // completion mint. Held here, the completion either committed its
+    // replacement BEFORE this trx (the scan sees it) or wakes under the
+    // lock AFTER the restore and adopts the now-'paid' original through
+    // findAdoptableScheduledInvoice instead of minting a duplicate. Taken
+    // before the payments row lock, same slot as the fee-lane advisory lock.
+    if (linkedInvoice?.scheduled_service_id) {
+      await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, linkedInvoice.scheduled_service_id);
+    }
     const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
     if (!row) return;
     let meta = {};
@@ -4261,13 +4272,22 @@ async function handleRefundFailed(refund) {
     // kept — void it here, in the same trx as the restore, so no window
     // exists where the visit carries a paid AND a collectible invoice. Same
     // conditional-WHERE convention as the restore: status pinned in the
-    // UPDATE, never a pre-trx read. Money-backed replacements (paid/prepaid,
-    // or payment_recorded_at) are NEVER auto-voided — that is a double
-    // payment and a human refunds it (named in the notification below).
+    // UPDATE, never a pre-trx read. Fail CLOSED on anything money- or
+    // ledger-bearing (pre-push P0 round): a replacement that is paid/prepaid,
+    // has payment_recorded_at, carries a live stripe_payment_intent_id
+    // (money may be in flight — the PI triage in
+    // voidOpenInvoicesForCancelledService is a Stripe round-trip that does
+    // not belong inside this webhook trx), sits on a payer statement, or
+    // holds applied account/deposit credit is NEVER auto-voided here — it
+    // is named in the notification for a human to void through
+    // InvoiceService (which restores the ledgers) or refund. Only a bare
+    // collectible row — nothing to restore — takes the status-only void,
+    // which is exactly what the shared void primitive would do for it.
     const voidedReplacements = [];
     const collectedReplacements = [];
     if (restoredInvoiceId && (linkedInvoice.scheduled_service_id || linkedInvoice.service_record_id)) {
-      const { CANCELLED_SERVICE_VOIDABLE_STATUSES } = require('../services/invoice');
+      const InvoiceService = require('../services/invoice');
+      const { CANCELLED_SERVICE_VOIDABLE_STATUSES } = InvoiceService;
       let replacementQuery = trx('invoices')
         .whereNot({ id: linkedInvoice.id })
         .where((qb) => {
@@ -4279,11 +4299,18 @@ async function handleRefundFailed(refund) {
       // updated_at) — an older sibling invoice on the same visit is not a
       // replacement for this refund.
       if (linkedInvoice.updated_at) replacementQuery = replacementQuery.where('created_at', '>', linkedInvoice.updated_at);
-      const replacements = await replacementQuery.select('id', 'invoice_number', 'status', 'payment_recorded_at');
+      const replacements = await replacementQuery.select(
+        'id', 'invoice_number', 'status', 'payment_recorded_at', 'stripe_payment_intent_id',
+        'payer_statement_id', 'credit_applied', 'line_items',
+      );
       for (const rep of replacements || []) {
         const repLabel = rep.invoice_number || rep.id;
         const moneyApplied = ['paid', 'prepaid'].includes(rep.status) || !!rep.payment_recorded_at;
-        if (moneyApplied || !CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(rep.status)) {
+        const ledgerBound = !!rep.stripe_payment_intent_id
+          || !!rep.payer_statement_id
+          || (parseFloat(rep.credit_applied) || 0) > 0
+          || InvoiceService._invoiceHasDepositCreditLine(rep);
+        if (moneyApplied || ledgerBound || !CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(rep.status)) {
           collectedReplacements.push(repLabel);
           continue;
         }
@@ -4306,7 +4333,7 @@ async function handleRefundFailed(refund) {
     let sideEffectHint = '';
     if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
     if (voidedReplacements.length) sideEffectHint += ` Replacement invoice${voidedReplacements.length > 1 ? 's' : ''} ${voidedReplacements.map((r) => r.label).join(', ')} (minted by a completion after the refund) ${voidedReplacements.length > 1 ? 'were' : 'was'} voided — superseded: refund bounced, original invoice restored.`;
-    if (collectedReplacements.length) sideEffectHint += ` Replacement invoice${collectedReplacements.length > 1 ? 's' : ''} ${collectedReplacements.join(', ')} for the same visit also collected (or is not auto-voidable) — DOUBLE PAYMENT, needs a manual refund.`;
+    if (collectedReplacements.length) sideEffectHint += ` Replacement invoice${collectedReplacements.length > 1 ? 's' : ''} ${collectedReplacements.join(', ')} for the same visit ${collectedReplacements.length > 1 ? 'were' : 'was'} NOT auto-voided (collected, payment in flight, on a statement, or carrying applied credit) — DOUBLE PAYMENT risk: refund if collected, otherwise void it through the invoice void action so its credit/statement ledgers restore.`;
     else if (linkedInvoice) sideEffectHint += ` Check invoice ${linkedInvoice.invoice_number || linkedInvoice.id}: restored account credit may need to be re-applied/clawed back.`;
     if (cancelledPrepayTermId) sideEffectHint += ` Annual-prepay term ${cancelledPrepayTermId} was CANCELLED by the refund — the paid-sync is re-run, but refund-cancelled terms are not auto-revived (revival is dispute-marker-gated); if coverage stays cancelled, reactivate it manually.`;
     if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
