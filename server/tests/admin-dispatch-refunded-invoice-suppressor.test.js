@@ -94,16 +94,30 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
     return knex;
   }
 
-  test.each(['refunded', 'canceled', 'cancelled'])('finds the %s invoice on the visit', async (status) => {
-    const knex = makeOrderedKnex([{ id: `inv-${status}`, invoice_number: 'WPC-1', status, scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
-    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toEqual({ id: `inv-${status}`, invoice_number: 'WPC-1', status });
+  test('finds the REFUNDED invoice on the visit (only a refund can bounce)', async () => {
+    const knex = makeOrderedKnex([{ id: 'inv-refunded', invoice_number: 'WPC-1', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
+    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toEqual({ id: 'inv-refunded', invoice_number: 'WPC-1', status: 'refunded' });
     expect(knex.scopes()).toEqual([{ scheduled_service_id: 'svc-1' }]);
+    expect(COMPLETION_TERMINAL_INVOICE_STATUSES).toEqual(['refunded']);
   });
 
-  test('one ordered query across both identifiers — newest wins', async () => {
+  test.each(['canceled', 'cancelled'])('a %s invoice on the visit does NOT block — excluded from reuse, the completion mints its replacement', async (status) => {
+    const knex = makeOrderedKnex([{ id: `inv-${status}`, status, scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
+    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toBeNull();
+    // Still never reused as the completion invoice.
+    expect(InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).toContain(status);
+    // And the decision mints (no terminal → no suppression, no alert).
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false, alreadyPaid: false, prepaidCovered: false, autopayCoversVisit: false,
+      preMintedInvoice: null, existingCompletionInvoice: null, terminalInvoiceOnVisit: false,
+      createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 120, serviceType: 'Pest Control', isCallback: false,
+    })).toBe(true);
+  });
+
+  test('one ordered query across both identifiers — newest refunded wins', async () => {
     const knex = makeOrderedKnex([
       { id: 'inv-old', status: 'refunded', service_record_id: 'rec-1', created_at: '2026-08-01' },
-      { id: 'inv-new', status: 'canceled', scheduled_service_id: 'svc-1', created_at: '2026-08-20' },
+      { id: 'inv-new', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-20' },
     ]);
     const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
     expect(found.id).toBe('inv-new');
@@ -206,11 +220,11 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     await expect(findFirstApplicationInvoiceForEstimateService(svc, knex)).resolves.toBe(refundedOwn);
   });
 
-  test('a terminal SIBLING first-application row is routed to the terminal path, never reused (splitTerminalCompletionInvoice)', () => {
+  test('a REFUNDED sibling first-application row is routed to the manual path; a canceled sibling is dropped from reuse and the mint proceeds (splitTerminalCompletionInvoice)', () => {
     const refundedSibling = { id: 'inv-sib', invoice_number: 'WPC-7', status: 'refunded', token: 'dead', scheduled_service_id: 'sibling-visit' };
     expect(splitTerminalCompletionInvoice(refundedSibling)).toEqual({ existing: null, terminal: { id: 'inv-sib', invoice_number: 'WPC-7', status: 'refunded' } });
-    for (const status of ['canceled', 'cancelled']) {
-      expect(splitTerminalCompletionInvoice({ ...refundedSibling, status }).existing).toBeNull();
+    for (const status of ['canceled', 'cancelled', 'void']) {
+      expect(splitTerminalCompletionInvoice({ ...refundedSibling, status })).toEqual({ existing: null, terminal: null });
     }
     const live = { id: 'inv-live', status: 'sent', token: 't' };
     expect(splitTerminalCompletionInvoice(live)).toEqual({ existing: live, terminal: null });
@@ -268,7 +282,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
     expect(block).toContain("'billing',");
-    expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded/canceled');
+    expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded');
     expect(block).toContain('bell: true');
     expect(block).toMatch(/whereRaw\("metadata->>'dedupeKey' = \?", \[dedupeKey\]\)/);
     // Same mechanism as the dues-covered alert (not a parallel one).
