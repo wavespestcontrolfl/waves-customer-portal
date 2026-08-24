@@ -8625,6 +8625,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Never assigned to `invoice` / `payUrl` (no pay link to a dead invoice).
     let terminalCompletionInvoice = null;
     let completionLiveBesideInvoice = null;
+    let completionTerminalIncludedSetupFee = false;
     try {
       existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
@@ -8705,6 +8706,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // the manual-billing alert names it (codex #3456 r7), same as
             // the own-visit reconciliation's liveBeside.
             completionLiveBesideInvoice = siblingFirstApplication.liveBeside || null;
+          } else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee) {
+            // Canceled ACCEPTANCE invoice with no live replacement (codex
+            // #3456 late-round P1): it carried the one-time setup fee
+            // beside the visit charge, so an ordinary completion mint would
+            // recreate only the visit charge and silently drop the fee.
+            // Park the manual path instead — the alert tells the office to
+            // bill BOTH charges by hand.
+            const c = siblingFirstApplication.canceledSetupFee;
+            terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };
+            completionTerminalIncludedSetupFee = true;
           }
         }
       }
@@ -8875,6 +8886,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // insert rolls back but the flag stays true) and would let the
         // closeout finalize without its only durable follow-up.
         manualBillingAlerted = true === await db.transaction(async (trx) => {
+          // Shared mint serialization FIRST (codex r12 P1): every
+          // scheduled-service invoice writer keys on the schedule.invoice.mint
+          // advisory lock — holding it here means no Charge Now / scheduled
+          // mint can insert a live invoice between the fresh lookup below
+          // and this transaction's commit. Taken BEFORE the dedupe lock so
+          // the lock order is deterministic across retries.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          // Estimate/date SIBLING visits can carry the first-application
+          // invoice, and a sibling mint contends on the SIBLING's lock key —
+          // so the lock set is this visit PLUS its siblings, acquired in
+          // sorted order (codex r13: two sibling completions locking
+          // own-then-other would ABBA-deadlock; a global sort cannot).
+          let alertSiblingServiceIds = [];
+          if (svc.source_estimate_id) {
+            const { dateOnly } = require('../services/estimate-first-application-invoice');
+            alertSiblingServiceIds = await trx('scheduled_services')
+              .where({ source_estimate_id: svc.source_estimate_id, customer_id: svc.customer_id })
+              .where('scheduled_date', dateOnly(svc.scheduled_date))
+              .pluck('id');
+          }
+          const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
+          for (const lockId of alertMintLockIds) {
+            await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
@@ -8893,26 +8928,51 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where({ id: terminalCompletionInvoice.id })
             .forUpdate()
             .first('id', 'invoice_number', 'status');
-          const terminalRestored = terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+          // "Restored" means LEFT the refunded state for a non-resolved one —
+          // a concurrently canceled/cancelled/void row is dead, not restored
+          // (codex r12 P1): naming it "collect THAT invoice" would point
+          // staff at a non-collectible row. Resolved-away rows fall through
+          // to the fresh-live/sibling/generic note, whose "bill manually"
+          // instruction is then exactly right (no invoice stands).
+          const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+          const terminalRestored = terminalNow
+            && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+            && !terminalResolvedAway.includes(terminalNow.status)
             ? terminalNow : null;
-          // 2. A FRESH on-visit live-invoice lookup (not the pre-transaction
-          //    snapshot): a concurrent Charge Now / mint may have created a
-          //    collectible invoice after the unlocked lookups, and a "bill
-          //    manually" alert beside it would invite a duplicate.
-          const freshLiveOnVisit = await completionNewestLiveInvoiceLookup(trx, {
-            serviceRecordId: record.id,
-            scheduledServiceId: svc.id,
-          });
-          // 3. The sibling snapshot row (off-visit — invisible to the
-          //    on-visit lookup) re-read by id.
+          // 2. EVERY on-visit invoice row, locked FIRST with NO status
+          //    filter, then classified from the locked statuses (codex P0
+          //    round: a status-filtered select can MISS a row that a
+          //    concurrent transaction is restoring to collectible — its
+          //    transition commits after our snapshot; FOR UPDATE returns
+          //    the latest committed versions and holds them to commit).
+          //    Also covers a collectible invoice minted after the unlocked
+          //    lookups — the advisory mint locks make new mints wait, and
+          //    existing rows are all locked here.
+          const onVisitLockedRows = await trx('invoices')
+            .where((qb) => {
+              qb.orWhere({ service_record_id: record.id });
+              qb.orWhere({ scheduled_service_id: svc.id });
+            })
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc')
+            .select('id', 'invoice_number', 'status');
+          const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
+            && !terminalResolvedAway.includes(r.status)) || null;
+          // 3. The COMPLETE estimate/date sibling set, re-queried on this
+          //    transaction under the sibling mint locks taken above (codex
+          //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
+          //    so the classification reads locked statuses, never a
+          //    snapshot a concurrent refund/cancel/restore invalidates.
           let siblingLiveNow = null;
-          if (!terminalRestored && !freshLiveOnVisit && completionLiveBesideInvoice) {
-            siblingLiveNow = await trx('invoices')
-              .where({ id: completionLiveBesideInvoice.id })
-              .forUpdate()
-              .first('id', 'invoice_number', 'status');
-            const resolvedTerminal = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
-            if (siblingLiveNow && resolvedTerminal.includes(siblingLiveNow.status)) siblingLiveNow = null;
+          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
+            const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });
+            const siblingCandidate = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
+              ? (siblingNow.liveBeside || null)
+              : (siblingNow.invoice || null);
+            siblingLiveNow = siblingCandidate && !terminalResolvedAway.includes(siblingCandidate.status)
+              ? { id: siblingCandidate.id, invoice_number: siblingCandidate.invoice_number, status: siblingCandidate.status }
+              : null;
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
@@ -8936,7 +8996,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               : (terminalRestored
                 ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
                 : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
-            : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
+            : (completionTerminalIncludedSetupFee
+              ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
+              : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
           const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
@@ -8949,7 +9011,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
-            'Completed visit needs manual billing — prior invoice was refunded',
+            `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
@@ -9448,6 +9510,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const typedLiveRequiredMint = backfillReviewMintRequired && !isBackfillCompletion;
         if (typedLiveRequiredMint && invoiceLookupFailed) {
           throw new Error('existing-invoice lookups failed — refusing to mint a possible duplicate invoice for this one-time completion');
+        }
+        // EVERY estimate-linked lane fails closed on a failed lookup before
+        // minting (codex hardening P0): the sibling first-application lookup
+        // is what detects a canceled ACCEPTANCE invoice that carried the
+        // one-time setup fee — if it errored, minting here would recreate
+        // only the visit charge and permanently drop the fee (and could
+        // duplicate an unseen suppressor invoice). The throw lands in the
+        // same release-for-resume/503 catch as the typed lane; the retry
+        // re-runs the lookups.
+        if (invoiceLookupFailed && svc.source_estimate_id) {
+          throw new Error('existing-invoice lookups failed — refusing to mint for an estimate-linked visit whose sibling/setup-fee suppressors could not be verified');
         }
         const mintOptions = {
           // The frozen money on a required resume — the exact number the

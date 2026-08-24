@@ -286,7 +286,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
@@ -328,7 +328,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the alert transaction re-verifies the refunded row FOR UPDATE — a bounced refund (restored to paid) skips the alert instead of instructing a duplicate bill', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     const recheckAt = block.indexOf('.forUpdate()');
     const notifyAt = block.indexOf("notifyAdmin(");
     expect(recheckAt).toBeGreaterThan(-1);
@@ -344,7 +344,31 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // The FRESH on-visit live lookup runs on the TRANSACTION (codex r11) —
     // a concurrently minted invoice is seen, and even a pre-existing dedupe
     // notification is rewritten so stale "bill/collect" advice cannot stand.
-    expect(block).toContain('await completionNewestLiveInvoiceLookup(trx, {');
+    // EVERY on-visit row is locked with NO status filter, then classified
+    // from locked statuses — a filtered select could miss a row being
+    // restored to collectible by a concurrent transaction.
+    expect(block).toContain('const onVisitLockedRows = await trx(\'invoices\')');
+    expect(block.slice(block.indexOf('onVisitLockedRows'), block.indexOf('freshLiveOnVisit ='))).toContain('.forUpdate()');
+    expect(block.slice(block.indexOf('onVisitLockedRows'), block.indexOf('freshLiveOnVisit ='))).not.toContain('whereIn');
+    // Shared mint serialization (codex r12): the alert transaction holds the
+    // SAME schedule.invoice.mint advisory lock every invoice writer takes —
+    // before the dedupe lock — so no mint can land mid-revalidation.
+    // The lock SET is this visit plus every estimate/date sibling, in
+    // sorted order (codex r13: own-then-other would ABBA-deadlock between
+    // two sibling completions), taken before the dedupe lock.
+    expect(block).toContain('const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();');
+    expect(block).toContain('await acquireScheduledInvoiceMintLock(trx, lockId);');
+    expect(block.indexOf('acquireScheduledInvoiceMintLock')).toBeLessThan(block.indexOf('pg_advisory_xact_lock(hashtext(?))'));
+    // The sibling set is RE-DERIVED on the transaction (never a remembered
+    // single row): the fresh sibling lookup runs on trx.
+    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });');
+    // The sibling re-query locks its rows too (lockRows → FOR UPDATE OF i)
+    // and the chosen candidate is classified from the locked status.
+    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });');
+    expect(block).toContain('!terminalResolvedAway.includes(siblingCandidate.status)');
+    // A concurrently canceled/void refunded row is DEAD, not restored —
+    // never named as collectible (codex r12).
+    expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');
     expect(block).toContain('RESOLVED — no action needed');
     expect(block).toContain('body: alertBody,');
     expect(block).toContain('const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;');
@@ -400,12 +424,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 8600);
+    const block = src.slice(at - 1600, at + 10500);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
     expect(block).toContain("'billing',");
-    expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded');
+    expect(block).toContain('Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}');
     expect(block).toContain('bell: true');
     expect(block).toMatch(/whereRaw\("metadata->>'dedupeKey' = \?", \[dedupeKey\]\)/);
     // Same mechanism as the dues-covered alert (not a parallel one).
@@ -435,7 +459,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
     // No assignment inside the callback: success is signalled by returning
     // true, which only reaches the flag after the commit resolves.
@@ -480,8 +504,26 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const canceledNewer = { id: 'inv-canceled', status: 'canceled', created_at: '2026-08-20', ...matchFields };
     const liveOlder = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01', ...matchFields };
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toEqual({ invoice: liveOlder, liveBeside: null });
-    // Only canceled matches → nothing suppresses, the mint proceeds.
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null });
+    // Only canceled ACCEPTANCE matches → surfaced as canceledSetupFee so the
+    // caller PARKS instead of partial-reminting (the acceptance invoice
+    // carried the one-time setup fee beside the visit charge).
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null, canceledSetupFee: canceledNewer });
+    // …but ONLY when the canceled row actually carried the fee: a canceled
+    // "first application only" acceptance invoice has no fee to lose and
+    // remints normally (codex P0 — no billing a nonexistent $99).
+    const canceledNoFee = {
+      id: 'inv-canceled-nofee', status: 'canceled', created_at: '2026-08-20',
+      title: 'WaveGuard Membership — First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - first application only.',
+    };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNoFee]))).resolves.toEqual({ invoice: null, liveBeside: null });
+    // line_items are the AUTHORITY when present — notes mentioning the fee
+    // do not park a row whose parsed lines carry no setup-fee entry.
+    const { invoiceContainsSetupFeeLine } = require('../services/estimate-first-application-invoice');
+    expect(invoiceContainsSetupFeeLine({ line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', unit_price: 99 }]) })).toBe(true);
+    expect(invoiceContainsSetupFeeLine({ line_items: JSON.stringify([{ description: 'First service application', unit_price: 120 }]), notes: 'mentions setup fee historically' })).toBe(false);
+    expect(invoiceContainsSetupFeeLine({ line_items: '[]', notes: 'Customer selected pay per application - $99 setup fee plus first application.' })).toBe(true);
+    expect(invoiceContainsSetupFeeLine({ notes: 'first application only' })).toBe(false);
     // A refunded match wins in ANY mint order — there is no reliable
     // refund-event clock, so it always reaches the caller's terminal path
     // instead of a live sibling's pay link going out while the refund
@@ -514,3 +556,33 @@ describe('completion route wiring (source contract)', () => {
 function chainCalled(knex, method) {
   return knex.calls.some((c) => c[0] === method);
 }
+
+describe('canceled acceptance invoice → manual path with setup-fee wording (source contract)', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const src2 = fs2.readFileSync(path2.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+
+  test('the route parks the manual path (no partial remint) and flags the setup fee', () => {
+    const at = src2.indexOf('siblingFirstApplication.canceledSetupFee');
+    expect(at).toBeGreaterThan(-1);
+    const block = src2.slice(at - 200, at + 700);
+    expect(block).toContain('terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };');
+    expect(block).toContain('completionTerminalIncludedSetupFee = true;');
+    // The alert copy tells the office to bill BOTH charges.
+    expect(src2).toContain('bill BOTH charges manually; an auto-mint here would have recreated only the visit charge');
+    // Only when NO live replacement stands — a live match still wins.
+    expect(block).toContain('else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee)');
+  });
+
+  test('estimate-linked lanes fail CLOSED on a failed lookup before ANY mint — the setup-fee safeguard cannot fail open', () => {
+    const at = src2.indexOf('refusing to mint for an estimate-linked visit');
+    expect(at).toBeGreaterThan(-1);
+    const guard = src2.slice(at - 900, at + 200);
+    expect(guard).toContain('if (invoiceLookupFailed && svc.source_estimate_id) {');
+    // Sits beside the typed-lane guard, ahead of the mint options.
+    const typedGuardAt = src2.indexOf('refusing to mint a possible duplicate invoice for this one-time completion');
+    expect(typedGuardAt).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(typedGuardAt);
+    expect(src2.indexOf('const mintOptions = {', typedGuardAt)).toBeGreaterThan(at);
+  });
+});
