@@ -265,13 +265,25 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].best_price).toBe(64); // 1.00/oz * 64 oz
   });
 
-  test('only considers active, approved, unexpired vendor rows', async () => {
+  test('only considers active, approved, unexpired vendor rows and invalidates the catalog when none remain', async () => {
     const filterCalls = [];
+    const catalogUpdates = [];
+    const pricingUpdates = [];
     db.mockImplementation((table) => makeChain(table, (q) => {
       if (table === 'vendor_pricing') {
-        if (q.called('update')) return 1;
+        if (q.called('update')) {
+          pricingUpdates.push(q.args('update')[0]);
+          return 1;
+        }
         filterCalls.push(q._calls.filter(([m]) => ['where', 'whereIn', 'whereNull'].includes(m)));
         return [];
+      }
+      if (table === 'products_catalog') {
+        if (q.called('update')) {
+          catalogUpdates.push(q.args('update')[0]);
+          return 1;
+        }
+        return { unit_size_oz: 64 };
       }
       throw new Error(`Unexpected table ${table}`);
     }));
@@ -279,7 +291,20 @@ describe('recalcBestPrice', () => {
     const calls = filterCalls[0];
     expect(calls).toContainEqual(['where', ['vendor_pricing.is_active', true]]);
     expect(calls).toContainEqual(['whereIn', ['vendor_pricing.approval_status', ['approved', 'auto_approved']]]);
-    expect(calls.some(([m, args]) => m === 'where' && typeof args[0] === 'function')).toBe(true); // unexpired guard
+    // priced + unexpired guards are grouped where-callbacks
+    expect(calls.filter(([m, args]) => m === 'where' && typeof args[0] === 'function').length).toBeGreaterThanOrEqual(2);
+    // No eligible rows: the stale winner must be invalidated, not left current.
+    expect(catalogUpdates).toHaveLength(1);
+    expect(catalogUpdates[0]).toEqual(expect.objectContaining({
+      best_price: null,
+      best_vendor: null,
+      best_vendor_pricing_id: null,
+      best_price_amount_cached: null,
+      best_price_vendor_id_cached: null,
+      best_price_status: 'no_valid_price',
+      needs_pricing: true,
+    }));
+    expect(pricingUpdates).toContainEqual({ is_best_price: false });
   });
 
   test('falls back to raw price only when no row has size info', async () => {

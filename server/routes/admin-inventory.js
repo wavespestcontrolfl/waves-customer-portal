@@ -2161,35 +2161,14 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         if (snapshot?.source_confidence != null) pricingUpdate.source_confidence = snapshot.source_confidence;
 
         await trx('vendor_pricing').where({ id: vendorPricingId }).update(pricingUpdate);
-
-        const best = await trx('vendor_pricing as vp')
-          .join('vendors as v', 'v.id', 'vp.vendor_id')
-          .where('vp.product_id', approval.product_id)
-          .where('vp.is_active', true)
-          .whereIn('vp.approval_status', ['approved', 'auto_approved'])
-          .where(function pricedOnly() {
-            this.whereNotNull('vp.price_amount').orWhereNotNull('vp.price');
-          })
-          .select('vp.*', 'v.name as vendor_name')
-          .orderByRaw('COALESCE(vp.landed_unit_price, vp.normalized_unit_price, vp.price_amount, vp.price) ASC')
-          .first();
-        if (best) {
-          await trx('vendor_pricing').where({ product_id: approval.product_id }).update({ is_best_price: false }).catch(() => {});
-          await trx('vendor_pricing').where({ id: best.id }).update({ is_best_price: true }).catch(() => {});
-          await trx('products_catalog').where({ id: approval.product_id }).update({
-            best_vendor_pricing_id: best.id,
-            best_price_amount_cached: best.price_amount || best.price,
-            best_price_vendor_id_cached: best.vendor_id,
-            best_price_updated_at: new Date(),
-            best_price_status: 'current',
-            best_price: best.price || best.price_amount,
-            best_vendor: best.vendor_name,
-            needs_pricing: false,
-          });
-        }
       }
     });
     if (stale) return res.status(409).json({ error: 'Approval event was already decided; refresh the queue' });
+    // Single best-price writer: the canonical recalculation scores per-oz and
+    // persists best_price scaled to the product's own unit_size_oz. The old
+    // inline writer here selected by normalized unit price but wrote the raw
+    // vendor pack price, which consumers divide by unit_size_oz.
+    await recalcBestPrice(approval.product_id);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2288,7 +2267,11 @@ router.put('/:productId/pricing', async (req, res, next) => {
           last_checked_at: trx.fn.now(),
           ...priceColumns,
         });
-        await trx('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' });
+        // A pending placeholder row (e.g. a Hermes report awaiting review) has no
+        // prior price; price_history.price is NOT NULL, so skip the old-price row.
+        if (existing.price != null) {
+          await trx('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' });
+        }
       } else {
         await trx('vendor_pricing').insert({
           product_id: productId,
@@ -3274,7 +3257,7 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
 // when the quantity cannot be parsed (nothing to validate against).
 function vendorRowPricePerOz(row) {
   const oz = quantityToOz(row.quantity);
-  const price = numberOrNull(row.price);
+  const price = numberOrNull(row.price) ?? numberOrNull(row.price_amount);
   if (oz && oz > 0 && price != null) return price / oz;
   const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
   return stored != null && stored > 0 ? stored : null;
@@ -3296,7 +3279,10 @@ async function recalcBestPrice(productId) {
   // feed best_price consumers. The control-layer migration backfilled all
   // legacy rows to approved/is_active=true, so this excludes nothing valid.
   const rows = await db('vendor_pricing')
-    .where({ product_id: productId }).whereNotNull('price').where('price', '>', 0)
+    .where({ product_id: productId })
+    .where(function priced() {
+      this.where('vendor_pricing.price', '>', 0).orWhere('vendor_pricing.price_amount', '>', 0);
+    })
     .where('vendor_pricing.is_active', true)
     .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
     .where(function unexpired() {
@@ -3304,11 +3290,30 @@ async function recalcBestPrice(productId) {
     })
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
-  if (!rows || !rows.length) return;
+  if (!rows || !rows.length) {
+    // No eligible (active, approved, unexpired) vendor price remains — the
+    // previous winner must not keep feeding costing as if it were current.
+    await db('products_catalog').where({ id: productId }).update({
+      best_price: null,
+      best_vendor: null,
+      best_vendor_pricing_id: null,
+      best_price_amount_cached: null,
+      best_price_vendor_id_cached: null,
+      best_price_updated_at: new Date(),
+      best_price_status: 'no_valid_price',
+      needs_pricing: true,
+    });
+    await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+    return;
+  }
 
   const product = await db('products_catalog').where({ id: productId }).select('unit_size_oz').first();
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
-  const scored = rows.map((row) => ({ row, perOz: vendorRowPricePerOz(row), price: Number(row.price) }));
+  const scored = rows.map((row) => ({
+    row,
+    perOz: vendorRowPricePerOz(row),
+    price: numberOrNull(row.price) ?? numberOrNull(row.price_amount),
+  }));
   const sized = scored.filter((s) => s.perOz != null);
   const pool = sized.length ? sized : scored;
   pool.sort((a, b) => (sized.length ? a.perOz - b.perOz : a.price - b.price) || a.price - b.price);
