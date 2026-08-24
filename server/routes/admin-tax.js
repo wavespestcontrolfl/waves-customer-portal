@@ -6,8 +6,9 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { taxPeriodFor } = require('../utils/tax-period');
 const {
-  buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, annotateMidQuarter, outflowTransactionsQuery,
+  buildPnlReport, getPeriodRange, paidRevenueForWindow, salesTaxCollectedForWindow,
+  rateAsOf, dateCellStr, prorateAssetDepreciation, annotateMidQuarter,
+  outflowTransactionsQuery, buildQuarterlyEstimate,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1059,27 +1060,30 @@ router.get('/revenue/reconcile', async (req, res, next) => {
     const endDate = new Date(Date.UTC(yr, mo, 0)).toISOString().split('T')[0];
 
     // Real collected revenue for the month — same refund-netted cash basis
-    // as the P&L (paidRevenueForWindow), so the two surfaces can't disagree.
-    // The old read targeted a revenue_daily table that never existed, so
-    // this card showed $0/$0 every month. Errors propagate (except a
-    // missing table in dev) — a DB failure must be a 500, not a $0 report.
-    const totalRevenue = await paidRevenueForWindow(db, startDate, endDate);
+    // as the P&L (paidRevenueForWindow), with the sales tax collected on
+    // commercial invoices backed out (it's a pass-through liability, not
+    // income — same subtraction buildPnlReport makes), so the two surfaces
+    // can't disagree. Errors propagate (except a missing table in dev) — a
+    // DB failure must be a 500, not a $0 report.
+    const [paidRevenue, taxCollected] = await Promise.all([
+      paidRevenueForWindow(db, startDate, endDate),
+      salesTaxCollectedForWindow(db, startDate, endDate),
+    ]);
+    const totalRevenue = Math.round((paidRevenue - taxCollected) * 100) / 100;
 
-    // Sales tax collected/owed are NOT computable from portal data: nothing
-    // records tax_collected, and a liability figure requires the taxability
-    // determination per service + exemptions — an owner/CPA decision, not a
-    // flat rate. The old response fabricated taxOwed = 7% × ALL revenue.
-    // null = "not recorded"; the client renders "—" and skips the
-    // over/under-collected verdict rather than asserting one from fiction.
+    // Sales tax OWED is NOT computable from portal data: a liability figure
+    // requires the taxability determination per service + exemptions — an
+    // owner/CPA decision, not a flat rate. null = "not computed"; the client
+    // skips the over/under-collected verdict rather than asserting one.
     res.json({
       month,
       startDate,
       endDate,
       totalRevenue,
-      taxCollected: null,
+      taxCollected,
       taxOwed: null,
       difference: null,
-      note: 'Sales tax collection is not recorded in the portal, so collected/owed cannot be reconciled here. Revenue is the month\'s paid payments. Confirm taxability and any liability with your CPA.',
+      note: 'Revenue is the month\'s paid payments net of refunds, excluding sales tax collected. Tax collected is the sum of invoices.tax_amount on invoices paid this month (commercial customers). Tax owed cannot be computed here — confirm taxability and any liability with your CPA.',
     });
   } catch (err) { next(err); }
 });
@@ -1108,29 +1112,43 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
     const endDate = `${qEndP.year}-${pad2(qEndP.month)}-${pad2(qEndP.day)}`;
     const ytdStart = `${year}-01-01`;
 
-    const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
-    const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+    // Revenue: SAME helper the P&L uses (refund-netted, deposits + gap rows),
+    // minus the pass-through sales tax inside those receipts. Expenses: the
+    // DEDUCTIBLE amount (meals 50%, non-deductible rows) — this is a tax
+    // estimate, not book P&L. Prior 1040-ES payments recorded on the filing
+    // calendar for earlier quarters of this year are credited.
+    const [paidRevenue, salesTaxCollected, expenses, priorRows] = await Promise.all([
+      paidRevenueForWindow(db, ytdStart, endDate),
+      salesTaxCollectedForWindow(db, ytdStart, endDate),
+      db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate])
+        .select(db.raw("COALESCE(SUM(LEAST(amount, GREATEST(0, COALESCE(tax_deductible_amount, amount))))::text, '0') as total"))
+        .first().catch(() => ({ total: '0' })),
+      qNum > 1
+        ? db('tax_filing_calendar')
+          .where('filing_type', '1040es_quarterly')
+          .whereIn('status', ['filed', 'paid'])
+          .whereIn('period_label', Array.from({ length: qNum - 1 }, (_, i) => `Q${i + 1} ${year}`))
+          .select(db.raw("COALESCE(SUM(amount_paid)::text, '0') as total"))
+          .first().catch(() => ({ total: '0' }))
+        : Promise.resolve({ total: '0' }),
+    ]);
 
-    const ytdRevenue = parseFloat(revenue?.total || 0);
-    const ytdExpenses = parseFloat(expenses?.total || 0);
-    const estimatedNetIncome = Math.max(0, ytdRevenue - ytdExpenses);
-
-    const seBase = estimatedNetIncome * 0.9235;
-    const seTax = seBase * 0.153;
-    const incomeTaxBase = Math.max(0, estimatedNetIncome - (seTax * 0.5));
-    const incomeTax = incomeTaxBase * 0.22;
-    const annualLiability = seTax + incomeTax;
-    const quarterlyPayment = annualLiability / 4;
+    const est = buildQuarterlyEstimate({
+      qNum,
+      ytdRevenue: paidRevenue - salesTaxCollected,
+      ytdExpenses: parseFloat(expenses?.total || 0),
+      priorPayments: parseFloat(priorRows?.total || 0),
+    });
 
     // Quarterly due dates (1040-ES)
     const dueDates = { Q1: `${year}-04-15`, Q2: `${year}-06-15`, Q3: `${year}-09-15`, Q4: `${year + 1}-01-15` };
 
     res.json({
       quarter, startDate, endDate,
-      ytdRevenue, ytdExpenses, estimatedNetIncome,
-      seTax, incomeTax, quarterlyPayment,
+      salesTaxCollected,
+      ...est,
       dueDate: dueDates[quarter],
-      note: 'Estimates assume 22% federal bracket. SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. Consult CPA for precise figures.',
+      note: `Estimates assume a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as filed/paid on the filing calendar for earlier ${year} quarters are credited. Consult CPA for precise figures.`,
     });
   } catch (err) { next(err); }
 });

@@ -2942,11 +2942,14 @@ function RevenueTab() {
             }}
           >
             {[
-              ["YTD Revenue", fmtM(quarterly.ytdRevenue)],
-              ["YTD Expenses", fmtM(quarterly.ytdExpenses)],
-              ["Estimated Net Income", fmtM(quarterly.estimatedNetIncome)],
-              ["Self-Employment Tax (15.3%)", fmtM(quarterly.seTax)],
-              ["Estimated Income Tax", fmtM(quarterly.incomeTax)],
+              ["YTD Revenue (excl. sales tax)", fmtM(quarterly.ytdRevenue)],
+              ["YTD Deductible Expenses", fmtM(quarterly.ytdExpenses)],
+              ["YTD Net Income", fmtM(quarterly.estimatedNetIncome)],
+              ["Annualized Net Income", fmtM(quarterly.annualizedNet)],
+              ["Self-Employment Tax (15.3%, annual)", fmtM(quarterly.seTax)],
+              ["Estimated Income Tax (22%, annual)", fmtM(quarterly.incomeTax)],
+              ["Required Cumulative Through Quarter", fmtM(quarterly.requiredCumulative)],
+              ["Prior 1040-ES Payments Credited", fmtM(quarterly.priorPaymentsCredited)],
               ["Total Quarterly Payment", fmtM(quarterly.quarterlyPayment)],
             ].map(([l, v]) => (
               <div
@@ -3246,6 +3249,11 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow label="Total Revenue" value={pnl.revenue?.total} bold />{" "}
+          <PnlRow
+            label="Sales tax collected (liability, not income)"
+            value={pnl.revenue?.salesTaxCollected}
+            indent
+          />{" "}
           <div style={{ height: 12 }} />{" "}
           <PnlRow label="COST OF GOODS SOLD" value={null} bold />{" "}
           <PnlRow label="Labor" value={pnl.cogs?.labor} indent />{" "}

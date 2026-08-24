@@ -427,6 +427,7 @@ function prorateDepreciation(assets, startDate, endDate) {
 function assemblePnl({
   serviceRevenue = 0,
   otherRevenue = 0,
+  salesTaxCollected = 0,
   laborCost = 0,
   materialsCost = 0,
   cogsNonDeductible = 0,
@@ -493,7 +494,12 @@ function assemblePnl({
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
   return {
-    revenue: { serviceRevenue: revenue, otherRevenue: other, total: totalRevenue },
+    // salesTaxCollected is DISCLOSURE ONLY — already excluded from
+    // serviceRevenue by the caller (liability, not income).
+    revenue: {
+      serviceRevenue: revenue, otherRevenue: other, total: totalRevenue,
+      salesTaxCollected: round2(Number(salesTaxCollected) || 0),
+    },
     cogs: { labor, materials, total: cogsTotal },
     grossProfit,
     grossMargin: totalRevenue > 0 ? grossProfit / totalRevenue : 0,
@@ -733,6 +739,73 @@ async function paidRevenueForWindow(db, startDate, endDate) {
 }
 
 /**
+ * Sales tax collected on invoices PAID in [startDate, endDate] (ET days).
+ * Commercial invoices carry invoices.tax_amount (TaxCalculator in
+ * invoice.js); the customer pays subtotal + tax, so every receipt-based
+ * revenue figure above includes that tax. It is a pass-through LIABILITY
+ * (remitted on the DR-15), not income — callers subtract it from
+ * paidRevenueForWindow and disclose it separately. Window: the invoice's
+ * paid_at, same ET-day rule as the paid-invoice gap query. Fully refunded
+ * invoices flip to status 'refunded' (their cash is netted by the outflow
+ * ledger), so only status='paid' rows carry a live liability here.
+ */
+async function salesTaxCollectedForWindow(db, startDate, endDate) {
+  const row = await db('invoices')
+    .where('status', 'paid')
+    .whereNotNull('paid_at')
+    .whereRaw("paid_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${startDate}T00:00:00`])
+    .whereRaw("paid_at < (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'", [`${endDate}T00:00:00`])
+    .select(db.raw("COALESCE(SUM(tax_amount)::text, '0') as total"))
+    .first()
+    .catch(missingTableOnly({ total: '0' }));
+  return round2(parseFloat(row?.total || 0));
+}
+
+/**
+ * 1040-ES quarterly payment from YTD figures. Pure.
+ *
+ * YTD net income is ANNUALIZED (÷ months elapsed at the quarter's end × 12)
+ * before the annual liability is computed — the old code taxed the YTD
+ * figure as if it were the full year, then took a quarter of it, so Q1 came
+ * out ~4× low. The required cumulative payment through quarter N is N/4 of
+ * the annual liability, less 1040-ES payments already made this year.
+ * Owner-approved assumptions: flat 22% federal bracket, SE tax 15.3% on
+ * 92.35% of net earnings, half of SE tax deducted before income tax; no
+ * standard deduction or QBI.
+ */
+function buildQuarterlyEstimate({ qNum, ytdRevenue = 0, ytdExpenses = 0, priorPayments = 0 } = {}) {
+  const q = Math.min(4, Math.max(1, parseInt(qNum, 10) || 1));
+  const monthsElapsed = q * 3;
+  const revenue = round2(Number(ytdRevenue) || 0);
+  const expenses = round2(Number(ytdExpenses) || 0);
+  const estimatedNetIncome = round2(Math.max(0, revenue - expenses));
+  const annualizedNet = round2((estimatedNetIncome / monthsElapsed) * 12);
+
+  const seBase = annualizedNet * 0.9235;
+  const seTax = round2(seBase * 0.153);
+  const incomeTaxBase = Math.max(0, annualizedNet - (seTax * 0.5));
+  const incomeTax = round2(incomeTaxBase * 0.22);
+  const annualLiability = round2(seTax + incomeTax);
+  const requiredCumulative = round2(annualLiability * (q / 4));
+  const prior = round2(Math.max(0, Number(priorPayments) || 0));
+  const quarterlyPayment = round2(Math.max(0, requiredCumulative - prior));
+
+  return {
+    ytdRevenue: revenue,
+    ytdExpenses: expenses,
+    estimatedNetIncome,
+    monthsElapsed,
+    annualizedNet,
+    seTax,
+    incomeTax,
+    annualLiability,
+    requiredCumulative,
+    priorPaymentsCredited: prior,
+    quarterlyPayment,
+  };
+}
+
+/**
  * DATE cell → 'YYYY-MM-DD' via LOCAL getters. node-postgres parses DATE
  * columns to local-midnight Date objects, so etDateString/toISOString would
  * shift them a day depending on the server zone (same trap and fix as
@@ -780,9 +853,12 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets,
+  const [paidRevenue, salesTaxCollected, matRow, opexRows, feeRow, mileageRow, assets,
     financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
+    // Pass-through sales tax inside those receipts — backed out of revenue
+    // below and disclosed on its own line (see salesTaxCollectedForWindow).
+    salesTaxCollectedForWindow(db, startDate, endDate),
     // The P&L is BOOK accounting — actual spend (expenses.amount) drives opex,
     // net income, and margins. The deductible amount (lower for partial
     // categories like meals 50%) is tracked SEPARATELY as a book-to-tax
@@ -928,8 +1004,9 @@ async function buildPnlReport(db, startDate, endDate) {
   const depreciableAssets = annotateMidQuarter(assets);
 
   const report = assemblePnl({
-    serviceRevenue,
+    serviceRevenue: round2(paidRevenue - salesTaxCollected),
     otherRevenue: 0,
+    salesTaxCollected,
     // No imputed labor: the sole technician IS the owner, and an
     // owner/sole-proprietor's own labor is not a deductible expense —
     // costing job minutes at the loaded job-costing rate deducted
@@ -1039,6 +1116,8 @@ async function buildPnlReport(db, startDate, endDate) {
 module.exports = {
   buildPnlReport,
   paidRevenueForWindow,
+  salesTaxCollectedForWindow,
+  buildQuarterlyEstimate,
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,

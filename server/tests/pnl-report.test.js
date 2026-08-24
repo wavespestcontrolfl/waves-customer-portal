@@ -15,6 +15,7 @@
 
 const {
   assemblePnl,
+  buildQuarterlyEstimate,
   prorateDepreciation,
   macrsYearAmount,
   annotateMidQuarter,
@@ -113,6 +114,43 @@ describe('missingTableOnly', () => {
   });
 });
 
+describe('buildQuarterlyEstimate', () => {
+  test('annualizes YTD net income by months elapsed — Q1 $25k YTD net reads as a $100k year', () => {
+    const est = buildQuarterlyEstimate({ qNum: 1, ytdRevenue: 30000, ytdExpenses: 5000 });
+    expect(est.estimatedNetIncome).toBe(25000);
+    expect(est.monthsElapsed).toBe(3);
+    expect(est.annualizedNet).toBe(100000); // NOT 25000 — the old code taxed YTD as the full year
+    // SE tax on the ANNUALIZED figure: 100000 × 0.9235 × 0.153
+    expect(est.seTax).toBeCloseTo(14129.55, 2);
+    // Income tax: (100000 − seTax/2) × 22%
+    expect(est.incomeTax).toBeCloseTo(20445.75, 2);
+    expect(est.annualLiability).toBeCloseTo(est.seTax + est.incomeTax, 2);
+    // Q1 owes 1/4 of the annual liability, and with no prior payments the
+    // quarterly payment IS the required cumulative.
+    expect(est.requiredCumulative).toBeCloseTo(est.annualLiability / 4, 2);
+    expect(est.priorPaymentsCredited).toBe(0);
+    expect(est.quarterlyPayment).toBe(est.requiredCumulative);
+  });
+
+  test('same YTD net at Q2 annualizes over 6 months and credits prior 1040-ES payments', () => {
+    const est = buildQuarterlyEstimate({ qNum: 2, ytdRevenue: 30000, ytdExpenses: 5000, priorPayments: 2000 });
+    expect(est.annualizedNet).toBe(50000); // 25000 / 6 × 12
+    expect(est.requiredCumulative).toBeCloseTo(est.annualLiability / 2, 2);
+    expect(est.priorPaymentsCredited).toBe(2000);
+    expect(est.quarterlyPayment).toBeCloseTo(Math.max(0, est.requiredCumulative - 2000), 2);
+  });
+
+  test('prior payments can only reduce to zero — never a negative payment or a refund claim', () => {
+    const est = buildQuarterlyEstimate({ qNum: 1, ytdRevenue: 1000, ytdExpenses: 900, priorPayments: 99999 });
+    expect(est.quarterlyPayment).toBe(0);
+    // Negative YTD (loss) floors net income at 0 → no liability.
+    const loss = buildQuarterlyEstimate({ qNum: 3, ytdRevenue: 100, ytdExpenses: 900 });
+    expect(loss.estimatedNetIncome).toBe(0);
+    expect(loss.annualizedNet).toBe(0);
+    expect(loss.quarterlyPayment).toBe(0);
+  });
+});
+
 describe('assemblePnl', () => {
   test('includes NULL-category expenses as Uncategorized opex', () => {
     const out = assemblePnl({
@@ -128,6 +166,14 @@ describe('assemblePnl', () => {
     expect(uncat.amount).toBe(200); // 137.50 + 62.50 merged into one bucket
     expect(out.operatingExpenses.total).toBe(400);
     expect(out.netIncome).toBe(600);
+  });
+
+  test('salesTaxCollected is disclosed on the revenue block and never re-added to income', () => {
+    const out = assemblePnl({ serviceRevenue: 10000, salesTaxCollected: 700 });
+    // Caller already backed the tax out of serviceRevenue — the figure is
+    // disclosure only, so total must equal the (net) revenue passed in.
+    expect(out.revenue.salesTaxCollected).toBe(700);
+    expect(out.revenue.total).toBe(10000);
   });
 
   test('labor cost flows into COGS', () => {
