@@ -250,6 +250,23 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].best_price).toBe(64); // 1.00/oz * 64 oz
   });
 
+  test('only considers active, approved, unexpired vendor rows', async () => {
+    const filterCalls = [];
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') {
+        if (q.called('update')) return 1;
+        filterCalls.push(q._calls.filter(([m]) => ['where', 'whereIn', 'whereNull'].includes(m)));
+        return [];
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await recalcBestPrice('prod-1');
+    const calls = filterCalls[0];
+    expect(calls).toContainEqual(['where', ['vendor_pricing.is_active', true]]);
+    expect(calls).toContainEqual(['whereIn', ['vendor_pricing.approval_status', ['approved', 'auto_approved']]]);
+    expect(calls.some(([m, args]) => m === 'where' && typeof args[0] === 'function')).toBe(true); // unexpired guard
+  });
+
   test('falls back to raw price only when no row has size info', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [
@@ -316,6 +333,9 @@ describe('POST /approvals/bulk', () => {
         price_per_oz: 0.7813,
         normalized_unit_price: 0.7813,
         unit_normalized: 'oz',
+        // approving must make the row eligible for best-price selection
+        approval_status: 'approved',
+        is_active: true,
       }));
       expect(body.processed).toBe(1);
       expect(body.failed).toEqual(['ap-2']);

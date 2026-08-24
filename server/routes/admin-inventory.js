@@ -40,6 +40,11 @@ function approvedPerOzFields(price, quantity) {
     unit_normalized: perOz != null ? 'oz' : null,
     price_per_oz: perOz,
     normalized_unit_price: perOz,
+    // These writes ARE approvals; without this a new insert keeps the
+    // column default approval_status='pending' and recalcBestPrice
+    // (which only trusts approved rows) would never see it.
+    approval_status: 'approved',
+    is_active: true,
   };
 }
 
@@ -3270,8 +3275,18 @@ function vendorRowPricePerOz(row) {
 // (no normalized price and an unparseable quantity) only compete on raw
 // price when no sized row exists, and are persisted as the raw price.
 async function recalcBestPrice(productId) {
+  // Eligibility mirrors the control-layer contract (see the review-queue
+  // approve path): only active, approved/auto-approved, unexpired rows may
+  // become the catalog best price — a pending or rejected scrape must never
+  // feed best_price consumers. The control-layer migration backfilled all
+  // legacy rows to approved/is_active=true, so this excludes nothing valid.
   const rows = await db('vendor_pricing')
     .where({ product_id: productId }).whereNotNull('price').where('price', '>', 0)
+    .where('vendor_pricing.is_active', true)
+    .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
+    .where(function unexpired() {
+      this.whereNull('vendor_pricing.expires_at').orWhere('vendor_pricing.expires_at', '>', new Date());
+    })
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
   if (!rows || !rows.length) return;
