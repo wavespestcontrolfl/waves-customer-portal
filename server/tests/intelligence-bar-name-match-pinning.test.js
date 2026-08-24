@@ -104,6 +104,20 @@ describe('resolveCustomer (comms)', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a pinned confirmation refuses when the customer was archived during the pending window', async () => {
+    // whereNull('deleted_at') makes the confirm-time lookup miss the
+    // archived row even though its phone is unchanged.
+    const customers = chain({ first: undefined });
+    db.mockReturnValue(customers);
+
+    const res = await executeCommsTool('send_sms', {
+      customer_id: 'cust-1', phone: '+19415551111', message: 'hello', _require_phone_match: true,
+    });
+    expect(res.preview_changed).toBe(true);
+    expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('without the pin, a phone/record mismatch degrades to a phone-only send (legacy behavior)', async () => {
     db.mockReturnValue(chain({ first: { ...CUST_A, phone: '+19415559999' } }));
 

@@ -557,8 +557,9 @@ async function sendSms(input) {
     custId = customer.id;
     phone = customer.phone;
   } else if (custId && !phone) {
-    const customer = await db('customers').where('id', custId).first();
-    if (!customer || !customer.phone) return { error: 'Customer has no phone number' };
+    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
+    if (!customer) return { error: 'Customer not found' };
+    if (!customer.phone) return { error: 'Customer has no phone number' };
     customerName = `${customer.first_name} ${customer.last_name}`;
     phone = customer.phone;
   } else if (!custId && phone) {
@@ -579,7 +580,12 @@ async function sendSms(input) {
     // BOTH custId and phone given. Verify they belong to the same record;
     // if not, trust the typed phone and drop the id. Prevents cross-wired
     // consent (codex P1).
-    const customer = await db('customers').where('id', custId).first();
+    // deleted_at filter: a customer archived/merged-away after the card was
+    // proposed must NOT pass the pin check just because the phone is
+    // unchanged — the lookup misses, phonesMatch is false, and a pinned
+    // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
+    // sends degrade to phone-only consent, never an archived identity.
+    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
     const inputDigits = phone.replace(/\D/g, '').slice(-10);
     const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
     const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
