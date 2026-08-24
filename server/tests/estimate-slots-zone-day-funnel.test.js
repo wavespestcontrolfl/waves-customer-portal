@@ -164,6 +164,9 @@ describe('isFunnelZone / zone matching', () => {
     expect(isFunnelZone(VENICE_ZONE)).toBe(true);
     expect(isFunnelZone(SARASOTA_ZONE)).toBe(false);
     expect(isFunnelZone(null)).toBe(false);
+    // The seeded Port Charlotte zone row funnels by default too — an
+    // estimate resolving to it must not fall outside the south rollout.
+    expect(isFunnelZone({ id: 'z-pc', zone_name: 'Port Charlotte', cities: ['Port Charlotte'] })).toBe(true);
   });
 
   test('SOUTH_FUNNEL_ZONE_SLUGS overrides the funneled slug list', () => {

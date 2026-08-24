@@ -53,8 +53,12 @@ const { isEnabled } = require('../../config/feature-gates');
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').
 // Override without a deploy via SOUTH_FUNNEL_ZONE_SLUGS (comma-separated);
 // read at call time so a Railway variable edit takes effect on restart only,
-// same as the gate itself.
-const DEFAULT_FUNNEL_ZONE_SLUGS = 'venice';
+// same as the gate itself. 'port charlotte' is included by default because a
+// seeded Port Charlotte service_zones row exists (20260401000048) — even
+// after its cities are consolidated into the Venice row, keeping the slug
+// here means an estimate that still resolves to it funnels instead of
+// silently falling outside the rollout.
+const DEFAULT_FUNNEL_ZONE_SLUGS = 'venice,port charlotte';
 
 function funnelZoneSlugs() {
   return new Set(

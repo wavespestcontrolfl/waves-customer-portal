@@ -1700,8 +1700,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // preference follows find-time's score order — classifiedRaw preserves it
   // per segment — so an empty-zone window seeds the cheapest-detour day,
   // not just the soonest.
+  // Ranked over route candidates that SURVIVE the collision pass and the
+  // requested time of day (`classified` preserves find-time's score order;
+  // filter() keeps it) — a best-scored raw window that collided or falls
+  // outside the requested daypart must not rank its date (codex #3473 r2
+  // P2). Dates later removed by the seasonal/lead filters are skipped by
+  // applyZoneDayFunnel itself (it only seeds dates present in the pool).
   const preferredSeedDates = [];
-  for (const s of classifiedRaw) {
+  for (const s of filterTimeOfDay(classified, opts.timeOfDay)) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
   }
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
