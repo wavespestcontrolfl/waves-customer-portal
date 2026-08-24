@@ -69,7 +69,9 @@ jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed:
 jest.mock('../services/stripe', () => ({
   ...jest.requireActual('../services/stripe'),
   retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
+  cancelPaymentIntent: jest.fn(async (piId) => ({ id: piId, status: 'canceled' })),
 }));
+jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => 0) }));
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
@@ -209,7 +211,10 @@ describe('handleRefundFailed', () => {
     };
     dbInvoices = {
       where: jest.fn(() => dbInvoices),
+      whereNotIn: jest.fn(() => dbInvoices),
       first: jest.fn(async () => null),
+      // Pre-lock read of marked open replacements (PI triage). Default: none.
+      select: jest.fn(async () => []),
     };
     dbPrepayTerms = {
       where: jest.fn(() => dbPrepayTerms),
@@ -341,6 +346,13 @@ describe('handleRefundFailed', () => {
     id: 'inv-2', invoice_number: 'WPC-2026-0002', status: 'sent', replaces_invoice_id: 'inv-1',
     payment_recorded_at: null, stripe_payment_intent_id: null, ...over,
   });
+  // Seed both reads of the marked open rows: the pre-lock triage read
+  // (db) and the FOR UPDATE scan (trx); the second trx select is the
+  // collected-rows read.
+  const seedMarked = (openRows, collectedRows = []) => {
+    dbInvoices.select.mockResolvedValue(openRows);
+    trxInvoices.select.mockResolvedValueOnce(openRows).mockResolvedValueOnce(collectedRows);
+  };
 
   test('voids a MARKED open replacement through the canonical transactional void in a savepoint', async () => {
     // charge.refunded flipped inv-1 to 'refunded'; a completion then minted
@@ -349,7 +361,7 @@ describe('handleRefundFailed', () => {
     // would leave the visit with a paid invoice AND a collectible one.
     dbInvoices.first.mockResolvedValue(original());
     trxInvoices.first.mockResolvedValue(lockedOriginal());
-    trxInvoices.select.mockResolvedValueOnce([replacement()]).mockResolvedValueOnce([]);
+    seedMarked([replacement()]);
     await handleRefundFailed(failedRefund());
 
     const InvoiceService = require('../services/invoice');
@@ -396,7 +408,7 @@ describe('handleRefundFailed', () => {
     dbInvoices.first.mockResolvedValue(original());
     trxInvoices.first.mockResolvedValue(lockedOriginal());
     // Excluded from the FOR UPDATE scan by status; named by the collected scan.
-    trxInvoices.select.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'inv-2', invoice_number: 'WPC-2026-0002' }]);
+    seedMarked([], [{ id: 'inv-2', invoice_number: 'WPC-2026-0002' }]);
     await handleRefundFailed(failedRefund());
 
     expect(trxInvoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'prepaid']);
@@ -408,27 +420,66 @@ describe('handleRefundFailed', () => {
     expect(require('../services/invoice-followups').stopSequence).not.toHaveBeenCalled();
   });
 
-  test('a marked replacement with a live PaymentIntent or recorded payment is NOT voided in-webhook (needs the operator void)', async () => {
+  test('a marked replacement with a CANCELABLE PaymentIntent is triaged pre-lock like the operator void, then voided with that PI id', async () => {
     dbInvoices.first.mockResolvedValue(original());
     trxInvoices.first.mockResolvedValue(lockedOriginal());
-    trxInvoices.select.mockResolvedValueOnce([
-      replacement({ stripe_payment_intent_id: 'pi_live' }),
-      replacement({ id: 'inv-3', invoice_number: 'WPC-2026-0003', payment_recorded_at: '2026-08-21T09:00:00Z' }),
-    ]).mockResolvedValueOnce([]);
+    const StripeService = require('../services/stripe');
+    StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_open', status: 'requires_payment_method' });
+    seedMarked([replacement({ stripe_payment_intent_id: 'pi_open' })]);
+    await handleRefundFailed(failedRefund());
+
+    expect(StripeService.retrievePaymentIntent).toHaveBeenCalledWith('pi_open');
+    expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_open', { cancellation_reason: 'abandoned' });
+    expect(require('../services/pay-combined').clearPaymentIntentStamps).toHaveBeenCalledWith(db, 'pi_open', { keepInvoiceIds: ['inv-2'] });
+    // Triage happened BEFORE the transaction opened.
+    const triageOrder = StripeService.cancelPaymentIntent.mock.invocationCallOrder[0];
+    expect(triageOrder).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+    expect(require('../services/invoice').voidInvoiceInTransaction).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ id: 'inv-2' }), { triagedVoidPiId: 'pi_open', createdBy: 'system:refund_bounce' },
+    );
+    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0002');
+    expect(notificationInsert.mock.calls[0][0].body).toContain('was voided');
+  });
+
+  test('money in flight on the replacement PI, an unverifiable PI, or a recorded payment → NOT voided, named for the operator', async () => {
+    dbInvoices.first.mockResolvedValue(original());
+    trxInvoices.first.mockResolvedValue(lockedOriginal());
+    const StripeService = require('../services/stripe');
+    StripeService.retrievePaymentIntent
+      .mockResolvedValueOnce({ id: 'pi_flight', status: 'processing' })
+      .mockRejectedValueOnce(new Error('stripe down'));
+    seedMarked([
+      replacement({ stripe_payment_intent_id: 'pi_flight' }),
+      replacement({ id: 'inv-3', invoice_number: 'WPC-2026-0003', stripe_payment_intent_id: 'pi_unknown' }),
+      replacement({ id: 'inv-4', invoice_number: 'WPC-2026-0004', payment_recorded_at: '2026-08-21T09:00:00Z' }),
+    ]);
+    await handleRefundFailed(failedRefund());
+
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
+    const body = notificationInsert.mock.calls[0][0].body;
+    expect(body).toContain('WPC-2026-0002 (payment in flight (pi_flight is processing))');
+    expect(body).toContain('WPC-2026-0003 (open payment session pi_unknown could not be verified (stripe down))');
+    expect(body).toContain('could NOT be auto-voided');
+    expect(body).toContain('WPC-2026-0004');
+    expect(body).toContain('DOUBLE PAYMENT');
+  });
+
+  test('a marked replacement that landed AFTER the pre-lock triage read is never voided blind', async () => {
+    dbInvoices.first.mockResolvedValue(original());
+    trxInvoices.first.mockResolvedValue(lockedOriginal());
+    dbInvoices.select.mockResolvedValue([]);
+    trxInvoices.select.mockResolvedValueOnce([replacement()]).mockResolvedValueOnce([]);
     await handleRefundFailed(failedRefund());
 
     expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
-    const body = notificationInsert.mock.calls[0][0].body;
-    expect(body).toContain('WPC-2026-0002 (open payment session pi_live)');
-    expect(body).toContain('could NOT be auto-voided');
-    expect(body).toContain('WPC-2026-0003');
-    expect(body).toContain('DOUBLE PAYMENT');
+    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0002 (minted during the bounce — not triaged)');
   });
 
   test('a refused canonical void rolls back only its savepoint — the restore still commits and the alert names the reason', async () => {
     dbInvoices.first.mockResolvedValue(original());
     trxInvoices.first.mockResolvedValue(lockedOriginal());
-    trxInvoices.select.mockResolvedValueOnce([replacement()]).mockResolvedValueOnce([]);
+    seedMarked([replacement()]);
     require('../services/invoice').voidInvoiceInTransaction.mockRejectedValueOnce(new Error('A payment was applied to this invoice while voiding — issue a refund instead'));
     await handleRefundFailed(failedRefund());
 
@@ -456,7 +507,7 @@ describe('handleRefundFailed', () => {
   test('no visit id resolvable → no mint lock, no backfill; the marker void still runs', async () => {
     dbInvoices.first.mockResolvedValue(original({ scheduled_service_id: null, service_record_id: 'sr-orphan' }));
     trxInvoices.first.mockResolvedValue(lockedOriginal({ scheduled_service_id: null }));
-    trxInvoices.select.mockResolvedValueOnce([replacement()]).mockResolvedValueOnce([]);
+    seedMarked([replacement()]);
     await handleRefundFailed(failedRefund());
 
     expect(trxRaw).not.toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['schedule.invoice.mint']));

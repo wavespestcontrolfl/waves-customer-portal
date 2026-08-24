@@ -108,6 +108,12 @@ describe('completion mint stamps replaces_invoice_id (source contract)', () => {
     expect(dispatchSrc).not.toMatch(/update\(\{\s*replaces_invoice_id/);
   });
 
+  test('a marked replacement mint serializes on the shared mint lock even on the explicit-amount (backfill) path', () => {
+    expect(invoiceSrc).toContain('const serializedReplacementMint =\n      !replayFromScheduled && !!replacesInvoiceId && !!sr.scheduled_service_id;');
+    expect(invoiceSrc).toContain('if (!replayFromScheduled && !serializedReplacementMint) return null;');
+    expect(invoiceSrc).toContain('if (replayFromScheduled || serializedReplacementMint) {\n      return runMintTransaction(async (trx) => {\n        const adopted = await adoptUnderMintLock(trx);');
+  });
+
   test('InvoiceService.create writes the column and createFromService threads the option', () => {
     expect(invoiceSrc).toContain('replacesInvoiceId = null,');
     expect(invoiceSrc).toContain('...(replacesInvoiceId ? { replaces_invoice_id: replacesInvoiceId } : {}),');

@@ -1762,6 +1762,17 @@ const InvoiceService = {
       amount !== undefined && amount !== null && Number(amount) > 0;
     const replayFromScheduled =
       (useScheduledReplay || !hasExplicitAmount) && !!sr.scheduled_service_id;
+    // A marked replacement mint (replacesInvoiceId — the completion re-bills
+    // a refunded/canceled invoice) MUST serialize on the shared mint lock
+    // even on the explicit-amount (backfill / frozen-resume) path (pre-push
+    // P0, codex #3456): the refund-bounce handler restores the original and
+    // voids marked replacements under that same lock, so an unserialized
+    // mint could commit AFTER its scan and leave a collectible duplicate
+    // beside the restored paid invoice. Under the lock the in-lock adoption
+    // re-check sees the restored 'paid' row and adopts it instead. Price
+    // proof stays off (frozen money by design) — only the lock + adoption.
+    const serializedReplacementMint =
+      !replayFromScheduled && !!replacesInvoiceId && !!sr.scheduled_service_id;
     // Params are built PER MINT ATTEMPT, on the minting connection
     // (mint-serialization, WaveGuard #3338 fast-follow): the replay path
     // derives its price from the scheduled row, so that read happens under
@@ -1874,7 +1885,7 @@ const InvoiceService = {
     // non-terminal invoice that landed — the caller's reuse filters ran
     // before this transaction and cannot have seen it.
     const adoptUnderMintLock = async (trx) => {
-      if (!replayFromScheduled) return null;
+      if (!replayFromScheduled && !serializedReplacementMint) return null;
       const { adoptScheduledInvoiceUnderMintLock } = require("./scheduled-invoice-mint");
       return adoptScheduledInvoiceUnderMintLock(trx, sr.scheduled_service_id);
     };
@@ -1962,7 +1973,7 @@ const InvoiceService = {
       }
     }
 
-    if (replayFromScheduled) {
+    if (replayFromScheduled || serializedReplacementMint) {
       return runMintTransaction(async (trx) => {
         const adopted = await adoptUnderMintLock(trx);
         if (adopted) return adopted;

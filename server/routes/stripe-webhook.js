@@ -4148,6 +4148,65 @@ async function handleRefundFailed(refund) {
     }
   }
 
+  // Pre-lock Stripe triage for marked replacements (codex #3456, pre-push
+  // P0): the canonical operator void (InvoiceService.voidInvoice) verifies
+  // an attached PaymentIntent BEFORE locking — refuses if money is in
+  // flight, cancels a still-cancelable intent, unbinds combined siblings —
+  // and the in-lock void re-checks the id it triaged. Same shape here, on
+  // the invoices stamped replaces_invoice_id = the original: the Stripe
+  // round-trips run outside the transaction, and voidInvoiceInTransaction
+  // refuses under the lock if the row's PI no longer matches. Only the
+  // marked, still-open rows are triaged (nothing else is ever voided).
+  const replacementTriage = new Map();
+  if (linkedInvoice) {
+    try {
+      const openMarked = await db('invoices')
+        .where({ replaces_invoice_id: linkedInvoice.id })
+        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+        .select('id', 'invoice_number', 'stripe_payment_intent_id', 'payment_recorded_at');
+      for (const rep of openMarked || []) {
+        const triagedPiId = rep.stripe_payment_intent_id || null;
+        if (!triagedPiId || rep.payment_recorded_at) {
+          replacementTriage.set(String(rep.id), { triagedVoidPiId: null });
+          continue;
+        }
+        const StripeService = require('../services/stripe');
+        let pi;
+        try {
+          pi = await StripeService.retrievePaymentIntent(triagedPiId);
+        } catch (e) {
+          replacementTriage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be verified (${e.message})` });
+          continue;
+        }
+        if (!pi) {
+          replacementTriage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be verified (payment service unavailable)` });
+          continue;
+        }
+        if (['processing', 'succeeded', 'requires_capture'].includes(pi.status)) {
+          replacementTriage.set(String(rep.id), { skip: `payment in flight (${triagedPiId} is ${pi.status})` });
+          continue;
+        }
+        if (pi.status !== 'canceled') {
+          try {
+            await StripeService.cancelPaymentIntent(triagedPiId, { cancellation_reason: 'abandoned' });
+          } catch (e) {
+            replacementTriage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be cancelled (${e.message})` });
+            continue;
+          }
+        }
+        // Unbind combined siblings from the canceled PI (same as the
+        // operator void), keeping this row's own stamp for the in-lock
+        // identity re-check.
+        await require('../services/pay-combined').clearPaymentIntentStamps(db, triagedPiId, { keepInvoiceIds: [String(rep.id)] });
+        replacementTriage.set(String(rep.id), { triagedVoidPiId: triagedPiId });
+      }
+    } catch (err) {
+      // Fail closed: a triage read failure leaves every replacement for the
+      // operator (untriaged rows are never voided below).
+      logger.warn(`[stripe-webhook] replacement triage failed for invoice ${linkedInvoice.id}: ${err.message}`);
+    }
+  }
+
   let restoredInvoiceId = null;
   let voidedReplacementsCommitted = [];
   await db.transaction(async (trx) => {
@@ -4310,9 +4369,10 @@ async function handleRefundFailed(refund) {
     // rollup) inside a SAVEPOINT, so a refused void rolls back only itself
     // and the restore still commits. Fail closed on money: paid/prepaid or
     // payment_recorded_at = collected (a human refunds one); a live
-    // stripe_payment_intent_id needs the pre-lock Stripe triage the
-    // operator void does — a network call that does not belong in this
-    // transaction — so it is left for the operator too.
+    // stripe_payment_intent_id was triaged BEFORE this transaction (see
+    // replacementTriage above) exactly as the operator void does — money
+    // in flight or an unverifiable/uncancelable intent leaves the row for
+    // the operator, never voided blind.
     const voidedReplacements = [];
     const collectedReplacements = [];
     const manualReplacements = [];
@@ -4328,13 +4388,21 @@ async function handleRefundFailed(refund) {
           collectedReplacements.push(repLabel);
           continue;
         }
-        if (rep.stripe_payment_intent_id) {
-          manualReplacements.push(`${repLabel} (open payment session ${rep.stripe_payment_intent_id})`);
+        const triage = replacementTriage.get(String(rep.id));
+        if (!triage) {
+          // Landed after the pre-lock read — untriaged, never voided blind.
+          manualReplacements.push(`${repLabel} (minted during the bounce — not triaged)`);
+          continue;
+        }
+        if (triage.skip) {
+          manualReplacements.push(`${repLabel} (${triage.skip})`);
           continue;
         }
         try {
+          // The in-lock re-check inside voidInvoiceInTransaction refuses if
+          // a PI attached (or changed) since the pre-lock triage.
           const voided = await trx.transaction((sp) => require('../services/invoice')
-            .voidInvoiceInTransaction(sp, rep, { triagedVoidPiId: null, createdBy: 'system:refund_bounce' }));
+            .voidInvoiceInTransaction(sp, rep, { triagedVoidPiId: triage.triagedVoidPiId, createdBy: 'system:refund_bounce' }));
           voidedReplacements.push(voided);
         } catch (voidErr) {
           manualReplacements.push(`${repLabel} (${voidErr.message})`);
