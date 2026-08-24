@@ -7008,11 +7008,6 @@ async function handleDisputeClosed(dispute) {
               if (restoredRows > 0) {
                 restoredCount += 1;
                 restoredThisPass = true;
-                // The reinstated share settled the invoice again — complete
-                // any plan created while the dispute had it reopened (codex
-                // r8 P1). Throwing variant: a failure fails the event and
-                // Stripe redelivery recovers.
-                await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
               } else {
                 logger.warn(`[stripe-webhook] dispute ${dispute.id} won — invoice ${invId} binding changed before the restore committed; parking the reinstated share`);
                 await db('stripe_orphan_charges')
@@ -7038,6 +7033,15 @@ async function handleDisputeClosed(dispute) {
               }
             }
             if (restoredThisPass || alreadyRestoredByThisPi) {
+              // The reinstated share settled the invoice again — complete any
+              // plan created while the dispute had it reopened (codex r8 P1).
+              // In the REPLAY branch, not only after this pass's restore
+              // (codex r13 P1): a prior delivery may have committed the
+              // restore and failed the completion — redelivery arrives with
+              // alreadyRestoredByThisPi=true and must still repair it.
+              // Throwing + idempotent: a failure fails the event and Stripe
+              // redelivers; a landed flip makes replays no-ops.
+              await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
               // Recovery sync on the restored money (codex r4 P1): a paid
               // prepay invoice re-activates its dispute-suspended term.
               // UNCAUGHT (codex r5 P1): a swallowed failure marks the event
@@ -7375,9 +7379,16 @@ async function handleDisputeClosed(dispute) {
           stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
           stripe_charge_id: payment.stripe_charge_id || null,
         });
-        // Restored settlement completes any plan created while the dispute
-        // had the invoice reopened (codex r8 P1). Throwing variant — a
-        // failure fails the event and Stripe redelivery recovers.
+      }
+      // Restored settlement completes any plan created while the dispute had
+      // the invoice reopened (codex r8 P1). Runs for the ALREADY-restored
+      // disputed-PI shape too, not only after this pass's own restore (codex
+      // r13 P1): the restore and the plan flip are separate autocommit
+      // writes, so a prior delivery may have committed the restore and
+      // failed the flip — redelivery then sees status='paid' under the
+      // disputed PI and must still repair it. Throwing + idempotent.
+      if (invoice
+        && (!wonInvoicePi || (wonDisputedPi && wonInvoicePi === wonDisputedPi))) {
         await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
       }
       // Annual-prepay sync on the restored money: a paid PREPAY invoice
