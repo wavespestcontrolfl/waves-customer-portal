@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const InvoiceService = require('./invoice');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -25,15 +26,10 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db) {
     .where('i.customer_id', customerId)
     .where('first_visit.source_estimate_id', sourceEstimateId)
     .where('first_visit.scheduled_date', scheduledDate)
-    // INTENTIONALLY retains refunded/cancelled rows (status quo — codex #3456
-    // narrowed scope): this lookup reaches SIBLING scheduled services of the
-    // same estimate/date, so a fresh mint here would need cross-visit
-    // replacement provenance and a cross-visit lock scope before a bounced
-    // refund could void it safely. Neither exists yet, so a terminal sibling
-    // first-application invoice keeps suppressing the completion mint exactly
-    // as before, and completionSupersededTerminalInvoiceLookup never stamps a
-    // marker for it (own-visit rows only). Follow-up lane.
-    .whereNot('i.status', 'void')
+    // Collectible-or-settled only: a refunded/cancelled first-application
+    // invoice must not be reused as the completion's invoice (see
+    // completionSuppressorInvoiceLookup in routes/admin-dispatch.js).
+    .whereNotIn('i.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .orderBy('i.created_at', 'desc')
     .select('i.*');
 

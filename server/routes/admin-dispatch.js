@@ -4245,36 +4245,6 @@ function completionSuppressorInvoiceLookup(conn, where) {
     .first();
 }
 
-// Terminal statuses the suppressor skips that a fresh mint RE-BILLS
-// (codex #3456): a refunded/canceled invoice's money may still come back
-// (refund.failed) — the replacement minted in that window must be
-// provably tied to the invoice it supersedes, so the bounce handler can
-// void exactly it. 'void' is deliberately NOT here: a voided invoice is an
-// operator decision that nothing restores, so a mint after it is a plain
-// new invoice, not a replacement.
-const COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES = ['refunded', 'canceled', 'cancelled'];
-
-// The terminal invoice the suppressor lookup skipped for this visit, if
-// any — newest wins, same shape as the suppressor query. Returns the id to
-// stamp as invoices.replaces_invoice_id on the completion mint, or null.
-// ONE globally ordered query across both visit identifiers (pre-push P0,
-// codex #3456): an `a || b` pair let an older service_record_id row win
-// over a newer scheduled_service_id row, and a bounce on the newer one
-// could not find its replacement.
-async function completionSupersededTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
-  if (!serviceRecordId && !scheduledServiceId) return null;
-  const row = await conn('invoices')
-    .where((qb) => {
-      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
-      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
-    })
-    .whereIn('status', COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES)
-    .orderBy('created_at', 'desc')
-    .orderBy('id', 'desc')
-    .first('id');
-  return row ? row.id : null;
-}
-
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -8536,12 +8506,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     let existingCompletionInvoice = null;
-    // Provenance for a replacement mint (codex #3456): when the suppressor
-    // chain resolves null BECAUSE a refunded/canceled invoice for this visit
-    // was skipped, the fresh invoice is stamped replaces_invoice_id = that
-    // row so a bounced refund can void exactly it. Read BEFORE the decision
-    // block (same pre-read posture as the suppressors themselves).
-    let supersededTerminalInvoiceId = null;
     try {
       existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
@@ -8577,21 +8541,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
-    // Provenance lookup is NOT inside the non-blocking try above (pre-push
-    // P0, codex #3456): only the typed-required lane honours
-    // invoiceLookupFailed, so a swallowed failure here would let another
-    // lane mint an UNMARKED replacement that a later refund bounce could
-    // never find. A failure propagates — the completion request fails and
-    // is retried — rather than minting without provenance. Runs only when
-    // the whole suppressor chain resolved null (lookup succeeded, nothing
-    // reusable): a suppressor failure keeps existingCompletionInvoice null
-    // AND invoiceLookupFailed set, so this is skipped too.
-    if (!existingCompletionInvoice && !invoiceLookupFailed && !recapReviewOnly) {
-      supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {
-        serviceRecordId: record.id,
-        scheduledServiceId: svc.id,
-      });
-    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -9234,8 +9183,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // fix round). The invoice mints at face value; the deposit stays
           // on the estimate's ledger for the reviewer to apply.
           skipDepositCredit: isBackfillCompletion,
-          // Replacement provenance (codex #3456), terminal-skipped mints only.
-          ...(supersededTerminalInvoiceId ? { replacesInvoiceId: supersededTerminalInvoiceId } : {}),
           // Statement accrual is a billing side effect too (Codex P1, PR
           // #2897 fix round 5): for a payer-billed NET15/NET30 visit under
           // GATE_PAYER_STATEMENTS, create() otherwise attaches this invoice
@@ -9325,9 +9272,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               taxRate: mintInvoiceTaxRate,
               dueDate: serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
-              // Completion-replacement provenance (codex #3456), same
-              // source as mintOptions on the other lane.
-              ...(supersededTerminalInvoiceId ? { replacesInvoiceId: supersededTerminalInvoiceId } : {}),
             }),
           });
           invoice = minted.invoice;
@@ -14188,8 +14132,6 @@ module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
-  completionSupersededTerminalInvoiceLookup,
-  COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,
