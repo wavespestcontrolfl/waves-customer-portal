@@ -88,12 +88,29 @@ function excludeGloballySuppressed(query) {
 // send time: exclude any subscriber whose linked customer has deleted_at set.
 // Unlinked rows (customer_id NULL) are untouched. Shared by buildSubscriberQuery
 // AND the resume/retry refetch, like excludeGloballySuppressed.
+//
+// EXCEPT when the household came back: a customer archived and later
+// re-booked gets a NEW customers row (12 creation entry points, none of
+// which re-runs the twin picker), so the subscriber's customer_id keeps
+// pointing at the archived row forever and the anti-join would silence a
+// CURRENT customer for good. A live profile carrying the subscriber's own
+// email — the same scope liveTwinSubselect uses (deleted_at IS NULL only;
+// link semantics, not lifecycle) — lifts the suppression: the person we'd
+// mail is a live contact again, whichever row they're linked to. The stale
+// link itself is repaired by the archive/restore relink helpers; this is
+// the send-time read that must not depend on that hygiene.
 function excludeArchivedCustomers(query) {
   return query.whereNotExists(function () {
     this.select(db.raw('1'))
       .from('customers as ac')
       .whereRaw('ac.id = newsletter_subscribers.customer_id')
-      .whereNotNull('ac.deleted_at');
+      .whereNotNull('ac.deleted_at')
+      .whereNotExists(function () {
+        this.select(db.raw('1'))
+          .from('customers as lt')
+          .whereRaw('LOWER(TRIM(lt.email)) = LOWER(TRIM(newsletter_subscribers.email))')
+          .whereNull('lt.deleted_at');
+      });
   });
 }
 

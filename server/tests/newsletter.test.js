@@ -120,7 +120,7 @@ describe('newsletter buildSubscriberQuery', () => {
   // refetch (both go through excludeArchivedCustomers).
   test('always anti-joins archived (deleted_at) linked customers', () => {
     const { sql } = shapeOf(null);
-    expect(sql).toMatch(/not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null\)/i);
+    expect(sql).toMatch(/not exists \(select 1 from "customers" as "ac" where ac\.id = newsletter_subscribers\.customer_id and "ac"\."deleted_at" is not null and not exists/i);
   });
 
   test('excludeArchivedCustomers emits the same anti-join for the retry refetch', () => {
@@ -129,6 +129,30 @@ describe('newsletter buildSubscriberQuery', () => {
     ).toSQL();
     expect(sql).toMatch(/"customers" as "ac"/);
     expect(sql).toMatch(/"ac"\."deleted_at" is not null/);
+  });
+
+  // Regression (#3449 hunt finding): an archived customer re-booked as a NEW
+  // customers row (create paths never re-run the twin picker) left the
+  // subscriber linked to the archived row and silenced forever. A LIVE
+  // profile carrying the subscriber's own email lifts the suppression at
+  // send time — same scope as liveTwinSubselect (deleted_at IS NULL only),
+  // correlated on the SUBSCRIBER's email, never the archived row's.
+  test('a live same-email profile lifts the archived-link suppression (re-booked household)', () => {
+    const { sql } = excludeArchivedCustomers(
+      db('newsletter_subscribers').where({ status: 'active' }),
+    ).toSQL();
+    expect(sql).toMatch(/not exists \(select 1 from "customers" as "lt" where LOWER\(TRIM\(lt\.email\)\) = LOWER\(TRIM\(newsletter_subscribers\.email\)\) and "lt"\."deleted_at" is null\)/i);
+    // The lift is scoped INSIDE the archived anti-join (suppress only when
+    // archived-linked AND no live twin) — not a top-level condition that
+    // would drop unlinked or live-linked rows.
+    const outer = sql.indexOf('"customers" as "ac"');
+    const inner = sql.indexOf('"customers" as "lt"');
+    expect(outer).toBeGreaterThan(-1);
+    expect(inner).toBeGreaterThan(outer);
+    // Link scope stays deleted_at-only (link semantics, not lifecycle) —
+    // no active/pipeline_stage narrowing sneaking into the twin check.
+    const twin = sql.slice(inner, sql.indexOf(')', inner) + 1);
+    expect(twin).not.toMatch(/active|pipeline_stage/);
   });
 
   test('customersOnly adds customer_id IS NOT NULL', () => {
