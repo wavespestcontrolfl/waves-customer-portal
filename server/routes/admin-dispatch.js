@@ -4271,7 +4271,24 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
     .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
     .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
-    .first('id', 'invoice_number', 'status')) || null;
+    .first('id', 'invoice_number', 'status', 'created_at')) || null;
+}
+
+// Invoices are not unique per visit (pre-push P0): a NEWER refunded
+// invoice can coexist with an OLDER live one, and the status-filtered
+// suppressor would hand back the older row and skip the refunded check —
+// its pay link goes out, and if the newer refund bounces Stripe restores
+// that invoice to paid beside it. Classify by the newest row across both:
+// a refunded invoice newer than the live one wins (manual path, live row
+// not reused); an older refunded one is history and the live row stands.
+function reconcileLiveVsRefunded(existing, refunded) {
+  if (!refunded) return { existing, terminal: null };
+  if (!existing) return { existing: null, terminal: refunded };
+  const liveAt = new Date(existing.created_at || 0).getTime();
+  const refundedAt = new Date(refunded.created_at || 0).getTime();
+  return refundedAt > liveAt
+    ? { existing: null, terminal: refunded }
+    : { existing, terminal: null };
 }
 
 // The sibling first-application lookup (services/estimate-first-application-
@@ -8574,17 +8591,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
       }
-      // Own-visit terminal check BEFORE the sibling first-application
-      // fallback (pre-push P0): that fallback matches the current visit too
-      // (same customer/estimate/date) and filters only 'void', so it would
-      // hand back this visit's own refunded invoice as a dead pay link and
-      // skip the alert. A terminal own-visit invoice wins here; siblings are
-      // consulted only when the visit carries no terminal invoice.
-      if (!existingCompletionInvoice && !recapReviewOnly) {
-        terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {
+      // Own-visit refunded check right after the direct suppressors and
+      // BEFORE the sibling first-application fallback (pre-push P0): that
+      // fallback matches the current visit too (same customer/estimate/
+      // date) and filters only 'void', so it would hand back this visit's
+      // own refunded invoice as a dead pay link and skip the alert. Runs
+      // UNCONDITIONALLY (not only when the suppressors found nothing) and
+      // reconciles by recency: a refunded invoice NEWER than the live row
+      // the suppressor found wins (manual path, older live row not reused);
+      // an older refunded one is history. Siblings are consulted only when
+      // neither a live nor a refunded own-visit invoice stands.
+      if (!recapReviewOnly) {
+        const refundedOnVisit = await completionTerminalInvoiceLookup(db, {
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
         });
+        const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit);
+        existingCompletionInvoice = reconciled.existing;
+        terminalCompletionInvoice = reconciled.terminal;
       }
       if (!existingCompletionInvoice && !terminalCompletionInvoice) {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
@@ -14278,6 +14302,7 @@ module.exports._test = {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
   splitTerminalCompletionInvoice,
+  reconcileLiveVsRefunded,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,

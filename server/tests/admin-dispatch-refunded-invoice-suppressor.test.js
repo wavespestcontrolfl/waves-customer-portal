@@ -18,6 +18,7 @@ const {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
   splitTerminalCompletionInvoice,
+  reconcileLiveVsRefunded,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
   shouldAutoInvoiceCompletion,
 } = require('../routes/admin-dispatch')._test;
@@ -86,7 +87,7 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
         const matches = rows.filter((r) => included.includes(r.status)
           && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
         matches.sort((a, b) => (b.created_at.localeCompare(a.created_at)) || String(b.id).localeCompare(String(a.id)));
-        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status } : undefined;
+        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status, created_at: matches[0].created_at } : undefined;
       }),
     };
     const knex = jest.fn(() => chain);
@@ -96,7 +97,7 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
 
   test('finds the REFUNDED invoice on the visit (only a refund can bounce)', async () => {
     const knex = makeOrderedKnex([{ id: 'inv-refunded', invoice_number: 'WPC-1', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
-    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toEqual({ id: 'inv-refunded', invoice_number: 'WPC-1', status: 'refunded' });
+    await expect(completionTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toEqual({ id: 'inv-refunded', invoice_number: 'WPC-1', status: 'refunded', created_at: '2026-08-20' });
     expect(knex.scopes()).toEqual([{ scheduled_service_id: 'svc-1' }]);
     expect(COMPLETION_TERMINAL_INVOICE_STATUSES).toEqual(['refunded']);
   });
@@ -157,13 +158,16 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
 
   test('the own-visit terminal lookup runs after the direct suppressors and BEFORE the sibling first-application fallback, which is skipped when a terminal invoice exists', () => {
-    const idx = src.indexOf('terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {');
+    const idx = src.indexOf('const refundedOnVisit = await completionTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
     const chainStart = src.indexOf('let existingCompletionInvoice = null;');
     const siblingAt = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);', chainStart);
     expect(chainStart).toBeLessThan(idx);
     expect(idx).toBeLessThan(siblingAt);
-    expect(src.slice(idx - 80, idx)).toMatch(/if \(!existingCompletionInvoice && !recapReviewOnly\) \{\s*$/);
+    // Unconditional (not gated on the suppressors finding nothing) — an
+    // older live row must not mask a newer refunded one.
+    expect(src.slice(idx - 60, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*$/);
+    expect(src.slice(idx, idx + 400)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit)');
     expect(src.slice(siblingAt - 100, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice\) \{\s*$/);
     expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
     const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));
@@ -195,18 +199,19 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     chain.first
       .mockResolvedValueOnce(undefined) // suppressor by service_record_id
       .mockResolvedValueOnce(undefined) // suppressor by scheduled_service_id
-      .mockResolvedValueOnce({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded' }); // terminal lookup
+      .mockResolvedValueOnce({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded', created_at: '2026-08-20' }); // terminal lookup
     const knex = jest.fn(() => chain);
     const svc = { id: 'svc-1', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' };
 
     let existing = await completionSuppressorInvoiceLookup(knex, { service_record_id: 'rec-1' });
     if (!existing) existing = await completionSuppressorInvoiceLookup(knex, { scheduled_service_id: svc.id });
-    let terminal = null;
-    if (!existing) terminal = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: svc.id });
+    const refundedOnVisit = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: svc.id });
+    let terminal;
+    ({ existing, terminal } = reconcileLiveVsRefunded(existing, refundedOnVisit));
     if (!existing && !terminal) existing = await findFirstApplicationInvoiceForEstimateService(svc, knex);
 
     expect(existing).toBeFalsy();
-    expect(terminal).toEqual({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded' });
+    expect(terminal).toEqual({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded', created_at: '2026-08-20' });
     // The sibling fallback never ran, so its dead token can't become a pay link.
     expect(chain.join).not.toHaveBeenCalled();
     expect(chain.select).not.toHaveBeenCalled();
@@ -253,6 +258,17 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(succeededAt).toBeGreaterThan(at);
     // Same release + 503 shape as the typed-required mint failure.
     expect(src).toContain("code: 'backfill_invoice_mint_failed',");
+  });
+
+  test('reconcileLiveVsRefunded: a NEWER refunded invoice beats an older live row (no dead-or-stale pay link); an older refunded one is history', () => {
+    const live = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01T00:00:00Z' };
+    const refundedNewer = { id: 'inv-ref', status: 'refunded', created_at: '2026-08-20T00:00:00Z' };
+    const refundedOlder = { id: 'inv-ref-old', status: 'refunded', created_at: '2026-07-01T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
+    expect(reconcileLiveVsRefunded(live, refundedOlder)).toEqual({ existing: live, terminal: null });
+    expect(reconcileLiveVsRefunded(null, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
+    expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });
+    expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null });
   });
 
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
