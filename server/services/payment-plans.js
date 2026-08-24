@@ -18,9 +18,23 @@ const logger = require('./logger');
 async function completeActivePlansForInvoice(invoiceId, conn = db) {
   if (!invoiceId) return 0;
   const now = new Date();
-  return conn('payment_plans')
+  const flipped = await conn('payment_plans')
     .where({ invoice_id: invoiceId, status: 'active' })
     .update({ status: 'completed', completed_at: now, updated_at: now });
+  // Release the plan-owned dunning stop too (codex PR r1 P1): the plan's
+  // creation left the sequence 'stopped' with a payment_plan_created:<id>
+  // stamp, and stopOnPayment deliberately skips stopped rows — without this
+  // a later dispute reopen would find isDunningStopped() true forever and
+  // suppress every reminder path. 'completed' mirrors stopOnPayment's
+  // settled outcome (a dispute reopen re-arms from that state via the
+  // existing paths). Unconditional (not gated on flipped>0) so a retry can
+  // repair a partial earlier attempt; admin stops with unrelated reasons
+  // keep their stamp.
+  await conn('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId, status: 'stopped' })
+    .where('stopped_reason', 'like', 'payment_plan_created:%')
+    .update({ status: 'completed', next_touch_at: null, updated_at: now });
+  return flipped;
 }
 
 /** Best-effort post-commit variant for paths that already committed the paid flip. */

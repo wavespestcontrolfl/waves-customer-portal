@@ -120,6 +120,14 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
           };
           return pq;
         }
+        if (table === 'invoice_followup_sequences') {
+          // Plan completion releases plan-owned dunning stops on the same trx.
+          const sq = {
+            where: jest.fn(() => sq),
+            update: jest.fn(async () => 0),
+          };
+          return sq;
+        }
         throw new Error(`Unexpected trx table: ${table}`);
       });
       trx.raw = jest.fn(async () => undefined);

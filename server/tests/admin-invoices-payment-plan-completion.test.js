@@ -123,6 +123,8 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       if (table === 'invoices') return trxInvoices;
       if (table === 'payments') return trxPayments;
       if (table === 'payment_plans') return trxPlans;
+      // completeActivePlansForInvoice also releases plan-owned dunning stops.
+      if (table === 'invoice_followup_sequences') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
     });
     trx.fn = { now: jest.fn(() => 'NOW()') };

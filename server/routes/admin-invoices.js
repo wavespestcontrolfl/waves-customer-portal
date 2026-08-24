@@ -287,12 +287,27 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
 async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
   const seq = await trx('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .first('id', 'status', 'stopped_reason', 'paused_reason');
+    .first('id', 'status', 'stopped_reason', 'paused_reason', 'is_autopay_held');
   if (!seq) return 'schedule';
   const planOwned = seq.stopped_reason === paymentPlanFollowupStopReason(planId)
     && (seq.status === 'stopped'
       || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
   if (!planOwned) return 'untouched';
+  // Autopay customers re-enter the HOLD, not the active cadence (codex PR r1
+  // P1): resumeSequence would set status 'active' with a due time and the
+  // next cron would dun a customer whose card is on autopay — the existing
+  // failure-threshold release flow (releaseFromAutopayHold) owns when a held
+  // sequence starts reminding.
+  if (seq.is_autopay_held) {
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      status: 'autopay_hold',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+      updated_at: new Date(),
+    });
+    return 'held';
+  }
   const FollowUpsSvc = require('../services/invoice-followups');
   await FollowUpsSvc.resumeSequence(invoiceId, trx);
   return 'resumed';

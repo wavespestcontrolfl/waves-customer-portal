@@ -345,6 +345,32 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('an autopay-held sequence returns to autopay_hold, never the active cadence (codex PR r1 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({
+      id: 'seq-1',
+      status: 'stopped',
+      stopped_reason: 'payment_plan_created:plan-1',
+      is_autopay_held: true,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      // The failure-threshold release flow owns when a held sequence starts
+      // reminding — resumeSequence would dun an autopay customer.
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+      expect(db.followupsQB.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'autopay_hold',
+        stopped_reason: null,
+        next_touch_at: null,
+      }));
+    });
+  });
+
   test('a sequence an admin stopped for an UNRELATED reason stays stopped after cancel (codex r2 P1)', async () => {
     db.followupsQB.first.mockResolvedValue({ id: 'seq-1', status: 'stopped', stopped_reason: 'admin_stop' });
     await withServer(async (baseUrl) => {

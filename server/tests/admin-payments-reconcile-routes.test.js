@@ -115,6 +115,10 @@ jest.mock('../models/db', () => {
         return rows.map((r) => ({ ...r }));
       },
       async update(updates) {
+        if (table === 'invoice_followup_sequences') {
+          // Plan completion releases plan-owned dunning stops; none tracked here.
+          return 0;
+        }
         if (table === 'payment_plans') {
           // The reconcile settlement completes active plans on the same trx.
           const hits = (data.paymentPlans || []).filter((r) => matches(r, builder._where));

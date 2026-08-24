@@ -1511,7 +1511,7 @@ function InvoiceList({
                               Payment plan
                             </button>
                           )}
-                          {inv.active_payment_plan && (
+                          {isAdminUser && inv.active_payment_plan && (
                             <button
                               onClick={() =>
                                 handleCancelPaymentPlan(
