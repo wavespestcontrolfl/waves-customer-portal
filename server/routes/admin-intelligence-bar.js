@@ -24,9 +24,9 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
-const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
+const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
@@ -192,6 +192,11 @@ const PII_TOOL_NAMES = new Set([
   'list_call_partners',
   'get_partner_call_history',
   'send_sms',
+  // Lead write tools accept/echo lead names, and their ambiguity and bulk
+  // previews return candidate names + phone last4 — taint so telemetry is
+  // redacted like the comms tools (codex P1 on the pinning round).
+  'update_lead_status',
+  'bulk_update_leads',
   'draft_sms_reply',
   'draft_sms',
   'lookup_property',
@@ -473,6 +478,27 @@ function operatorAdjustmentCardLine(adj) {
 }
 
 function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'send_sms' && preview?.pinned_recipient) {
+    // The card must show WHO the confirmed send goes to — the pinned
+    // identity resolved at proposal time, not a raw partial name that
+    // /confirm-action would re-resolve to somebody else.
+    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'update_lead_status' && preview?.pinned_lead) {
+    return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
+  }
+  if (toolName === 'bulk_update_leads') {
+    // Curated card: the pinned id list is authoritative but unreadable —
+    // show the count + sample the operator is approving, never a raw array.
+    return {
+      current_status: params.current_status,
+      new_status: params.new_status,
+      ...(params.older_than_days ? { older_than_days: params.older_than_days } : {}),
+      ...(params.lost_reason ? { lost_reason: params.lost_reason } : {}),
+      leads_to_update: (params.lead_ids || []).length,
+      sample: (preview?.preview || []).map(l => l.name).slice(0, 10).join(', ') || null,
+    };
+  }
   if (toolName === 'move_stops_to_day') {
     // The card must always disclose whether committing texts the customers —
     // including the default-silent case where the model omitted the optional
@@ -550,6 +576,69 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+    // Identity pinning (mirrors the set_estimate_presentation pin below):
+    // name→row resolution happens NOW, so the operator approves a specific
+    // pinned id and /confirm-action can never re-resolve "Smith" to a
+    // different row than the card showed.
+    if (toolUse.name === 'send_sms' && !params.customer_id && !params.phone && params.customer_name) {
+      const customer = await resolveCommsCustomer({ customer_name: params.customer_name });
+      // Generic error strings: a failed proposal's error is persisted in
+      // tool-health telemetry, so it must not carry the typed name.
+      if (!customer) return { failed: true, modelResult: { error: 'No customer matches that name.' } };
+      if (customer.error) return { failed: true, modelResult: customer };
+      if (!customer.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
+      params.customer_id = customer.id;
+      params.customer_name = `${customer.first_name} ${customer.last_name || ''}`.trim();
+      // Pin the APPROVED phone too: sendSms re-reads the customer at
+      // confirm time and refuses (preview_changed) if the record's phone
+      // no longer matches — the card's last4 stays truthful for the whole
+      // pending window.
+      params.phone = customer.phone;
+      params._require_phone_match = true;
+      preview = {
+        ...preview,
+        pinned_recipient: {
+          customer_id: customer.id,
+          name: params.customer_name,
+          phone_last4: (customer.phone || '').replace(/\D/g, '').slice(-4) || null,
+        },
+      };
+    }
+    if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
+      const lead = await resolveLeadForUpdate(params);
+      if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
+      if (lead.error) return { failed: true, modelResult: lead };
+      params.lead_id = lead.id;
+      params.lead_name = `${lead.first_name} ${lead.last_name || ''}`.trim();
+      // Pin the approved transition: if the lead moves during the pending
+      // window, updateLeadStatus refuses (preview_changed) instead of
+      // overwriting a state the card never showed.
+      params._expected_status = lead.status;
+      preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
+    }
+    if (toolUse.name === 'bulk_update_leads') {
+      // The executor's dry_run DEFAULTS true, so a confirmed card used to
+      // execute as a dry run and report success (silent no-op) — and an
+      // explicit dry_run:false re-queried the match set at confirm time, so
+      // the executed set could differ from the previewed one. Run the
+      // read-only dry run NOW, pin the matched ids, and force dry_run:false
+      // into the STORED params so Confirm executes exactly the previewed set.
+      const dryRun = await previewBulkLeadUpdate(params);
+      if (isToolFailure(dryRun)) return { failed: true, modelResult: dryRun };
+      const matchedIds = dryRun.matched_ids || [];
+      if (matchedIds.length === 0) {
+        return { failed: true, modelResult: { error: 'No leads match those criteria — nothing to update.' } };
+      }
+      if (matchedIds.length > BULK_LEAD_UPDATE_CAP) {
+        return {
+          failed: true,
+          modelResult: { error: `${matchedIds.length} leads match — over the ${BULK_LEAD_UPDATE_CAP}-lead bulk cap. Narrow the criteria (e.g. older_than_days) and retry.` },
+        };
+      }
+      params.dry_run = false;
+      params.lead_ids = matchedIds;
+      preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action };
+    }
     // create_pending_estimate with an operator price adjustment: the Confirm
     // card must show the engine anchor vs adjusted totals and any floor
     // outcome (codex P2 on #2947). compute_estimate is read-only, so running

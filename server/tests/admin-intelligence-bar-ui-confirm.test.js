@@ -22,6 +22,9 @@ const mockClaimForConfirm = jest.fn();
 const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
+const mockResolveCommsCustomer = jest.fn();
+const mockResolveLeadForUpdate = jest.fn();
+const mockPreviewBulkLeadUpdate = jest.fn();
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -51,9 +54,17 @@ jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/review-tools', () => ({ REVIEW_TOOLS: [], executeReviewTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/comms-tools', () => ({ COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/comms-tools', () => ({
+  COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
+  resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
+}));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/leads-tools', () => ({
+  LEADS_TOOLS: [], executeLeadsTool: jest.fn(),
+  resolveLeadForUpdate: (...args) => mockResolveLeadForUpdate(...args),
+  previewBulkLeadUpdate: (...args) => mockPreviewBulkLeadUpdate(...args),
+  BULK_LEAD_UPDATE_CAP: 500,
+}));
 jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
@@ -610,6 +621,155 @@ describe('technician tool execution is default-deny (P0)', () => {
       });
       expect(res.status).toBe(403);
       expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// Proposal-time identity pinning: name→row resolution happens when the card
+// is BUILT, not when it is confirmed — the operator approves a pinned id, and
+// /confirm-action executes exactly what the card showed. bulk_update_leads
+// additionally pins the previewed id set and forces dry_run:false into the
+// stored params (its executor defaults dry_run TRUE, so a confirmed card used
+// to run as a dry run and report success — a silent no-op).
+describe('proposal-time identity pinning (name-match fixes)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_UI_CONFIRM = 'true';
+    mockCreatePendingAction.mockImplementation(async ({ toolName, summary }) => ({
+      id: PENDING_ID, tool_name: toolName, summary, expires_at: new Date(Date.now() + 600000).toISOString(),
+    }));
+  });
+
+  afterAll(() => {
+    delete process.env.GATE_IB_UI_CONFIRM;
+  });
+
+  test('send_sms by partial name: resolved BEFORE storing — pinned customer_id in stored params, identity on the card', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'cust-9', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { customer_name: 'Alpha', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text Alpha', context: 'comms' });
+      expect(mockResolveCommsCustomer).toHaveBeenCalledWith({ customer_name: 'Alpha' });
+
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.customer_id).toBe('cust-9');
+      expect(stored.params.customer_name).toBe('Testa Alpha');
+      // The APPROVED phone is pinned too, and execution must verify the
+      // record still carries it (phone-drift refusal in sendSms).
+      expect(stored.params.phone).toBe('+19415551234');
+      expect(stored.params._require_phone_match).toBe(true);
+
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.recipient).toBe('Testa Alpha (…1234)');
+    });
+  });
+
+  test('send_sms ambiguous name: no pending action is created, the ambiguity error goes back to the model', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({
+      error: 'Multiple customers match "Alpha". Ask the operator which one, then retry with customer_id.',
+      ambiguous: true,
+      candidates: [
+        { id: 'c1', name: 'Testa Alpha', phone_last4: '1111' },
+        { id: 'c2', name: 'Testb Alpha', phone_last4: '2222' },
+      ],
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { customer_name: 'Alpha', message: 'hi' } }],
+      [{ type: 'text', text: 'Which one?' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text Alpha', context: 'comms' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.ambiguous).toBe(true);
+      expect(toolResult.candidates).toHaveLength(2);
+    });
+  });
+
+  test('update_lead_status by name pins lead_id at proposal', async () => {
+    mockResolveLeadForUpdate.mockResolvedValue({ id: 'lead-3', first_name: 'Testc', last_name: 'Beta', status: 'contacted' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_lead_status', input: { lead_name: 'Beta', new_status: 'lost', lost_reason: 'competitor' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'mark Beta lost', context: 'leads' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.lead_id).toBe('lead-3');
+      expect(stored.params.lead_name).toBe('Testc Beta');
+      // The approved transition's starting status is pinned — execution
+      // refuses if the lead moved inside the pending window.
+      expect(stored.params._expected_status).toBe('contacted');
+      expect(body.pendingActions[0].params.lead).toBe('Testc Beta — contacted → lost');
+    });
+  });
+
+  test('bulk_update_leads: dry-run runs at proposal, stored params carry dry_run:false + the pinned id set', async () => {
+    mockPreviewBulkLeadUpdate.mockResolvedValue({
+      dry_run: true,
+      matches: 3,
+      matched_ids: ['l1', 'l2', 'l3'],
+      preview: [{ name: 'Testa A' }, { name: 'Testb B' }],
+      action: 'Would move 3 leads from "unresponsive" to "lost"',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_leads', input: { current_status: 'unresponsive', new_status: 'lost' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'close them out', context: 'leads' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.dry_run).toBe(false);
+      expect(stored.params.lead_ids).toEqual(['l1', 'l2', 'l3']);
+      expect(body.pendingActions[0].params.leads_to_update).toBe(3);
+    });
+  });
+
+  test('bulk_update_leads with zero matches proposes nothing', async () => {
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ dry_run: true, matches: 0, matched_ids: [], preview: [] });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_leads', input: { current_status: 'unresponsive', new_status: 'lost' } }],
+      [{ type: 'text', text: 'Nothing to do.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'close them out', context: 'leads' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+    });
+  });
+
+  test('confirmed bulk_update_leads executes the STORED pinned set (dry_run:false rides the stored params)', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: {
+        id: PENDING_ID,
+        tool_name: 'bulk_update_leads',
+        params: { current_status: 'unresponsive', new_status: 'lost', dry_run: false, lead_ids: ['l1', 'l2'] },
+      },
+    });
+    mockExecuteTool.mockResolvedValue({ success: true, updated: 2 });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      const [toolName, params] = mockExecuteTool.mock.calls[0];
+      expect(toolName).toBe('bulk_update_leads');
+      expect(params.dry_run).toBe(false);
+      expect(params.lead_ids).toEqual(['l1', 'l2']);
     });
   });
 });

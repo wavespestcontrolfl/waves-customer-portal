@@ -216,18 +216,44 @@ async function executeCommsTool(toolName, input) {
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
+// A name match must be UNIQUE among live customers before anything acts on
+// it. The old `.first()` (no ORDER BY, no deleted_at filter) let "Smith"
+// resolve to whichever row Postgres returned first — possibly an archived/
+// merged-away customer. Ambiguity is returned as a structured error so the
+// tool can ask the operator to disambiguate instead of guessing.
+function ambiguousCustomerMatch(name, matches) {
+  // The error string is PERSISTED verbatim in tool-health telemetry
+  // (recordToolEvent -> tool_health_events.error_message), so it must not
+  // carry the typed name — the candidates array holds the detail and only
+  // reaches the operator-facing tool result.
+  return {
+    error: 'Multiple customers match that name. Ask the operator which one, then retry with customer_id.',
+    ambiguous: true,
+    candidates: matches.map(c => ({
+      id: c.id,
+      name: `${c.first_name} ${c.last_name || ''}`.trim(),
+      phone_last4: (c.phone || '').replace(/\D/g, '').slice(-4) || null,
+    })),
+  };
+}
+
+// Returns a customer row, null (no match), or an { error, ambiguous,
+// candidates } object — callers must pass an error-shaped result through.
 async function resolveCustomer(input) {
   if (input.customer_id) return db('customers').where('id', input.customer_id).first();
   if (input.customer_name) {
-    return db('customers').where(function () {
+    const matches = await db('customers').where(function () {
       const s = `%${input.customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
         .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).first();
+    }).whereNull('deleted_at').limit(2);
+    if (matches.length > 1) return ambiguousCustomerMatch(input.customer_name, matches);
+    return matches[0] || null;
   }
   if (input.phone) {
     const digits = input.phone.replace(/\D/g, '').slice(-10);
-    return db('customers').whereRaw("RIGHT(REPLACE(phone, '+', ''), 10) = ?", [digits]).first();
+    return db('customers').whereRaw("RIGHT(REPLACE(phone, '+', ''), 10) = ?", [digits])
+      .whereNull('deleted_at').first();
   }
   return null;
 }
@@ -305,6 +331,7 @@ async function getConversationThread(input) {
   } else {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
+    if (customer.error) return customer;
     phone = customer.phone;
   }
 
@@ -529,12 +556,14 @@ async function sendSms(input) {
   if (!custId && !phone) {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
+    if (customer.error) return customer;
     customerName = `${customer.first_name} ${customer.last_name}`;
     custId = customer.id;
     phone = customer.phone;
   } else if (custId && !phone) {
-    const customer = await db('customers').where('id', custId).first();
-    if (!customer || !customer.phone) return { error: 'Customer has no phone number' };
+    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
+    if (!customer) return { error: 'Customer not found' };
+    if (!customer.phone) return { error: 'Customer has no phone number' };
     customerName = `${customer.first_name} ${customer.last_name}`;
     phone = customer.phone;
   } else if (!custId && phone) {
@@ -544,6 +573,7 @@ async function sendSms(input) {
     if (inputDigits.length === 10) {
       const customer = await db('customers')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [inputDigits])
+        .whereNull('deleted_at')
         .first();
       if (customer) {
         customerName = `${customer.first_name} ${customer.last_name}`;
@@ -554,15 +584,28 @@ async function sendSms(input) {
     // BOTH custId and phone given. Verify they belong to the same record;
     // if not, trust the typed phone and drop the id. Prevents cross-wired
     // consent (codex P1).
-    const customer = await db('customers').where('id', custId).first();
-    if (customer) {
-      const inputDigits = phone.replace(/\D/g, '').slice(-10);
-      const customerDigits = (customer.phone || '').replace(/\D/g, '').slice(-10);
-      if (inputDigits === customerDigits && inputDigits.length === 10) {
-        customerName = `${customer.first_name} ${customer.last_name}`;
-      } else {
-        custId = null;
-      }
+    // deleted_at filter: a customer archived/merged-away after the card was
+    // proposed must NOT pass the pin check just because the phone is
+    // unchanged — the lookup misses, phonesMatch is false, and a pinned
+    // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
+    // sends degrade to phone-only consent, never an archived identity.
+    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
+    const inputDigits = phone.replace(/\D/g, '').slice(-10);
+    const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
+    const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
+    // _require_phone_match rides on a proposal-pinned confirmation: the card
+    // showed a specific person + phone last4, so if the record's phone
+    // changed (or the record vanished) inside the pending window, REFUSE and
+    // make the operator rebuild the card — never silently send to a number
+    // nobody approved (codex P1 on the pinning round).
+    if (input._require_phone_match && !phonesMatch) {
+      return {
+        error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
+        preview_changed: true,
+      };
+    }
+    if (phonesMatch) {
+      customerName = `${customer.first_name} ${customer.last_name}`;
     } else {
       custId = null;
     }
@@ -641,6 +684,7 @@ async function sendSms(input) {
 async function draftSmsReply(input) {
   const customer = await resolveCustomer(input);
   if (!customer) return { error: 'Customer not found' };
+  if (customer.error) return customer;
   if (!customer.phone) return { error: 'Customer has no phone number' };
 
   const digits = customer.phone.replace(/\D/g, '').slice(-10);
@@ -1025,4 +1069,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer };
