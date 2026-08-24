@@ -100,7 +100,6 @@ const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|al
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
-  refundEventTime,
 } = require('../services/estimate-first-application-invoice');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
@@ -4270,15 +4269,9 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
       if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
     })
     .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
-    // Ordered by refund-EVENT time, the same clock reconcileLiveVsRefunded
-    // reads (refundEventTime = latest of created_at/updated_at; the
-    // webhook's refund flip stamps updated_at) — ordering by created_at
-    // alone could hand back a historically-refunded row while an
-    // older-created invoice carries the NEWEST refund (pg GREATEST ignores
-    // a NULL updated_at).
-    .orderByRaw('GREATEST(created_at, updated_at) DESC')
+    .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
-    .first('id', 'invoice_number', 'status', 'created_at', 'updated_at')) || null;
+    .first('id', 'invoice_number', 'status', 'created_at')) || null;
 }
 
 // The newest LIVE (collectible-or-settled) invoice on THIS visit across
@@ -4303,44 +4296,25 @@ async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null,
     .first()) || null;
 }
 
-// Invoices are not unique per visit (pre-push P0): a NEWER refunded
-// invoice can coexist with an OLDER live one, and the status-filtered
-// suppressor would hand back the older row and skip the refunded check —
-// its pay link goes out, and if the newer refund bounces Stripe restores
-// that invoice to paid beside it. Classify by the newest row across both:
-// a refunded invoice newer than the NEWEST live row wins (manual path, the
-// live row the chain found is not reused); a refunded invoice older than
-// the newest live row is history and the chain's row stands. `newestLive`
-// (completionNewestLiveInvoiceLookup) is the comparison row — the chain's
-// `existing` may be an OLDER row reached through service_record_id while a
-// newer live row hangs off scheduled_service_id (pre-push P0 round 2).
+// Invoices are not unique per visit (pre-push P0): a refunded invoice can
+// coexist with a live one, in either mint order — and there is NO reliable
+// refund-event clock to order them by (invoices carry no refunded_at;
+// created_at is the MINT time, not the refund; updated_at moves on
+// unrelated edits — pre-push P0 rounds 2–6 walked every timestamp option
+// and each one mis-orders some real sequence). So the reconciliation never
+// auto-picks: whenever a refunded row exists beside a live row, the visit
+// goes to the MANUAL path — nothing is reused (no pay link while the
+// refund could still bounce and restore the refunded row to paid), nothing
+// is minted, and the parked alert names the live row (`liveBeside`) so the
+// office collects THAT invoice once the refund is final instead of cutting
+// a duplicate. `newestLive` (completionNewestLiveInvoiceLookup, full row)
+// beats the chain's `existing` as the named row — the chain may hold an
+// OLDER row via service_record_id while a newer live row hangs off
+// scheduled_service_id. A refunded row alone (no live row) parks exactly
+// as before; no refunded row → the chain's row stands untouched.
 function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
-  if (!refunded) return { existing, terminal: null };
-  if (!existing) return { existing: null, terminal: refunded };
-  const compareRow = newestLive || existing;
-  const liveAt = new Date(compareRow.created_at || 0).getTime();
-  // The refund is an EVENT, not a row: invoice A minted first, invoice B
-  // minted later, A refunded last — comparing created_at alone calls A
-  // "history" and reuses B's pay link while a bounced refund could restore
-  // A to paid beside it (pre-push P1 round 4). refundEventTime (shared with
-  // the sibling first-application reconciliation and the terminal lookup's
-  // ordering) reads the refund transition: latest of created_at/updated_at
-  // (the webhook's refund flip stamps updated_at). updated_at also moves on
-  // unrelated edits — that error direction only makes suppression MORE
-  // likely (manual-billing alert instead of a possible double collection),
-  // which is this design's accepted posture.
-  const refundedAt = refundEventTime(refunded);
-  // Ties go to the refunded row (pre-push P1): rows minted in one
-  // transaction share created_at and JS Date truncates sub-millisecond
-  // precision — never let a possibly-newer refund lose to a stale pay link.
-  // When live wins, the row the completion reuses is the NEWEST live row —
-  // handing back the chain's older `existing` while a newer live row hangs
-  // off the other identifier would text the stale row's pay link (and, if
-  // the newer row is already paid, collect twice). `newestLive` is a full
-  // invoice row for exactly this reason (pre-push P0 round 3).
-  return refundedAt >= liveAt
-    ? { existing: null, terminal: refunded }
-    : { existing: newestLive || existing, terminal: null };
+  if (!refunded) return { existing, terminal: null, liveBeside: null };
+  return { existing: null, terminal: refunded, liveBeside: newestLive || existing || null };
 }
 
 // The sibling first-application lookup (services/estimate-first-application-
@@ -8650,6 +8624,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // shouldAutoInvoiceCompletion and parks a manual-billing alert below.
     // Never assigned to `invoice` / `payUrl` (no pay link to a dead invoice).
     let terminalCompletionInvoice = null;
+    let completionLiveBesideInvoice = null;
     try {
       existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
@@ -8712,6 +8687,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit);
       existingCompletionInvoice = reconciled.existing;
       terminalCompletionInvoice = reconciled.terminal;
+      // Live invoice coexisting with the refunded one — the manual-billing
+      // alert names it so the office collects IT instead of cutting a
+      // duplicate (see reconcileLiveVsRefunded).
+      completionLiveBesideInvoice = reconciled.liveBeside;
     }
     try {
       if (!existingCompletionInvoice && !terminalCompletionInvoice) {
@@ -8895,11 +8874,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
             .first();
           if (already) return true;
+          // With a LIVE invoice beside the refunded one, the instruction is
+          // "collect that one" — never "bill manually", which would invite a
+          // duplicate invoice while the live row stays payable.
+          const liveBesideNote = completionLiveBesideInvoice
+            ? ` A live invoice (${completionLiveBesideInvoice.invoice_number || completionLiveBesideInvoice.id}, status ${completionLiveBesideInvoice.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`
+            : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
             'Completed visit needs manual billing — prior invoice was refunded',
-            `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link. Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).`,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+            `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`,
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(completionLiveBesideInvoice ? { liveBesideInvoiceId: completionLiveBesideInvoice.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;

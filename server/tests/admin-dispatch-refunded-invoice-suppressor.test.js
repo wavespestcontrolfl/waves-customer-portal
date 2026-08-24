@@ -74,8 +74,6 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
     let scopes = [];
     let included = null;
     const orders = [];
-    // Mirrors the SQL: GREATEST(created_at, updated_at) with NULLs ignored.
-    const eventTime = (r) => (r.updated_at && r.updated_at > r.created_at ? r.updated_at : r.created_at);
     const chain = {
       where: jest.fn((arg) => {
         if (typeof arg === 'function') {
@@ -90,8 +88,8 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
       first: jest.fn(async () => {
         const matches = rows.filter((r) => included.includes(r.status)
           && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
-        matches.sort((a, b) => (eventTime(b).localeCompare(eventTime(a))) || String(b.id).localeCompare(String(a.id)));
-        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status, created_at: matches[0].created_at, updated_at: matches[0].updated_at } : undefined;
+        matches.sort((a, b) => (b.created_at.localeCompare(a.created_at)) || String(b.id).localeCompare(String(a.id)));
+        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status, created_at: matches[0].created_at } : undefined;
       }),
     };
     const knex = jest.fn(() => chain);
@@ -127,19 +125,8 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
     const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
     expect(found.id).toBe('inv-new');
     expect(knex.scopes()).toEqual([{ service_record_id: 'rec-1' }, { scheduled_service_id: 'svc-1' }]);
-    // Ordered by refund-EVENT time (the reconcile clock), not mint time.
-    expect(knex.orders).toEqual([['raw', 'GREATEST(created_at, updated_at) DESC'], ['id', 'desc']]);
+    expect(knex.orders).toEqual([['created_at', 'desc'], ['id', 'desc']]);
     expect(knex).toHaveBeenCalledTimes(1);
-  });
-
-  test('multi-refund: an older-CREATED invoice refunded most recently wins the lookup (event time beats row age)', async () => {
-    const knex = makeOrderedKnex([
-      { id: 'inv-old-row-new-refund', status: 'refunded', service_record_id: 'rec-1', created_at: '2026-08-01', updated_at: '2026-08-28' },
-      { id: 'inv-new-row-old-refund', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-15', updated_at: '2026-08-16' },
-    ]);
-    const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
-    expect(found.id).toBe('inv-old-row-new-refund');
-    expect(found.updated_at).toBe('2026-08-28');
   });
 
   test('a VOID invoice does not block (nothing restores a void); a live one is not terminal', async () => {
@@ -297,7 +284,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 3200);
+    const block = src.slice(at, at + 4400);
     expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
@@ -314,39 +301,39 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(src).toContain("code: 'backfill_invoice_mint_failed',");
   });
 
-  test('reconcileLiveVsRefunded: a NEWER refunded invoice beats an older live row (no dead-or-stale pay link); an older refunded one is history', () => {
+  test('reconcileLiveVsRefunded: a refunded row beside a live row ALWAYS parks — no timestamp ordering, the live row is named for the alert', () => {
+    // There is no reliable refund-event clock (no refunded_at; created_at =
+    // mint time; updated_at moves on unrelated edits — review rounds 2–6
+    // rejected every timestamp), so the reconciliation never auto-picks:
+    // nothing is reused (no pay link while the refund could bounce), and
+    // liveBeside carries the live row so the alert says "collect THAT
+    // invoice", never "bill manually" beside a payable one.
     const live = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01T00:00:00Z' };
-    const refundedNewer = { id: 'inv-ref', status: 'refunded', created_at: '2026-08-20T00:00:00Z' };
+    const refunded = { id: 'inv-ref', status: 'refunded', created_at: '2026-08-20T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refunded)).toEqual({ existing: null, terminal: refunded, liveBeside: live });
+    // In EITHER mint order — an older refund is not "history".
     const refundedOlder = { id: 'inv-ref-old', status: 'refunded', created_at: '2026-07-01T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
-    expect(reconcileLiveVsRefunded(live, refundedOlder)).toEqual({ existing: live, terminal: null });
-    // Ties (same created_at — e.g. minted in one transaction) go to the refunded row.
-    const refundedTie = { id: 'inv-ref-tie', status: 'refunded', created_at: '2026-08-01T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedTie)).toEqual({ existing: null, terminal: refundedTie });
-    expect(reconcileLiveVsRefunded(null, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
-    // The chain may hand back an OLDER live row (service_record_id first)
-    // while a NEWER live row hangs off scheduled_service_id — compare the
-    // refund against the NEWEST live row, not the chain's row. And when
-    // live wins, the NEWEST live row is what the completion reuses — the
-    // chain's stale row must not keep its pay link (a paid newer row would
-    // otherwise be double-collected via the older collectible one).
+    expect(reconcileLiveVsRefunded(live, refundedOlder)).toEqual({ existing: null, terminal: refundedOlder, liveBeside: live });
+    // The NEWEST live row (full row, either identifier) is the one named —
+    // the chain's row may be an older duplicate.
     const newestLive = { id: 'inv-live-2', status: 'sent', token: 't2', created_at: '2026-08-25T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLive)).toEqual({ existing: newestLive, terminal: null });
-    const newestLiveOlderThanRefund = { id: 'inv-live-2', status: 'sent', created_at: '2026-08-10T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLiveOlderThanRefund)).toEqual({ existing: null, terminal: refundedNewer });
-    expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });
-    expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null });
-    // The refund is an EVENT: invoice A minted BEFORE the newest live row
-    // but refunded AFTER it (updated_at stamped by the webhook's refund
-    // flip) is the newest financial event and must win — created_at alone
-    // would call it history and reuse a pay link a bounced refund could
-    // turn into a double collection.
-    const refundedOldRowNewEvent = { id: 'inv-a', status: 'refunded', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-28T00:00:00Z' };
-    const newestLiveB = { id: 'inv-b', status: 'sent', token: 'tb', created_at: '2026-08-20T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedOldRowNewEvent, newestLiveB)).toEqual({ existing: null, terminal: refundedOldRowNewEvent });
-    // …while a refund transition OLDER than the replacement mint stays history.
-    const refundedSettledBeforeB = { id: 'inv-a2', status: 'refunded', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-10T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedSettledBeforeB, newestLiveB)).toEqual({ existing: newestLiveB, terminal: null });
+    expect(reconcileLiveVsRefunded(live, refunded, newestLive)).toEqual({ existing: null, terminal: refunded, liveBeside: newestLive });
+    // Refunded alone parks with nothing to name; no refunded row → chain row stands.
+    expect(reconcileLiveVsRefunded(null, refunded)).toEqual({ existing: null, terminal: refunded, liveBeside: null });
+    expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null, liveBeside: null });
+    expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null, liveBeside: null });
+  });
+
+  test('the manual-billing alert names the live-beside invoice instead of instructing a manual (duplicate) bill', () => {
+    const at = src.indexOf('const liveBesideNote = completionLiveBesideInvoice');
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, at + 1400);
+    expect(block).toContain('collect THAT invoice; do NOT create another');
+    expect(block).toContain('bill this visit manually');
+    expect(block).toContain('liveBesideInvoiceId: completionLiveBesideInvoice.id');
+    // Wired from the reconciliation, before the alert block reads it.
+    expect(src).toContain('completionLiveBesideInvoice = reconciled.liveBeside;');
+    expect(src.indexOf('completionLiveBesideInvoice = reconciled.liveBeside;')).toBeLessThan(at);
   });
 
   test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
@@ -377,7 +364,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 1800);
+    const block = src.slice(at - 1600, at + 2800);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
@@ -412,7 +399,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 3600);
+    const block = src.slice(at, at + 4400);
     expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
     // No assignment inside the callback: success is signalled by returning
     // true, which only reaches the flag after the commit resolves.
@@ -456,18 +443,15 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toBe(liveOlder);
     // Only canceled matches → nothing suppresses, the mint proceeds.
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toBeNull();
-    // A refunded match reconciles by refund-EVENT time like the own-visit path.
+    // A refunded match wins in ANY mint order — there is no reliable
+    // refund-event clock, so it always reaches the caller's terminal path
+    // instead of a live sibling's pay link going out while the refund
+    // could still bounce.
     const refundedNewer = { id: 'inv-refunded', status: 'refunded', created_at: '2026-08-25', ...matchFields };
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([refundedNewer, liveOlder]))).resolves.toBe(refundedNewer);
-    // An OLDER-created sibling refunded AFTER the live row (updated_at from
-    // the webhook's refund flip) is the newest financial event → terminal
-    // path, never masked by the newer live row's created_at.
     const liveNewer = { id: 'inv-live-new', status: 'sent', token: 't2', created_at: '2026-08-20', ...matchFields };
-    const refundedOldRowNewEvent = { id: 'inv-ref-event', status: 'refunded', created_at: '2026-08-01', updated_at: '2026-08-30', ...matchFields };
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedOldRowNewEvent]))).resolves.toBe(refundedOldRowNewEvent);
-    // …while a refund settled BEFORE the live mint stays history.
-    const refundedSettled = { id: 'inv-ref-hist', status: 'refunded', created_at: '2026-08-01', updated_at: '2026-08-10', ...matchFields };
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedSettled]))).resolves.toBe(liveNewer);
+    const refundedOlder = { id: 'inv-ref-old', status: 'refunded', created_at: '2026-08-01', ...matchFields };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedOlder]))).resolves.toBe(refundedOlder);
   });
 });
 
