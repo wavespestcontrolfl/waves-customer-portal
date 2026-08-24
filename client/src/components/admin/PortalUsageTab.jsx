@@ -164,7 +164,7 @@ export default function PortalUsageTab({ canAdmin }) {
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 600, color: D.heading, margin: 0 }}>
+        <h2 style={{ fontSize: 18, fontWeight: 500, color: D.heading, margin: 0 }}>
           Portal Usage
         </h2>
         <p style={{ fontSize: 14, color: D.muted, margin: "6px 0 0", maxWidth: 640 }}>
@@ -268,18 +268,18 @@ export default function PortalUsageTab({ canAdmin }) {
               }}
             >
               <div style={{ fontSize: 14, color: D.text }}>
-                <strong style={{ fontWeight: 600 }}>Most regular:</strong>{" "}
+                <strong style={{ fontWeight: 500 }}>Most regular:</strong>{" "}
                 {insights.regular.join(", ")}
               </div>
               {insights.opens.length > 0 && (
                 <div style={{ fontSize: 14, color: D.text }}>
-                  <strong style={{ fontWeight: 600 }}>App opens land on:</strong>{" "}
+                  <strong style={{ fontWeight: 500 }}>App opens land on:</strong>{" "}
                   {insights.opens.join(", ")}
                 </div>
               )}
               {insights.buried.length > 0 && (
                 <div style={{ fontSize: 14, color: D.text }}>
-                  <strong style={{ fontWeight: 600 }}>
+                  <strong style={{ fontWeight: 500 }}>
                     Used often but not in the nav you tap:
                   </strong>{" "}
                   {insights.buried.join(", ")} — candidates for a promotion to

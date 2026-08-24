@@ -241,7 +241,7 @@ export default function PriceMatchPage() {
             key={f.key}
             onClick={() => { setFilter(f.key); setSelectedId(null); }}
             style={{
-              padding: "5px 12px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer",
+              padding: "5px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
               border: `1px solid ${filter === f.key ? D.blue : D.border}`,
               background: filter === f.key ? "#EFF6FF" : D.card,
               color: filter === f.key ? D.blue : D.text,
@@ -290,7 +290,7 @@ export default function PriceMatchPage() {
                   <Chip tone={STATUS_TONE[d.status] || "neutral"}>{d.status}</Chip>
                   <span style={{ color: D.muted, fontSize: 12 }}>{d.included_count} item{d.included_count === 1 ? "" : "s"}</span>
                 </div>
-                <div style={{ color: D.text, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div style={{ color: D.text, fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {d.subject}
                 </div>
                 <div style={{ color: D.muted, fontSize: 12, marginTop: 2 }}>
@@ -336,14 +336,14 @@ export default function PriceMatchPage() {
                 )}
                 {detail.status === "pending" && confirmSend && (
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ color: D.text, fontSize: 13, fontWeight: 600 }}>Email this price-match request to {detail.recipient}?</span>
+                    <span style={{ color: D.text, fontSize: 13, fontWeight: 500 }}>Email this price-match request to {detail.recipient}?</span>
                     <ActionButton tone="primary" icon={Send} disabled={busy} onClick={() => act(detail.id, "send")}>{busy ? "Sending…" : "Confirm send"}</ActionButton>
                     <ActionButton tone="ghost" disabled={busy} onClick={() => setConfirmSend(false)}>Cancel</ActionButton>
                   </div>
                 )}
                 {detail.status === "sending" && !detail.send_attempted_at && (
                   <>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.amber, fontSize: 13, fontWeight: 600 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.amber, fontSize: 13, fontWeight: 500 }}>
                       <AlertTriangle size={15} /> Claimed but the send wasn't attempted{staleElapsed ? " — if it's stuck, reset to re-review." : ` — a send may be in progress. Reset becomes available in ~${staleInMin}m.`}
                     </span>
                     {staleElapsed && (
@@ -353,7 +353,7 @@ export default function PriceMatchPage() {
                 )}
                 {detail.status === "sending" && detail.send_attempted_at && (
                   <>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.red, fontSize: 13, fontWeight: 600 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.red, fontSize: 13, fontWeight: 500 }}>
                       <AlertTriangle size={15} /> A send was attempted — it may already have reached {detail.recipient}. Verify in SendGrid before acting; if it went out, dismiss it (never resend).{staleElapsed ? "" : ` Dismiss becomes available in ~${staleInMin}m.`}
                     </span>
                     {staleElapsed && (
@@ -362,7 +362,7 @@ export default function PriceMatchPage() {
                   </>
                 )}
                 {detail.status === "sent" && (
-                  <span style={{ color: D.green, fontSize: 13, fontWeight: 600 }}>
+                  <span style={{ color: D.green, fontSize: 13, fontWeight: 500 }}>
                     Sent{detail.message_id ? ` · ${detail.message_id}` : ""}
                   </span>
                 )}
@@ -384,7 +384,7 @@ export default function PriceMatchPage() {
                         {m.competitor && m.competitor.vendor ? <span style={{ color: D.muted }}> · {m.competitor.vendor}</span> : null}
                       </span>
                       <a href={m.competitor.source_url} target="_blank" rel="noopener noreferrer"
-                        style={{ display: "inline-flex", alignItems: "center", gap: 4, color: D.blue, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" }}>
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4, color: D.blue, fontSize: 13, fontWeight: 500, whiteSpace: "nowrap" }}>
                         View listing <ExternalLink size={13} />
                       </a>
                     </div>
@@ -418,7 +418,7 @@ function ActionButton({ children, onClick, disabled, icon: Icon, tone = "ghost" 
       disabled={disabled}
       style={{
         display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 14px", borderRadius: 8,
-        fontSize: 13, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", ...styles,
+        fontSize: 13, fontWeight: 500, cursor: disabled ? "not-allowed" : "pointer", ...styles,
       }}
     >
       {Icon ? <Icon size={15} /> : null}

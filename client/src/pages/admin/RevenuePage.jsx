@@ -77,7 +77,7 @@ const thStyle = {
   padding: "10px 14px",
   textAlign: "left",
   fontSize: 12,
-  fontWeight: 600,
+  fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
   textTransform: "uppercase",
@@ -239,7 +239,7 @@ function AdAttributionSection({ period }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           Ad Attribution
         </div>
         {attr.blendedROAS && (
@@ -537,7 +537,7 @@ export default function RevenuePage() {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Daily Revenue
           </div>{" "}
           <div style={{ display: "flex", gap: 20, fontSize: 13 }}>
@@ -613,7 +613,7 @@ export default function RevenuePage() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -713,7 +713,7 @@ export default function RevenuePage() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -778,7 +778,7 @@ export default function RevenuePage() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -853,7 +853,7 @@ export default function RevenuePage() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 16,
             }}

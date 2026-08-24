@@ -437,7 +437,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
             if (customerId) onViewCustomer?.(service);
           }}
           className={cn(
-            'text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
             'text-inherit bg-transparent border-0 p-0 cursor-pointer'
           )}
           title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
@@ -694,7 +694,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
               }
               onEdit?.(svc);
             }}
-            className="px-2 py-1 rounded-[3px] text-11 font-semibold text-white truncate max-w-[220px] u-focus-ring"
+            className="px-2 py-1 rounded-[3px] text-11 font-medium text-white truncate max-w-[220px] u-focus-ring"
             style={{ background: svc.status === 'completed' ? '#E4E4E7' : '#3B82F6', color: svc.status === 'completed' ? '#71717A' : '#FFFFFF', border: `1px solid ${svc.status === 'completed' ? '#E4E4E7' : '#3B82F6'}` }}
             title={(svc.customerId || svc.customer_id) && onViewCustomer ? 'Open customer profile' : undefined}
           >
@@ -785,7 +785,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+          'block w-full text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
           'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}

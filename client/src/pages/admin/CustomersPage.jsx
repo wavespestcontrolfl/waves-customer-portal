@@ -160,7 +160,7 @@ function StageBadge({ stage }) {
         padding: "3px 10px",
         borderRadius: 9999,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         background: s.bg,
         color: s.textColor || s.color,
         letterSpacing: 0.3,
@@ -231,7 +231,7 @@ function ScoreDot({ score }) {
           fontFamily: "JetBrains Mono, monospace",
           fontSize: 12,
           color,
-          fontWeight: 600,
+          fontWeight: 500,
         }}
       >
         {score}
@@ -250,7 +250,7 @@ function TagChip({ tag, onRemove }) {
         padding: "2px 8px",
         borderRadius: 9999,
         fontSize: 10,
-        fontWeight: 600,
+        fontWeight: 500,
         background: `${D.teal}22`,
         color: D.teal,
         letterSpacing: 0.3,
@@ -588,7 +588,7 @@ function QuickAddModal({ onClose, onCreated, onOpenExisting }) {
                   border: "none",
                   borderRadius: 6,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   fontFamily: "Roboto, Arial, sans-serif",
                 }}
@@ -626,7 +626,7 @@ function QuickAddModal({ onClose, onCreated, onOpenExisting }) {
                 borderRadius: 8,
                 fontSize: 14,
                 fontFamily: "Roboto, Arial, sans-serif",
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: submitting ? "not-allowed" : "pointer",
                 opacity: submitting ? 0.6 : 1,
               }}
@@ -672,7 +672,7 @@ function PipelineCard({ customer, onDelete }) {
           style={{
             fontFamily: "Roboto, Arial, sans-serif",
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -733,7 +733,7 @@ function PipelineCard({ customer, onDelete }) {
                 background: D.red,
                 color: "#fff",
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -842,7 +842,7 @@ function PipelineColumn({ stage, customers, onDeleteCustomer }) {
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               fontFamily: "Roboto, Arial, sans-serif",
             }}
@@ -867,7 +867,7 @@ function PipelineColumn({ stage, customers, onDeleteCustomer }) {
               fontFamily: "JetBrains Mono, monospace",
               fontSize: 12,
               color: D.green,
-              fontWeight: 600,
+              fontWeight: 500,
             }}
           >
             ${monthlyTotal.toLocaleString()}/mo
@@ -917,7 +917,7 @@ function SortHeader({
         alignItems: "center",
         gap: 4,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         color: active ? D.teal : D.muted,
         textTransform: "uppercase",
         letterSpacing: 0.8,
@@ -1074,7 +1074,7 @@ function CustomerIntelligenceTab() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1140,7 +1140,7 @@ function CustomerIntelligenceTab() {
             }}
           >
             {" "}
-            <span style={{ color: D.red, fontWeight: 600 }}>
+            <span style={{ color: D.red, fontWeight: 500 }}>
               MRR at risk: ${data.mrrAtRisk?.toLocaleString()}/mo
             </span>{" "}
             <span style={{ color: D.muted, marginLeft: 8 }}>
@@ -1163,7 +1163,7 @@ function CustomerIntelligenceTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.red,
               marginBottom: 16,
             }}
@@ -1198,7 +1198,7 @@ function CustomerIntelligenceTab() {
                     <span
                       style={{
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                       }}
                     >
@@ -1290,7 +1290,7 @@ function CustomerIntelligenceTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 16,
             }}
@@ -1311,7 +1311,7 @@ function CustomerIntelligenceTab() {
               <div
                 style={{
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 4,
                 }}
@@ -1344,7 +1344,7 @@ function CustomerIntelligenceTab() {
                     background: D.green,
                     color: "#fff",
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -1405,7 +1405,7 @@ function CustomerIntelligenceTab() {
             }}
           >
             {" "}
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.green }}>
+            <div style={{ fontSize: 16, fontWeight: 500, color: D.green }}>
               Upsell Opportunities ({data.upsells.length})
             </div>{" "}
             <div style={{ fontSize: 13, color: D.muted }}>
@@ -1605,7 +1605,7 @@ function CustomerIntelligenceTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 16,
             }}
@@ -1799,7 +1799,7 @@ function CustomerTimeline({ customerId }) {
         <div
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.muted,
             textTransform: "uppercase",
             letterSpacing: 1,
@@ -1849,7 +1849,7 @@ function CustomerTimeline({ customerId }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {" "}
               <span
-                style={{ color: COLORS[item.type] || D.muted, fontWeight: 600 }}
+                style={{ color: COLORS[item.type] || D.muted, fontWeight: 500 }}
               >
                 {item.title}
               </span>
@@ -2111,7 +2111,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -2142,7 +2142,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.red,
             marginBottom: 4,
           }}
@@ -2315,7 +2315,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
                     style={{
                       fontSize: 11,
                       color: TIER_PIN_COLORS[selectedPin.tier] || D.teal,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       marginTop: 4,
                     }}
                   >
@@ -2334,7 +2334,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
                     border: "none",
                     borderRadius: 6,
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >

@@ -54,7 +54,7 @@ const sBtn = (bg, c) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, c) => ({
@@ -63,7 +63,7 @@ const sBadge = (bg, c) => ({
   borderRadius: 4,
   background: bg,
   color: c,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 const sInput = {
@@ -146,7 +146,7 @@ function ConditionBar({ rating }) {
           }}
         />{" "}
       </div>{" "}
-      <span style={{ fontSize: 11, color, fontWeight: 600, minWidth: 20 }}>
+      <span style={{ fontSize: 11, color, fontWeight: 500, minWidth: 20 }}>
         {r}/10
       </span>{" "}
     </div>
@@ -331,7 +331,7 @@ export default function EquipmentMaintenancePage({
             padding: "10px 20px",
             borderRadius: 8,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             zIndex: 9999,
           }}
         >
@@ -1093,19 +1093,19 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                 {" "}
                 <div>
                   <div style={{ color: D.muted }}>Purchase</div>
-                  <div style={{ color: D.heading, fontWeight: 600 }}>
+                  <div style={{ color: D.heading, fontWeight: 500 }}>
                     {fmt(detail.costOfOwnership.purchase_price)}
                   </div>
                 </div>{" "}
                 <div>
                   <div style={{ color: D.muted }}>Total Maintenance</div>
-                  <div style={{ color: D.heading, fontWeight: 600 }}>
+                  <div style={{ color: D.heading, fontWeight: 500 }}>
                     {fmt(detail.costOfOwnership.total_maintenance)}
                   </div>
                 </div>{" "}
                 <div>
                   <div style={{ color: D.muted }}>Total Fuel</div>
-                  <div style={{ color: D.heading, fontWeight: 600 }}>
+                  <div style={{ color: D.heading, fontWeight: 500 }}>
                     {fmt(detail.costOfOwnership.total_fuel)}
                   </div>
                 </div>{" "}
@@ -1117,20 +1117,20 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                 </div>{" "}
                 <div>
                   <div style={{ color: D.muted }}>Monthly Cost</div>
-                  <div style={{ color: D.heading, fontWeight: 600 }}>
+                  <div style={{ color: D.heading, fontWeight: 500 }}>
                     {fmt(detail.costOfOwnership.monthly_cost)}
                   </div>
                 </div>{" "}
                 <div>
                   <div style={{ color: D.muted }}>Age</div>
-                  <div style={{ color: D.heading, fontWeight: 600 }}>
+                  <div style={{ color: D.heading, fontWeight: 500 }}>
                     {detail.costOfOwnership.age_months} months
                   </div>
                 </div>
                 {detail.costOfOwnership.cost_per_mile && (
                   <div>
                     <div style={{ color: D.muted }}>Cost/Mile</div>
-                    <div style={{ color: D.heading, fontWeight: 600 }}>
+                    <div style={{ color: D.heading, fontWeight: 500 }}>
                       {fmt(detail.costOfOwnership.cost_per_mile)}
                     </div>
                   </div>
@@ -2098,7 +2098,7 @@ function AnalyticsTab({
                       padding: "8px",
                       color: D.amber,
                       textAlign: "right",
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {fmt(c.monthly_cost)}
@@ -2279,7 +2279,7 @@ function AnalyticsTab({
                         padding: "8px",
                         color: D.red,
                         textAlign: "right",
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       {parseFloat(r.total_downtime_hours).toFixed(1)}

@@ -196,7 +196,7 @@ export function MarginCalculator() {
             border: "none",
             cursor: "pointer",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             background: D.teal,
             color: D.white,
           }}
@@ -381,7 +381,7 @@ export function MarginCalculator() {
                     style={{
                       padding: "8px 10px",
                       color: D.text,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       fontSize: 12,
                       textTransform: "capitalize",
                     }}
@@ -415,7 +415,7 @@ export function MarginCalculator() {
                       color:
                         s.materialCostSource === "fallback" ? D.amber : D.green,
                       fontSize: 11,
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {costSourceLabel(s.materialCostSource)}
@@ -452,7 +452,7 @@ export function MarginCalculator() {
                           fontSize: 10,
                           padding: "2px 8px",
                           borderRadius: 4,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           background: `${marginColor(s.margin)}18`,
                           color: marginColor(s.margin),
                         }}
@@ -829,7 +829,7 @@ function PestCalibrationPanel() {
               background: D.input,
               color: D.heading,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               alignSelf: "end",
             }}
           >
@@ -1099,7 +1099,7 @@ function PestCalibrationPanel() {
                         style={{
                           padding: "7px 8px",
                           color: D.heading,
-                          fontWeight: 600,
+                          fontWeight: 500,
                         }}
                       >
                         {row.customer_name || row.address_line1 || "Unknown"}
@@ -1203,7 +1203,7 @@ function PestCalibrationPanel() {
                     style={{
                       padding: "8px 10px",
                       color: D.heading,
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {row.customer_name || row.address_line1 || "Unknown"}

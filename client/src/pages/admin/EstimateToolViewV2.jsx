@@ -1022,7 +1022,7 @@ function PanelTitle({ children, description }) {
       {" "}
       <h3
         className="text-zinc-900 mt-0 mb-3"
-        style={{ fontSize: 15, fontWeight: 600 }}
+        style={{ fontSize: 15, fontWeight: 500 }}
       >
         {children}
       </h3>
@@ -1040,7 +1040,7 @@ function SubGroupLabel({ children, className }) {
   return (
     <h4
       className={cn("text-zinc-900 mt-4 mb-2", className)}
-      style={{ fontSize: 15, fontWeight: 600 }}
+      style={{ fontSize: 15, fontWeight: 500 }}
     >
       {children}
     </h4>
@@ -1808,7 +1808,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
   return (
     <div className="customer-preview-scope cp-scene rounded-sm overflow-hidden border-hairline border-[rgba(4,57,94,0.16)] mb-6">
       <div className="bg-white/60 backdrop-blur border-b border-[rgba(4,57,94,0.12)] px-5 py-3 flex items-center justify-between gap-4">
-        <span className="text-13 font-semibold text-[#04395E]">(941) 297-5749</span>
+        <span className="text-13 font-medium text-[#04395E]">(941) 297-5749</span>
         <img src="/waves-logo.png" alt="Waves" className="h-7 block" />
       </div>
 
@@ -1846,7 +1846,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                       selected ? "cp-gold text-[#1B2C5B]" : "cp-chip text-[#04395E]",
                     )}
                   >
-                    <span className="block text-13 font-semibold">{tier.label}</span>
+                    <span className="block text-13 font-medium">{tier.label}</span>
                     <span className={cn("block text-11 mt-1", selected ? "text-[#1B2C5B]/80" : "text-[rgba(12,21,40,0.6)]")}>
                       {fmt(tier.pa)}/visit
                     </span>
@@ -1859,10 +1859,10 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
 
         {hasOneTimeChoice && (
           <div className="cp-chip rounded-full p-1 mt-5 flex gap-1">
-            <div className="cp-gold flex-1 rounded-full text-[#1B2C5B] text-center text-13 font-semibold px-3 py-2">
+            <div className="cp-gold flex-1 rounded-full text-[#1B2C5B] text-center text-13 font-medium px-3 py-2">
               {oneTimeChoiceMeta.recurringLabel}
             </div>
-            <div className="flex-1 rounded-full text-[rgba(4,57,94,0.75)] text-center text-13 font-semibold px-3 py-2">
+            <div className="flex-1 rounded-full text-[rgba(4,57,94,0.75)] text-center text-13 font-medium px-3 py-2">
               {oneTimeChoiceMeta.oneTimeLabel}
             </div>
           </div>
@@ -1952,7 +1952,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                       <div>{item.name}</div>
                       {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
                     </div>
-                    <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
+                    <div className={cn("font-medium u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
                       {previewLineAmount(item.price)}
                     </div>
                   </div>
@@ -2020,7 +2020,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                     <div>{item.name}</div>
                     {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
                   </div>
-                  <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
+                  <div className={cn("font-medium u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
                     {previewLineAmount(item.price)}
                   </div>
                 </div>
@@ -2054,7 +2054,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
           {!presentMode && (
-            <div className="cp-gold inline-flex mt-4 px-5 py-3 rounded-full text-[#1B2C5B] text-15 font-semibold">
+            <div className="cp-gold inline-flex mt-4 px-5 py-3 rounded-full text-[#1B2C5B] text-15 font-medium">
               Pick a time and book
             </div>
           )}
@@ -5715,11 +5715,11 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="flex items-center justify-between gap-3 mb-1">
                     {" "}
-                    <div className="text-11 font-semibold uppercase tracking-label text-ink-secondary">
+                    <div className="text-11 font-medium uppercase tracking-label text-ink-secondary">
                       Property Data Quality
                     </div>{" "}
                     <div
-                      className={`text-11 font-semibold uppercase tracking-label ${
+                      className={`text-11 font-medium uppercase tracking-label ${
                         enrichedProfile.propertyDataQuality.level === "high"
                           ? "text-emerald-700"
                           : enrichedProfile.propertyDataQuality.level ===
@@ -6424,7 +6424,7 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="flex items-center justify-between gap-3 mb-2">
-                    <div className="text-12 font-semibold text-zinc-900">
+                    <div className="text-12 font-medium text-zinc-900">
                       Treatable Lawn Area
                     </div>
                     <Badge variant="neutral" className="text-10 u-nums">
@@ -6652,7 +6652,7 @@ export default function EstimateToolViewV2({
               {(form.svcMosquito || form.svcOnetimeMosquito) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-13 font-semibold text-zinc-900 mb-2">
+                  <div className="text-13 font-medium text-zinc-900 mb-2">
                     Mosquito Estimate
                   </div>{" "}
                   <div
@@ -6700,7 +6700,7 @@ export default function EstimateToolViewV2({
                       {" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
-                        <div className="text-12 font-semibold text-zinc-900 mb-1">
+                        <div className="text-12 font-medium text-zinc-900 mb-1">
                           Seasonal Program
                         </div>
                         9 applications during mosquito season, roughly every 21
@@ -6708,7 +6708,7 @@ export default function EstimateToolViewV2({
                       </div>{" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
-                        <div className="text-12 font-semibold text-zinc-900 mb-1">
+                        <div className="text-12 font-medium text-zinc-900 mb-1">
                           Monthly Program
                         </div>
                         12 applications year-round. Recommended for heavy tree
@@ -6721,7 +6721,7 @@ export default function EstimateToolViewV2({
                       {" "}
                       <div className="flex items-center justify-between gap-3 mb-2">
                         {" "}
-                        <div className="text-12 font-semibold text-zinc-900">
+                        <div className="text-12 font-medium text-zinc-900">
                           Mosquito Protocol
                         </div>{" "}
                         <Badge variant="neutral" className="text-10">
@@ -6735,7 +6735,7 @@ export default function EstimateToolViewV2({
                             className="flex gap-2 text-11 leading-snug text-ink-secondary"
                           >
                             {" "}
-                            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-10 font-semibold text-zinc-700">
+                            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-10 font-medium text-zinc-700">
                               {index + 1}
                             </span>{" "}
                             <span>{step}</span>{" "}
@@ -6747,7 +6747,7 @@ export default function EstimateToolViewV2({
                   {mosquitoRecommendations.length > 0 && (
                     <div className="mt-3 bg-zinc-50 border-hairline border-zinc-300 rounded-xs p-3">
                       {" "}
-                      <div className="text-12 font-semibold text-zinc-900 mb-2">
+                      <div className="text-12 font-medium text-zinc-900 mb-2">
                         Field Recommendations
                       </div>{" "}
                       <div className="grid gap-2">
@@ -6759,7 +6759,7 @@ export default function EstimateToolViewV2({
                             {" "}
                             <div>
                               {" "}
-                              <div className="text-12 font-semibold text-zinc-900">
+                              <div className="text-12 font-medium text-zinc-900">
                                 {recommendation.label}
                               </div>{" "}
                               <div className="text-11 text-ink-secondary leading-snug">
@@ -6974,7 +6974,7 @@ export default function EstimateToolViewV2({
               {hasAnyTermiteSelection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-12 font-semibold text-zinc-900 mb-2">
+                  <div className="text-12 font-medium text-zinc-900 mb-2">
                     Termite Measurements
                   </div>
                   <div className="text-11 text-ink-secondary mb-3">
@@ -7322,7 +7322,7 @@ export default function EstimateToolViewV2({
                               : "bg-white border-zinc-300 text-zinc-800 hover:bg-zinc-100",
                           )}
                         >
-                          <div className="text-13 font-semibold">{option.label}</div>
+                          <div className="text-13 font-medium">{option.label}</div>
                           <div className={cn("mt-1 text-11 leading-snug", active ? "text-zinc-200" : "text-ink-secondary")}>
                             {option.detail}
                           </div>
@@ -7381,7 +7381,7 @@ export default function EstimateToolViewV2({
                     <>
                       <div className="flex items-center justify-between gap-3 mb-2">
                         <div>
-                          <div className="text-12 font-semibold text-zinc-900">
+                          <div className="text-12 font-medium text-zinc-900">
                             Treatable Lawn Area
                           </div>
                           <div className="mt-0.5 text-11 text-ink-secondary leading-snug">
@@ -7520,7 +7520,7 @@ export default function EstimateToolViewV2({
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-12 font-semibold text-zinc-900 mb-2">
+                  <div className="text-12 font-medium text-zinc-900 mb-2">
                     Standalone / Specialty Services
                   </div>
                   <FieldV2 label="Service Type" className="mb-0">
@@ -9274,7 +9274,7 @@ export default function EstimateToolViewV2({
                       if (!hasNotes) return null;
                       return (
                         <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-12 text-zinc-900">
-                          <div className="font-semibold mb-1">Pricing Review Notes</div>
+                          <div className="font-medium mb-1">Pricing Review Notes</div>
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"

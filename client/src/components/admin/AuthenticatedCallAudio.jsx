@@ -139,7 +139,7 @@ export default function AuthenticatedCallAudio({
               color: "inherit",
               font: "inherit",
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: id ? "pointer" : "not-allowed",
             }}
           >

@@ -174,25 +174,56 @@ input[type="week"] {
   color: #000 !important;
 }
 
-/* /admin/* — Roboto everywhere. Scoped to .admin-shell-v2 (the
-   AdminLayoutV2 root) so the customer portal and tech portal keep their
-   existing brand fonts (Luckiest Guy / Baloo 2 / Inter / Montserrat).
+/* /admin/* — Roboto everywhere. Scoped to body.admin-surface, which
+   AdminLayoutV2 toggles on mount/unmount, so the customer portal and tech
+   portal keep their existing brand fonts (Luckiest Guy / Baloo 2 / Inter /
+   Montserrat) while portaled admin overlays (Dialog / Sheet / Mobile*Sheet,
+   rendered outside .admin-shell-v2) are covered too — previously they leaked
+   the global h1/h2 brand fonts (Anton / Montserrat) onto admin screens.
    The mono override below keeps numbers/code on the
    same Roboto family while preserving tabular numeric spacing.
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade. */
-.admin-shell-v2,
-.admin-shell-v2 * {
+body.admin-surface,
+body.admin-surface * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
-.admin-shell-v2 [class*="font-mono"],
-.admin-shell-v2 [class*="font-mono"] *,
-.admin-shell-v2 code,
-.admin-shell-v2 code *,
-.admin-shell-v2 pre,
-.admin-shell-v2 pre * {
+body.admin-surface [class*="font-mono"],
+body.admin-surface [class*="font-mono"] *,
+body.admin-surface code,
+body.admin-surface code *,
+body.admin-surface pre,
+body.admin-surface pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
+}
+
+/* Admin shell height. iOS Safari's 100vh is the LARGE viewport (toolbars
+   retracted), so a 100vh scroller leaves its last ~80-100px under the
+   toolbar + fixed tab bar. 100dvh tracks the visible viewport. */
+:root {
+  --admin-vh: 100vh;
+}
+@supports (height: 100dvh) {
+  :root {
+    --admin-vh: 100dvh;
+  }
+}
+
+/* Horizontal-scroll affordance for wide admin tables. Overlay scrollbars on
+   macOS/iOS give no hint that a table continues to the right (Inventory hides
+   ~45% of its columns, Pricing Reality Check ~60%). Pure-CSS scroll shadows:
+   the local-attached white covers hide the shadow at the scroll ends. */
+body.admin-surface .overflow-x-auto {
+  background:
+    linear-gradient(to right, #fff 30%, rgba(255, 255, 255, 0)),
+    linear-gradient(to right, rgba(255, 255, 255, 0), #fff 70%) 100% 0,
+    linear-gradient(to right, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0)),
+    linear-gradient(to left, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0)) 100% 0;
+  background-repeat: no-repeat;
+  background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+  background-attachment: local, local, scroll, scroll;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Tailwind preflight is intentionally disabled, so native form controls keep

@@ -187,7 +187,7 @@ function Badge({ label, color, style }) {
         padding: "2px 10px",
         borderRadius: 9999,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         backgroundColor: color + "22",
         color,
         border: `1px solid ${color}44`,
@@ -277,7 +277,7 @@ function PipelineStatusCard({ label, value }) {
         <span
           style={{
             fontSize: 11,
-            fontWeight: 600,
+            fontWeight: 500,
             textTransform: "uppercase",
             letterSpacing: 0,
             color: C.muted,
@@ -404,7 +404,7 @@ function Btn({ children, onClick, color, small, style, disabled }) {
         backgroundColor: color || C.teal,
         color: "#fff",
         fontSize: small ? 12 : 13,
-        fontWeight: 600,
+        fontWeight: 500,
         opacity: disabled ? 0.5 : 1,
         transition: "opacity 0.2s",
         ...style,
@@ -641,7 +641,7 @@ function SpeedToLeadTimer({ firstContactAt }) {
         ...mono,
         fontSize: 13,
         color,
-        fontWeight: 600,
+        fontWeight: 500,
         animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
       }}
     >
@@ -1313,7 +1313,7 @@ export function LeadsSection() {
                   border: "none",
                   cursor: "pointer",
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   textTransform: "capitalize",
                   fontFamily: ROBOTO,
                 }}
@@ -1406,7 +1406,7 @@ export function LeadsSection() {
               }}
             >
               <span style={{ color: C.muted }}>Source:</span>
-              <span style={{ fontWeight: 600 }}>{filters.source_name}</span>
+              <span style={{ fontWeight: 500 }}>{filters.source_name}</span>
               {sourcePeriodLabel && (
                 <span style={{ color: C.muted }}>· {sourcePeriodLabel}</span>
               )}
@@ -1458,7 +1458,7 @@ export function LeadsSection() {
                 fontFamily: ROBOTO,
               }}
             >
-              <span style={{ fontWeight: 600 }}>Builder warranty expiring</span>
+              <span style={{ fontWeight: 500 }}>Builder warranty expiring</span>
               <button
                 type="button"
                 aria-label="Clear builder warranty filter"
@@ -1531,7 +1531,7 @@ export function LeadsSection() {
                           textAlign: "left",
                           fontSize: 11,
                           color: C.muted,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           textTransform: "uppercase",
                         }}
                       >
@@ -1723,7 +1723,7 @@ export function LeadsSection() {
                                     background: C.white,
                                     color: C.red,
                                     fontSize: 12,
-                                    fontWeight: 600,
+                                    fontWeight: 500,
                                     cursor:
                                       deletingLeadId === lead.id
                                         ? "not-allowed"
@@ -1789,7 +1789,7 @@ export function LeadsSection() {
                                         <span
                                           style={{
                                             color: C.heading,
-                                            fontWeight: 600,
+                                            fontWeight: 500,
                                           }}
                                         >
                                           {lead.service_interest || "--"}
@@ -2175,7 +2175,7 @@ export function LeadsSection() {
                                         style={{
                                           fontSize: 12,
                                           color: C.teal,
-                                          fontWeight: 600,
+                                          fontWeight: 500,
                                           marginBottom: 6,
                                         }}
                                       >
@@ -2495,7 +2495,7 @@ export function LeadsSection() {
                                         style={{
                                           fontSize: 12,
                                           color: C.teal,
-                                          fontWeight: 600,
+                                          fontWeight: 500,
                                           marginBottom: 8,
                                         }}
                                       >
@@ -2612,7 +2612,7 @@ export function LeadsSection() {
                                         style={{
                                           fontSize: 12,
                                           color: C.amber,
-                                          fontWeight: 600,
+                                          fontWeight: 500,
                                           marginBottom: 8,
                                         }}
                                       >
@@ -2745,7 +2745,7 @@ export function LeadsSection() {
                                       style={{
                                         fontSize: 12,
                                         color: C.green,
-                                        fontWeight: 600,
+                                        fontWeight: 500,
                                         marginBottom: 8,
                                       }}
                                     >
@@ -3263,7 +3263,7 @@ export function LeadsSection() {
                             style={{
                               color: C.heading,
                               fontSize: 13,
-                              fontWeight: 600,
+                              fontWeight: 500,
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
@@ -3352,7 +3352,7 @@ export function LeadsSection() {
                             background: C.white,
                             color: C.red,
                             fontSize: 11,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             cursor:
                               deletingLeadId === lead.id
                                 ? "not-allowed"
@@ -3478,7 +3478,7 @@ export function LeadsSection() {
                       textAlign: "left",
                       fontSize: 11,
                       color: C.muted,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       textTransform: "uppercase",
                       whiteSpace: "nowrap",
                     }}
@@ -3634,7 +3634,7 @@ export function LeadsSection() {
                           padding: "12px 14px",
                           ...mono,
                           fontSize: 13,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: roiColor(roi || 0),
                         }}
                       >
@@ -4323,7 +4323,7 @@ export function LeadsSection() {
                       textAlign: "left",
                       fontSize: 11,
                       color: C.muted,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       textTransform: "uppercase",
                     }}
                   >
@@ -4399,7 +4399,7 @@ export function LeadsSection() {
                       padding: "10px 14px",
                       ...mono,
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: roiColor(s.roi),
                     }}
                   >

@@ -3910,7 +3910,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       borderRadius: 4,
                     }}
                   >
-                    <div style={{ fontSize: 13, color: "#111827", fontWeight: 600, marginBottom: 8 }}>
+                    <div style={{ fontSize: 13, color: "#111827", fontWeight: 500, marginBottom: 8 }}>
                       New payer
                     </div>
                     <label style={labelStyle}>Payer name *</label>
@@ -3974,7 +3974,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           border: "none",
                           borderRadius: 4,
                           fontSize: 13,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           cursor: newPayerSaving ? "default" : "pointer",
                           opacity: newPayerSaving || !newPayer.displayName.trim() ? 0.6 : 1,
                           minHeight: 44,
@@ -8759,7 +8759,7 @@ export function StationMarkingStep({
                 color: "#fff",
                 fontSize: 22,
                 lineHeight: 1,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: disabled || blocked ? "default" : "pointer",
                 opacity: disabled || blocked ? 0.35 : 1,
                 touchAction: "manipulation",
@@ -8774,7 +8774,7 @@ export function StationMarkingStep({
             right edge — parking this in a third corner would leave barely any
             unobstructed ground to pin on. */}
         {canPan ? (
-          <div style={{ position: "absolute", bottom: 4, left: 6, padding: "3px 8px", borderRadius: 999, background: "rgba(15,25,35,0.72)", color: "#fff", fontSize: 11, fontWeight: 600, pointerEvents: "none" }}>
+          <div style={{ position: "absolute", bottom: 4, left: 6, padding: "3px 8px", borderRadius: 999, background: "rgba(15,25,35,0.72)", color: "#fff", fontSize: 11, fontWeight: 500, pointerEvents: "none" }}>
             {zoomLevel}× · drag to pan
           </div>
         ) : null}

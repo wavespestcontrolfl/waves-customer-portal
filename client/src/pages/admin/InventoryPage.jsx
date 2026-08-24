@@ -106,7 +106,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -115,7 +115,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
 });
 const sInput = {
   padding: "8px 12px",
@@ -1140,7 +1140,7 @@ function PriceSyncTab({ showToast }) {
               borderRadius: 20,
               border: "none",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               background: view === tab.key ? D.teal : D.card,
               color: view === tab.key ? D.white : D.muted,
@@ -2045,7 +2045,7 @@ function ProductsTab({
               borderRadius: 20,
               border: "none",
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               background: filter === f.key ? D.teal : D.card,
               color: filter === f.key ? D.white : D.muted,
@@ -2105,7 +2105,7 @@ function ProductsTab({
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
             }}
@@ -2259,7 +2259,7 @@ function ProductsTab({
                 background: D.green,
                 color: "#fff",
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -2325,14 +2325,14 @@ function ProductsTab({
                         : "transparent",
                   }}
                 >
-                  <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
+                  <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                     {isEditing ? (
                       <input
                         value={editForm.name}
                         onChange={(e) =>
                           setEditForm((f) => ({ ...f, name: e.target.value }))
                         }
-                        style={{ ...sInput, width: "100%", fontWeight: 600 }}
+                        style={{ ...sInput, width: "100%", fontWeight: 500 }}
                         onClick={(e) => e.stopPropagation()}
                       />
                     ) : (
@@ -2530,7 +2530,7 @@ function ProductsTab({
                               background: D.green,
                               color: "#fff",
                               cursor: "pointer",
-                              fontWeight: 600,
+                              fontWeight: 500,
                             }}
                           >
                             Save
@@ -3075,7 +3075,7 @@ function ExpandedProduct({
               >
                 {" "}
                 <span
-                  style={{ color: D.heading, fontWeight: 600, minWidth: 140 }}
+                  style={{ color: D.heading, fontWeight: 500, minWidth: 140 }}
                 >
                   {vp.vendorName}
                 </span>{" "}
@@ -3712,7 +3712,7 @@ function VendorsTab({ showToast }) {
           >
             {" "}
             <div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
                 {v.name}
               </div>
               <div style={{ fontSize: 11, color: D.muted }}>{v.type}</div>
@@ -3923,7 +3923,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
           }}
         >
           {" "}
-          <span style={{ fontSize: 13, fontWeight: 600, color: D.teal }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: D.teal }}>
             {selected.size} selected
           </span>{" "}
           <button
@@ -3986,7 +3986,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
                 <div style={{ flex: 1 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {a.product_name}
                   </div>{" "}
@@ -4317,7 +4317,7 @@ function ProtocolsTab({
       >
         {" "}
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Treatment Protocols by Service Line
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
@@ -4411,7 +4411,7 @@ function ProtocolsTab({
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 800,
+                        fontWeight: 700,
                         color: D.heading,
                       }}
                     >
@@ -4633,7 +4633,7 @@ function ProtocolsTab({
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -4690,7 +4690,7 @@ function ProtocolsTab({
               }}
             >
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
                 {svc.serviceType}
               </div>{" "}
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -5195,7 +5195,7 @@ function MarginsTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 16,
         }}
@@ -5221,7 +5221,7 @@ function MarginsTab({ showToast }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
                 {svc.serviceType}
               </div>{" "}
               <div
@@ -5352,7 +5352,7 @@ function ScrapeTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 16,
         }}
@@ -5384,7 +5384,7 @@ function ScrapeTab({ showToast }) {
               <div
                 style={{
                   fontSize: 14,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 4,
                 }}
@@ -5427,7 +5427,7 @@ function ScrapeTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 12,
         }}

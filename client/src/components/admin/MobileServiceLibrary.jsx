@@ -114,7 +114,7 @@ function Header({ title, onBack, onAdd, centerTitle = false }) {
       </button>
       {centerTitle && (
         <div
-          className="flex-1 text-center font-semibold text-zinc-900"
+          className="flex-1 text-center font-medium text-zinc-900"
           style={{ fontSize: 17 }}
         >
           {title}
@@ -331,7 +331,7 @@ function CategoriesView({ onBack }) {
                   <div className="flex-1 min-w-0">
                     {" "}
                     <div
-                      className="font-semibold text-ink-primary truncate"
+                      className="font-medium text-ink-primary truncate"
                       style={{ fontSize: 15 }}
                     >
                       {g.label}
@@ -561,7 +561,7 @@ function DiscountsView({ onBack }) {
                   <div className="flex-1 min-w-0">
                     {" "}
                     <div
-                      className="font-semibold text-ink-primary truncate"
+                      className="font-medium text-ink-primary truncate"
                       style={{ fontSize: 15 }}
                     >
                       {d.name}
@@ -662,7 +662,7 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
         <div
-          className="text-ink-primary font-semibold"
+          className="text-ink-primary font-medium"
           style={{ fontSize: 15 }}
         >
           New Discount
@@ -829,7 +829,7 @@ function AllServicesView({ onBack }) {
           setCreating(true);
           setExpandedId(null);
         }}
-        className="w-full bg-zinc-100 text-zinc-900 font-semibold rounded-sm u-focus-ring mt-2"
+        className="w-full bg-zinc-100 text-zinc-900 font-medium rounded-sm u-focus-ring mt-2"
         style={{ padding: "18px 20px", fontSize: 16 }}
       >
         Create Service
@@ -874,7 +874,7 @@ function AllServicesView({ onBack }) {
               setExpandedId(null);
             }}
             className={`${status === key ? "bg-zinc-900 text-white" : "bg-white text-ink-secondary border-hairline border-zinc-200"} rounded-sm u-focus-ring`}
-            style={{ height: 36, fontSize: 13, fontWeight: 600 }}
+            style={{ height: 36, fontSize: 13, fontWeight: 500 }}
           >
             {label}
           </button>
@@ -922,7 +922,7 @@ function AllServicesView({ onBack }) {
                   <div className="flex-1 min-w-0">
                     {" "}
                     <div
-                      className="font-semibold text-ink-primary truncate"
+                      className="font-medium text-ink-primary truncate"
                       style={{ fontSize: 15 }}
                     >
                       {s.name}
@@ -1080,7 +1080,7 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
         <div
-          className="text-ink-primary font-semibold"
+          className="text-ink-primary font-medium"
           style={{ fontSize: 15 }}
         >
           New Service

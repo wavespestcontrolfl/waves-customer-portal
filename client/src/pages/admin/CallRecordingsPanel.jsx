@@ -90,7 +90,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -99,7 +99,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 
@@ -410,7 +410,7 @@ export default function CallRecordingsPanel() {
                       <div
                         style={{
                           fontSize: 14,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -493,7 +493,7 @@ export default function CallRecordingsPanel() {
                       </span>
                     )}
                     {action && (
-                      <span style={{ color: action.color, fontWeight: 600 }}>
+                      <span style={{ color: action.color, fontWeight: 500 }}>
                         {action.text}
                         {action.icon}
                       </span>
@@ -538,7 +538,7 @@ export default function CallRecordingsPanel() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -560,7 +560,7 @@ export default function CallRecordingsPanel() {
                 style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
               >
                 {" "}
-                <span style={{ fontWeight: 600, color: D.heading }}>
+                <span style={{ fontWeight: 500, color: D.heading }}>
                   {getNumberLabel(s.number)}:
                 </span>{" "}
                 <span style={{ color: D.teal }}>{s.count}</span>
@@ -684,7 +684,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
             key={key++}
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginTop: 8,
               marginBottom: 2,
@@ -729,7 +729,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
             </span>
             {parts.map((part, i) =>
               part.startsWith("**") && part.endsWith("**") ? (
-                <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>
+                <strong key={i} style={{ color: D.heading, fontWeight: 500 }}>
                   {part.replace(/\*\*/g, "")}
                 </strong>
               ) : (
@@ -747,7 +747,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
           >
             {parts.map((part, i) =>
               part.startsWith("**") && part.endsWith("**") ? (
-                <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>
+                <strong key={i} style={{ color: D.heading, fontWeight: 500 }}>
                   {part.replace(/\*\*/g, "")}
                 </strong>
               ) : (
@@ -789,7 +789,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Call Details
           </div>{" "}
           <button
@@ -877,7 +877,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
         {/* Receiving number label */}
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
           Receiving line:{" "}
-          <span style={{ color: D.heading, fontWeight: 600 }}>
+          <span style={{ color: D.heading, fontWeight: 500 }}>
             {getNumberLabel(r.to_phone)}
           </span>{" "}
         </div>
@@ -943,7 +943,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
             <div
               style={{
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 1,
@@ -1006,7 +1006,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
                 <div
                   style={{
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 1,
@@ -1035,7 +1035,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
                 <div
                   style={{
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 1,
@@ -1078,7 +1078,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 1,
