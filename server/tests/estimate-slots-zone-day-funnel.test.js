@@ -181,6 +181,19 @@ describe('isFunnelZone / zone matching', () => {
     }
   });
 
+  test('zoneStopDates excludes phantom statuses — rescheduled/skipped rows must not mint cluster days', async () => {
+    const chain = scheduledServicesChain([zoneStopRow()]);
+    const dbc = jest.fn(() => chain);
+    const dates = await funnelInternals.zoneStopDates(dbc, VENICE_ZONE, '2027-05-18', '2027-05-22');
+    expect(dates).toEqual(new Set(['2027-05-20']));
+    // The mock chain can't apply the filter, so pin the query arguments: a
+    // 'rescheduled' phantom or 'skipped' visit is not a truck in the zone.
+    expect(chain.whereNotIn).toHaveBeenCalledWith(
+      'scheduled_services.status',
+      ['cancelled', 'rescheduled', 'skipped'],
+    );
+  });
+
   test('rowMatchesZone mirrors filterCollidingSlots: slug OR customer city, legacy slugs via city', () => {
     const cities = new Set(['venice', 'nokomis', 'north port']);
     const { rowMatchesZone } = funnelInternals;
