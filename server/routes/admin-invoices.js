@@ -2311,15 +2311,11 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
     }).catch((err) => ({ ok: false, error: err.message }));
 
-    try {
-      const FollowUps = require('../services/invoice-followups');
-      await FollowUps.pauseSequence(invoice.id, {
-        reason: 'payment_plan_created',
-        adminId: req.user?.id || req.technicianId || null,
-      });
-    } catch (err) {
-      logger.warn(`[admin-invoices:payment-plan] follow-up pause failed: ${err.message}`);
-    }
+    // NOTE: no post-commit pauseSequence here (codex r9 P1). The in-trx
+    // stopInvoiceFollowupsForPaymentPlan above already stopped the sequence
+    // with this plan's stamped reason; an unconditional pause after the
+    // email could land AFTER a concurrent cancel's transactional re-arm and
+    // disable dunning with no active plan left.
 
     await db('activity_log').insert({
       customer_id: planCustomerId,
