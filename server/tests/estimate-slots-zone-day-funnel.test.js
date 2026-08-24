@@ -258,6 +258,20 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'seeded', seedDate: '2027-05-21' });
   });
 
+  test('funneled results are never cached: a new zone stop reshapes the very next request', async () => {
+    mockDb({ scheduledRows: [] });
+    const first = await getAvailableSlots('est-funnel-1', WINDOW);
+    expect(first.metadata.zoneDayFunnel?.mode).toBe('seeded');
+    // A zone stop lands (any estimate in the zone) — no invalidation hook
+    // fires for THIS estimate, so a cached seed would now be wrong.
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const second = await getAvailableSlots('est-funnel-1', WINDOW);
+    expect(second.metadata.cacheHit).toBe(false);
+    expect(second.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
+    const slots = [...(second.primary || []), ...(second.expander || [])];
+    expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
+  });
+
   test('non-funneled zone: a Sarasota estimate keeps its multi-day pool', async () => {
     mockDb({
       scheduledRows: [],

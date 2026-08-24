@@ -1726,7 +1726,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     },
   };
 
-  wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
+  // Never cache a funneled result: the funnel's day set changes with EVERY
+  // zone-stop mutation (create/cancel/reschedule/hold-expiry on ANY estimate
+  // in the zone), and reserveSlot only invalidates the booking estimate's
+  // own entries — a cached cluster/seed day could steer other estimates to
+  // yesterday's answer for the whole TTL. Funneled-zone estimates are a
+  // small slice of traffic; recomputing beats versioning the cache by
+  // schedule state. Non-funneled results keep today's caching exactly.
+  if (!funnel) {
+    wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
+  }
   return result;
 }
 
