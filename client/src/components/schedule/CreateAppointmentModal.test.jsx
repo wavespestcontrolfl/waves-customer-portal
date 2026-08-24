@@ -6,6 +6,8 @@ import {
   formatScheduleEstimateAmount,
   MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
+  quickAddConfirmFlags,
+  quickAddConflictFromError,
 } from './CreateAppointmentModal.jsx';
 
 describe('CreateAppointmentModal won estimate helpers', () => {
@@ -135,5 +137,28 @@ describe('buildFindTimeRequestBody', () => {
     const body = buildFindTimeRequestBody({ customerId: 'c', serviceName: 's', durationMinutes: 90, dateFrom: 'a', dateTo: 'b', technicianId: 'tech-9', horizonDays: 30 });
     expect(body.topN).toBe(100);
     expect(body.technicianId).toBe('tech-9');
+  });
+});
+
+describe('quick-add phone-match confirm helpers', () => {
+  const err = (status, code, match) => Object.assign(new Error('x'), { status, code, details: match ? { match } : undefined });
+
+  it('maps only the two 409 confirm codes to a conflict (other errors stay generic)', () => {
+    expect(quickAddConflictFromError(null)).toBeNull();
+    expect(quickAddConflictFromError(err(500, 'DUPLICATE_PROFILE'))).toBeNull();
+    expect(quickAddConflictFromError(err(409, 'CUSTOMER_BUSY'))).toBeNull();
+    const c = quickAddConflictFromError(err(409, 'PHONE_MATCH_CONFIRM', { accountId: 'acct-1', name: 'Existing Owner' }));
+    expect(c).toMatchObject({ code: 'PHONE_MATCH_CONFIRM', match: { accountId: 'acct-1' } });
+    // Missing match payload must not crash the confirm UI.
+    expect(quickAddConflictFromError(err(409, 'DUPLICATE_PROFILE'))).toMatchObject({ code: 'DUPLICATE_PROFILE', match: null });
+  });
+
+  it('binds resubmit flags to the displayed account; separate-account uses the force lane', () => {
+    expect(quickAddConfirmFlags({ code: 'PHONE_MATCH_CONFIRM', match: { accountId: 'acct-1' } }))
+      .toEqual({ confirmAttach: true, confirmMatchedAccountId: 'acct-1' });
+    expect(quickAddConfirmFlags({ code: 'DUPLICATE_PROFILE', match: { accountId: 'acct-1' } }))
+      .toEqual({ confirmDuplicate: true, confirmMatchedAccountId: 'acct-1' });
+    expect(quickAddConfirmFlags({ code: 'PHONE_MATCH_CONFIRM' }, { separateAccount: true }))
+      .toEqual({ forceNewAccount: true, ignorePhoneMatch: true });
   });
 });
