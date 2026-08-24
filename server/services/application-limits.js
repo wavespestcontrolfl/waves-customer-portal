@@ -115,7 +115,7 @@ class ApplicationLimitChecker {
           return { violated: true, message: `BLACKOUT: ${(limit.jurisdiction || '').replace(/_/g, ' ')} restricts nitrogen ${startLabel} — ${endLabel}. Use iron/potassium only.`, current: 'in_blackout', max: 'none' };
         }
         // Approaching-window check: compute days-until using ET calendar math.
-        const proposedYear = etParts(proposedDate).year;
+        const proposedYear = Number(proposedYMD.slice(0, 4));
         const startYear = proposedMMDD <= startMMDD ? proposedYear : proposedYear + 1;
         const startDate = new Date(`${startYear}-${startMMDD}T12:00:00Z`);
         const proposedAnchor = new Date(`${proposedYMD}T12:00:00Z`);
@@ -215,7 +215,9 @@ class ApplicationLimitChecker {
     return month >= 6 && month <= 9;   // June-Sept inclusive — was UTC month 5-8
   }
 
-  getYearStart(date) { return `${etParts(date).year}-01-01`; }
+  // Accepts a true instant or a hydrated pg DATE — etCalendarDayOf keeps a
+  // UTC-midnight Jan 1 as Jan 1 (etParts would read it as Dec 31 ET).
+  getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }
 
 module.exports = new ApplicationLimitChecker();

@@ -81,6 +81,29 @@ describe('application-limits with pg date columns as JS Date objects', () => {
     expect(oct1.blocks).toHaveLength(0);
   });
 
+  test('(a3) pg DATE Jan 1 keeps its own year for annual history (not Dec 31 of the prior year)', async () => {
+    expect(applicationLimits.getYearStart(pgDate('2026-01-01'))).toBe('2026-01-01');
+    expect(applicationLimits.getYearStart(new Date('2026-01-01T05:30:00Z'))).toBe('2026-01-01');
+    expect(applicationLimits.getYearStart(new Date('2026-01-01T04:30:00Z'))).toBe('2025-01-01'); // 23:30 ET Dec 31
+
+    // annual_max_apps: 2 prior apps in 2025 must not count toward a Jan 1 2026 application.
+    const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
+    const limit = {
+      id: 'lim-ann', product_id: 'prod-h', match_type: 'product', limit_type: 'annual_max_apps',
+      limit_value: '2.0000', severity: 'hard_block', description: 'Headway: max 2 applications per year.',
+    };
+    const historyQ = chain({ rows: [] });
+    db
+      .mockReturnValueOnce(chain({ first: product }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', city: 'Bradenton' } }))
+      .mockReturnValueOnce(historyQ)
+      .mockReturnValueOnce(chain({ rows: [limit] }));
+    const result = await applicationLimits.checkLimits('cust-1', 'prod-h', pgDate('2026-01-01'));
+    expect(result.allowed).toBe(true);
+    const yearWhere = historyQ.where.mock.calls.find(c => c[0] === 'application_date' && c[1] === '>=');
+    expect(yearWhere[2]).toBe('2026-01-01');
+  });
+
   test('(c) string season window still works and dates outside the window are allowed', async () => {
     mockNitrogenCheck(blackoutLimit('2026-06-01', '2026-09-30'));
     const inside = await applicationLimits.checkLimits('cust-1', 'prod-n', new Date('2026-07-15T16:00:00Z'));
