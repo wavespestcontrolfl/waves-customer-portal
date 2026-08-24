@@ -368,8 +368,10 @@ describe('handleRefundFailed', () => {
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
     // Identity is the durable marker, locked FOR UPDATE — never a same-visit scan.
     expect(trxInvoices.where).toHaveBeenCalledWith({ replaces_invoice_id: 'inv-1' });
-    expect(trxInvoices.forUpdate).toHaveBeenCalled();
-    expect(trxInvoices.whereNotIn).toHaveBeenCalledWith('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled']);
+    // Lock order (codex P1): the scan is a plain read — only the original's
+    // re-read takes FOR UPDATE; the canonical void locks statement → invoice.
+    expect(trxInvoices.forUpdate).toHaveBeenCalledTimes(1);
+    expect(trxInvoices.whereNotIn).toHaveBeenCalledWith('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled']);
     // Restore + void run under the shared scheduled-invoice mint lock.
     expect(trxRaw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['schedule.invoice.mint', 'ss-1']);
     // The void is the ONE canonical implementation, inside a SAVEPOINT.
@@ -411,7 +413,7 @@ describe('handleRefundFailed', () => {
     seedMarked([], [{ id: 'inv-2', invoice_number: 'WPC-2026-0002' }]);
     await handleRefundFailed(failedRefund());
 
-    expect(trxInvoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'prepaid']);
+    expect(trxInvoices.whereIn).toHaveBeenCalledWith('status', ['paid']);
     expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
     const body = notificationInsert.mock.calls[0][0].body;
     expect(body).toContain('WPC-2026-0001 was restored to paid');
@@ -483,6 +485,31 @@ describe('handleRefundFailed', () => {
     await handleRefundFailed(failedRefund());
     expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
     expect(dbInvoices.select).not.toHaveBeenCalled();
+  });
+
+  test('a CREDIT-covered prepaid replacement (no payment row) is a void candidate — the canonical void returns the credit', async () => {
+    dbInvoices.first.mockResolvedValue(original());
+    trxInvoices.first.mockResolvedValue(lockedOriginal());
+    seedMarked([replacement({ status: 'prepaid', credit_applied: '102.90' })]);
+    await handleRefundFailed(failedRefund());
+
+    expect(require('../services/invoice').voidInvoiceInTransaction).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ id: 'inv-2', status: 'prepaid' }), { triagedVoidPiId: null, createdBy: 'system:refund_bounce' },
+    );
+    const body = notificationInsert.mock.calls[0][0].body;
+    expect(body).toContain('WPC-2026-0002');
+    expect(body).toContain('was voided');
+    expect(body).not.toContain('DOUBLE PAYMENT');
+  });
+
+  test('a CASH-backed prepaid replacement (payment_recorded_at) is collected money — flagged, never voided', async () => {
+    dbInvoices.first.mockResolvedValue(original());
+    trxInvoices.first.mockResolvedValue(lockedOriginal());
+    seedMarked([replacement({ status: 'prepaid', payment_recorded_at: '2026-08-21T09:00:00Z' })]);
+    await handleRefundFailed(failedRefund());
+
+    expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
+    expect(notificationInsert.mock.calls[0][0].body).toContain('DOUBLE PAYMENT');
   });
 
   test('a marked replacement that landed AFTER the pre-lock triage read is never voided blind', async () => {

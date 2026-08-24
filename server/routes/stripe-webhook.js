@@ -4178,7 +4178,7 @@ async function handleRefundFailed(refund) {
     try {
       const openMarked = await db('invoices')
         .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+        .whereNotIn('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled'])
         .select('id', 'invoice_number', 'stripe_payment_intent_id', 'payment_recorded_at');
       for (const rep of openMarked || []) {
         const triagedPiId = rep.stripe_payment_intent_id || null;
@@ -4383,7 +4383,7 @@ async function handleRefundFailed(refund) {
     // voidInvoiceInTransaction (status-conditional flip, PI re-check,
     // payments-ledger re-check, deposit/account credit restore, statement
     // rollup) inside a SAVEPOINT, so a refused void rolls back only itself
-    // and the restore still commits. Fail closed on money: paid/prepaid or
+    // and the restore still commits. Fail closed on money: paid or
     // payment_recorded_at = collected (a human refunds one); a live
     // stripe_payment_intent_id was triaged BEFORE this transaction (see
     // replacementTriage above) exactly as the operator void does — money
@@ -4393,10 +4393,18 @@ async function handleRefundFailed(refund) {
     const collectedReplacements = [];
     const manualReplacements = [];
     if (restoredInvoiceId) {
+      // Plain read, NO FOR UPDATE here (codex P1): the canonical void locks
+      // the payer statement FIRST and then the invoice row via its
+      // status-conditional update — locking invoices up front would invert
+      // that order against a concurrent operator void. 'prepaid' rows ARE
+      // candidates (codex P0): a completion can prepay a fresh replacement
+      // from ACCOUNT CREDIT with no payment row — that credit must be
+      // returned, which the canonical void does; a CASH-backed prepayment
+      // (payment_recorded_at / paid payment row) is refused by its ledger
+      // guards and lands in the manual list.
       const replacements = await trx('invoices')
         .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .forUpdate()
+        .whereNotIn('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled'])
         .select('*');
       for (const rep of replacements || []) {
         const repLabel = rep.invoice_number || rep.id;
@@ -4428,7 +4436,7 @@ async function handleRefundFailed(refund) {
       // by status; name them from a plain read so the alert is complete.
       const collected = await trx('invoices')
         .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereIn('status', ['paid', 'prepaid'])
+        .whereIn('status', ['paid'])
         .select('id', 'invoice_number');
       for (const rep of collected || []) collectedReplacements.push(rep.invoice_number || rep.id);
     }
