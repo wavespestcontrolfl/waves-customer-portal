@@ -643,11 +643,19 @@ describe('handleRefundFailed', () => {
         .mockResolvedValueOnce({ id: 'inv-1', scheduled_service_id: 'ss-zeta', service_record_id: null })
         .mockResolvedValueOnce({ id: 'inv-9', scheduled_service_id: null, service_record_id: 'sr-9' });
       dbServiceRecords.first.mockResolvedValue({ scheduled_service_id: 'ss-alpha' });
+      // Locked re-reads: inv-1 already carries its visit; inv-9 (legacy) does not.
+      trxInvoices.first
+        .mockResolvedValueOnce({ id: 'inv-1', scheduled_service_id: 'ss-zeta' })
+        .mockResolvedValueOnce({ id: 'inv-9', scheduled_service_id: null });
       await handleRefundFailed(failedRefund());
 
       const mintLocks = trxRaw.mock.calls.filter((c) => c[1][0] === 'schedule.invoice.mint').map((c) => c[1][1]);
       expect(mintLocks).toEqual(['ss-alpha', 'ss-zeta']);
       expect(trxInvoices.update).toHaveBeenCalledTimes(2);
+      // Legacy row gets its visit link backfilled on restore (adoptable by a
+      // completion waking under the lock); the linked row is untouched.
+      expect(trxInvoices.update).toHaveBeenNthCalledWith(1, expect.not.objectContaining({ scheduled_service_id: expect.anything() }));
+      expect(trxInvoices.update).toHaveBeenNthCalledWith(2, expect.objectContaining({ status: 'paid', scheduled_service_id: 'ss-alpha' }));
       expect(notificationInsert.mock.calls[0][0].body).toContain('2 invoices restored');
     });
 

@@ -3914,6 +3914,7 @@ async function handleRefundFailed(refund) {
         && combinedRefundMeta.failed_refund_ids.includes(refundId);
       const combinedTriage = new Map();
       const combinedVisitIds = [];
+      const combinedVisitByInvoice = new Map();
       if (!combinedPreFailed && refundId) {
         try {
           const preRows = rowChargeId
@@ -3929,7 +3930,10 @@ async function handleRefundFailed(refund) {
           }
           for (const invoiceId of invoiceIds) {
             const visitId = await resolveInvoiceVisitId(db, invoiceId);
-            if (visitId && !combinedVisitIds.includes(String(visitId))) combinedVisitIds.push(String(visitId));
+            if (visitId) {
+              combinedVisitByInvoice.set(String(invoiceId), String(visitId));
+              if (!combinedVisitIds.includes(String(visitId))) combinedVisitIds.push(String(visitId));
+            }
             combinedTriage.set(invoiceId, await triageReplacementsForInvoice(invoiceId));
           }
           combinedVisitIds.sort();
@@ -4078,6 +4082,19 @@ async function handleRefundFailed(refund) {
               });
             }
           } else if (invId) {
+            // Legacy service_record-only invoice: backfill the visit link on
+            // restore (single-row lane parity, pre-push P0, codex #3456) so
+            // a completion waking under the mint lock held above can ADOPT
+            // the restored row (findAdoptableScheduledInvoice keys on
+            // scheduled_service_id) instead of minting a duplicate. Read
+            // under the lock, never from the pre-read.
+            const backfillVisitId = combinedVisitByInvoice.get(String(invId)) || null;
+            const lockedInv = backfillVisitId
+              ? await trx('invoices').where({ id: invId }).forUpdate().first('id', 'scheduled_service_id')
+              : null;
+            const backfillVisitLink = !wasStillProcessing && backfillVisitId && lockedInv && !lockedInv.scheduled_service_id
+              ? { scheduled_service_id: backfillVisitId }
+              : {};
             const flipped = await trx('invoices')
               .where({ id: invId, status: 'refunded' })
               .update(wasStillProcessing
@@ -4096,6 +4113,7 @@ async function handleRefundFailed(refund) {
                   // the ledger row's recorded settle time when available.
                   paid_at: meta.settled_event_at || new Date().toISOString(),
                   updated_at: new Date(),
+                  ...backfillVisitLink,
                 });
             if (flipped > 0 && !wasStillProcessing) restored.push(invId);
           }
