@@ -25,6 +25,8 @@ const protocols = require('../config/protocols.json');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function numberOrNull(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -2195,6 +2197,9 @@ router.put('/:productId/pricing', async (req, res, next) => {
       expiresAt,
     } = req.body;
     const productId = req.params.productId;
+    if (!UUID_RE.test(String(vendorId || ''))) return res.status(400).json({ error: 'vendorId must be a uuid' });
+    const priceNum = Number(price);
+    if (!Number.isFinite(priceNum) || priceNum <= 0) return res.status(400).json({ error: 'price must be greater than 0' });
     const sizeOz = normalizeQuantityToOz(quantity);
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
@@ -2217,61 +2222,50 @@ router.put('/:productId/pricing', async (req, res, next) => {
       landed_unit_price: landedPerOz,
     };
 
-    const existing = await db('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }).first();
-
-    if (existing) {
-      // Record history (table may not exist yet)
-      try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' }); } catch { /* migration pending */ }
-
-      // Update — use only columns that exist
-      const upd = {
-        previous_price: existing.price,
-        price,
-        quantity,
-        vendor_product_url: url,
-        last_checked_at: db.fn.now(),
-      };
-      try {
-        await db('vendor_pricing').where({ id: existing.id }).update({
-          ...upd,
-          shipping_cost: shippingCost || null,
-          tax_rate: taxRate || null,
-          landed_cost: landed,
-          unit_normalized: sizeOz ? 'oz' : null,
-          price_per_oz: perOz,
-          normalized_unit_price: perOz,
-          ...controlLayerPriceFields,
-          source_type: sourceType,
-          confidence_score: confidence,
-          availability: availability || null,
-          branch_location: branchLocation || null,
-          expires_at: expiresAt || null,
+    // The vendor_pricing write is transactional and has NO partial-column
+    // fallback: a failed write must surface as a 500 rather than leave
+    // landed_cost / price_per_oz stale next to a fresh price (costing reads
+    // those columns).
+    const priceColumns = {
+      shipping_cost: shippingCost || null,
+      tax_rate: taxRate || null,
+      landed_cost: landed,
+      unit_normalized: sizeOz ? 'oz' : null,
+      price_per_oz: perOz,
+      normalized_unit_price: perOz,
+      ...controlLayerPriceFields,
+      source_type: sourceType,
+      confidence_score: confidence,
+      availability: availability || null,
+      branch_location: branchLocation || null,
+      expires_at: expiresAt || null,
+    };
+    await db.transaction(async (trx) => {
+      const existing = await trx('vendor_pricing')
+        .where({ product_id: productId, vendor_id: vendorId }).forUpdate().first();
+      if (existing) {
+        await trx('vendor_pricing').where({ id: existing.id }).update({
+          previous_price: existing.price,
+          price,
+          quantity,
+          vendor_product_url: url,
+          last_checked_at: trx.fn.now(),
+          ...priceColumns,
         });
-      }
-      catch { await db('vendor_pricing').where({ id: existing.id }).update(upd); }
-    } else {
-      const ins = { product_id: productId, vendor_id: vendorId, price, quantity, vendor_product_url: url, last_checked_at: db.fn.now() };
-      try {
-        await db('vendor_pricing').insert({
-          ...ins,
-          shipping_cost: shippingCost || null,
-          tax_rate: taxRate || null,
-          landed_cost: landed,
-          unit_normalized: sizeOz ? 'oz' : null,
-          price_per_oz: perOz,
-          normalized_unit_price: perOz,
-          ...controlLayerPriceFields,
-          source_type: sourceType,
-          confidence_score: confidence,
-          availability: availability || null,
-          branch_location: branchLocation || null,
-          expires_at: expiresAt || null,
+        await trx('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' });
+      } else {
+        await trx('vendor_pricing').insert({
+          product_id: productId,
+          vendor_id: vendorId,
+          price,
+          quantity,
+          vendor_product_url: url,
+          last_checked_at: trx.fn.now(),
+          ...priceColumns,
         });
+        await trx('price_history').insert({ product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual' });
       }
-      catch { await db('vendor_pricing').insert(ins); }
-
-      try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual' }); } catch { /* migration pending */ }
-    }
+    });
 
     try {
       const current = await db('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }).first();
@@ -2451,26 +2445,33 @@ router.post('/approvals/bulk', async (req, res, next) => {
     if (!['approve', 'reject'].includes(action)) return res.status(400).json({ error: 'action must be approve or reject' });
 
     let processed = 0;
+    const skipped = [];
+    const failed = [];
     for (const id of ids) {
       try {
         if (action === 'approve') {
           const approval = await db('price_approvals').where({ id, status: 'pending' }).first();
-          if (!approval) continue;
+          if (!approval) { skipped.push(id); continue; }
+          // Same field set as the single approve route (quantity + source url)
+          // so bulk-approved prices carry their container size into per-oz costing.
           const existing = await db('vendor_pricing')
             .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
           if (existing) {
             await db('vendor_pricing').where({ id: existing.id }).update({
-              previous_price: existing.price, price: approval.new_price, last_checked_at: db.fn.now(),
+              previous_price: existing.price, price: approval.new_price,
+              quantity: approval.new_quantity || existing.quantity,
+              last_checked_at: db.fn.now(),
             });
           } else {
             await db('vendor_pricing').insert({
               product_id: approval.product_id, vendor_id: approval.vendor_id,
-              price: approval.new_price, last_checked_at: db.fn.now(),
+              price: approval.new_price, quantity: approval.new_quantity,
+              vendor_product_url: approval.source_url, last_checked_at: db.fn.now(),
             });
           }
           await db('price_history').insert({
             product_id: approval.product_id, vendor_id: approval.vendor_id,
-            price: approval.new_price, source: 'scrape_approved',
+            price: approval.new_price, quantity: approval.new_quantity, source: 'scrape_approved',
           });
           await recalcBestPrice(approval.product_id);
         }
@@ -2479,9 +2480,12 @@ router.post('/approvals/bulk', async (req, res, next) => {
           reviewed_by: req.adminUser?.name || 'admin', reviewed_at: new Date(),
         });
         processed++;
-      } catch { /* skip individual failures */ }
+      } catch (err) {
+        logger.warn(`[admin-inventory] bulk ${action} failed for approval ${id}: ${err.message}`);
+        failed.push(id);
+      }
     }
-    res.json({ success: true, processed });
+    res.json({ success: failed.length === 0, processed, skipped, failed });
   } catch (err) { next(err); }
 });
 
@@ -3119,10 +3123,28 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
     const action = String(req.body?.action || '').toLowerCase();
     if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
-    const request = await db('product_restock_requests').where({ id: req.params.id }).first();
-    if (!request) return res.status(404).json({ error: 'Restock request not found' });
     const actor = req.technicianId || req.technician?.id || null;
     const result = await db.transaction(async (trx) => {
+      // Lock the request row so a double-click / stale tab cannot receive the
+      // same request twice (double stock + duplicate restock movement).
+      const request = await trx('product_restock_requests').where({ id: req.params.id }).forUpdate().first();
+      if (!request) {
+        const err = new Error('Restock request not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const status = String(request.status || '').toLowerCase();
+      if (action === 'receive' && !['open', 'ordered'].includes(status)) {
+        const err = new Error(`Restock request is already ${status}; refresh the list`);
+        err.statusCode = 409;
+        throw err;
+      }
+      if (action !== 'receive' && status === 'received') {
+        // Reopening a received request would leave the stock it added in place.
+        const err = new Error('Restock request was already received and cannot be reopened');
+        err.statusCode = 409;
+        throw err;
+      }
       if (action === 'mark_ordered') {
         const [updated] = await trx('product_restock_requests')
           .where({ id: request.id })
@@ -3203,21 +3225,48 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
   }
 });
 
+// ── Helper: per-oz price of a vendor_pricing row (null when size unknown) ──
+function vendorRowPricePerOz(row) {
+  const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
+  if (stored != null && stored > 0) return stored;
+  const oz = normalizeQuantityToOz(row.quantity);
+  const price = numberOrNull(row.price);
+  if (!oz || oz <= 0 || price == null) return null;
+  return price / oz;
+}
+
 // ── Helper: recalculate best price for a product ──
+// CONTRACT: products_catalog.best_price is the price of ONE container of the
+// product's own unit_size_oz. Consumers divide best_price by unit_size_oz to
+// get cost/oz (admin-dispatch cost_used, product-costing costLineFromUsage,
+// price-sync priceMap, admin-equipment tank-mix costing). So the cheapest
+// vendor is chosen PER OZ, and the winning per-oz price is scaled to the
+// product's unit_size_oz before being persisted. Rows with no size info
+// (no normalized price and an unparseable quantity) only compete on raw
+// price when no sized row exists, and are persisted as the raw price.
 async function recalcBestPrice(productId) {
-  const best = await db('vendor_pricing')
+  const rows = await db('vendor_pricing')
     .where({ product_id: productId }).whereNotNull('price').where('price', '>', 0)
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
-    .select('vendor_pricing.*', 'vendors.name as vendor_name')
-    .orderBy('price').first();
+    .select('vendor_pricing.*', 'vendors.name as vendor_name');
+  if (!rows || !rows.length) return;
 
-  if (best) {
-    await db('products_catalog').where({ id: productId }).update({
-      best_price: best.price, best_vendor: best.vendor_name, needs_pricing: false,
-    });
-    await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
-    await db('vendor_pricing').where({ id: best.id }).update({ is_best_price: true });
-  }
+  const product = await db('products_catalog').where({ id: productId }).select('unit_size_oz').first();
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  const scored = rows.map((row) => ({ row, perOz: vendorRowPricePerOz(row), price: Number(row.price) }));
+  const sized = scored.filter((s) => s.perOz != null);
+  const pool = sized.length ? sized : scored;
+  pool.sort((a, b) => (sized.length ? a.perOz - b.perOz : a.price - b.price) || a.price - b.price);
+  const best = pool[0];
+  const bestPrice = best.perOz != null && unitSizeOz > 0
+    ? Math.round(best.perOz * unitSizeOz * 100) / 100
+    : best.price;
+
+  await db('products_catalog').where({ id: productId }).update({
+    best_price: bestPrice, best_vendor: best.row.vendor_name, needs_pricing: false,
+  });
+  await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+  await db('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
 }
 
 // POST / — create a new product
@@ -3605,6 +3654,8 @@ router._test = {
   loginDiscoveryFromConnection,
   vendorCredentialStatusWhileQueued,
   vendorNeedsLoginDiscovery,
+  recalcBestPrice,
+  vendorRowPricePerOz,
 };
 
 // Shared with the Intelligence Bar stock tools (update_restock_request

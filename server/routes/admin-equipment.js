@@ -252,8 +252,10 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
         .where({ id: p.product_id })
         .first();
       if (catalogProduct && catalogProduct.best_price) {
-        // cost_per_oz from best price / total oz in container
-        const containerOz = parseFloat(catalogProduct.size_oz) || 128; // default 1 gal
+        // cost_per_oz from best price / total oz in container.
+        // Column is products_catalog.unit_size_oz (there is no size_oz);
+        // best_price is the price for one unit_size_oz container.
+        const containerOz = parseFloat(catalogProduct.unit_size_oz) || 128; // default 1 gal
         unitCost = parseFloat(catalogProduct.best_price) / containerOz;
       }
     }
