@@ -391,7 +391,9 @@ const ComplianceService = {
       if (limit.limit_type === 'annual_max_apps') {
         if (current >= limit.limit_value) status = 'exceeded';
         else if (current >= limit.limit_value - 1) status = 'warning';
-      } else if (limit.limit_type === 'seasonal_blackout') {
+      } else if (limit.limit_type === 'seasonal_blackout' && limit.season_start && limit.season_end) {
+        // Incomplete windows (nullable endpoints) are skipped — same as
+        // application-limits.js seasonal_blackout.
         // Compare ET calendar MM-DD, not UTC Date objects — blackout windows
         // are legal dates, not absolute timestamps.
         // pg `date` columns deserialize as JS Date objects — normalize first.
@@ -445,6 +447,7 @@ const ComplianceService = {
     const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
     const todayMMDD = today.slice(5, 10);
     const activeBlackouts = blackouts.filter(b => {
+      if (!b.season_start || !b.season_end) return false; // incomplete window
       const startMMDD = mmdd(b.season_start);
       const endMMDD = mmdd(b.season_end);
       return startMMDD <= endMMDD
@@ -494,8 +497,8 @@ const ComplianceService = {
     return {
       blackoutPeriods: blackouts.map(b => ({
         jurisdiction: b.jurisdiction,
-        start: etCalendarDayOf(b.season_start),
-        end: etCalendarDayOf(b.season_end),
+        start: b.season_start ? etCalendarDayOf(b.season_start) : null,
+        end: b.season_end ? etCalendarDayOf(b.season_end) : null,
         description: b.description,
       })),
       customers: statuses,

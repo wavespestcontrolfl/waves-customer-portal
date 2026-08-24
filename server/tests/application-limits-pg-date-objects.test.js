@@ -157,6 +157,28 @@ describe('compliance service with pg date columns as JS Date objects', () => {
     }
   });
 
+  test('null season endpoints: never active on Jan 1 and rendered as null (not 1970-01-01)', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T16:00:00Z') });
+    try {
+      db
+        .mockReturnValueOnce(chain({ rows: [blackoutLimit(null, null)] }))
+        .mockReturnValueOnce(chain({ rows: [{ id: 'cust-5', first_name: 'I', last_name: 'J', city: 'Sarasota', zip: '34231', lawn_type: 'Zoysia' }] }))
+        .mockReturnValueOnce(chain({ first: { count: '0' } }));
+      const status = await ComplianceService.getNitrogenStatus();
+      expect(status.blackoutPeriods[0]).toMatchObject({ start: null, end: null });
+      expect(status.customers[0].blackoutActive).toBe(false);
+
+      db
+        .mockReturnValueOnce(chain({ first: { id: 'cust-5', first_name: 'I', last_name: 'J', zip: '34231' } }))
+        .mockReturnValueOnce(chain({ rows: [] }))
+        .mockReturnValueOnce(chain({ rows: [blackoutLimit(null, null)] }));
+      const out = await ComplianceService.getProductLimits('cust-5');
+      expect(out.limits[0]).toMatchObject({ limitType: 'seasonal_blackout', status: 'ok' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('getProductLimits: Date-object blackout window reports blackout_active', async () => {
     jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
     try {
