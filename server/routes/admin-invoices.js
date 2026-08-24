@@ -10,6 +10,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
+const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -1602,6 +1603,10 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
         });
       }
       await trx('payments').insert(paymentRow);
+      // The invoice is settled — an active payment plan has nothing left to
+      // collect. Complete it on the SAME trx so a paid invoice never keeps
+      // an `active` plan that blocks edits / credit reversal.
+      await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
       return row;
     });
 
@@ -1902,6 +1907,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         };
         if (waiveSetupFee) updates.setup_fee_waived = true;
         await trx('invoices').where({ id }).update(updates);
+        // Fully credit-covered — any active payment plan is done collecting.
+        await PaymentPlans.completeActivePlansForInvoice(id, trx);
 
         // No payments-ledger row here. Revenue is recognized when cash is
         // RECEIVED — a cash-backed prepayment books its payment row at credit
@@ -2298,6 +2305,65 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] payment-plan failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// POST /:id/payment-plan/cancel — cancel the invoice's active payment plan.
+// Plans are record-only (no collector yet), but an `active` row blocks invoice
+// edits, credit reversal and auto-credit — this is the only admin exit.
+router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const reason = cleanOptionalText((req.body || {}).reason, 300);
+    const cancelledBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        if (!invoice) {
+          const e = new Error('Invoice not found'); e.statusCode = 404; throw e;
+        }
+        const plan = await trx('payment_plans')
+          .where({ invoice_id: id, status: 'active' })
+          .forUpdate()
+          .first();
+        if (!plan) {
+          const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
+        }
+        const now = new Date();
+        const [cancelled] = await trx('payment_plans')
+          .where({ id: plan.id, status: 'active' })
+          .update({ status: 'cancelled', cancelled_at: now, cancelled_by: cancelledBy, updated_at: now })
+          .returning('*');
+        if (!cancelled) {
+          const e = new Error('Payment plan changed before it could be cancelled'); e.statusCode = 409; throw e;
+        }
+        return { invoice, plan: cancelled };
+      });
+    } catch (err) {
+      if (err?.statusCode === 404 || err?.statusCode === 409) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const { invoice, plan } = outcome;
+    await db('activity_log').insert({
+      customer_id: plan.customer_id || invoice.customer_id,
+      action: 'payment_plan_cancelled',
+      description: `Payment plan cancelled for invoice ${invoice.invoice_number || invoice.id}`
+        + `${reason ? ` — ${reason}` : ''} — ${cancelledBy}`,
+      metadata: {
+        invoice_id: invoice.id,
+        payment_plan_id: plan.id,
+        reason,
+      },
+    }).catch((err) => logger.warn(`[admin-invoices:payment-plan-cancel] activity_log insert failed: ${err.message}`));
+
+    res.json({ ok: true, paymentPlan: plan });
+  } catch (err) {
+    logger.error(`[admin-invoices] payment-plan cancel failed: ${err.message}`);
     next(err);
   }
 });

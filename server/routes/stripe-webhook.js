@@ -1841,6 +1841,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       if (paidInvoice) {
         await require('../services/invoice-followups').stopOnPayment(paidInvoice.id)
           .catch((e) => logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`));
+        await require('../services/payment-plans').completeActivePlansForPaidInvoice(paidInvoice.id, 'stripe_webhook');
         await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(paidInvoice);
       }
     } catch (e) {

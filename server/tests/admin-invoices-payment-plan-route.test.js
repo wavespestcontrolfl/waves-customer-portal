@@ -209,3 +209,79 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     });
   });
 });
+
+describe('POST /:id/payment-plan/cancel', () => {
+  let trx;
+  let trxInvoices;
+  let trxPlans;
+
+  const ACTIVE_PLAN = { id: 'plan-1', customer_id: 'cust-1', status: 'active' };
+  const CANCELLED_PLAN = { ...ACTIVE_PLAN, status: 'cancelled' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
+    trxPlans = makeRecorder({
+      first: jest.fn(async () => ({ ...ACTIVE_PLAN })),
+      update: jest.fn(() => ({ returning: jest.fn(async () => [CANCELLED_PLAN]) })),
+    });
+    trx = jest.fn((table) => {
+      if (table === 'invoices') return trxInvoices;
+      if (table === 'payment_plans') return trxPlans;
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    const activityQB = makeRecorder();
+    db.mockImplementation((table) => {
+      if (table === 'activity_log') return activityQB;
+      throw new Error(`unexpected table ${table}`);
+    });
+    db.transaction.mockImplementation(async (cb) => cb(trx));
+  });
+
+  test('cancels the active plan under row locks and stamps cancelled_at/by', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'created in error' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.paymentPlan.status).toBe('cancelled');
+      // Both rows locked in the transaction before the flip.
+      expect(trxInvoices.forUpdate).toHaveBeenCalled();
+      expect(trxPlans.forUpdate).toHaveBeenCalled();
+      // The UPDATE re-asserts status='active' so a concurrent completion
+      // (invoice paid mid-request) can't be silently overwritten.
+      expect(trxPlans.where).toHaveBeenCalledWith({ id: 'plan-1', status: 'active' });
+      expect(trxPlans.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'cancelled',
+        cancelled_by: 'admin-1',
+        cancelled_at: expect.any(Date),
+      }));
+    });
+  });
+
+  test('409 when the invoice has no active plan', async () => {
+    trxPlans.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(409);
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('404 when the invoice does not exist', async () => {
+    trxInvoices.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(404);
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+});

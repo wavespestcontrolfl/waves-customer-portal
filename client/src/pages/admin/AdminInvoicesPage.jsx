@@ -668,6 +668,7 @@ function InvoiceList({
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
+  const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
@@ -808,6 +809,28 @@ function InvoiceList({
       onRefresh();
     } catch (err) {
       showToast(`Reverse failed: ${err.message}`);
+    }
+  };
+
+  const handleCancelPaymentPlan = async (id) => {
+    if (
+      !confirm(
+        "Cancel this payment plan? The invoice reopens for normal collection and editing.",
+      )
+    )
+      return;
+    setCancellingPlanInvoiceId(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
+        method: "POST",
+      });
+      showToast("Payment plan cancelled");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Cancel plan failed: ${err.message}`);
+    } finally {
+      setCancellingPlanInvoiceId(null);
     }
   };
 
@@ -1485,6 +1508,18 @@ function InvoiceList({
                               title="Create a payment plan and send the confirmation email"
                             >
                               Payment plan
+                            </button>
+                          )}
+                          {inv.active_payment_plan && (
+                            <button
+                              onClick={() => handleCancelPaymentPlan(inv.id)}
+                              disabled={cancellingPlanInvoiceId === inv.id}
+                              style={sBtn(D.card, D.text, isMobile)}
+                              title="Cancel the active payment plan — the invoice reopens for normal collection and editing"
+                            >
+                              {cancellingPlanInvoiceId === inv.id
+                                ? "Cancelling…"
+                                : "Cancel plan"}
                             </button>
                           )}
                           {inv.status !== "void" && (

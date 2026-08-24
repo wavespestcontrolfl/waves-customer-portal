@@ -2577,6 +2577,7 @@ const StripeService = {
       } catch (e) {
         logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
       }
+      await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
       try {
         const fresh = await db('invoices').where({ id: invoiceId }).first();
         if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
@@ -2596,6 +2597,7 @@ const StripeService = {
       } catch (err) {
         logger.error(`[invoice-followups] stopOnPayment failed for card-on-file invoice ${invoiceId}: ${err.message}`);
       }
+      await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'card_on_file');
       try {
         await require('./annual-prepay-renewals').syncTermForInvoicePayment({
           id: invoiceId,
@@ -3759,6 +3761,7 @@ const StripeService = {
         } catch (e) {
           logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
         }
+        await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
         try {
           const fresh = await db('invoices').where({ id: invoiceId }).first();
           if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
