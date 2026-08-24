@@ -6,6 +6,8 @@ import {
   buildInvoiceListParams,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
+  invoiceCreatedSendFailedToast,
+  invoiceCreatedSendToast,
   invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
@@ -128,5 +130,92 @@ describe("AdminInvoicesPage deposit credit chip", () => {
     expect(invoiceDepositCreditTotal(undefined)).toBe(0);
     expect(invoiceDepositCreditTotal("[]")).toBe(0);
     expect(invoiceDepositCreditTotal([])).toBe(0);
+  });
+});
+
+describe("AdminInvoicesPage create-path send toasts", () => {
+  it("reports both channels when the send fully succeeds", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        sms: { ok: true },
+        email: { ok: true, recipient: { email: "billing@example.com" } },
+      }),
+    ).toBe(
+      "Invoice created & sent: WPC-2026-0001 (SMS + email to billing@example.com)",
+    );
+  });
+
+  it("calls out the failed channel on a partial send instead of claiming a full send", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        sms: { ok: true },
+        email: { ok: false, error: "no email on file" },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — sent via SMS; email failed");
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        sms: { ok: false },
+        email: { ok: true },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — sent via email; SMS failed");
+  });
+
+  it("points at Resend when no channel went out", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: false,
+        sms: { ok: false },
+        email: { ok: false },
+      }),
+    ).toBe(
+      "Invoice created but not sent: WPC-2026-0001 — use Resend on the invoice",
+    );
+  });
+
+  it("post-create failure toast names the action and surfaces the server reason", () => {
+    expect(
+      invoiceCreatedSendFailedToast(
+        "WPC-2026-0001",
+        "sent",
+        new Error("Invoice send already in progress"),
+      ),
+    ).toBe(
+      "Invoice WPC-2026-0001 created but not sent — Invoice send already in progress. Use Resend on the invoice.",
+    );
+    // Defensive: no invoice number / no error object still reads sensibly.
+    expect(invoiceCreatedSendFailedToast(null, "scheduled", undefined)).toBe(
+      "Invoice created but not scheduled — send failed. Use Resend on the invoice.",
+    );
+  });
+});
+
+describe("AdminInvoicesPage create-path toast edge cases", () => {
+  it("reports a credit-covered invoice as a success, never as a failed send", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        covered_by_credit: true,
+        sms: { ok: false, code: "covered_by_credit" },
+        email: { ok: false, code: "covered_by_credit" },
+      }),
+    ).toBe(
+      "Invoice created: WPC-2026-0001 — fully covered by account credit, nothing to send",
+    );
+  });
+
+  it("failure toast accepts a custom recovery instruction (schedule retry keeps the builder open)", () => {
+    expect(
+      invoiceCreatedSendFailedToast(
+        "WPC-2026-0001",
+        "scheduled",
+        new Error("scheduledFor must be in the future"),
+        "Adjust the time and press the button again to schedule this same invoice.",
+      ),
+    ).toBe(
+      "Invoice WPC-2026-0001 created but not scheduled — scheduledFor must be in the future. Adjust the time and press the button again to schedule this same invoice.",
+    );
   });
 });

@@ -889,6 +889,11 @@ const InvoiceService = {
       // on the invoice as `applied_deposit_credit`; consume exactly that from
       // the ledger, never the requested amount.
       depositCredit = null,
+      // Batch idempotency key (POST /admin/invoices/batch): persisted on the
+      // row so a batch retry can detect invoices the earlier attempt already
+      // created; the partial unique index (customer_id, batch_key) makes the
+      // concurrent-retry case lose atomically at the DB.
+      batchKey = null,
       // skipAccrual: this invoice must NOT accrue to a payer statement even for a
       // NET-terms payer — set by callers that immediately settle the invoice
       // (annual-prepay, paid in the same flow) or create a throwaway preview
@@ -1435,6 +1440,7 @@ const InvoiceService = {
             : {}),
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
+          ...(batchKey ? { batch_key: batchKey } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,

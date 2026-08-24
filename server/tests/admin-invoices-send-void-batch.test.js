@@ -1,0 +1,285 @@
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../models/db', () => {
+  const dbMock = jest.fn();
+  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  return dbMock;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => {
+    req.technicianId = 'tech-1';
+    req.techRole = 'technician';
+    return next();
+  },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+jest.mock('../services/invoice', () => ({
+  create: jest.fn(),
+  sendViaSMS: jest.fn(),
+  sendViaSMSAndEmail: jest.fn(),
+  voidInvoice: jest.fn(),
+}));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (url) => url),
+  invoiceShortCodePrefix: jest.fn(() => 'i'),
+}));
+jest.mock('../utils/portal-url', () => ({
+  publicPortalUrl: jest.fn(() => 'https://portal.test'),
+}));
+
+const express = require('express');
+const db = require('../models/db');
+const InvoiceService = require('../services/invoice');
+const router = require('../routes/admin-invoices');
+
+async function withServer(fn) {
+  const app = express();
+  app.use(express.json());
+  app.use('/admin/invoices', router);
+  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  const server = app.listen(0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  try {
+    return await fn(baseUrl);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const post = (baseUrl, path, body) => fetch(`${baseUrl}/admin/invoices${path}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body || {}),
+});
+
+// Chainable stub for the batch-dedupe lookup:
+// db('invoices').where(...).whereNotIn(...).whereNull(...).where(...).first(...)
+function makeDupChain(result) {
+  const chain = {};
+  for (const m of ['where', 'whereNotIn', 'whereNull']) chain[m] = jest.fn(() => chain);
+  chain.first = jest.fn(async () => result);
+  return chain;
+}
+
+describe('POST /:id/send error surface', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('both channels failing returns 400 with a TOP-LEVEL error (adminFetch toasts body.error; without it the operator sees a bare "HTTP 400")', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false,
+      sms: { ok: false, error: 'No phone on file' },
+      email: { ok: false, error: 'No email on file' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/send');
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe('No phone on file');
+      // Per-channel detail must survive for callers that read it.
+      expect(body.sms).toEqual({ ok: false, error: 'No phone on file' });
+      expect(body.email).toEqual({ ok: false, error: 'No email on file' });
+    });
+  });
+
+  test('falls back to the email error, then a generic message, when sms carries none', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false,
+      sms: { ok: false },
+      email: { ok: false, error: 'Mailbox rejected the message' },
+    });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/send');
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: 'Mailbox rejected the message' });
+    });
+
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: false, sms: { ok: false }, email: { ok: false } });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/send');
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: 'Invoice send failed on both channels' });
+    });
+  });
+
+  test('a single-channel success stays 200 with per-channel results (partial sends are reported, not errored)', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: true,
+      sms: { ok: true },
+      email: { ok: false, error: 'No email on file' },
+    });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/send');
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.sms.ok).toBe(true);
+      expect(body.email.ok).toBe(false);
+    });
+  });
+
+  test('an in-progress send throw still maps to 409', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockRejectedValue(new Error('Invoice send already in progress'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/send');
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ error: 'Invoice send already in progress' });
+    });
+  });
+});
+
+// Every business refusal InvoiceService.voidInvoice throws must surface as an
+// operator-actionable 409 toast, never fall through to the generic 500 handler
+// (an unhandled 500 gave the admin no toast and left the row unrefreshed).
+// Pinned VERBATIM to the service's messages, mirroring the PUT mapper suite.
+describe('POST /:id/void refusal mapping', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each([
+    ['paid invoice', 'Cannot void a paid invoice — issue a refund instead'],
+    ['payment in flight (status)', 'Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed'],
+    ['finalized payer statement', 'This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line'],
+    ['payment already applied', 'Cannot void an invoice with payment already applied (payment recorded) — issue a refund instead'],
+    ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before voiding'],
+    ['PI money in flight', 'A payment is already in flight (requires_capture); wait for it to settle or refund it before voiding'],
+    ['PI cancel failed', "Couldn't cancel the open payment session pi_abc (boom); resolve it before voiding"],
+    ['status changed mid-void', 'Invoice status changed while voiding — re-check and retry'],
+    ['new payment session mid-void', 'A new payment session started for this invoice — re-check and retry the void'],
+    ['payment applied mid-void', 'A payment was applied to this invoice while voiding — issue a refund instead'],
+  ])('surfaces the %s refusal as a 409 conflict', async (_label, message) => {
+    InvoiceService.voidInvoice.mockRejectedValue(new Error(message));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/void');
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ error: message });
+    });
+  });
+
+  test('a missing invoice maps to 404', async () => {
+    InvoiceService.voidInvoice.mockRejectedValue(new Error('Invoice not found'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/void');
+      expect(response.status).toBe(404);
+    });
+  });
+
+  test('a non-refusal failure still surfaces as a server error (mapper is not over-broad)', async () => {
+    InvoiceService.voidInvoice.mockRejectedValue(new Error('connection refused'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/void');
+      expect(response.status).toBe(500);
+    });
+  });
+});
+
+describe('POST /batch idempotency (batchKey)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const lineItems = [{ description: 'Service', unit_price: 100, quantity: 1, amount: 100 }];
+
+  test('a keyed retry skips customers that already have a live same-title invoice from the last 24h (no duplicate row, no duplicate text)', async () => {
+    // cust-1 already has the invoice (created by the first, partially-failed
+    // request); cust-2 does not.
+    const dupResults = [{ id: 'inv-existing', invoice_number: 'WPC-1' }, undefined];
+    db.mockImplementation(() => makeDupChain(dupResults.shift()));
+    InvoiceService.create.mockResolvedValue({
+      id: 'inv-new', invoice_number: 'WPC-2', total: 100, token: 'tok-2', payer_id: null,
+    });
+    InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1', 'cust-2'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000001',
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.created_count).toBe(1);
+      expect(body.skipped_count).toBe(1);
+      expect(body.failed_count).toBe(0);
+      expect(body.skipped[0]).toMatchObject({
+        customerId: 'cust-1',
+        invoiceId: 'inv-existing',
+        invoiceNumber: 'WPC-1',
+      });
+      // The skipped customer must not be re-created OR re-texted.
+      expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+      expect(InvoiceService.create.mock.calls[0][0]).toMatchObject({
+        customerId: 'cust-2',
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000001',
+      });
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-new', { operatorInitiated: true });
+    });
+  });
+
+  test('an unkeyed request keeps the old behavior — no dedupe lookup, every customer billed', async () => {
+    InvoiceService.create.mockResolvedValue({
+      id: 'inv-new', invoice_number: 'WPC-2', total: 100, token: 'tok-2', payer_id: null,
+    });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1', 'cust-2'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.created_count).toBe(2);
+      expect(body.skipped_count).toBe(0);
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a concurrent keyed retry losing the unique-index race is reported skipped, not failed', async () => {
+    // Pre-check SELECT sees nothing (both requests passed it), insert loses on
+    // invoices_customer_batch_key_uniq, re-select finds the winner's row.
+    const dupResults = [undefined, { id: 'inv-winner', invoice_number: 'WPC-9' }];
+    db.mockImplementation(() => makeDupChain(dupResults.shift()));
+    const uniqueErr = new Error('duplicate key value violates unique constraint "invoices_customer_batch_key_uniq"');
+    uniqueErr.code = '23505';
+    uniqueErr.constraint = 'invoices_customer_batch_key_uniq';
+    InvoiceService.create.mockRejectedValue(uniqueErr);
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000002',
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.failed_count).toBe(0);
+      expect(body.created_count).toBe(0);
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0]).toMatchObject({
+        customerId: 'cust-1',
+        invoiceId: 'inv-winner',
+        invoiceNumber: 'WPC-9',
+      });
+      // The loser must not text the customer.
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a malformed batchKey is rejected up front', async () => {
+    await withServer(async (baseUrl) => {
+      for (const batchKey of [123, '', '   ', 'x'.repeat(101)]) {
+        const response = await post(baseUrl, '/batch', {
+          customerIds: ['cust-1'], title: 'T', lineItems, batchKey,
+        });
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+          error: 'batchKey must be a non-empty string (max 100 chars)',
+        });
+      }
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+  });
+});

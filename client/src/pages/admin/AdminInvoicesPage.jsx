@@ -411,6 +411,51 @@ export function invoiceDepositCreditTotal(lineItems) {
     .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
 }
 
+// Create-path send toast. /admin/invoices/:id/send returns per-channel
+// results ({ sms: { ok }, email: { ok, recipient } }) and 200 when EITHER
+// channel succeeded — a flat "created & sent" toast hides a half-failed
+// send (SendInvoiceModal already reads the channels; the create path must
+// too). Exported for tests.
+export function invoiceCreatedSendToast(invoiceNumber, res) {
+  // Account credit fully covered the invoice at send time: sendViaSMSAndEmail
+  // returns ok:true with covered_by_credit and BOTH channels not-ok — that is
+  // a success (the invoice is prepaid, nothing to deliver), not a failed send.
+  if (res?.covered_by_credit) {
+    return `Invoice created: ${invoiceNumber} — fully covered by account credit, nothing to send`;
+  }
+  const sent = [
+    res?.sms?.ok && "SMS",
+    res?.email?.ok &&
+      (res.email.recipient?.email
+        ? `email to ${res.email.recipient.email}`
+        : "email"),
+  ].filter(Boolean);
+  const failed = [
+    res?.sms && !res.sms.ok && "SMS",
+    res?.email && !res.email.ok && "email",
+  ].filter(Boolean);
+  if (!sent.length) {
+    return `Invoice created but not sent: ${invoiceNumber} — use Resend on the invoice`;
+  }
+  return failed.length
+    ? `Invoice created: ${invoiceNumber} — sent via ${sent.join(" + ")}; ${failed.join(" + ")} failed`
+    : `Invoice created & sent: ${invoiceNumber} (${sent.join(" + ")})`;
+}
+
+// Toast for a send/schedule request that failed AFTER the invoice row was
+// persisted. The builder must still close (onCreated) — leaving the form
+// intact invites a second Create click that duplicates the invoice.
+// Exported for tests.
+export function invoiceCreatedSendFailedToast(
+  invoiceNumber,
+  action,
+  err,
+  recovery = "Use Resend on the invoice.",
+) {
+  const label = invoiceNumber ? `Invoice ${invoiceNumber}` : "Invoice";
+  return `${label} created but not ${action} — ${err?.message || "send failed"}. ${recovery}`;
+}
+
 export function buildInvoiceListParams({
   limit = 100,
   pageNo = 1,
@@ -782,12 +827,24 @@ function InvoiceList({
     };
   }, [promptResendId, onPromptResendHandled, invoices, showToast]);
 
+  // Per-row busy id for void/archive/unarchive: without it a failed request
+  // was an unhandled rejection (no toast, no refresh) and the button stayed
+  // clickable mid-flight (double-fire).
+  const [rowActionBusy, setRowActionBusy] = useState(null);
+
   const handleVoid = async (id) => {
     if (!confirm("Void this invoice?")) return;
-    await adminFetch(`/admin/invoices/${id}/void`, { method: "POST" });
-    showToast("Invoice voided");
-    load();
-    onRefresh();
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/void`, { method: "POST" });
+      showToast("Invoice voided");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Void failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
+    }
   };
 
   const handleReversePrepaid = async (id) => {
@@ -818,23 +875,33 @@ function InvoiceList({
       )
     )
       return;
-    const res = await adminFetch(`/admin/invoices/${id}/archive`, {
-      method: "POST",
-    });
-    if (res?.error) {
-      showToast(res.error);
-      return;
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/archive`, {
+        method: "POST",
+      });
+      showToast("Invoice archived");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Archive failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
     }
-    showToast("Invoice archived");
-    load();
-    onRefresh();
   };
 
   const handleUnarchive = async (id) => {
-    await adminFetch(`/admin/invoices/${id}/unarchive`, { method: "POST" });
-    showToast("Invoice restored");
-    load();
-    onRefresh();
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/unarchive`, { method: "POST" });
+      showToast("Invoice restored");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Restore failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
+    }
   };
 
   const toggleSelect = (id) => {
@@ -1529,7 +1596,11 @@ function InvoiceList({
                           {canCollect && (
                             <button
                               onClick={() => handleVoid(inv.id)}
-                              style={sBtn("transparent", D.red, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn("transparent", D.red, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                             >
                               Void
                             </button>
@@ -1546,7 +1617,11 @@ function InvoiceList({
                           {inv.status === "void" && !inv.archived_at && (
                             <button
                               onClick={() => handleArchive(inv.id)}
-                              style={sBtn(D.heading, D.white, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn(D.heading, D.white, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                               title="Tuck this voided invoice out of the default list"
                             >
                               Archive
@@ -1555,7 +1630,11 @@ function InvoiceList({
                           {inv.archived_at && (
                             <button
                               onClick={() => handleUnarchive(inv.id)}
-                              style={sBtn("transparent", D.text, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn("transparent", D.text, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                               title="Restore to the default list"
                             >
                               Unarchive
@@ -4295,6 +4374,10 @@ function PaymentPlanModal({
 
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
+  // Set when POST /admin/invoices succeeded but /schedule-send failed: the
+  // invoice row EXISTS, so the primary button must retry delivery of that
+  // same row — creating again would duplicate the invoice.
+  const [pendingScheduleInvoice, setPendingScheduleInvoice] = useState(null);
   const editMode = !!editInvoice;
   // Editing an invoice the customer already received: the copy in their inbox
   // is stale until Adam resends, so the form shows a reminder and the save
@@ -4891,12 +4974,17 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         dueDate,
       };
 
-      const invoice = await adminFetch("/admin/invoices", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+      // A pending schedule retry means the invoice row already exists —
+      // reuse it and only re-attempt the delivery step below.
+      let invoice = pendingScheduleInvoice;
+      if (!invoice) {
+        invoice = await adminFetch("/admin/invoices", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      }
 
-      if (queuedAttachments.length > 0 && invoice.id) {
+      if (!pendingScheduleInvoice && queuedAttachments.length > 0 && invoice.id) {
         try {
           await uploadInvoiceAttachments(invoice.id, queuedAttachments);
         } catch (attachmentErr) {
@@ -4910,29 +4998,67 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       }
 
       if (sendTiming === "now" && invoice.id) {
-        await adminFetch(`/admin/invoices/${invoice.id}/send`, {
-          method: "POST",
-          body: JSON.stringify({
-            requestReview,
-            reviewDelayMinutes: reviewDelay,
-            reviewTiming,
-            reviewScheduledFor:
-              reviewTiming === "custom" ? reviewCustomAt : null,
-          }),
-        });
-        showToast(`Invoice created & sent: ${invoice.invoice_number}`);
+        let sendRes;
+        try {
+          sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
+            method: "POST",
+            body: JSON.stringify({
+              requestReview,
+              reviewDelayMinutes: reviewDelay,
+              reviewTiming,
+              reviewScheduledFor:
+                reviewTiming === "custom" ? reviewCustomAt : null,
+            }),
+          });
+        } catch (sendErr) {
+          // The POST /admin/invoices above already persisted the row — a
+          // failed send is a POST-create problem. Never leave the builder
+          // open with the same form (the outer catch used to, and the next
+          // Create click duplicated the invoice + the send). Close it and
+          // hand the id to the list so it opens the resend dialog.
+          showToast(
+            invoiceCreatedSendFailedToast(
+              invoice.invoice_number,
+              "sent",
+              sendErr,
+            ),
+          );
+          onCreated({ promptResendId: invoice.id });
+          setSaving(false);
+          return;
+        }
+        showToast(invoiceCreatedSendToast(invoice.invoice_number, sendRes));
       } else if (sendTiming !== "draft" && invoice.id) {
-        await adminFetch(`/admin/invoices/${invoice.id}/schedule-send`, {
-          method: "POST",
-          body: JSON.stringify({
-            scheduledFor,
-            requestReview,
-            reviewDelayMinutes: reviewDelay,
-            reviewTiming,
-            reviewScheduledFor:
-              reviewTiming === "custom" ? reviewCustomAt : null,
-          }),
-        });
+        try {
+          await adminFetch(`/admin/invoices/${invoice.id}/schedule-send`, {
+            method: "POST",
+            body: JSON.stringify({
+              scheduledFor,
+              requestReview,
+              reviewDelayMinutes: reviewDelay,
+              reviewTiming,
+              reviewScheduledFor:
+                reviewTiming === "custom" ? reviewCustomAt : null,
+            }),
+          });
+        } catch (schedErr) {
+          // Post-create failure, but the operator's schedule choice must
+          // survive (the resend dialog only sends immediately). Keep the
+          // builder open in retry mode: the primary button re-attempts
+          // delivery of this same invoice — create is skipped, so a second
+          // click can never duplicate the row.
+          setPendingScheduleInvoice(invoice);
+          showToast(
+            invoiceCreatedSendFailedToast(
+              invoice.invoice_number,
+              "scheduled",
+              schedErr,
+              "Adjust the time and press the button again to schedule this same invoice.",
+            ),
+          );
+          setSaving(false);
+          return;
+        }
         showToast(`Invoice scheduled: ${invoice.invoice_number}`);
       } else {
         showToast(`Invoice created: ${invoice.invoice_number} (draft)`);
@@ -5077,17 +5203,27 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     borderRadius: 10,
     ...style,
   });
+  // A different customer selection invalidates a pending schedule retry —
+  // the next Create is a genuinely new invoice for the new customer.
+  useEffect(() => {
+    setPendingScheduleInvoice(null);
+  }, [selectedCustomer?.id]);
+
   const primaryActionLabel = editMode
     ? saving
       ? "Saving..."
       : "Save Changes"
-    : saving
-      ? "Creating..."
-      : sendTiming === "now"
-        ? "Send Invoice"
-        : sendTiming === "draft"
-          ? "Create Draft"
-          : "Schedule Invoice";
+    : pendingScheduleInvoice
+      ? saving
+        ? "Retrying..."
+        : `Retry — ${pendingScheduleInvoice.invoice_number} already created`
+      : saving
+        ? "Creating..."
+        : sendTiming === "now"
+          ? "Send Invoice"
+          : sendTiming === "draft"
+            ? "Create Draft"
+            : "Schedule Invoice";
   const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
   const queuedAttachmentHelpId = "invoice-create-attachments-help";
   const queuedAttachmentStatusId = "invoice-create-attachments-status";

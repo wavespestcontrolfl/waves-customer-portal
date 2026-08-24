@@ -664,20 +664,48 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
 // Body: { customerIds: string[], title, lineItems, notes?, dueDate?, taxRate?, sendImmediately?: boolean }
 router.post('/batch', requireAdmin, async (req, res, next) => {
   try {
-    const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately } = req.body || {};
+    const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately, batchKey } = req.body || {};
     if (!Array.isArray(customerIds) || customerIds.length === 0) {
       return res.status(400).json({ error: 'customerIds[] required' });
     }
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
+    if (batchKey !== undefined
+      && (typeof batchKey !== 'string' || !batchKey.trim() || batchKey.length > 100)) {
+      return res.status(400).json({ error: 'batchKey must be a non-empty string (max 100 chars)' });
+    }
 
     const domain = publicPortalUrl();
     const created = [];
     const failed = [];
+    const skipped = [];
 
     for (const customerId of customerIds) {
       try {
+        // Idempotent retry: this loop has no transaction across customers, so
+        // retrying a keyed request after a partial-failure response must not
+        // re-create rows that already landed (and re-text them when
+        // sendImmediately is set). The key is persisted on invoices.batch_key
+        // — this SELECT is the fast path, and the partial unique index
+        // (customer_id, batch_key) settles the concurrent case atomically in
+        // the 23505 handler below. Unkeyed requests keep the old behavior —
+        // deliberate repeat billing stays possible.
+        if (batchKey) {
+          const existing = await db('invoices')
+            .where({ customer_id: customerId, batch_key: batchKey })
+            .first('id', 'invoice_number');
+          if (existing) {
+            skipped.push({
+              customerId,
+              invoiceId: existing.id,
+              invoiceNumber: existing.invoice_number,
+              reason: 'This batch key already created an invoice for this customer (retry detected)',
+            });
+            continue;
+          }
+        }
         const invoice = await InvoiceService.create({
           customerId, title, lineItems, notes, dueDate, taxRate,
+          batchKey: batchKey || null,
         });
         let sendResult = null;
         if (sendImmediately) {
@@ -707,6 +735,22 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           sent: sendResult,
         });
       } catch (err) {
+        // Concurrent keyed retries can both pass the pre-check SELECT; the
+        // partial unique index (customer_id, batch_key) makes the second
+        // insert lose — the invoice exists, so report it skipped, not failed.
+        if (batchKey && err?.code === '23505'
+          && `${err.constraint || ''} ${err.detail || ''}`.includes('batch_key')) {
+          const existing = await db('invoices')
+            .where({ customer_id: customerId, batch_key: batchKey })
+            .first('id', 'invoice_number');
+          skipped.push({
+            customerId,
+            invoiceId: existing?.id || null,
+            invoiceNumber: existing?.invoice_number || null,
+            reason: 'This batch key already created an invoice for this customer (concurrent retry)',
+          });
+          continue;
+        }
         logger.error(`[admin-invoices:batch] create failed for ${customerId}: ${err.message}`);
         failed.push({ customerId, error: err.message });
       }
@@ -716,8 +760,10 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
       total: customerIds.length,
       created_count: created.length,
       failed_count: failed.length,
+      skipped_count: skipped.length,
       created,
       failed,
+      skipped,
     });
   } catch (err) { next(err); }
 });
@@ -938,7 +984,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       operatorInitiated: true,
     });
     if (!result.ok) {
-      return res.status(400).json(result);
+      // Both channels failed. adminFetch toasts `body.error` — without a
+      // top-level error the operator sees a bare "HTTP 400" instead of the
+      // per-channel reason (no phone on file, bounced email, ...).
+      return res.status(400).json({
+        ...result,
+        error: result.error || result.sms?.error || result.email?.error
+          || 'Invoice send failed on both channels',
+      });
     }
     res.json(result);
   } catch (err) {
@@ -1063,7 +1116,20 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (/Invoice not found/i.test(err.message)) {
+      return res.status(404).json({ error: err.message });
+    }
+    // Business refusals from voidInvoice / assertInvoiceVoidable (paid or
+    // in-flight payment, finalized payer statement, unverifiable/live
+    // PaymentIntent, concurrent status change) are operator-actionable
+    // conflicts, not server faults — surface them as 409 so the UI can
+    // toast the reason instead of an opaque 500 (mirrors the PUT mapper).
+    if (/^Cannot void|finalized payer statement|resolve it before voiding|already in flight|while voiding|re-check and retry the void/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.
