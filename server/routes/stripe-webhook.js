@@ -4157,8 +4157,24 @@ async function handleRefundFailed(refund) {
   // round-trips run outside the transaction, and voidInvoiceInTransaction
   // refuses under the lock if the row's PI no longer matches. Only the
   // marked, still-open rows are triaged (nothing else is ever voided).
+  // Preflight on the pre-lock payment row (codex P1): a replay (refund id
+  // already in failed_refund_ids) or an unstamped early bounce returns from
+  // the transaction below without restoring or voiding anything — Stripe
+  // sessions must not be cancelled for those. The in-transaction fence
+  // re-checks under the lock; this only avoids mutating Stripe for events
+  // that can already be seen to change nothing.
   const replacementTriage = new Map();
-  if (linkedInvoice) {
+  let triageWorthwhile = false;
+  if (linkedInvoice && refundId) {
+    let preMeta = {};
+    try {
+      preMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+    } catch { preMeta = {}; }
+    const preFailed = Array.isArray(preMeta.failed_refund_ids) && preMeta.failed_refund_ids.includes(refundId);
+    const preStamped = Array.isArray(preMeta.stamped_refund_ids) ? preMeta.stamped_refund_ids : [];
+    triageWorthwhile = !preFailed && (payment.stripe_refund_id === refundId || preStamped.includes(refundId));
+  }
+  if (triageWorthwhile) {
     try {
       const openMarked = await db('invoices')
         .where({ replaces_invoice_id: linkedInvoice.id })

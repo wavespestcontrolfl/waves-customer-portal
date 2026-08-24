@@ -465,6 +465,26 @@ describe('handleRefundFailed', () => {
     expect(body).toContain('DOUBLE PAYMENT');
   });
 
+  test('replay or unstamped bounce: no Stripe mutation — the pre-lock triage is skipped for events the fence will drop', async () => {
+    const StripeService = require('../services/stripe');
+    dbInvoices.first.mockResolvedValue(original());
+    dbInvoices.select.mockResolvedValue([replacement({ stripe_payment_intent_id: 'pi_open' })]);
+    // Replay: this refund id already bounced once.
+    paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_fail'] });
+    await handleRefundFailed(failedRefund());
+    expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalledWith('pi_open');
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(dbInvoices.select).not.toHaveBeenCalled();
+
+    // Unstamped: the bounce arrived before its creation stamp.
+    jest.clearAllMocks();
+    paymentRow.metadata = null;
+    paymentRow.stripe_refund_id = 're_other';
+    await handleRefundFailed(failedRefund());
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(dbInvoices.select).not.toHaveBeenCalled();
+  });
+
   test('a marked replacement that landed AFTER the pre-lock triage read is never voided blind', async () => {
     dbInvoices.first.mockResolvedValue(original());
     trxInvoices.first.mockResolvedValue(lockedOriginal());
