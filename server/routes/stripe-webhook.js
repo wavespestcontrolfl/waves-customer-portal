@@ -1850,17 +1850,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Complete any active payment plan on the settled invoice. OUTSIDE the
   // invoiceUpdated>0 gate (codex r1 P1): on a webhook retry the invoice is
   // already paid (invoiceUpdated=0), and the retry must still be able to
-  // recover a plan flip that failed transiently on the first delivery. The
-  // helper is idempotent (WHERE status='active') and best-effort, matching
-  // the neighbouring post-settlement side effects.
+  // recover a plan flip that failed transiently on the first delivery.
+  // THROWING variant (codex r2 P1): a swallowed DB error here would let the
+  // outer handler stamp the event processed=true, and central idempotency
+  // would then block every retry — the paid invoice keeps its active plan
+  // forever. Propagating fails the event (500), so Stripe redelivers and the
+  // idempotent helper (WHERE status='active') recovers.
   {
     const settledInvoice = await db('invoices')
       .where({ stripe_payment_intent_id: piId })
       .whereIn('status', ['paid', 'prepaid'])
-      .first('id')
-      .catch(() => null);
+      .first('id');
     if (settledInvoice) {
-      await require('../services/payment-plans').completeActivePlansForPaidInvoice(settledInvoice.id, 'stripe_webhook');
+      await require('../services/payment-plans').completeActivePlansForInvoice(settledInvoice.id);
     }
   }
   // Awaited inline so the side effect runs inside the same processing

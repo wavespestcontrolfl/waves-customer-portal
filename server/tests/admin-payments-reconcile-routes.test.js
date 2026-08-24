@@ -83,6 +83,7 @@ jest.mock('../models/db', () => {
     invoice: null,
     otherInvoices: [],
     payments: [],
+    paymentPlans: [],
     customers: [],
     failPaymentsInsert: false,
     onLock: null,
@@ -93,6 +94,7 @@ jest.mock('../models/db', () => {
     const rowsFor = () => {
       if (table === 'invoices') return [data.invoice, ...(data.otherInvoices || [])].filter(Boolean);
       if (table === 'payments') return data.payments;
+      if (table === 'payment_plans') return data.paymentPlans || [];
       if (table === 'customers') return data.customers;
       return [];
     };
@@ -113,6 +115,12 @@ jest.mock('../models/db', () => {
         return rows.map((r) => ({ ...r }));
       },
       async update(updates) {
+        if (table === 'payment_plans') {
+          // The reconcile settlement completes active plans on the same trx.
+          const hits = (data.paymentPlans || []).filter((r) => matches(r, builder._where));
+          hits.forEach((r) => Object.assign(r, updates));
+          return hits.length;
+        }
         if (table !== 'invoices') throw new Error(`unexpected update on ${table}`);
         if (!data.invoice || !matches(data.invoice, builder._where)) return 0;
         if (builder._notIn && builder._notIn.vals.includes(data.invoice[builder._notIn.col])) return 0;
@@ -134,6 +142,7 @@ jest.mock('../models/db', () => {
       invoice: state.invoice ? { ...state.invoice } : null,
       otherInvoices: (state.otherInvoices || []).map((r) => ({ ...r })),
       payments: [...state.payments],
+      paymentPlans: (state.paymentPlans || []).map((r) => ({ ...r })),
       customers: state.customers,
       failPaymentsInsert: state.failPaymentsInsert,
     };
@@ -147,6 +156,7 @@ jest.mock('../models/db', () => {
     state.invoice = staged.invoice;
     state.otherInvoices = staged.otherInvoices;
     state.payments = staged.payments;
+    state.paymentPlans = staged.paymentPlans;
     return result;
   };
   dbFn.fn = { now: () => new Date() };
@@ -214,6 +224,7 @@ beforeEach(() => {
   db.__state.invoice = freshInvoice();
   db.__state.otherInvoices = [];
   db.__state.payments = [];
+  db.__state.paymentPlans = [];
   db.__state.customers = [];
   db.__state.failPaymentsInsert = false;
   db.__state.onLock = null;
@@ -267,6 +278,23 @@ describe('manual reconcile atomicity', () => {
       stripe_charge_id: null,
       processor: null,
     }));
+  });
+
+  test('an active payment plan completes on the SAME trx as the reconcile settlement', async () => {
+    db.__state.paymentPlans = [
+      { id: 'plan-1', invoice_id: 'inv-1', status: 'active' },
+      { id: 'plan-other', invoice_id: 'inv-2', status: 'active' },
+    ];
+    const { status } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
+    });
+    expect(status).toBe(200);
+    expect(db.__state.invoice.status).toBe('paid');
+    const plan = db.__state.paymentPlans.find((r) => r.id === 'plan-1');
+    expect(plan.status).toBe('completed');
+    expect(plan.completed_at).toEqual(expect.any(Date));
+    // Another invoice's plan is untouched.
+    expect(db.__state.paymentPlans.find((r) => r.id === 'plan-other').status).toBe('active');
   });
 
   test('a failed payments insert rolls back the status flip (both-or-neither)', async () => {

@@ -250,10 +250,16 @@ describe('POST /:id/payment-plan/cancel', () => {
       throw new Error(`unexpected trx table ${table}`);
     });
     const activityQB = makeRecorder();
+    const followupsQB = makeRecorder({
+      // The sequence THIS plan stopped — the only kind cancel may re-arm.
+      first: jest.fn(async () => ({ id: 'seq-1', status: 'stopped', stopped_reason: 'payment_plan_created:plan-1' })),
+    });
     db.mockImplementation((table) => {
       if (table === 'activity_log') return activityQB;
+      if (table === 'invoice_followup_sequences') return followupsQB;
       throw new Error(`unexpected table ${table}`);
     });
+    db.followupsQB = followupsQB;
     db.transaction.mockImplementation(async (cb) => cb(trx));
   });
 
@@ -284,7 +290,18 @@ describe('POST /:id/payment-plan/cancel', () => {
       // collection" is a lie (codex r1 P1).
       const FollowUps = require('../services/invoice-followups');
       expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1');
-      expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
+  test('a sequence an admin stopped for an UNRELATED reason stays stopped after cancel (codex r2 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({ id: 'seq-1', status: 'stopped', stopped_reason: 'admin_stop' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
     });
   });
 

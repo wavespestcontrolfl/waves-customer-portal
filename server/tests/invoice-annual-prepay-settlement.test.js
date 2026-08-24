@@ -61,14 +61,20 @@ describe('settleInvoiceAsAnnualPrepayCovered (full coverage only)', () => {
   test('no add-ons → prepaid, dedicated marker set, paid_at stamped, NO payments row', async () => {
     const inv = invoice();
     const updateChain = chain({ first: inv, returning: [{ ...inv, status: 'prepaid' }] });
+    const plansChain = chain();
     db.mockReturnValueOnce(chain({ first: inv }))      // initial fetch
       .mockReturnValueOnce(chain({ first: undefined })) // pre-txn payments check
       .mockReturnValueOnce(chain({ first: inv }))       // locked fetch
       .mockReturnValueOnce(chain({ first: undefined })) // in-txn payments check
-      .mockReturnValueOnce(updateChain);                // update
+      .mockReturnValueOnce(updateChain)                 // update
+      .mockReturnValueOnce(plansChain);                 // payment-plan completion (same trx)
     const res = await InvoiceService.settleInvoiceAsAnnualPrepayCovered('inv-1', 'term-1');
     expect(res).toMatchObject({ settled: true });
     expect(res.invoice.status).toBe('prepaid');
+    // The settlement closes the invoice — any active payment plan completes
+    // on the SAME transaction (a prepaid invoice must not stay plan-locked).
+    expect(plansChain.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
+    expect(plansChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
     expect(updateChain._update).toMatchObject({
       status: 'prepaid', annual_prepay_covered_term_id: 'term-1', prepaid_at: 'NOW', paid_at: 'NOW',
     });

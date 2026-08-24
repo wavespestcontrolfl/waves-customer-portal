@@ -2360,15 +2360,20 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
 
     const { invoice, plan } = outcome;
 
-    // Plan creation stopped/paused the dunning sequence; cancelling the plan
-    // returns the invoice to normal collection, so re-arm reminders (same
-    // pattern as reverse-prepaid): resumeSequence reactivates an existing
-    // row; scheduleForInvoice creates one if none exists (both no-op on
-    // non-collectible invoices).
+    // Plan creation stopped the dunning sequence; cancelling the plan returns
+    // the invoice to normal collection, so re-arm reminders — but ONLY a
+    // sequence THIS plan stopped (stopped_reason carries the plan id). A
+    // sequence an admin stopped for an unrelated reason must stay stopped
+    // (codex r2 P1); resuming it here would undo that decision.
     try {
-      const FollowUpsSvc = require('../services/invoice-followups');
-      await FollowUpsSvc.resumeSequence(id);
-      await FollowUpsSvc.scheduleForInvoice(id);
+      const seq = await db('invoice_followup_sequences')
+        .where({ invoice_id: id })
+        .first('id', 'status', 'stopped_reason');
+      if (seq && seq.status === 'stopped'
+        && seq.stopped_reason === paymentPlanFollowupStopReason(plan.id)) {
+        const FollowUpsSvc = require('../services/invoice-followups');
+        await FollowUpsSvc.resumeSequence(id);
+      }
     } catch (err) {
       logger.warn(`[admin-invoices:payment-plan-cancel] follow-up re-arm failed: ${err.message}`);
     }

@@ -307,6 +307,10 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         .update(updates);
       if (!rows) return { updated: 0 };
 
+      // The invoice is settled — complete any active payment plan on the
+      // SAME trx so it can't keep the paid invoice edit/credit-locked.
+      await require('../services/payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+
       // Payments ledger row so revenue reports pick up the collection
       await trx('payments').insert({
         customer_id: invoice.customer_id,
