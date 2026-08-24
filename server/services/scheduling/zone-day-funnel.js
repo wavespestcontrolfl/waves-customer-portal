@@ -94,10 +94,24 @@ function isFunnelZone(estimateZone) {
 // A genuine Lakewood Ranch row still stays excluded through the city leg.
 const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
 
+// Slug equivalence for stamped rows. Direct/prefix match first; beyond
+// that, every slug in the funnel list names the SAME consolidated south
+// pool (the migration merged the legacy Port Charlotte zone's cities into
+// Venice / North Port, but rows stamped 'port charlotte' while that zone
+// was live remain correct history) — so a row stamped with one funneled
+// slug is cluster evidence for an estimate resolving another.
+function slugMatchesZone(rowZone, zoneSlug) {
+  if (!zoneSlug) return false;
+  if (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`)) return true;
+  const slugs = funnelZoneSlugs();
+  const inFunnel = (s) => slugs.has(s) || [...slugs].some((f) => s.startsWith(`${f}_`));
+  return inFunnel(rowZone) && inFunnel(zoneSlug);
+}
+
 function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
   const rowZone = String(row?.zone || '').toLowerCase();
   if (rowZone && rowZone !== FALLTHROUGH_ZONE_STAMP) {
-    return !!zoneSlug && (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`));
+    return slugMatchesZone(rowZone, zoneSlug);
   }
   const rowCity = String(row?.service_city || row?.customer_city || '').trim().toLowerCase();
   return !!rowCity && zoneCities.has(rowCity);

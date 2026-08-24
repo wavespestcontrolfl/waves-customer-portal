@@ -230,6 +230,13 @@ describe('isFunnelZone / zone matching', () => {
     expect(rowMatchesZone({ zone: 'lakewood_ranch', customer_city: 'Port Charlotte' }, VENICE_ZONE, 'venice', southCities)).toBe(true);
     expect(rowMatchesZone({ zone: 'lakewood_ranch', service_city: 'Punta Gorda', customer_city: 'Lakewood Ranch' }, VENICE_ZONE, 'venice', southCities)).toBe(true);
     expect(rowMatchesZone({ zone: 'lakewood_ranch', customer_city: 'Lakewood Ranch' }, VENICE_ZONE, 'venice', southCities)).toBe(false);
+    // Merged-zone alias: rows stamped 'port charlotte' while that zone was
+    // live are cluster evidence for the consolidated south pool — both
+    // slugs are in the funnel list, so they name the same pool, both ways.
+    expect(rowMatchesZone({ zone: 'port charlotte', customer_city: null }, VENICE_ZONE, 'venice', southCities)).toBe(true);
+    expect(rowMatchesZone({ zone: 'venice_north_port', customer_city: null }, VENICE_ZONE, 'port charlotte', southCities)).toBe(true);
+    // A non-funneled stamp never rides the alias.
+    expect(rowMatchesZone({ zone: 'sarasota', customer_city: null }, VENICE_ZONE, 'port charlotte', southCities)).toBe(false);
     // Unstamped multi-property call booking: the visit's service city
     // outranks the customer's primary city, both ways.
     expect(rowMatchesZone({ zone: null, service_city: 'Venice', customer_city: 'Sarasota' }, VENICE_ZONE, 'venice', cities)).toBe(true);
