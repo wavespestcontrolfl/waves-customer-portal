@@ -278,6 +278,21 @@ router.post('/pricing', async (req, res, next) => {
       if (seen.has(dupeKey)) { duplicates++; continue; }
       seen.add(dupeKey);
 
+      // Strict numeric price, validated BEFORE any catalog mutation (codex
+      // r19-push P1 + GH r3 P1; same contract as the price worker's
+      // isNumericInput): parseFloat accepts numeric prefixes, so
+      // "12.00 estimated" imported as 12, and a truthy malformed cell like
+      // "N/A" created the product with needs_pricing=false while writing
+      // no price at all.
+      const cleanedPrice = String(priceStr || '').trim().replace(/^\$/, '');
+      const importedPrice = /^-?\d+(\.\d+)?$/.test(cleanedPrice) ? Number(cleanedPrice) : NaN;
+      const hasValidPrice = Number.isFinite(importedPrice) && importedPrice > 0;
+      // Canonical unit size from the parsed pack (r20-push P1): without it
+      // recalcBestPrice cannot scale the vendor price and tank-mix costing
+      // cannot use the product at all.
+      const adminInventoryRouteForSize = require('./admin-inventory');
+      const importedSizeOz = adminInventoryRouteForSize.quantityToOz(size);
+
       // Find or create product in products_catalog
       let productRecord = await db('products_catalog').whereILike('name', product).first();
       if (!productRecord) {
@@ -288,7 +303,8 @@ router.post('/pricing', async (req, res, next) => {
           epa_reg_number: epaRegNumber || 'N/A',
           formulation: 'unspecified',
           container_size: size || null,
-          needs_pricing: !priceStr,
+          ...(importedSizeOz > 0 ? { unit_size_oz: importedSizeOz } : {}),
+          needs_pricing: !hasValidPrice,
         };
         if (sku) insertData.sku = sku;
         // subcategory column may not exist yet — try with it, fall back without
@@ -307,35 +323,76 @@ router.post('/pricing', async (req, res, next) => {
         if (missingEpaRegNumber(productRecord.epa_reg_number) && epaRegNumber) upd.epa_reg_number = epaRegNumber;
         if (!productRecord.sku && sku) upd.sku = sku;
         if (!productRecord.container_size && size) upd.container_size = size;
+        if (!(parseFloat(productRecord.unit_size_oz) > 0) && importedSizeOz > 0) upd.unit_size_oz = importedSizeOz;
         if (Object.keys(upd).length > 0) await db('products_catalog').where({ id: productRecord.id }).update(upd);
       }
 
-      // Add vendor pricing if vendor and price exist
-      if (vendor && priceStr) {
+      // Add vendor pricing if vendor and a VALID price exist
+      if (vendor && hasValidPrice) {
         const vendorRecord = await db('vendors').whereILike('name', vendor).first()
           || await db('vendors').whereILike('name', `%${vendor}%`).first();
 
         if (vendorRecord) {
-          const existing = await db('vendor_pricing')
-            .where({ product_id: productRecord.id, vendor_id: vendorRecord.id }).first();
 
-          if (!existing) {
-            await db('vendor_pricing').insert({
-              product_id: productRecord.id,
-              vendor_id: vendorRecord.id,
-              price: parseFloat(priceStr) || 0,
-              quantity: size || null,
-              vendor_product_url: sourceUrl || null,
-              vendor_sku: sku || null,
-              last_checked_at: new Date(),
-            });
-          }
-
-          // Update best price on product
-          const price = parseFloat(priceStr);
-          if (price > 0 && (!productRecord.best_price || price < parseFloat(productRecord.best_price))) {
-            await db('products_catalog').where({ id: productRecord.id }).update({
-              best_price: price, best_vendor: vendorRecord.name, needs_pricing: false,
+          // Admin-initiated import = an approval (codex #3465 r9-push P1):
+          // without the eligibility stamp the row sat at the pending
+          // default while best_price was hand-written — the next canonical
+          // recalculation then ignored the imported vendor entirely.
+          const adminInventoryRoute = require('./admin-inventory');
+          // Malformed prices never mutate (r11-push P1): "N/A"-style cells
+          // parsed to 0 and the upsert then zeroed a valid vendor price
+          // while stamping it approved. Only a finite positive price
+          // imports.
+          {
+            // One transaction per line (r11-push P1): the vendor upsert and
+            // the canonical recalculation commit together — a recalc
+            // failure must not leave a changed vendor price beside a
+            // catalog still pointing at the old winner. recalcBestPrice
+            // takes the product advisory lock first on this connection.
+            await db.transaction(async (trx) => {
+              // Product advisory lock FIRST — the shared lock-order
+              // contract (r12-push P1): upserting the vendor row before
+              // recalc's lock acquisition inverts the order the approval
+              // paths use and can deadlock against them.
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productRecord.id)]);
+              // Re-read INSIDE the lock (codex GH r3 P2): the pre-lock read
+              // races a concurrent approval inserting the unique
+              // (product_id, vendor_id) row — a stale null would make this
+              // insert violate the unique constraint (or double-write).
+              const lockedExisting = await trx('vendor_pricing')
+                .where({ product_id: productRecord.id, vendor_id: vendorRecord.id })
+                .first();
+              if (!lockedExisting) {
+                await trx('vendor_pricing').insert({
+                  product_id: productRecord.id,
+                  vendor_id: vendorRecord.id,
+                  price: importedPrice,
+                  quantity: size || null,
+                  ...adminInventoryRoute.approvedPerOzFields(importedPrice, size || null),
+                  vendor_product_url: sourceUrl || null,
+                  vendor_sku: sku || null,
+                  last_checked_at: new Date(),
+                });
+              } else {
+                // Upsert (r10-push P1): an existing product/vendor row was
+                // previously left untouched while the endpoint reported the
+                // line imported — recalculation then re-read the OLD price.
+                const quantity = size || lockedExisting.quantity || null;
+                await trx('vendor_pricing').where({ id: lockedExisting.id }).update({
+                  previous_price: lockedExisting.price,
+                  price: importedPrice,
+                  quantity,
+                  ...adminInventoryRoute.approvedPerOzFields(importedPrice, quantity),
+                  ...(sourceUrl ? { vendor_product_url: sourceUrl } : {}),
+                  ...(sku ? { vendor_sku: sku } : {}),
+                  last_checked_at: new Date(),
+                  updated_at: new Date(),
+                });
+              }
+              // Single best-price writer: the canonical recalculation
+              // replaces the old raw-price comparison (which ignored pack
+              // sizes and bypassed the backing/cache fields).
+              await adminInventoryRoute.recalcBestPrice(productRecord.id, trx);
             });
           }
         }

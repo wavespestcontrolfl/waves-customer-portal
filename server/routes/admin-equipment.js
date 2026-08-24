@@ -230,7 +230,22 @@ router.get('/tank-mixes', async (req, res, next) => {
     if (active !== undefined) query = query.where('active', active === 'true');
 
     const mixes = await query;
-    res.json({ tank_mixes: mixes, mixes });
+    // Derive cost_incomplete from the persisted per-line cost_unknown flags
+    // (r7-push P1): the mutation responses carry it, but the client reloads
+    // this list right after — without the derivation the partial totals
+    // would present as complete again on reload.
+    const withFlags = mixes.map((m) => {
+      let prods;
+      try {
+        prods = typeof m.products === 'string' ? JSON.parse(m.products) : (m.products || []);
+      } catch {
+        prods = [];
+      }
+      return Array.isArray(prods) && prods.some((p) => p && p.cost_unknown === true)
+        ? { ...m, cost_incomplete: true }
+        : m;
+    });
+    res.json({ tank_mixes: withFlags, mixes: withFlags });
   } catch (err) {
     next(err);
   }
@@ -243,18 +258,33 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
   let totalCostPerTank = 0;
 
   const enrichedProducts = [];
+  let anyCostUnknown = false;
   for (const p of products) {
     let unitCost = 0;
+    let costUnknown = false;
 
-    // Look up current price from products_catalog
+    // Look up current price from products_catalog. ANY catalog-linked
+    // component that can't produce a usable positive price AND size is
+    // UNKNOWN (r5-push P1) — a missing row, a missing/zero best_price, or a
+    // missing container size all otherwise contributed $0 while the totals
+    // presented as complete.
     if (p.product_id) {
+      costUnknown = true;
       const catalogProduct = await db('products_catalog')
         .where({ id: p.product_id })
         .first();
-      if (catalogProduct && catalogProduct.best_price) {
-        // cost_per_oz from best price / total oz in container
-        const containerOz = parseFloat(catalogProduct.size_oz) || 128; // default 1 gal
-        unitCost = parseFloat(catalogProduct.best_price) / containerOz;
+      if (catalogProduct && parseFloat(catalogProduct.best_price) > 0) {
+        // cost_per_oz from best price / total oz in container.
+        // Column is products_catalog.unit_size_oz (there is no size_oz);
+        // best_price is the price for one unit_size_oz container. A
+        // missing/zero unit_size_oz is UNKNOWN, never a 1-gal guess
+        // (r3-push P1): other costing paths reject missing sizes, and a
+        // fabricated divisor invents tank and per-1,000-sq-ft costs.
+        const containerOz = parseFloat(catalogProduct.unit_size_oz);
+        if (Number.isFinite(containerOz) && containerOz > 0) {
+          unitCost = parseFloat(catalogProduct.best_price) / containerOz;
+          costUnknown = false;
+        }
       }
     }
 
@@ -262,10 +292,16 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
     const productCost = unitCost * ozPerTank;
     totalCostPerTank += productCost;
 
+    if (costUnknown) anyCostUnknown = true;
+    // Strip any PRIOR flag before conditionally re-adding (r8-push P1):
+    // spreading p verbatim kept a stale cost_unknown:true after the
+    // catalog price/size became valid.
+    const { cost_unknown: _priorUnknown, ...rest } = p;
     enrichedProducts.push({
-      ...p,
+      ...rest,
       cost_per_oz: Math.round(unitCost * 10000) / 10000,
       cost_in_tank: Math.round(productCost * 100) / 100,
+      ...(costUnknown ? { cost_unknown: true } : {}),
     });
   }
 
@@ -278,6 +314,10 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
     products: enrichedProducts,
     cost_per_tank: costPerTank,
     cost_per_1000sf: costPer1000,
+    // At least one priced component had no container size — the totals
+    // EXCLUDE it and understate the mix cost; surfaces must show the gap
+    // instead of presenting the partial number as complete.
+    ...(anyCostUnknown ? { cost_incomplete: true } : {}),
   };
 }
 
@@ -310,7 +350,10 @@ router.post('/tank-mixes', async (req, res, next) => {
     }).returning('*');
 
     logger.info(`Tank mix created: ${mix.name}`);
-    res.status(201).json({ tank_mix: mix });
+    // cost_incomplete is response-level (no tank_mixes column): the per-line
+    // cost_unknown flags persist inside products, and surfaces must not
+    // present a partial total as complete (r6-push P1).
+    res.status(201).json({ tank_mix: { ...mix, ...(costs.cost_incomplete ? { cost_incomplete: true } : {}) } });
   } catch (err) {
     next(err);
   }
@@ -334,16 +377,19 @@ router.put('/tank-mixes/:id', async (req, res, next) => {
       updates.products = JSON.stringify(costs.products || updates.products);
       updates.cost_per_tank = costs.cost_per_tank;
       updates.cost_per_1000sf = costs.cost_per_1000sf;
+      updates._costIncomplete = costs.cost_incomplete === true;
     } else if (updates.products !== undefined) {
       updates.products = JSON.stringify(updates.products);
     }
 
+    const costIncomplete = updates._costIncomplete === true;
+    delete updates._costIncomplete;
     const [mix] = await db('tank_mixes')
       .where({ id: req.params.id })
       .update(updates)
       .returning('*');
 
-    res.json({ tank_mix: mix });
+    res.json({ tank_mix: { ...mix, ...(costIncomplete ? { cost_incomplete: true } : {}) } });
   } catch (err) {
     next(err);
   }
@@ -369,7 +415,7 @@ router.post('/tank-mixes/:id/recalculate', async (req, res, next) => {
       .returning('*');
 
     logger.info(`Tank mix recalculated: ${updated.name} — $${costs.cost_per_tank}/tank`);
-    res.json({ tank_mix: updated });
+    res.json({ tank_mix: { ...updated, ...(costs.cost_incomplete ? { cost_incomplete: true } : {}) } });
   } catch (err) {
     next(err);
   }

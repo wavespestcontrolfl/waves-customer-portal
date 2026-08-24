@@ -3880,14 +3880,28 @@ function ApprovalsTab({ showToast, onUpdate }) {
   };
   const handleBulk = async (action) => {
     try {
-      await adminFetch("/admin/inventory/approvals/bulk", {
+      // Partial failures are real (codex GH r3 P2): the endpoint returns
+      // 200 with per-id processed/skipped/failed — report them instead of
+      // claiming every selected price applied, and keep the unprocessed
+      // ids selected for a retry.
+      const result = await adminFetch("/admin/inventory/approvals/bulk", {
         method: "POST",
         body: JSON.stringify({ ids: [...selected], action }),
       });
-      showToast(
-        `${action === "approve" ? "Approved" : "Rejected"} ${selected.size} items`,
-      );
-      setSelected(new Set());
+      const failed = result?.failed || [];
+      const skipped = result?.skipped || [];
+      const verb = action === "approve" ? "Approved" : "Rejected";
+      if (failed.length || skipped.length) {
+        showToast(
+          `${verb} ${result?.processed ?? 0} of ${selected.size}` +
+            `${failed.length ? ` — ${failed.length} failed (kept selected)` : ""}` +
+            `${skipped.length ? ` — ${skipped.length} already decided` : ""}`,
+        );
+        setSelected(new Set(failed));
+      } else {
+        showToast(`${verb} ${selected.size} items`);
+        setSelected(new Set());
+      }
       load();
       onUpdate();
     } catch (e) {

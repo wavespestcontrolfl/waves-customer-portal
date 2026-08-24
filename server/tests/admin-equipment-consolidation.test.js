@@ -314,4 +314,52 @@ describe('equipment/fleet consolidation schema guards', () => {
     expect(source).toContain('legacy_equipment_maintenance_log_id');
     expect(source).toContain('maintenance_records_legacy_equipment_log_uidx');
   });
+
+  test('tank mix costing reads products_catalog.unit_size_oz (not the nonexistent size_oz)', async () => {
+    const inserts = [];
+    db.mockImplementation((table) => {
+      const q = makeThenableQuery([]);
+      if (table === 'products_catalog') {
+        q.first = jest.fn(async () => ({
+          id: 'prod-1',
+          best_price: 256,
+          unit_size_oz: 64, // real column; old code read size_oz and fell back to 128
+        }));
+        return q;
+      }
+      if (table === 'tank_mixes') {
+        q.insert = jest.fn((row) => {
+          inserts.push(row);
+          q.returning = jest.fn(async () => [{ id: 'mix-1', name: row.name, ...row }]);
+          return q;
+        });
+        return q;
+      }
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/equipment/tank-mixes`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Test Mix',
+          tank_size_gal: 100,
+          coverage_sqft: 10000,
+          products: [{ product_id: 'prod-1', oz_per_tank: 10 }],
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(201);
+      expect(inserts).toHaveLength(1);
+      // $256 for a 64 oz container → $4.00/oz → $40/tank at 10 oz/tank.
+      // The size_oz bug divided by the 128 oz default → $2.00/oz → $20/tank.
+      expect(inserts[0].cost_per_tank).toBe(40);
+      expect(inserts[0].cost_per_1000sf).toBe(4);
+      const products = JSON.parse(inserts[0].products);
+      expect(products[0].cost_per_oz).toBe(4);
+      expect(body.tank_mix.id).toBe('mix-1');
+    });
+  });
 });
