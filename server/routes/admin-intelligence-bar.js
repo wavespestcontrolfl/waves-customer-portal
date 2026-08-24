@@ -582,6 +582,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!customer.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
       params.customer_id = customer.id;
       params.customer_name = `${customer.first_name} ${customer.last_name || ''}`.trim();
+      // Pin the APPROVED phone too: sendSms re-reads the customer at
+      // confirm time and refuses (preview_changed) if the record's phone
+      // no longer matches — the card's last4 stays truthful for the whole
+      // pending window.
+      params.phone = customer.phone;
+      params._require_phone_match = true;
       preview = {
         ...preview,
         pinned_recipient: {
@@ -597,6 +603,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (lead.error) return { failed: true, modelResult: lead };
       params.lead_id = lead.id;
       params.lead_name = `${lead.first_name} ${lead.last_name || ''}`.trim();
+      // Pin the approved transition: if the lead moves during the pending
+      // window, updateLeadStatus refuses (preview_changed) instead of
+      // overwriting a state the card never showed.
+      params._expected_status = lead.status;
       preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
     }
     if (toolUse.name === 'bulk_update_leads') {

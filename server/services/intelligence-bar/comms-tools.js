@@ -580,14 +580,22 @@ async function sendSms(input) {
     // if not, trust the typed phone and drop the id. Prevents cross-wired
     // consent (codex P1).
     const customer = await db('customers').where('id', custId).first();
-    if (customer) {
-      const inputDigits = phone.replace(/\D/g, '').slice(-10);
-      const customerDigits = (customer.phone || '').replace(/\D/g, '').slice(-10);
-      if (inputDigits === customerDigits && inputDigits.length === 10) {
-        customerName = `${customer.first_name} ${customer.last_name}`;
-      } else {
-        custId = null;
-      }
+    const inputDigits = phone.replace(/\D/g, '').slice(-10);
+    const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
+    const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
+    // _require_phone_match rides on a proposal-pinned confirmation: the card
+    // showed a specific person + phone last4, so if the record's phone
+    // changed (or the record vanished) inside the pending window, REFUSE and
+    // make the operator rebuild the card — never silently send to a number
+    // nobody approved (codex P1 on the pinning round).
+    if (input._require_phone_match && !phonesMatch) {
+      return {
+        error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
+        preview_changed: true,
+      };
+    }
+    if (phonesMatch) {
+      customerName = `${customer.first_name} ${customer.last_name}`;
     } else {
       custId = null;
     }

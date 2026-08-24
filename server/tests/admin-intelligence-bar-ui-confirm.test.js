@@ -658,6 +658,10 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.customer_id).toBe('cust-9');
       expect(stored.params.customer_name).toBe('Testa Alpha');
+      // The APPROVED phone is pinned too, and execution must verify the
+      // record still carries it (phone-drift refusal in sendSms).
+      expect(stored.params.phone).toBe('+19415551234');
+      expect(stored.params._require_phone_match).toBe(true);
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.recipient).toBe('Testa Alpha (…1234)');
@@ -702,6 +706,9 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.lead_id).toBe('lead-3');
       expect(stored.params.lead_name).toBe('Testc Beta');
+      // The approved transition's starting status is pinned — execution
+      // refuses if the lead moved inside the pending window.
+      expect(stored.params._expected_status).toBe('contacted');
       expect(body.pendingActions[0].params.lead).toBe('Testc Beta — contacted → lost');
     });
   });

@@ -505,6 +505,15 @@ async function updateLeadStatus(input) {
   const lead = await resolveLeadForUpdate(input);
   if (!lead) return { error: 'Lead not found' };
   if (lead.error) return lead;
+  // _expected_status rides on a proposal-pinned confirmation: the card showed
+  // "X → new_status", so if the lead moved in the pending window the approved
+  // transition is stale — refuse and rebuild rather than overwrite.
+  if (input._expected_status && lead.status !== input._expected_status) {
+    return {
+      error: `Lead status changed after the card was approved (now "${lead.status}"). Rebuild the confirmation card.`,
+      preview_changed: true,
+    };
+  }
 
   const oldStatus = lead.status;
   const updates = { status: new_status, updated_at: new Date() };
@@ -542,12 +551,16 @@ async function updateLeadStatus(input) {
 // preview drops out instead of being clobbered).
 const BULK_LEAD_UPDATE_CAP = 500;
 
-async function matchBulkLeads({ current_status, older_than_days, lead_ids }) {
+function bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids }) {
   const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
   let query = db('leads').where('status', current_status).whereNull('deleted_at');
   if (cutoff) query = query.where('updated_at', '<', cutoff);
   if (Array.isArray(lead_ids)) query = query.whereIn('id', lead_ids.slice(0, BULK_LEAD_UPDATE_CAP));
-  return query.select('id', 'first_name', 'last_name', 'status', 'updated_at');
+  return query;
+}
+
+async function matchBulkLeads(input) {
+  return bulkLeadCriteriaQuery(input).select('id', 'first_name', 'last_name', 'status', 'updated_at');
 }
 
 // Read-only preview of a bulk update — the route runs this at proposal time
@@ -562,9 +575,8 @@ async function bulkUpdateLeads(input) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
-  const matching = await matchBulkLeads({ current_status, older_than_days, lead_ids });
-
   if (dry_run) {
+    const matching = await matchBulkLeads({ current_status, older_than_days, lead_ids });
     return {
       dry_run: true,
       matches: matching.length,
@@ -579,14 +591,19 @@ async function bulkUpdateLeads(input) {
     };
   }
 
-  // Execute bulk update
-  const ids = matching.map(l => l.id);
-  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
-
+  // Execute: ONE guarded UPDATE that re-asserts the full criteria (status,
+  // deleted_at, cutoff, pinned ids) in its own WHERE clause — a lead whose
+  // status changed between preview and confirm is skipped, never clobbered
+  // (codex P1: the old SELECT-ids-then-UPDATE-by-id pair raced). RETURNING
+  // yields the ids actually updated, which feed the funnel bridge + activity
+  // log, and `updated` reports the real count.
   const updates = { status: new_status, updated_at: new Date() };
   if (lost_reason) updates.lost_reason = lost_reason;
 
-  await db('leads').whereIn('id', ids).update(updates);
+  const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+    .update(updates, ['id']);
+  const ids = updatedRows.map(r => r.id);
+  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
   // same monotonic stage predicate as the single-lead bridge.

@@ -91,6 +91,26 @@ describe('resolveCustomer (comms)', () => {
     expect(res.candidates).toHaveLength(2);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test('a pinned confirmation refuses to send when the customer phone changed inside the pending window', async () => {
+    // The record's phone no longer matches the approved (pinned) phone.
+    db.mockReturnValue(chain({ first: { ...CUST_A, phone: '+19415559999' } }));
+
+    const res = await executeCommsTool('send_sms', {
+      customer_id: 'cust-1', phone: '+19415551111', message: 'hello', _require_phone_match: true,
+    });
+    expect(res.preview_changed).toBe(true);
+    expect(res.error).toContain('phone changed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('without the pin, a phone/record mismatch degrades to a phone-only send (legacy behavior)', async () => {
+    db.mockReturnValue(chain({ first: { ...CUST_A, phone: '+19415559999' } }));
+
+    const res = await executeCommsTool('send_sms', { customer_id: 'cust-1', phone: '+19415551111', message: 'hello' });
+    expect(res.preview_changed).toBeUndefined();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415551111', customerId: null }));
+  });
 });
 
 describe('update_lead_status (leads)', () => {
@@ -117,6 +137,18 @@ describe('update_lead_status (leads)', () => {
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
   });
 
+  test('a pinned confirmation refuses a stale transition when the lead moved inside the pending window', async () => {
+    const leads = chain({ first: LEAD_A }); // live status: contacted
+    db.mockReturnValue(leads);
+
+    const res = await executeLeadsTool('update_lead_status', {
+      lead_id: 'lead-1', new_status: 'lost', _expected_status: 'new',
+    });
+    expect(res.preview_changed).toBe(true);
+    expect(res.error).toContain('changed after the card was approved');
+    expect(leads.update).not.toHaveBeenCalled();
+  });
+
   test('resolveLeadForUpdate returns the single active match for pinning', async () => {
     db.mockReturnValue(chain({ limit: [LEAD_A] }));
     expect(await resolveLeadForUpdate({ lead_name: 'Testc' })).toEqual(LEAD_A);
@@ -133,8 +165,10 @@ describe('bulk_update_leads (leads)', () => {
     expect(res.matched_ids).toEqual(['lead-1', 'lead-2']);
   });
 
-  test('execution with pinned lead_ids updates only that set (intersected with the criteria)', async () => {
-    const leads = chain({ select: [LEAD_A, LEAD_B], update: 2 });
+  test('execution is ONE guarded UPDATE: pinned ids AND the criteria ride in the same WHERE, RETURNING reports the real set', async () => {
+    // Only two of the three pinned leads still match the criteria at
+    // confirm time — the guarded UPDATE returns exactly those.
+    const leads = chain({ update: [{ id: 'lead-1' }, { id: 'lead-2' }] });
     const activities = chain({ insert: undefined });
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
@@ -147,15 +181,17 @@ describe('bulk_update_leads (leads)', () => {
 
     expect(res.success).toBe(true);
     expect(res.updated).toBe(2);
-    // Matching is constrained to the pinned ids…
+    // The UPDATE itself carries the pinned ids and the criteria guards —
+    // no separate SELECT-then-UPDATE-by-id race window.
     expect(leads.whereIn).toHaveBeenCalledWith('id', ['lead-1', 'lead-2', 'lead-gone']);
-    // …and the UPDATE hits only the ids that still match the criteria.
-    expect(leads.whereIn).toHaveBeenCalledWith('id', ['lead-1', 'lead-2']);
+    expect(leads.where).toHaveBeenCalledWith('status', 'contacted');
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
+    expect(leads.select).not.toHaveBeenCalled();
   });
 
   test('a confirmed run with dry_run:false actually updates (no silent no-op)', async () => {
-    const leads = chain({ select: [LEAD_A], update: 1 });
+    const leads = chain({ update: [{ id: 'lead-1' }] });
     const activities = chain({ insert: undefined });
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
@@ -164,6 +200,6 @@ describe('bulk_update_leads (leads)', () => {
     });
     expect(res.dry_run).toBeUndefined();
     expect(res.updated).toBe(1);
-    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }));
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
   });
 });
