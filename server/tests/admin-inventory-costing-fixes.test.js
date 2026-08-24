@@ -234,6 +234,21 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].best_price).toBe(50); // 0.5/oz * 100 oz
   });
 
+  test('parses multipack quantities instead of dropping the vendor from per-oz scoring', async () => {
+    // "4 x 32 oz" is a supported pack form (parsePackSize) that the simple
+    // normalizer cannot read; the row must still be scored per-oz.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 64, quantity: '4 x 32 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }, // $0.50/oz
+        { id: 'vp-b', vendor_id: 'v-b', price: 48, quantity: '64 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor B' }, // $0.75/oz
+      ],
+      product: { unit_size_oz: 64 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
+    expect(catalogUpdates[0].best_price).toBe(32); // 0.50/oz * 64 oz
+  });
+
   test('rederives per-oz from current price+quantity over a stale stored value', async () => {
     // vp-a was approved from $100/128oz down to $40/32oz but the legacy
     // approval write left normalized_unit_price at the old 0.78125/oz.

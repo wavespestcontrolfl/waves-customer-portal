@@ -16,8 +16,10 @@ const {
 const { applyInventoryUnitFix } = require('../services/inventory-unit-review');
 const {
   calcLandedCost,
+  convertToOz,
   costLineFromUsage,
   normalizeQuantityToOz,
+  parsePackSize,
   unitPriceBreakdown,
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
@@ -27,11 +29,24 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Robust quantity → total oz: normalizeQuantityToOz handles simple "128 oz"
+// forms; parsePackSize additionally handles supported multipack/fraction
+// forms ("4 x 30g tubes", "2 1/2 gal") so approvals don't drop sizes the
+// costing pipeline can parse (codex r3).
+function quantityToOz(quantity) {
+  const direct = normalizeQuantityToOz(quantity);
+  if (direct && direct > 0) return direct;
+  const parsed = parsePackSize(quantity);
+  if (!parsed) return null;
+  const oz = convertToOz(parsed.amount, parsed.unit);
+  return oz && oz > 0 ? Math.round(oz * 100) / 100 : null;
+}
+
 // Approvals change price/quantity, so the stored per-oz unit costs must be
 // refreshed in the same write — otherwise best-price scoring and the per-unit
 // price display keep computing against the pre-approval pack size (codex r1).
 function approvedPerOzFields(price, quantity) {
-  const oz = normalizeQuantityToOz(quantity);
+  const oz = quantityToOz(quantity);
   const priceNum = numberOrNull(price);
   const perOz = oz && oz > 0 && priceNum != null
     ? Math.round((priceNum / oz) * 10000) / 10000
@@ -3258,7 +3273,7 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
 // so the stored per-oz fields can be stale. Stored values are only trusted
 // when the quantity cannot be parsed (nothing to validate against).
 function vendorRowPricePerOz(row) {
-  const oz = normalizeQuantityToOz(row.quantity);
+  const oz = quantityToOz(row.quantity);
   const price = numberOrNull(row.price);
   if (oz && oz > 0 && price != null) return price / oz;
   const stored = numberOrNull(row.normalized_unit_price) ?? numberOrNull(row.price_per_oz);
