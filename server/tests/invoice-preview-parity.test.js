@@ -180,7 +180,13 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     await runCreate();
     const stored = inserted[inserted.length - 1];
 
-    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith('cust-1', 'Commercial Pest Control', FEE);
+    // The calculator must ride the caller's connection (4th arg) — a bare
+    // call inside a mint transaction grabs a second pool connection and can
+    // deadlock-wait the pool under concurrent mints.
+    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith(
+      'cust-1', 'Commercial Pest Control', FEE,
+      expect.objectContaining({ database: expect.anything() }),
+    );
     expect(stored.tax_rate).toBe(0.065);
     expect(stored.tax_amount).toBe(Math.round(FEE * 0.065 * 100) / 100);
   });
@@ -245,6 +251,142 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     expect(stored.tax_amount).toBe(Math.round(FEE * 0.07 * 100) / 100);
   });
 
+  // Payer-billed explicit rate: the snapshotted Bill-To entity owes the tax and
+  // its OWN tax_exempt flag governs — the service customer's certificate must
+  // not zero a non-exempt payer's bill (that underbills the AP invoice).
+  test('explicit taxRate + non-exempt payer: the customer exemption is NOT applied', async () => {
+    const PayerService = require('../services/payer');
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValueOnce({
+        payerId: 'payer-1',
+        poNumber: null,
+        taxExempt: false,
+        snapshot: { name: 'Builder LLC' },
+        paymentTerms: 'due_on_receipt',
+      });
+    // A verified certificate exists on the service customer — it must be ignored.
+    TaxCalculator.findVerifiedExemption.mockResolvedValueOnce({
+      id: 'ex-1', exemption_type: 'nonprofit', certificate_number: 'CERT-1',
+    });
+    try {
+      const inserted = mockCreateDb();
+      await runCreateExplicitRate(0.07);
+      const stored = inserted[inserted.length - 1];
+
+      expect(TaxCalculator.findVerifiedExemption).not.toHaveBeenCalled();
+      expect(stored.payer_id).toBe('payer-1');
+      expect(stored.tax_rate).toBe(0.07);
+      expect(stored.tax_amount).toBe(Math.round(FEE * 0.07 * 100) / 100);
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  test('explicit taxRate + EXEMPT payer: tax mints at zero via the payer flag', async () => {
+    const PayerService = require('../services/payer');
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValueOnce({
+        payerId: 'payer-1',
+        poNumber: null,
+        taxExempt: true,
+        snapshot: { name: 'Exempt HOA' },
+        paymentTerms: 'due_on_receipt',
+      });
+    try {
+      const inserted = mockCreateDb();
+      await runCreateExplicitRate(0.07);
+      const stored = inserted[inserted.length - 1];
+
+      expect(stored.tax_rate).toBe(0);
+      expect(stored.tax_amount).toBe(0);
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  // Frozen money authority: a frozen rate pinned to a Bill-To identity must
+  // fail CLOSED when mint-time payer resolution lands on a different entity,
+  // and a post-freeze exemption flip must not zero the frozen rate.
+  test('frozenTaxAuthority: payer divergence 409s (FROZEN_PAYER_DIVERGED); matching identity keeps the frozen rate over a new exemption', async () => {
+    const PayerService = require('../services/payer');
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValue({
+        payerId: 'payer-1', poNumber: null, taxExempt: true,
+        snapshot: { name: 'Now-Exempt LLC' }, paymentTerms: 'due_on_receipt',
+      });
+    try {
+      mockCreateDb();
+      await expect(InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        taxRate: 0.065,
+        frozenTaxAuthority: true,
+        frozenPayerId: null, // frozen self-pay, but a payer resolves now
+      })).rejects.toMatchObject({ code: 'FROZEN_PAYER_DIVERGED', statusCode: 409 });
+
+      // Matching identity: the frozen 6.5% survives the payer's NEW exemption.
+      const inserted = mockCreateDb();
+      await InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        taxRate: 0.065,
+        frozenTaxAuthority: true,
+        frozenPayerId: 'payer-1',
+      });
+      const stored = inserted[inserted.length - 1];
+      expect(stored.tax_rate).toBe(0.065);
+      expect(stored.tax_amount).toBe(Math.round(FEE * 0.065 * 100) / 100);
+      expect(TaxCalculator.findVerifiedExemption).not.toHaveBeenCalled();
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  // Automatic branch (no explicit taxRate) + NON-exempt payer: the customer's
+  // certificate must be excluded from the calculator too — create and preview
+  // both pass skipCustomerExemption so the payer's AP invoice charges the
+  // county rate. (An EXEMPT payer never reaches this branch: resolvedTaxExempt
+  // forces explicit rate 0.)
+  test('automatic tax + non-exempt payer: calculator runs with skipCustomerExemption on both paths', async () => {
+    const PayerService = require('../services/payer');
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValue({
+        payerId: 'payer-1',
+        poNumber: null,
+        taxExempt: false,
+        snapshot: { name: 'Builder LLC' },
+        paymentTerms: 'due_on_receipt',
+      });
+    try {
+      const inserted = mockCreateDb();
+      await runCreate();
+      const stored = inserted[inserted.length - 1];
+      expect(stored.payer_id).toBe('payer-1');
+      expect(TaxCalculator.calculateTax).toHaveBeenCalledWith(
+        'cust-1', 'Commercial Pest Control', FEE,
+        expect.objectContaining({ skipCustomerExemption: true }),
+      );
+
+      TaxCalculator.calculateTax.mockClear();
+      const preview = await runPreview();
+      expect(preview.tax_rate).toBe(0.065);
+      expect(TaxCalculator.calculateTax).toHaveBeenCalledWith(
+        'cust-1', 'Commercial Pest Control', FEE,
+        expect.objectContaining({ skipCustomerExemption: true }),
+      );
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
   test('preview keys on the linked service record before the scheduled service', async () => {
     db.mockImplementation((table) => {
       const q = {};
@@ -266,7 +408,10 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     });
 
     expect(preview.tax_rate).toBe(0.065);
-    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith('cust-1', 'Commercial Pest Control', FEE);
+    expect(TaxCalculator.calculateTax).toHaveBeenCalledWith(
+      'cust-1', 'Commercial Pest Control', FEE,
+      expect.objectContaining({ database: expect.anything() }),
+    );
   });
 
   test('preview throws like create when the service record is not the customer\'s', async () => {

@@ -41,11 +41,16 @@ const TaxCalculator = {
     const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Customer not found' };
 
-    // 1. Check tax exemption
-    const exemption = await this.findVerifiedExemption(customerId, { database: conn });
+    // 1. Check tax exemption. opts.skipCustomerExemption bypasses it for a
+    // payer-billed invoice: the snapshotted Bill-To entity owes the tax and
+    // its OWN tax_exempt flag governs — the service customer's certificate
+    // must not zero a non-exempt payer's rate.
+    if (opts.skipCustomerExemption !== true) {
+      const exemption = await this.findVerifiedExemption(customerId, { database: conn });
 
-    if (exemption) {
-      return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };
+      if (exemption) {
+        return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };
+      }
     }
 
     // 2. Check service taxability. opts.isCommercial forces commercial treatment

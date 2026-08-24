@@ -1229,12 +1229,31 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
     && Number.isFinite(frozenTaxRate) && frozenTaxRate >= 0 && frozenTaxRate < 1
     ? frozenTaxRate
     : null;
+  // The frozen Bill-To identity (r4 P0). undefined = pre-stamp record (no
+  // identity enforcement on legacy resumes); null = frozen self-pay; a
+  // non-empty string = the frozen payer id. Anything else restores
+  // undefined rather than inventing an authority.
+  const frozenPayer = frozen.backfillMintPayerId;
+  // payers.id is NUMERIC (r7 P0): the stamp stringifies, but a pre-fix or
+  // hand-written record can hold the raw number after the JSONB round-trip
+  // — accept both and normalize to the string the identity comparison
+  // uses. Rejecting a numeric id here restored undefined, which skipped
+  // enforcement and let a post-commit payer change mint the frozen rate
+  // for the wrong party.
+  const backfillMintPayerId = backfillMintRequired
+    && ('backfillMintPayerId' in frozen)
+    && (frozenPayer === null
+      || (typeof frozenPayer === 'string' && frozenPayer)
+      || (typeof frozenPayer === 'number' && Number.isFinite(frozenPayer)))
+    ? (frozenPayer === null ? null : String(frozenPayer))
+    : undefined;
   return {
     isBackfillCompletion,
     effectiveTimeOnSite: frozen.timeOnSite ?? null,
     backfillMintRequired,
     backfillMintAmount,
     backfillMintTaxRate,
+    backfillMintPayerId,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
 }
@@ -5297,60 +5316,108 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
-    // The mint's TAX basis — hoisted for the same single-derivation reason:
-    // the commit-time money freeze below and createFromService must read one
-    // value (fix round 10). CALCULATOR-derived (was a flat per-property_type
-    // hard-code): TaxCalculator owns verified
+    // Third-party Bill-To resolution — moved ABOVE the tax freeze (codex
+    // pre-push P0): the frozen completion rate must be derived for the
+    // entity that OWES it. Resolving the payer after freezing let a service
+    // customer's verified exemption zero the rate, and that explicit 0 then
+    // underbilled a non-exempt payer's AP invoice (payer invoices skip the
+    // customer-exemption check by design). resolveForInvoice never throws
+    // (falls back to self-pay), and any lookup error keeps the existing
+    // self-pay flow.
+    // Fail CLOSED here (pre-push P0 r2): a silent self-pay fallback would
+    // freeze the customer-exempt 0, and if create() later resolves the real
+    // non-exempt payer that explicit 0 is honored — underbilling the AP
+    // invoice. throwOnError surfaces the lookup failure BEFORE any money is
+    // frozen; the completion errors loud and is simply retried.
+    // Resume tolerance (codex r5 P1): a committed RESUME's money authority
+    // is the FROZEN contract — a live lookup failure must not block it
+    // indefinitely. On resume the error is captured instead of thrown; the
+    // mint block fail-closes at the point of need if the frozen contract
+    // turns out incomplete. First runs (the freeze) stay strictly
+    // fail-closed.
+    let completionResolvedPayer = null;
+    let completionTaxAuthorityError = null;
+    try {
+      completionResolvedPayer = await require('../services/payer').resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+        throwOnError: true,
+      });
+    } catch (payerErr) {
+      // First runs fail CLOSED (codex r10 P0): the payer identity feeds the
+      // coverage suppressors and the money posture about to be FROZEN — a
+      // fail-soft self-pay fallback could let membership dues "cover" a
+      // payer-billed visit, freeze required=false, and finalize the
+      // closeout without the payer invoice (lost AR). A committed RESUME
+      // reads the frozen contract instead: the error is captured and the
+      // suppressors below treat the authority as UNKNOWN (never suppress).
+      if (!resumingCommittedCompletion) throw payerErr;
+      logger.warn(`[dispatch] payer resolve failed on completion resume for service ${svc.id} — coverage suppressors disabled, frozen contract governs the mint: ${payerErr.message}`);
+      completionTaxAuthorityError = payerErr;
+    }
+    // UNKNOWN payer authority on a resume counts as payer-billed for every
+    // coverage suppressor (r10 P0): payer visits are excluded from customer
+    // autopay/prepaid coverage, so "unknown" must fail toward BILLING —
+    // never toward a suppressor swallowing a possible payer invoice. The
+    // mint itself still resolves fail-closed under the frozen contract.
+    const visitIsPayerBilled = completionTaxAuthorityError
+      ? true
+      : !!completionResolvedPayer?.payerId;
+    const completionPayerTaxExempt = visitIsPayerBilled && completionResolvedPayer?.taxExempt === true;
+    // The mint's TAX basis — LAZY since codex r6 P1: recap-only,
+    // dues-covered, prepaid, and inspection-only completions never need a
+    // rate, so a tax-table blip must not block them. Derived (memoized) the
+    // first time an invoice-bearing path asks: the commit-time freeze for a
+    // REQUIRED posture, or the live mint fallback. CALCULATOR-derived
+    // (was a flat per-property_type hard-code): TaxCalculator owns verified
     // exemptions, service_taxability, and county tax_rates, and treats
-    // `business` property_type as commercial — the hard-code billed
-    // `business` at 0% and every county at flat 7%. Derived HERE, at the
-    // freeze point, and carried through the frozen money contract unchanged
-    // (frozen backfillMintTaxRate → mintInvoiceTaxRate → createFromService),
-    // so mint == frozen expectation exactly as before; the rate always
-    // satisfies the resume validator (finite, 0 ≤ rate < 1). A calculator
-    // failure falls back to the legacy flat basis (business now included)
-    // so a tax lookup can never block a completion.
-    const completionInvoiceTaxRate = await (async () => {
-      try {
-        const TaxCalculator = require('../services/tax-calculator');
-        const taxResult = await TaxCalculator.calculateTax(
-          svc.customer_id,
-          svc.service_type,
-          Number(invoiceAmount) || 0,
-        );
-        const r = Number(taxResult?.rate);
-        if (Number.isFinite(r) && r >= 0 && r < 1) return r;
-        throw new Error(`calculator returned unusable rate ${taxResult?.rate}`);
-      } catch (taxErr) {
-        logger.warn(`[dispatch] TaxCalculator failed deriving completion tax basis for service ${svc.id} — legacy flat rate used: ${taxErr.message}`);
-        return ['commercial', 'business'].includes(svc.property_type) ? 0.07 : 0;
+    // `business` property_type as commercial. Fail CLOSED on any failure
+    // (r3 P0): no flat-rate guess is ever frozen or minted — a payer or
+    // tax lookup failure surfaces to the asking path (required lanes
+    // release for resume; non-required lanes keep their non-blocking
+    // failure posture).
+    let completionTaxDerivation = null;
+    const deriveCompletionTaxRate = () => {
+      if (!completionTaxDerivation) {
+        completionTaxDerivation = (async () => {
+          if (completionTaxAuthorityError) throw completionTaxAuthorityError;
+          // Payer-billed: the payer's own tax_exempt flag governs. Exempt
+          // payer → 0; non-exempt payer → county/service rate with the
+          // service customer's certificate EXCLUDED (skipCustomerExemption).
+          if (completionPayerTaxExempt) return 0;
+          // Residential-zero policy (r11 P0): InvoiceService.create forces
+          // tax to zero for non-commercial customers regardless of
+          // taxability rows — the frozen rate must encode the same rule,
+          // or a required residential completion would freeze a county
+          // rate that create's frozen authority then honors.
+          if (!['commercial', 'business'].includes(svc.property_type)) return 0;
+          const TaxCalculator = require('../services/tax-calculator');
+          const taxResult = await TaxCalculator.calculateTax(
+            svc.customer_id,
+            svc.service_type,
+            Number(invoiceAmount) || 0,
+            visitIsPayerBilled ? { skipCustomerExemption: true } : {},
+          );
+          const r = Number(taxResult?.rate);
+          if (Number.isFinite(r) && r >= 0 && r < 1) return r;
+          throw new Error(`completion tax derivation returned unusable rate ${taxResult?.rate} for service ${svc.id} — refusing to freeze a guessed rate`);
+        })();
       }
-    })();
+      return completionTaxDerivation;
+    };
     // Third-party Bill-To + membership dues coverage — hoisted from the
     // invoice block below (fix round 12): dues coverage is a COMMIT-TIME
     // business suppressor, and the frozen posture must read the REAL value
     // (a covered visit owes no mint — freezing required=true would let a
     // crash-resume after a dues/autopay change surprise-bill covered
     // membership work). Every input here is knowable at the freeze point:
-    // svc-loaded aliases plus two plain reads (payer resolution;
+    // svc-loaded aliases plus two plain reads (payer resolution — now
+    // performed ABOVE the tax freeze, see visitIsPayerBilled;
     // payment_methods for the chargeable autopay method) on rows the
     // completion transaction never writes. A payer-billed visit is owed by
     // the payer's AP inbox, so the customer's autopay/prepay must neither
     // suppress the AP invoice nor be credited against it — payer resolves
-    // FIRST so every coverage gate can exclude payer visits; resolveForInvoice
-    // never throws (falls back to self-pay), and any lookup error keeps the
-    // existing self-pay flow.
-    let visitIsPayerBilled = false;
-    try {
-      const PayerService = require('../services/payer');
-      const resolvedPayer = await PayerService.resolveForInvoice({
-        customerId: svc.customer_id,
-        scheduledServiceId: svc.id,
-      });
-      visitIsPayerBilled = !!resolvedPayer?.payerId;
-    } catch (e) {
-      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
-    }
+    // FIRST so every coverage gate can exclude payer visits.
     const customerAutopayActive = await customerOnAutopay({
       id: svc.customer_id,
       autopay_enabled: svc.cust_autopay_enabled,
@@ -5405,6 +5472,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       visitPerformed,
       typedOneTimeBilling: typedOneTimeBillingProfile,
     });
+    // The freeze's tax basis (r6 P1: derived ONLY when a REQUIRED posture
+    // will actually stamp frozen money — recap-only/covered/non-invoiced
+    // completions never run the calculator). First-run only: a resume never
+    // stamps (no transaction runs) and reads the frozen contract instead.
+    // Fail-closed by derivation: a payer/tax lookup failure blocks the
+    // commit BEFORE any money is frozen.
+    const completionInvoiceTaxRate = backfillMintRequiredAtCommit && !resumingCommittedCompletion
+      ? await deriveCompletionTaxRate()
+      : null;
     // The EFFECTIVE posture the invoice decision and the fail-closed catch
     // read: first run = the live commit-time derivation above; the resume
     // block overwrites it with the FROZEN structured_notes posture before
@@ -5419,6 +5495,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // invoice via the amount guard nor mint a different amount.
     let backfillFrozenMintAmount = null;
     let backfillFrozenMintTaxRate = null;
+    // r4 P0: the frozen Bill-To identity beside the money. undefined until a
+    // frozen resume restores it (or on first run, where the live
+    // completionResolvedPayer is the same derivation the freeze stamps).
+    let backfillFrozenMintPayerId;
     // The typed one-time billing pre-gate (409 completion_billing_required →
     // checkout detour) was REMOVED by owner ruling 2026-07-27: it blocked
     // techs from completing one-time jobs the completion itself was about to
@@ -6336,6 +6416,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // the required-mint shape to keep the notes lean.
               backfillMintAmountCents: Math.round(Number(invoiceAmount) * 100),
               backfillMintTaxRate: completionInvoiceTaxRate,
+              // The Bill-To identity the frozen rate was derived FOR (r4
+              // P0): null = frozen self-pay. The mint requires the resolved
+              // payer to match (invoice.js frozenPayerId) so a post-commit
+              // payer change can never receive a rate derived for someone
+              // else.
+              backfillMintPayerId: completionResolvedPayer?.payerId != null
+                ? String(completionResolvedPayer.payerId)
+                : null,
             } : {}),
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
@@ -7616,6 +7704,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // required resume instead of recomputing from mutated billing state.
       backfillFrozenMintAmount = frozenResume.backfillMintAmount;
       backfillFrozenMintTaxRate = frozenResume.backfillMintTaxRate;
+      backfillFrozenMintPayerId = frozenResume.backfillMintPayerId;
       isBackfillCompletion = frozenResume.isBackfillCompletion;
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
@@ -8601,9 +8690,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null
       ? backfillFrozenMintAmount
       : invoiceAmount;
-    const mintInvoiceTaxRate = backfillReviewMintRequired && backfillFrozenMintTaxRate != null
-      ? backfillFrozenMintTaxRate
-      : completionInvoiceTaxRate;
+    // LAZY mint tax basis (r6 P1): resolved inside the mint try, only when
+    // an invoice is actually being minted. Frozen contract first (required
+    // resumes), the memoized live derivation otherwise — whose failure
+    // fail-closes the required lane through the release/503 catch and stays
+    // non-blocking (invoice-less, loud) on the non-required lanes, exactly
+    // like every other mint failure.
+    const resolveMintInvoiceTaxRate = async () => (
+      backfillReviewMintRequired && backfillFrozenMintTaxRate != null
+        ? backfillFrozenMintTaxRate
+        : deriveCompletionTaxRate()
+    );
+    // The Bill-To identity the mint's frozen rate belongs to (r4 P0): the
+    // restored frozen id on a stamped resume, the live resolution otherwise.
+    // undefined (legacy resume with no stamp, or a parked live lookup)
+    // skips create()'s enforcement — create's own fail-closed resolution
+    // (throwOnError under frozenTaxAuthority) still governs the mint.
+    const mintInvoicePayerId = backfillReviewMintRequired && backfillFrozenMintPayerId !== undefined
+      ? backfillFrozenMintPayerId
+      : (completionTaxAuthorityError ? undefined : (completionResolvedPayer?.payerId || null));
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
@@ -9131,6 +9236,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (typedLiveRequiredMint && invoiceLookupFailed) {
           throw new Error('existing-invoice lookups failed — refusing to mint a possible duplicate invoice for this one-time completion');
         }
+        // Resolved here — inside the mint try — so a derivation failure
+        // follows the lane's own failure posture (r5/r6): required lanes
+        // release for resume, non-required lanes stay non-blocking.
+        // REQUIRED lanes only (r11 P0): a non-required mint passes NO
+        // explicit rate — the early derivation is bound to
+        // completionResolvedPayer, and a Bill-To change before create()'s
+        // own definitive resolution would marry the stale rate (e.g. an
+        // exempt self-pay 0%) to the new payer's invoice. create() derives
+        // tax AFTER its payer resolution instead, atomically.
+        const mintInvoiceTaxRate = backfillReviewMintRequired
+          ? await resolveMintInvoiceTaxRate()
+          : undefined;
         const mintOptions = {
           // The frozen money on a required resume — the exact number the
           // decision's amount guard just passed (mintInvoiceAmount /
@@ -9138,6 +9255,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           amount: mintInvoiceAmount,
           description: svc.service_type,
           taxRate: mintInvoiceTaxRate,
+          // Frozen money authority — REQUIRED lanes only (r6 P0): an
+          // ordinary live lane has no frozen retry posture, so a
+          // FROZEN_PAYER_DIVERGED there would be swallowed by the
+          // non-blocking catch and finalize the closeout invoice-less
+          // (lost AR). Non-required mints let create() re-resolve the
+          // payer and apply its own exemption semantics to the fresh rate.
+          frozenPayerId: backfillReviewMintRequired ? mintInvoicePayerId : undefined,
+          frozenTaxAuthority: backfillReviewMintRequired,
           // Frozen-money mints bypass scheduled replay (Codex P0, fix round
           // 11): with the flag on, createFromService REBUILDS the line items
           // from the CURRENT scheduled-service row + add-ons + stored line
@@ -9285,6 +9410,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               lineItems: typedMintLines,
               discountIds: scheduledInvoice?.discountIds || undefined,
               taxRate: mintInvoiceTaxRate,
+              frozenTaxAuthority: true,
+              frozenPayerId: mintInvoicePayerId,
               dueDate: serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
@@ -9498,6 +9625,52 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // 409s right back here, so the closeout stays unfinalized and
             // parked for the operator instead of minting wrong money.
             logger.error(`[dispatch] frozen mint NOT refreshed for ${svc.id} — the visit carries a primary line price, so a single-line freeze cannot honestly cover the bill; bill manually or clear primary_line_price, then retry the closeout`);
+          } else if (invErr?.code === 'FROZEN_PAYER_DIVERGED') {
+            // Bill-To reconciliation (codex r5 P1): without a restamp,
+            // every resume restores the SAME stale frozen payer and 409s
+            // again — an unrecoverable loop. Re-derive the tax authority
+            // for the CURRENT payer with the exact fail-closed derivation
+            // the freeze used, and restamp it beside the frozen amount;
+            // the release below then promises a resume that mints under
+            // the reconciled authority. A failed re-derivation releases
+            // anyway — the resume re-raises the divergence and lands back
+            // here to retry the reconciliation.
+            try {
+              const PayerService = require('../services/payer');
+              const currentPayer = await PayerService.resolveForInvoice({
+                customerId: svc.customer_id,
+                scheduledServiceId: svc.id,
+                throwOnError: true,
+              });
+              const currentPayerBilled = !!currentPayer?.payerId;
+              let reconciledRate = 0;
+              // Same guards as deriveCompletionTaxRate (r12 P0): exempt
+              // payer → 0, and the residential-zero policy — a payer
+              // change on a residential completion must not reconcile a
+              // county rate the customer never owed.
+              if (!(currentPayerBilled && currentPayer?.taxExempt === true)
+                && ['commercial', 'business'].includes(svc.property_type)) {
+                const TaxCalculator = require('../services/tax-calculator');
+                const rr = await TaxCalculator.calculateTax(
+                  svc.customer_id,
+                  svc.service_type,
+                  Number(mintInvoiceAmount) || 0,
+                  currentPayerBilled ? { skipCustomerExemption: true } : {},
+                );
+                const r = Number(rr?.rate);
+                if (!(Number.isFinite(r) && r >= 0 && r < 1)) {
+                  throw new Error(`re-derived rate unusable: ${rr?.rate}`);
+                }
+                reconciledRate = r;
+              }
+              await mergeRecordNotesKeys(record.id, {
+                backfillMintTaxRate: reconciledRate,
+                backfillMintPayerId: currentPayer?.payerId || null,
+              });
+              logger.warn(`[dispatch] frozen Bill-To reconciled for ${svc.id} — the resume mints for ${currentPayer?.payerId ? `payer ${currentPayer.payerId}` : 'self-pay'} at rate ${reconciledRate}`);
+            } catch (reconcileErr) {
+              logger.error(`[dispatch] frozen Bill-To reconciliation FAILED for ${svc.id} — the resume re-raises the divergence and retries the reconciliation: ${reconcileErr.message}`);
+            }
           }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
