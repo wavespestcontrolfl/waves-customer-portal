@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
@@ -390,7 +390,8 @@ const ComplianceService = {
       } else if (limit.limit_type === 'seasonal_blackout') {
         // Compare ET calendar MM-DD, not UTC Date objects — blackout windows
         // are legal dates, not absolute timestamps.
-        const mmdd = (s) => String(s).slice(5, 10);
+        // pg `date` columns deserialize as JS Date objects — normalize first.
+        const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
         const startMMDD = mmdd(limit.season_start);
         const endMMDD = mmdd(limit.season_end);
         const todayMMDD = today.slice(5, 10);
@@ -432,7 +433,8 @@ const ComplianceService = {
     const blackouts = await db('product_limits')
       .where({ match_type: 'nitrogen', limit_type: 'seasonal_blackout' });
 
-    const mmdd = (s) => String(s).slice(5, 10);
+    // pg `date` columns deserialize as JS Date objects — normalize first.
+    const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
     const todayMMDD = today.slice(5, 10);
     const activeBlackouts = blackouts.filter(b => {
       const startMMDD = mmdd(b.season_start);
@@ -483,8 +485,8 @@ const ComplianceService = {
     return {
       blackoutPeriods: blackouts.map(b => ({
         jurisdiction: b.jurisdiction,
-        start: b.season_start,
-        end: b.season_end,
+        start: etCalendarDayOf(b.season_start),
+        end: etCalendarDayOf(b.season_end),
         description: b.description,
       })),
       customers: statuses,

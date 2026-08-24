@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { etParts, etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 
 class ApplicationLimitChecker {
   async checkLimits(customerId, productId, proposedDate = new Date()) {
@@ -68,7 +68,9 @@ class ApplicationLimitChecker {
 
       case 'min_interval_days': {
         if (!history.length) return { violated: false };
-        const lastApp = new Date(history[0].application_date + 'T12:00:00');
+        // pg `date` columns arrive as JS Date objects (no type parser is
+        // configured) — normalize to YYYY-MM-DD before building the anchor.
+        const lastApp = new Date(etCalendarDayOf(history[0].application_date) + 'T12:00:00');
         const daysSince = Math.floor((proposedDate - lastApp) / 86400000);
         const minDays = limit.limit_value;
         if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
@@ -88,8 +90,10 @@ class ApplicationLimitChecker {
         // Compare ET calendar days (YYYY-MM-DD), not Date objects — blackout
         // windows are legal calendar dates, not absolute timestamps.
         const proposedYMD = etDateString(proposedDate);
-        const startMMDD = String(limit.season_start).slice(5, 10);
-        const endMMDD = String(limit.season_end).slice(5, 10);
+        // season_start/season_end are pg `date` columns → JS Date objects;
+        // String(date).slice(5, 10) yields "Jun 0", never a MM-DD.
+        const startMMDD = etCalendarDayOf(limit.season_start).slice(5, 10);
+        const endMMDD = etCalendarDayOf(limit.season_end).slice(5, 10);
         const proposedMMDD = proposedYMD.slice(5, 10);
         const wraps = startMMDD > endMMDD;
         const inRange = wraps
