@@ -222,8 +222,12 @@ async function executeCommsTool(toolName, input) {
 // merged-away customer. Ambiguity is returned as a structured error so the
 // tool can ask the operator to disambiguate instead of guessing.
 function ambiguousCustomerMatch(name, matches) {
+  // The error string is PERSISTED verbatim in tool-health telemetry
+  // (recordToolEvent -> tool_health_events.error_message), so it must not
+  // carry the typed name — the candidates array holds the detail and only
+  // reaches the operator-facing tool result.
   return {
-    error: `Multiple customers match "${name}". Ask the operator which one, then retry with customer_id.`,
+    error: 'Multiple customers match that name. Ask the operator which one, then retry with customer_id.',
     ambiguous: true,
     candidates: matches.map(c => ({
       id: c.id,

@@ -482,7 +482,9 @@ async function resolveLeadForUpdate({ lead_id, lead_name }) {
   }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').limit(2);
   if (matches.length > 1) {
     return {
-      error: `Multiple active leads match "${lead_name}". Ask the operator which one, then retry with lead_id.`,
+      // Generic string: persisted in tool-health telemetry, must not carry
+      // the typed name (candidates hold the detail).
+      error: 'Multiple active leads match that name. Ask the operator which one, then retry with lead_id.',
       ambiguous: true,
       candidates: matches.map(l => ({
         id: l.id,

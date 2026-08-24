@@ -582,7 +582,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // different row than the card showed.
     if (toolUse.name === 'send_sms' && !params.customer_id && !params.phone && params.customer_name) {
       const customer = await resolveCommsCustomer({ customer_name: params.customer_name });
-      if (!customer) return { failed: true, modelResult: { error: `No customer matches "${params.customer_name}"` } };
+      // Generic error strings: a failed proposal's error is persisted in
+      // tool-health telemetry, so it must not carry the typed name.
+      if (!customer) return { failed: true, modelResult: { error: 'No customer matches that name.' } };
       if (customer.error) return { failed: true, modelResult: customer };
       if (!customer.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
       params.customer_id = customer.id;
@@ -604,7 +606,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
-      if (!lead) return { failed: true, modelResult: { error: `No active lead matches "${params.lead_name}"` } };
+      if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
       if (lead.error) return { failed: true, modelResult: lead };
       params.lead_id = lead.id;
       params.lead_name = `${lead.first_name} ${lead.last_name || ''}`.trim();
