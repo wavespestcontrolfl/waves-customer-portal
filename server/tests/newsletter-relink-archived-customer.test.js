@@ -113,7 +113,10 @@ describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBS
     const trx = fakeTrx(1);
     const out = await relinkSubscribersFromArchivedCustomer(trx, 'archived-1');
     expect(out).toEqual({ relinked: 1 });
-    const [sql, bindings] = trx.raw.mock.calls[0];
+    // Call 0 is the shared relink advisory lock (see the concurrency pin
+    // below); the set-based UPDATE is call 1.
+    expect(trx.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    const [sql, bindings] = trx.raw.mock.calls[1];
     // Rows are found by the archived LINK, never by the customer's current
     // email — that is what catches the stale snapshot.
     expect(sql).toMatch(/WHERE ns\.customer_id = \?/);
@@ -133,7 +136,7 @@ describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBS
     const trx = fakeTrx(0);
     expect(await relinkSubscribersFromArchivedCustomer(trx, 'archived-2')).toEqual({ relinked: 0 });
     expect(await relinkSubscribersFromArchivedCustomer(trx, null)).toEqual({ relinked: 0 });
-    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledTimes(2); // lock + UPDATE for 'archived-2'; the null call never queries
   });
 });
 
@@ -152,7 +155,9 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     const { trx, subs } = fakeTrx('secondary-1');
     const out = await relinkSubscribersForEmail(trx, ' Household@Example.com ');
     expect(out).toEqual({ winnerId: 'secondary-1', relinked: 2 });
-    const [sql, bindings] = trx.raw.mock.calls[0];
+    // Call 0 = the shared relink advisory lock; call 1 = the picker select.
+    expect(trx.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    const [sql, bindings] = trx.raw.mock.calls[1];
     expect(sql).toMatch(/LOWER\(TRIM\(c\.email\)\) = \?/);
     expect(sql).toMatch(SCOPE);
     expect(sql).toMatch(ORDER);
@@ -180,21 +185,26 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     expect(await relinkSubscribersForEmail(trx, 'solo@example.com')).toEqual({ winnerId: null, relinked: 0 });
     expect(subs.update).not.toHaveBeenCalled();
     expect(await relinkSubscribersForEmail(trx, '')).toEqual({ winnerId: null, relinked: 0 });
-    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledTimes(2); // lock + picker for the first call; the empty email never queries
   });
 });
 
 describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archive-side relink', () => {
   function fakeConn(rowCount) {
+    // The sweep opens its own transaction and serializes on the shared
+    // relink advisory lock before the set-based UPDATE.
     const conn = jest.fn();
     conn.raw = jest.fn(async () => ({ rowCount }));
+    conn.transaction = jest.fn(async (cb) => cb({ raw: conn.raw }));
     return conn;
   }
 
   test('every archived-linked subscriber with a live same-email twin moves — re-booked households relink before an audience is selected', async () => {
     const conn = fakeConn(3);
     expect(await relinkArchivedLinkedSubscribers(conn)).toEqual({ relinked: 3 });
-    const [sql] = conn.raw.mock.calls[0];
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(conn.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock'); // lock first, inside the trx
+    const [sql] = conn.raw.mock.calls[1];
     // Rows are found by their archived LINK (never the customer's current
     // email), and each moves to the winner for ITS OWN normalized email —
     // same shape as relinkSubscribersFromArchivedCustomer, without the

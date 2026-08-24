@@ -397,9 +397,23 @@ async function linkManyToCustomers(emails, conn = db) {
  * sender's anti-join excludes archived links; a later restore lifts it).
  * Returns { winnerId, relinked }.
  */
+// Every subscriber-relink WRITER (archive, restore, and the pre-send sweep)
+// serializes on this advisory xact lock (codex #3472 r4): the sweep's UPDATE
+// computes its winners from one MVCC snapshot, and without the lock it could
+// interleave between a restore's canonical relink and that restore's commit —
+// overwriting the restored primary with a stale pre-restore winner that later
+// sweeps can never repair (the wrong link is live). With the lock, whichever
+// writer runs second takes a fresh statement snapshot and converges on the
+// canonical picker result. Single deterministic key → no lock-ordering
+// deadlocks among the three.
+async function acquireRelinkLock(trx) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['newsletter_subscriber_relink']);
+}
+
 async function relinkSubscribersForEmail(trx, email) {
   const key = String(email || '').trim().toLowerCase();
   if (!key) return { winnerId: null, relinked: 0 };
+  await acquireRelinkLock(trx);
   const twin = liveTwinSubselect('?');
   const picked = await trx.raw(`SELECT ${twin.sql} AS id`, [key, ...twin.bindings]);
   const winnerId = picked?.rows?.[0]?.id ?? null;
@@ -429,6 +443,7 @@ async function relinkSubscribersForEmail(trx, email) {
  */
 async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
   if (!archivedCustomerId) return { relinked: 0 };
+  await acquireRelinkLock(trx);
   const res = await trx.raw(
     `UPDATE newsletter_subscribers ns
         SET customer_id = t.twin_id, updated_at = NOW()
@@ -465,8 +480,13 @@ async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
  * Set-based, idempotent, no-op when nothing is stale. Returns { relinked }.
  */
 async function relinkArchivedLinkedSubscribers(conn = db) {
-  const res = await conn.raw(
-    `UPDATE newsletter_subscribers ns
+  // Own transaction so the advisory xact lock brackets exactly this UPDATE
+  // (a caller already inside a transaction nests as a savepoint; the lock
+  // then rides the outer transaction, which is also correct).
+  return conn.transaction(async (trx) => {
+    await acquireRelinkLock(trx);
+    const res = await trx.raw(
+      `UPDATE newsletter_subscribers ns
         SET customer_id = t.twin_id, updated_at = NOW()
        FROM (
          SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
@@ -482,8 +502,9 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
        ) t
       WHERE LOWER(TRIM(ns.email)) = t.email_key
         AND ns.customer_id IN (SELECT ac.id FROM customers ac WHERE ac.deleted_at IS NOT NULL)`,
-  );
-  return { relinked: Number(res?.rowCount || 0) };
+    );
+    return { relinked: Number(res?.rowCount || 0) };
+  });
 }
 
 module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
