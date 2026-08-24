@@ -163,7 +163,7 @@ const thSt = {
   padding: "10px 14px",
   textAlign: "left",
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
   textTransform: "uppercase",
@@ -195,7 +195,7 @@ const btnPrimary = {
   background: D.teal,
   color: "#fff",
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 };
 const btnSmall = (color) => ({
@@ -205,7 +205,7 @@ const btnSmall = (color) => ({
   background: color,
   color: D.heading,
   fontSize: 10,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 
@@ -575,7 +575,7 @@ export default function ReferralsPageV2() {
               <div
                 style={{
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 14,
                 }}
@@ -611,7 +611,7 @@ export default function ReferralsPageV2() {
                       <div
                         style={{
                           fontSize: 14,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -645,7 +645,7 @@ export default function ReferralsPageV2() {
               <div
                 style={{
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 14,
                 }}
@@ -681,7 +681,7 @@ export default function ReferralsPageV2() {
                         <div
                           style={{
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -728,7 +728,7 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 12,
               }}
@@ -817,7 +817,7 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 14,
               }}
@@ -855,7 +855,7 @@ export default function ReferralsPageV2() {
                         {" "}
                         <td style={tdSt}>
                           {" "}
-                          <div style={{ fontWeight: 600 }}>
+                          <div style={{ fontWeight: 500 }}>
                             {r.referee_name ||
                               `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
                           </div>{" "}
@@ -986,7 +986,7 @@ export default function ReferralsPageV2() {
                   <tr key={p.id}>
                     {" "}
                     <td style={tdSt}>
-                      <span style={{ fontWeight: 600 }}>
+                      <span style={{ fontWeight: 500 }}>
                         {p.first_name} {p.last_name}
                       </span>
                       <br />
@@ -1051,7 +1051,7 @@ export default function ReferralsPageV2() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 14,
             }}
@@ -1303,7 +1303,7 @@ export default function ReferralsPageV2() {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 12,
                     }}
@@ -1410,7 +1410,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}
@@ -1462,7 +1462,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}
@@ -1511,7 +1511,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}

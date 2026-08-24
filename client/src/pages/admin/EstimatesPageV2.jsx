@@ -1069,7 +1069,7 @@ function EstimatePricingAuditModal({
           {" "}
           <div>
             {" "}
-            <div className="text-16 font-semibold text-zinc-900">
+            <div className="text-16 font-medium text-zinc-900">
               Estimate Pricing Audit
             </div>{" "}
             <div className="text-12 text-ink-secondary mt-1">
@@ -1561,7 +1561,7 @@ export function EngineReviewModal({ estimate, onClose }) {
       >
         <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
           <div>
-            <div className="text-16 font-semibold text-zinc-900">
+            <div className="text-16 font-medium text-zinc-900">
               AI Draft Review
             </div>
             <div className="text-12 text-ink-secondary mt-1">

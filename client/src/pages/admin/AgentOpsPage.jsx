@@ -74,7 +74,7 @@ function Chip({ children, tone }) {
         background: tone.bg,
         color: tone.fg,
         fontSize: 12,
-        fontWeight: 750,
+        fontWeight: 700,
         whiteSpace: "nowrap",
       }}
     >
@@ -128,11 +128,11 @@ function AgentCard({ agent, active, onSelect }) {
           <Icon size={17} strokeWidth={1.9} />
         </div>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: D.heading, overflowWrap: "anywhere" }}>{agent.name}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, overflowWrap: "anywhere" }}>{agent.name}</div>
           <div style={{ marginTop: 4 }}><Chip tone={tone}>{tone.label}</Chip></div>
         </div>
       </div>
-      <div style={{ fontSize: 13, color: D.text, fontWeight: 800, marginBottom: 6 }}>{agent.headline}</div>
+      <div style={{ fontSize: 13, color: D.text, fontWeight: 700, marginBottom: 6 }}>{agent.headline}</div>
       <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, minHeight: 34 }}>{agent.description}</div>
       <div style={{ display: "flex", gap: 10, marginTop: 12, color: D.muted, fontSize: 12, flexWrap: "wrap" }}>
         <span><strong style={{ color: D.heading }}>{numberLabel(agent.openTasks)}</strong> open</span>
@@ -145,8 +145,8 @@ function AgentCard({ agent, active, onSelect }) {
 function Kpi({ label, value, tone = D.heading }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14 }}>
-      <div style={{ fontSize: 12, fontWeight: 750, color: D.muted }}>{label}</div>
-      <div style={{ marginTop: 4, fontSize: 28, fontWeight: 850, color: tone, lineHeight: 1 }}>{numberLabel(value)}</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: D.muted }}>{label}</div>
+      <div style={{ marginTop: 4, fontSize: 28, fontWeight: 700, color: tone, lineHeight: 1 }}>{numberLabel(value)}</div>
     </div>
   );
 }
@@ -165,7 +165,7 @@ function ActionButton({ item, action, pending, onAction }) {
     background: isPrimary ? D.heading : D.card,
     color: isPrimary ? "#fff" : D.heading,
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 700,
     textDecoration: "none",
     cursor: pending ? "wait" : "pointer",
     opacity: pending ? 0.65 : 1,
@@ -216,7 +216,7 @@ function TaskRow({ item, pendingAction, onAction }) {
           <span style={{ fontSize: 12, color: D.muted }}>{item.sourceLabel}</span>
           {item.impact && <span style={{ fontSize: 12, color: D.muted }}>- {item.impact}</span>}
         </div>
-        <div style={{ fontSize: 14, fontWeight: 850, color: D.heading, overflowWrap: "anywhere" }}>{item.title}</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, overflowWrap: "anywhere" }}>{item.title}</div>
         {item.summary && (
           <div style={{ marginTop: 5, fontSize: 13, color: D.text, lineHeight: 1.45, overflowWrap: "anywhere" }}>{item.summary}</div>
         )}
@@ -253,7 +253,7 @@ function TaskRow({ item, pendingAction, onAction }) {
         )}
       </div>
       {hasUrl && !hasInlineActions && (
-        <Link to={item.actionUrl} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 800, color: D.heading, whiteSpace: "nowrap", textDecoration: "none" }}>
+        <Link to={item.actionUrl} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: D.heading, whiteSpace: "nowrap", textDecoration: "none" }}>
           {item.actionLabel || "Open"}
           <ExternalLink size={14} />
         </Link>
@@ -271,7 +271,7 @@ function SourceRow({ source }) {
         <Icon size={15} strokeWidth={2} />
       </span>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>{source.label}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>{source.label}</div>
         <div style={{ fontSize: 12, color: D.muted, overflowWrap: "anywhere" }}>
           {tone.label}{source.count != null ? ` · ${source.count} item${source.count === 1 ? "" : "s"}` : ""}
         </div>
@@ -283,8 +283,8 @@ function SourceRow({ source }) {
 function MetricCell({ label, value, tone = D.heading, suffix = "" }) {
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, minHeight: 72, background: D.card }}>
-      <div style={{ fontSize: 11, fontWeight: 750, color: D.muted, lineHeight: 1.25 }}>{label}</div>
-      <div style={{ marginTop: 6, fontSize: 22, fontWeight: 850, color: tone, lineHeight: 1 }}>{valueLabel(value, suffix)}</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, lineHeight: 1.25 }}>{label}</div>
+      <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: tone, lineHeight: 1 }}>{valueLabel(value, suffix)}</div>
     </div>
   );
 }
@@ -295,7 +295,7 @@ function LeadConversionPanel({ details }) {
     <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
       <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 9 }}>
         <CalendarClock size={16} color={D.heading} />
-        <div style={{ fontSize: 15, fontWeight: 850, color: D.heading }}>Lead Conversion</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Lead Conversion</div>
       </div>
       <div className="lead-agent-metrics" style={{ padding: 12 }}>
         <MetricCell label="New" value={metrics.newLeads} tone={metrics.newLeads ? D.red : D.heading} />
@@ -415,12 +415,12 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
 
       <div className="agent-ops-wrap">
         {error && (
-          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750 }}>
+          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700 }}>
             {error}
           </div>
         )}
         {notice && (
-          <div style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+          <div style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
             <span>{notice}</span>
             {noticeAction?.url && (
               <Link to={noticeAction.url} style={{ color: D.green, textDecoration: "underline", whiteSpace: "nowrap" }}>
@@ -456,12 +456,12 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
         <div className="agent-ops-main">
           <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", borderBottom: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 15, fontWeight: 850, color: D.heading }}>{activeAgentName} Task Feed</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{activeAgentName} Task Feed</div>
               {activeAgent !== "all" && (
                 <button
                   type="button"
                   onClick={() => setActiveAgent("all")}
-                  style={{ marginLeft: "auto", height: 30, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: "pointer" }}
+                  style={{ marginLeft: "auto", height: 30, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: "pointer" }}
                 >
                   Show All
                 </button>
@@ -486,7 +486,7 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
           <aside style={{ display: "grid", gap: 16 }}>
             {showLeadPanel && <LeadConversionPanel details={data?.agentDetails?.lead_conversion} />}
             <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, fontSize: 15, fontWeight: 850, color: D.heading }}>Source Health</div>
+              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, fontSize: 15, fontWeight: 700, color: D.heading }}>Source Health</div>
               {(data?.sources || []).length ? (
                 data.sources.map((source) => <SourceRow key={source.id} source={source} />)
               ) : (

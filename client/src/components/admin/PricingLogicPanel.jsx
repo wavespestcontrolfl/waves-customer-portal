@@ -665,7 +665,7 @@ function ProposalsTab() {
                 padding: "4px 10px",
                 borderRadius: 6,
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 border: `1px solid ${statusFilter === s ? D.teal : D.border}`,
                 background: statusFilter === s ? D.teal : "transparent",
                 color: statusFilter === s ? D.white : D.muted,
@@ -685,7 +685,7 @@ function ProposalsTab() {
             marginBottom: 12,
             borderRadius: 6,
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             background:
               toast.kind === "success" ? `${D.green}18` : `${D.red}18`,
             color: toast.kind === "success" ? D.green : D.red,
@@ -834,7 +834,7 @@ function ProposalsTab() {
                       color: "#0F172A",
                       fontFamily: ROBOTO,
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {p.config_key}
@@ -852,7 +852,7 @@ function ProposalsTab() {
                       {formatValue(p.current_value)}
                     </span>{" "}
                     <span style={{ margin: "0 6px", color: D.muted }}>→</span>{" "}
-                    <span style={{ color: "#0F172A", fontWeight: 600 }}>
+                    <span style={{ color: "#0F172A", fontWeight: 500 }}>
                       {formatValue(p.proposed_value)}
                     </span>{" "}
                   </td>{" "}
@@ -894,7 +894,7 @@ function ProposalsTab() {
                           border: "none",
                           cursor: "pointer",
                           fontSize: 11,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           background: D.teal,
                           color: D.white,
                         }}
@@ -962,44 +962,44 @@ function ProposalsTab() {
               }}
             >
               {" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>
+              <div style={{ color: D.muted, fontWeight: 500 }}>
                 Config Key
               </div>{" "}
               <div style={{ fontFamily: ROBOTO, color: "#0F172A" }}>
                 {selected.config_key}
               </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>Current</div>{" "}
+              <div style={{ color: D.muted, fontWeight: 500 }}>Current</div>{" "}
               <div style={{ fontFamily: ROBOTO, color: D.text }}>
                 {formatValue(selected.current_value)}
               </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>Proposed</div>{" "}
+              <div style={{ color: D.muted, fontWeight: 500 }}>Proposed</div>{" "}
               <div
                 style={{
                   fontFamily: ROBOTO,
                   color: "#0F172A",
-                  fontWeight: 600,
+                  fontWeight: 500,
                 }}
               >
                 {formatValue(selected.proposed_value)}
               </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>% Change</div>{" "}
+              <div style={{ color: D.muted, fontWeight: 500 }}>% Change</div>{" "}
               <div>
                 {pctBadge(selected.pct_change) || (
                   <span style={{ color: D.muted }}>—</span>
                 )}
               </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>Source</div>{" "}
+              <div style={{ color: D.muted, fontWeight: 500 }}>Source</div>{" "}
               <div style={{ color: D.text }}>
                 {selected.trigger_source || "—"}
               </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 600 }}>Created</div>{" "}
+              <div style={{ color: D.muted, fontWeight: 500 }}>Created</div>{" "}
               <div style={{ color: D.text }}>
                 {formatDate(selected.created_at)}
               </div>
               {selected.reviewed_at && (
                 <>
                   {" "}
-                  <div style={{ color: D.muted, fontWeight: 600 }}>
+                  <div style={{ color: D.muted, fontWeight: 500 }}>
                     Reviewed
                   </div>{" "}
                   <div style={{ color: D.text }}>
@@ -1016,7 +1016,7 @@ function ProposalsTab() {
                   style={{
                     fontSize: 12,
                     color: D.muted,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     marginBottom: 4,
                   }}
                 >
@@ -1052,7 +1052,7 @@ function ProposalsTab() {
                   style={{
                     fontSize: 12,
                     color: D.muted,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     marginBottom: 4,
                   }}
                 >
@@ -1087,7 +1087,7 @@ function ProposalsTab() {
                 style={{
                   fontSize: 12,
                   color: D.muted,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   marginBottom: 4,
                 }}
               >
@@ -1127,7 +1127,7 @@ function ProposalsTab() {
                   background: D.white,
                   color: D.text,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: submitting ? "not-allowed" : "pointer",
                 }}
               >
@@ -1331,7 +1331,7 @@ function ConfigCard({ config, onUpdate }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.teal,
               marginBottom: 4,
               textTransform: "capitalize",
@@ -1357,7 +1357,7 @@ function ConfigCard({ config, onUpdate }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.teal,
               marginBottom: 4,
               textTransform: "capitalize",
@@ -1597,7 +1597,7 @@ function ConfigCard({ config, onUpdate }) {
         {" "}
         <div>
           {" "}
-          <span style={{ fontSize: 13, fontWeight: 600, color: "#0F172A" }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: "#0F172A" }}>
             {config.name}
           </span>
           {saving && (
@@ -1785,7 +1785,7 @@ function LawnBracketsTab() {
               padding: "6px 14px",
               borderRadius: 6,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               background: activeTrack === tk ? D.green : D.card,
               color: activeTrack === tk ? D.white : D.muted,
@@ -2039,7 +2039,7 @@ function DiscountRulesTab() {
                   style={{
                     padding: "8px",
                     color: D.text,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     textTransform: "capitalize",
                     fontSize: 12,
                   }}
@@ -2362,7 +2362,7 @@ function AuditLog() {
       <div
         style={{
           fontSize: 13,
-          fontWeight: 600,
+          fontWeight: 500,
           color: "#0F172A",
           marginBottom: 12,
         }}
@@ -2438,7 +2438,7 @@ export default function PricingLogicPanel() {
               padding: "6px 12px",
               borderRadius: "6px 6px 0 0",
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               border: "none",
               cursor: "pointer",
               background: activeTab === t.key ? D.teal : "transparent",

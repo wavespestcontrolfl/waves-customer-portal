@@ -323,7 +323,7 @@ export default function ContentCalendar() {
                 padding: "8px 0",
                 textAlign: "center",
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 1,
@@ -431,7 +431,7 @@ export default function ContentCalendar() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -454,7 +454,7 @@ export default function ContentCalendar() {
                 color: D.heading,
                 cursor: "pointer",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             >
               Schedule Blog
@@ -470,7 +470,7 @@ export default function ContentCalendar() {
                 color: D.heading,
                 cursor: "pointer",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             >
               Schedule Social

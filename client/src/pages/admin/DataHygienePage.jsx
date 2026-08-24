@@ -37,7 +37,7 @@ function Chip({ children, tone = "neutral" }) {
       background: colors.bg,
       color: colors.fg,
       fontSize: 12,
-      fontWeight: 750,
+      fontWeight: 700,
       whiteSpace: "nowrap",
     }}>
       {children}
@@ -258,7 +258,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
                   background: status === s ? D.heading : D.card,
                   color: status === s ? "#fff" : D.text,
                   fontSize: 13,
-                  fontWeight: 750,
+                  fontWeight: 700,
                   cursor: "pointer",
                 }}
               >
@@ -285,7 +285,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
           <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
             <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 850, color: D.heading }}>Proposals</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Proposals</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{pendingCount} pending in current view</div>
               </div>
               <button type="button" onClick={load} disabled={loading} style={{ border: `1px solid ${D.border}`, background: D.card, borderRadius: 6, width: 34, height: 34, cursor: "pointer" }} aria-label="Refresh">
@@ -312,7 +312,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
                   }}
                 >
                   <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                    <div style={{ fontSize: 13, fontWeight: 850, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {proposal.customer?.name || proposal.customer?.phone || "Unknown customer"}
                     </div>
                     <Chip tone={statusTone(proposal.status)}>{proposal.status}</Chip>
@@ -331,7 +331,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
               <div style={{ display: "grid", gap: 14 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
                   <div>
-                    <div style={{ fontSize: 18, fontWeight: 850, color: D.heading }}>{fieldLabel(selected.field)}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>{fieldLabel(selected.field)}</div>
                     <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{selected.customer?.name || selected.scopeId}</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -351,7 +351,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
                   <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, background: "#FFFBEB" }}>
                     <div style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center" }}>
                       <div>
-                        <div style={{ fontSize: 12, fontWeight: 850, color: D.amber }}>Sensitive value</div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: D.amber }}>Sensitive value</div>
                         <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
                           Reveal decrypts the vault value and writes an audit event.
                         </div>
@@ -375,7 +375,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
                 )}
 
                 <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, background: "#FAFAFA" }}>
-                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 850, textTransform: "uppercase" }}>Evidence</div>
+                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>Evidence</div>
                   <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, marginTop: 8 }}>
                     {selected.evidence?.source_excerpt || "No excerpt available."}
                   </div>
@@ -423,7 +423,7 @@ function MetricsPanel({ metrics }) {
     <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
       <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 850, color: D.heading }}>Quality Signals</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Quality Signals</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>Last {metrics?.days || 30} days</div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -442,7 +442,7 @@ function MetricsPanel({ metrics }) {
       </div>
       <div style={{ padding: "0 14px 14px" }}>
         <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 850, color: D.heading }}>Rejected excerpts</div>
+          <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 700, color: D.heading }}>Rejected excerpts</div>
           {metrics?.topRejected?.length ? metrics.topRejected.map((row) => (
             <div key={row.id} style={{ padding: 12, borderBottom: `1px solid ${D.border}`, display: "grid", gap: 6 }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -465,8 +465,8 @@ function MetricsPanel({ metrics }) {
 function MetricCard({ title, bucket }) {
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, minHeight: 92 }}>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 850, textTransform: "uppercase" }}>{title}</div>
-      <div style={{ fontSize: 16, fontWeight: 850, color: D.heading, marginTop: 8, overflowWrap: "anywhere" }}>{bucket?.key ? fieldLabel(bucket.key) : "-"}</div>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{title}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginTop: 8, overflowWrap: "anywhere" }}>{bucket?.key ? fieldLabel(bucket.key) : "-"}</div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: D.muted }}>
         <span>{bucket?.total || 0} total</span>
         <span>{percent(bucket?.rejectionRate)} rejected</span>
@@ -478,22 +478,22 @@ function MetricCard({ title, bucket }) {
 function MetricTable({ title, rows, keyLabel }) {
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-      <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 850, color: D.heading }}>{title}</div>
+      <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 700, color: D.heading }}>{title}</div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ color: D.muted, textAlign: "left" }}>
-              <th style={{ padding: 10, fontWeight: 850 }}>{keyLabel}</th>
-              <th style={{ padding: 10, fontWeight: 850 }}>Total</th>
-              <th style={{ padding: 10, fontWeight: 850 }}>Approved</th>
-              <th style={{ padding: 10, fontWeight: 850 }}>Rejected</th>
-              <th style={{ padding: 10, fontWeight: 850 }}>Reject %</th>
+              <th style={{ padding: 10, fontWeight: 700 }}>{keyLabel}</th>
+              <th style={{ padding: 10, fontWeight: 700 }}>Total</th>
+              <th style={{ padding: 10, fontWeight: 700 }}>Approved</th>
+              <th style={{ padding: 10, fontWeight: 700 }}>Rejected</th>
+              <th style={{ padding: 10, fontWeight: 700 }}>Reject %</th>
             </tr>
           </thead>
           <tbody>
             {rows.slice(0, 6).map((row) => (
               <tr key={row.key} style={{ borderTop: `1px solid ${D.border}` }}>
-                <td style={{ padding: 10, color: D.heading, fontWeight: 750, overflowWrap: "anywhere" }}>{fieldLabel(row.key)}</td>
+                <td style={{ padding: 10, color: D.heading, fontWeight: 700, overflowWrap: "anywhere" }}>{fieldLabel(row.key)}</td>
                 <td style={{ padding: 10 }}>{row.total}</td>
                 <td style={{ padding: 10 }}>{row.approved}</td>
                 <td style={{ padding: 10 }}>{row.rejected}</td>
@@ -513,7 +513,7 @@ function MetricTable({ title, rows, keyLabel }) {
 function Info({ label, value }) {
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 850, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
       <div style={{ fontSize: 13, color: D.text, marginTop: 6, overflowWrap: "anywhere" }}>{value || "-"}</div>
     </div>
   );

@@ -122,7 +122,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             }`}
           >
             <div
-              style={dark ? { color: D.text, fontSize: 14, fontWeight: 600, marginBottom: 6 } : undefined}
+              style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
               {status === "confirmed" ? "✓ " : ""}Awaiting your confirmation: {action.tool}
@@ -156,7 +156,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   onClick={() => decide(action, "confirm")}
                   style={dark ? {
                     background: D.green, color: D.white, border: "none", borderRadius: 8,
-                    padding: "7px 16px", fontSize: 14, fontWeight: 600,
+                    padding: "7px 16px", fontSize: 14, fontWeight: 500,
                     cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
                   } : undefined}
                   className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
@@ -180,7 +180,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             ) : (
               <div
                 style={dark ? {
-                  fontSize: 14, fontWeight: 600,
+                  fontSize: 14, fontWeight: 500,
                   color: status === "confirmed" ? D.green : status === "failed" ? D.red : D.muted,
                 } : undefined}
                 className={dark ? undefined : `text-[14px] font-medium ${

@@ -554,7 +554,7 @@ export default function EmailPage() {
           <div
             style={{
               fontSize: 20,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -583,7 +583,7 @@ export default function EmailPage() {
               color: "#fff",
               borderRadius: 8,
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               textDecoration: "none",
               border: "none",
               cursor: connecting ? "default" : "pointer",
@@ -658,7 +658,7 @@ export default function EmailPage() {
           }}
         >
           {" "}
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
             Today
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
@@ -783,7 +783,7 @@ export default function EmailPage() {
                 border: "none",
                 borderRadius: 8,
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -829,7 +829,7 @@ export default function EmailPage() {
                       style={{
                         fontSize: 13,
                         color: D.heading,
-                        fontWeight: 600,
+                        fontWeight: 500,
                       }}
                     >
                       {b.domain || b.email_address}
@@ -891,7 +891,7 @@ export default function EmailPage() {
                   padding: "6px 14px",
                   borderRadius: 6,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   border: "none",
                   flexShrink: 0,
@@ -915,7 +915,7 @@ export default function EmailPage() {
                 padding: "6px 14px",
                 borderRadius: 6,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 border: "none",
                 flexShrink: 0,
@@ -1070,7 +1070,7 @@ export default function EmailPage() {
                                   borderRadius: 4,
                                   background: categoryColor + "22",
                                   color: categoryColor,
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                 }}
                               >
                                 {categoryLabel}
@@ -1129,7 +1129,7 @@ export default function EmailPage() {
                                 borderRadius: 4,
                                 background: D.purple + "22",
                                 color: D.purple,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 flexShrink: 0,
                               }}
                             >
@@ -1226,7 +1226,7 @@ export default function EmailPage() {
                               <span
                                 style={{
                                   color: categoryColor,
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                 }}
                               >
                                 {categoryLabel || category}
@@ -1302,7 +1302,7 @@ export default function EmailPage() {
                                 <span
                                   style={{
                                     fontSize: 13,
-                                    fontWeight: 600,
+                                    fontWeight: 500,
                                     color: D.heading,
                                   }}
                                 >
@@ -1445,7 +1445,7 @@ export default function EmailPage() {
                                 padding: "8px 16px",
                                 borderRadius: 6,
                                 fontSize: 12,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 cursor: "pointer",
                                 background: D.purple + "22",
                                 border: `1px solid ${D.purple}44`,
@@ -1462,7 +1462,7 @@ export default function EmailPage() {
                                 padding: "8px 20px",
                                 borderRadius: 6,
                                 fontSize: 13,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 border: "none",
                                 cursor: "pointer",
                                 background: D.teal,
@@ -1572,7 +1572,7 @@ export default function EmailPage() {
               <h2
                 style={{
                   fontSize: 18,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   margin: 0,
                 }}
@@ -1692,7 +1692,7 @@ export default function EmailPage() {
                             <div
                               style={{
                                 fontSize: 13,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 color: D.heading,
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
@@ -1826,7 +1826,7 @@ export default function EmailPage() {
                   padding: "8px 20px",
                   borderRadius: 6,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   border: "none",
                   cursor: "pointer",
                   background: D.teal,

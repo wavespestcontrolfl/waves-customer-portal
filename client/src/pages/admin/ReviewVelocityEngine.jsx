@@ -437,7 +437,7 @@ function Tag({ type, children }) {
     <span
       style={{
         fontSize: 10,
-        fontWeight: 600,
+        fontWeight: 500,
         padding: "3px 8px",
         borderRadius: 20,
         whiteSpace: "nowrap",
@@ -459,7 +459,7 @@ function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
     borderRadius: 8,
     fontFamily: C.sans,
     fontSize: 11,
-    fontWeight: 600,
+    fontWeight: 500,
     cursor: disabled ? "not-allowed" : "pointer",
     border: "none",
     transition: "all .15s",
@@ -495,7 +495,7 @@ function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
 function SectionLabel({ children }) {
   return (
     <div
-      style={{ fontSize: 11, fontWeight: 600, color: C.t2, marginBottom: 6 }}
+      style={{ fontSize: 11, fontWeight: 500, color: C.t2, marginBottom: 6 }}
     >
       {children}
     </div>
@@ -1079,13 +1079,13 @@ function Dashboard({
                   background: k.accent,
                 }}
               />{" "}
-              <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 2 }}>
+              <div style={{ fontSize: 28, fontWeight: 700, marginBottom: 2 }}>
                 {k.value}
               </div>{" "}
               <div
                 style={{
                   fontSize: 11,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: C.t2,
                   marginBottom: 4,
                 }}
@@ -1124,7 +1124,7 @@ function Dashboard({
               return (
                 <div key={s.label} style={{ marginBottom: i === funnelStages.length - 1 ? 0 : 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>{s.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 500, color: C.t2 }}>{s.label}</span>
                     <span style={{ fontSize: 12, fontWeight: 700 }}>
                       {s.value}
                       {s.rate != null && (
@@ -1807,7 +1807,7 @@ function Pipeline({
                           cursor: c.sendable ? "pointer" : "not-allowed",
                           opacity: c.sendable ? 1 : 0.6,
                           fontSize: 11,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           fontFamily: C.sans,
                           textTransform: "uppercase",
                           letterSpacing: "0.04em",
@@ -2166,7 +2166,7 @@ function CustomerDrawer({
             }}
           >
             {" "}
-            <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor }}>
+            <div style={{ fontSize: 32, fontWeight: 700, color: scoreColor }}>
               {c.score}
             </div>{" "}
             <div
@@ -2281,7 +2281,7 @@ function CustomerDrawer({
                   style={{ display: "flex", justifyContent: "space-between" }}
                 >
                   {" "}
-                  <span style={{ fontWeight: 600 }}>{j.svcType}</span>{" "}
+                  <span style={{ fontWeight: 500 }}>{j.svcType}</span>{" "}
                   <span style={{ fontSize: 10, color: C.t3 }}>
                     {j.date}
                   </span>{" "}
@@ -2398,7 +2398,7 @@ function CustomerDrawer({
                   fontSize: 11,
                   color: C.org,
                   marginTop: 6,
-                  fontWeight: 600,
+                  fontWeight: 500,
                 }}
               >
                 Not sendable: {eligibilityLabel(c.eligibilityReasons)}
@@ -2474,7 +2474,7 @@ function DrawerSection({ title, children }) {
       <div
         style={{
           fontSize: 12,
-          fontWeight: 600,
+          fontWeight: 500,
           color: C.t2,
           marginBottom: 8,
           paddingBottom: 4,

@@ -18,8 +18,8 @@ function adminFetchRaw(path) {
 }
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16, marginBottom: 12 };
-const sBtn = (bg, color) => ({ padding: '7px 14px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' });
-const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
+const sBtn = (bg, color) => ({ padding: '7px 14px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: 'pointer' });
+const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 500, display: 'inline-block' });
 const sInput = { padding: '7px 10px', background: D.input, border: '1px solid #CBD5E1', borderRadius: 8, color: '#0F172A', fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--';
 const fmtMi = (n) => n != null ? Number(n).toFixed(1) : '0.0';
@@ -135,7 +135,7 @@ export default function MileageTab() {
   ];
 
   const navStyle = { display: 'flex', gap: 4, marginBottom: 16, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', flexWrap: 'nowrap' };
-  const navBtn = (active) => ({ padding: '8px 14px', borderRadius: 8, border: 'none', background: active ? D.teal : 'transparent', color: active ? D.white : D.muted, fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' });
+  const navBtn = (active) => ({ padding: '8px 14px', borderRadius: 8, border: 'none', background: active ? D.teal : 'transparent', color: active ? D.white : D.muted, fontSize: 12, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' });
 
   // ── Render: Dashboard ────────────────────────────────────────
   const renderDashboard = () => {
@@ -155,7 +155,7 @@ export default function MileageTab() {
           </div>
           {v ? (
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-              <div><span style={{ color: D.muted, fontSize: 11 }}>Vehicle</span><div style={{ color: '#0F172A', fontSize: 14, fontWeight: 600 }}>{v.nickname || `${v.make} ${v.model}`}</div></div>
+              <div><span style={{ color: D.muted, fontSize: 11 }}>Vehicle</span><div style={{ color: '#0F172A', fontSize: 14, fontWeight: 500 }}>{v.nickname || `${v.make} ${v.model}`}</div></div>
               <div><span style={{ color: D.muted, fontSize: 11 }}>Status</span><div><span style={sBadge(v.isRunning ? D.green : D.muted, D.white)}>{v.isRunning ? 'RUNNING' : 'STOPPED'}</span></div></div>
               {v.lastLocation && <div><span style={{ color: D.muted, fontSize: 11 }}>Location</span><div style={{ color: D.text, fontSize: 13 }}>{v.lastLocation.address || `${v.lastLocation.lat}, ${v.lastLocation.lon}`}</div></div>}
               {v.odometer != null && <div><span style={{ color: D.muted, fontSize: 11 }}>Odometer</span><div style={{ color: D.text, fontSize: 13 }}>{Number(v.odometer).toLocaleString()} mi</div></div>}
@@ -346,7 +346,7 @@ export default function MileageTab() {
     return (
       <div>
         <div style={{ ...sCard, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <span style={{ color: '#0F172A', fontWeight: 600 }}>Tax Year:</span>
+          <span style={{ color: '#0F172A', fontWeight: 500 }}>Tax Year:</span>
           <select value={irsYear} onChange={e => setIrsYear(parseInt(e.target.value))} style={{ ...sInput, width: 100 }}>
             {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
           </select>
@@ -390,7 +390,7 @@ export default function MileageTab() {
                       <td style={{ ...td, color: D.green }}>{fmtMi(m.business_miles)}</td>
                       <td style={{ ...td, color: D.red }}>{fmtMi(m.personal_miles)}</td>
                       <td style={td}>{m.trip_count}</td>
-                      <td style={{ ...td, color: D.amber, fontWeight: 600 }}>{fmt(m.irs_deduction)}</td>
+                      <td style={{ ...td, color: D.amber, fontWeight: 500 }}>{fmt(m.irs_deduction)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -415,7 +415,7 @@ export default function MileageTab() {
   return (
     <div>
       {/* Toast */}
-      {toast && <div style={{ position: 'fixed', top: 20, right: 20, background: D.teal, color: D.white, padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999 }}>{toast}</div>}
+      {toast && <div style={{ position: 'fixed', top: 20, right: 20, background: D.teal, color: D.white, padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 500, zIndex: 9999 }}>{toast}</div>}
 
       {/* Sub-navigation */}
       <div style={navStyle}>
@@ -453,7 +453,7 @@ function TripRow({ trip, expanded, selected, onToggle, onSelect, onReclassify })
         <td style={td}>{toDateStr(trip.trip_date)}<br /><span style={{ color: D.muted, fontSize: 10 }}>{trip.created_at ? new Date(trip.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span></td>
         <td style={{ ...td, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{truncAddr(trip.start_address, 30)}</td>
         <td style={{ ...td, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{truncAddr(trip.end_address, 30)}</td>
-        <td style={{ ...td, fontWeight: 600 }}>{fmtMi(trip.distance_miles)}</td>
+        <td style={{ ...td, fontWeight: 500 }}>{fmtMi(trip.distance_miles)}</td>
         <td style={td}>{minToHM(trip.duration_minutes)}</td>
         <td style={{ ...td, color: trip.customer_name ? D.green : D.muted }}>{trip.customer_name || '--'}</td>
         <td style={td}><span style={sBadge(isBiz ? D.green : D.red, D.white)}>{isBiz ? 'BIZ' : 'PERS'}</span></td>
@@ -489,5 +489,5 @@ function renderSpinner() {
 }
 
 // ── Table Styles ─────────────────────────────────────────────────
-const th = { textAlign: 'left', padding: '8px 6px', color: '#64748B', fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap' };
+const th = { textAlign: 'left', padding: '8px 6px', color: '#64748B', fontWeight: 500, fontSize: 11, whiteSpace: 'nowrap' };
 const td = { padding: '8px 6px', color: '#334155', verticalAlign: 'top' };

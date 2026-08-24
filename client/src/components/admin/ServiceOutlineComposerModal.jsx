@@ -43,7 +43,7 @@ function validationIcon(status) {
 function SectionPreview({ section }) {
   return (
     <section className="border-b border-zinc-200 py-4 last:border-b-0">
-      <h4 className="text-sm font-semibold text-zinc-950">{section.title}</h4>
+      <h4 className="text-sm font-medium text-zinc-950">{section.title}</h4>
       <p className="mt-1 text-sm leading-6 text-zinc-600">{section.body}</p>
       {Array.isArray(section.bullets) && section.bullets.length > 0 && (
         <ul className="mt-2 space-y-1 text-sm leading-5 text-zinc-700">
@@ -312,7 +312,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
           <div>
             <div className="flex items-center gap-2">
               <Sprout size={18} strokeWidth={1.75} className="text-emerald-700" />
-              <h2 className="text-base font-semibold text-zinc-950">Lawn Service Outline</h2>
+              <h2 className="text-base font-medium text-zinc-950">Lawn Service Outline</h2>
               {validation.status && (
                 <Badge tone={statusTone(validation.status)} className="inline-flex items-center gap-1">
                   {validationIcon(validation.status)}
@@ -350,7 +350,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
           <aside className="border-b border-zinc-200 bg-zinc-50 p-4 lg:border-b-0 lg:border-r">
             <div className="space-y-4">
               <label className="block">
-                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Turf type</span>
+                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Turf type</span>
                 <select value={turfType} onChange={(event) => setTurfType(event.target.value)} className="mt-1 h-10 w-full rounded-xs border border-zinc-300 bg-white px-3 text-sm text-zinc-900">
                   {TURF_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
@@ -359,7 +359,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
               </label>
 
               <label className="block">
-                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Detail level</span>
+                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Detail level</span>
                 <select value={detailLevel} onChange={(event) => setDetailLevel(event.target.value)} className="mt-1 h-10 w-full rounded-xs border border-zinc-300 bg-white px-3 text-sm text-zinc-900">
                   <option value="concise">Concise</option>
                   <option value="standard">Standard</option>
@@ -382,7 +382,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
               {packet?.id && (
                 <div className="rounded-xs border border-zinc-200 bg-white p-3">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Regeneration</div>
+                  <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Regeneration</div>
                   <p className="mt-1 text-xs leading-5 text-zinc-500">Creates a new packet from current approved modules, facts, protocol, and local rules.</p>
                   <label className="mt-2 flex items-start gap-2 text-sm text-zinc-700">
                     <input type="checkbox" checked={revokeOldOnRegenerate} onChange={(event) => setRevokeOldOnRegenerate(event.target.checked)} className="mt-1" />
@@ -402,7 +402,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
             {!loading && outline?.title && (
               <article>
                 <div className="border-b border-zinc-200 pb-4">
-                  <h3 className="text-xl font-semibold text-zinc-950">{outline.title}</h3>
+                  <h3 className="text-xl font-medium text-zinc-950">{outline.title}</h3>
                   <p className="mt-2 text-sm leading-6 text-zinc-600">{outline.intro}</p>
                 </div>
                 {(outline.sections || []).map((section) => (
@@ -410,11 +410,11 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 ))}
                 {Array.isArray(outline.productCards) && outline.productCards.length > 0 && (
                   <section className="py-4">
-                    <h4 className="text-sm font-semibold text-zinc-950">Approved Product Cards</h4>
+                    <h4 className="text-sm font-medium text-zinc-950">Approved Product Cards</h4>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                       {outline.productCards.map((product) => (
                         <div key={product.id} className="rounded-md border border-zinc-200 p-3">
-                          <div className="text-sm font-semibold text-zinc-950">{product.name}</div>
+                          <div className="text-sm font-medium text-zinc-950">{product.name}</div>
                           <div className="mt-1 text-xs text-zinc-500">{product.category}</div>
                           <p className="mt-2 text-sm leading-5 text-zinc-600">{product.summary}</p>
                           {product.epaRegistrationNumber && <div className="mt-2 text-xs text-zinc-500">EPA Reg. No. {product.epaRegistrationNumber}</div>}
@@ -429,7 +429,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
           <aside className="border-t border-zinc-200 bg-zinc-50 p-4 lg:border-l lg:border-t-0">
             <div className="rounded-md border border-zinc-200 bg-white p-3">
-              <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
+              <div className="flex items-center gap-2 text-sm font-medium text-zinc-950">
                 <ShieldCheck size={16} strokeWidth={1.75} className="text-emerald-700" />
                 Fact and Safety Status
               </div>
@@ -443,7 +443,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
             {(validation.errors || []).length > 0 && (
               <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-                <div className="font-semibold">Blocked</div>
+                <div className="font-medium">Blocked</div>
                 <ul className="mt-2 space-y-1">
                   {validation.errors.map((item, index) => <li key={index}>{item}</li>)}
                 </ul>
@@ -451,7 +451,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
             )}
             {(validation.warnings || []).length > 0 && (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                <div className="font-semibold">Warnings</div>
+                <div className="font-medium">Warnings</div>
                 <ul className="mt-2 space-y-1">
                   {validation.warnings.map((item, index) => <li key={index}>{item}</li>)}
                 </ul>
@@ -462,7 +462,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
             {(packet?.id || events.length > 0) && (
               <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
+                <div className="flex items-center gap-2 text-sm font-medium text-zinc-950">
                   <Clock3 size={16} strokeWidth={1.75} className="text-zinc-500" />
                   Outline Timeline
                 </div>
