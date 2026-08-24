@@ -8921,7 +8921,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // (throwOnError under frozenTaxAuthority) still governs the mint.
     const mintInvoicePayerId = backfillReviewMintRequired && backfillFrozenMintPayerId !== undefined
       ? backfillFrozenMintPayerId
-      : (completionTaxAuthorityError ? undefined : (completionResolvedPayer?.payerId || null));
+      // A RESUMED record lacking the identity stamp stays undefined (post-
+      // merge audit P0): supplying the live payer would make create() treat
+      // a LEGACY frozen rate as a complete contract and bypass residential
+      // zeroing / exemption handling for a rate that never encoded them.
+      // Only a first-run live-derived contract pins the live identity.
+      : (resumingCommittedCompletion || completionTaxAuthorityError
+        ? undefined
+        : (completionResolvedPayer?.payerId || null));
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
