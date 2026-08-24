@@ -286,7 +286,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 6200);
+    const block = src.slice(at, at + 8200);
     expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
@@ -328,7 +328,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the alert transaction re-verifies the refunded row FOR UPDATE — a bounced refund (restored to paid) skips the alert instead of instructing a duplicate bill', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 6200);
+    const block = src.slice(at, at + 8200);
     const recheckAt = block.indexOf('.forUpdate()');
     const notifyAt = block.indexOf("notifyAdmin(");
     expect(recheckAt).toBeGreaterThan(-1);
@@ -342,12 +342,19 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   });
 
   test('the manual-billing alert names the live-beside invoice instead of instructing a manual (duplicate) bill', () => {
-    const at = src.indexOf('const liveBesideNote = completionLiveBesideInvoice');
+    const at = src.indexOf('let liveBesideNow = null;');
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at, at + 1400);
+    const block = src.slice(at, at + 2600);
     expect(block).toContain('collect THAT invoice; do NOT create another');
     expect(block).toContain('bill this visit manually');
-    expect(block).toContain('liveBesideInvoiceId: completionLiveBesideInvoice.id');
+    expect(block).toContain('liveBesideInvoiceId: liveBesideNow.id');
+    // The live-beside row's status is RE-READ under lock and the action is
+    // tailored by it (codex r9): settled → no alert at all (a "collect"
+    // instruction on a paid row = duplicate collection); in-flight →
+    // verify, don't collect; only a collectible row gets "collect THAT".
+    expect(block).toContain("['paid', 'prepaid'].includes(liveBesideNow.status)");
+    expect(block).toContain('manual-billing alert skipped');
+    expect(block).toContain('already PROCESSING — verify it settles; do NOT collect again');
     // Wired from the reconciliation, before the alert block reads it.
     expect(src).toContain('completionLiveBesideInvoice = reconciled.liveBeside;');
     expect(src.indexOf('completionLiveBesideInvoice = reconciled.liveBeside;')).toBeLessThan(at);
@@ -381,7 +388,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 4200);
+    const block = src.slice(at - 1600, at + 5800);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
@@ -416,7 +423,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 6200);
+    const block = src.slice(at, at + 8200);
     expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
     // No assignment inside the callback: success is signalled by returning
     // true, which only reaches the flag after the commit resolves.

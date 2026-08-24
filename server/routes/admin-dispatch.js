@@ -8897,17 +8897,38 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[dispatch] visit ${svc.id}: invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} left '${terminalCompletionInvoice.status}' (now '${terminalNow.status}') before the manual-billing alert — refund bounced back; alert skipped, visit is covered by the restored invoice`);
             return true;
           }
-          // With a LIVE invoice beside the refunded one, the instruction is
-          // "collect that one" — never "bill manually", which would invite a
-          // duplicate invoice while the live row stays payable.
-          const liveBesideNote = completionLiveBesideInvoice
-            ? ` A live invoice (${completionLiveBesideInvoice.invoice_number || completionLiveBesideInvoice.id}, status ${completionLiveBesideInvoice.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`
+          // With a LIVE invoice beside the refunded one, the instruction
+          // depends on that row's CURRENT status (re-read under lock — the
+          // lookup snapshot may be stale, codex r9): a SETTLED row means the
+          // visit is already covered, so no billing alert at all (an alert
+          // saying "collect" would instruct a duplicate collection); an
+          // in-flight payment must be verified, not re-collected; only a
+          // genuinely collectible row gets "collect THAT invoice" — never
+          // "bill manually", which would invite a duplicate invoice.
+          let liveBesideNow = null;
+          if (completionLiveBesideInvoice) {
+            liveBesideNow = await trx('invoices')
+              .where({ id: completionLiveBesideInvoice.id })
+              .forUpdate()
+              .first('id', 'invoice_number', 'status');
+            const resolvedTerminal = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+            if (liveBesideNow && resolvedTerminal.includes(liveBesideNow.status)) liveBesideNow = null;
+          }
+          if (liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status)) {
+            logger.warn(`[dispatch] visit ${svc.id}: refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} sits beside SETTLED invoice ${liveBesideNow.invoice_number || liveBesideNow.id} (${liveBesideNow.status}) — visit is covered; manual-billing alert skipped`);
+            return true;
+          }
+          const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
+          const liveBesideNote = liveBesideNow
+            ? (liveBesideNow.status === 'processing'
+              ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
+              : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`)
             : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
             'Completed visit needs manual billing — prior invoice was refunded',
             `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(completionLiveBesideInvoice ? { liveBesideInvoiceId: completionLiveBesideInvoice.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;
