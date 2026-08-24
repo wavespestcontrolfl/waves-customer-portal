@@ -4982,6 +4982,22 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           method: "POST",
           body: JSON.stringify(body),
         });
+      } else {
+        // The form stayed editable while parked in retry mode — persist any
+        // edits BEFORE delivering, or the scheduled invoice could differ
+        // from what the form shows. Same PUT contract handleSave uses (the
+        // server retotals from line items); a refused edit throws into the
+        // outer catch, the builder stays in retry mode with the reason.
+        invoice = await adminFetch(`/admin/invoices/${invoice.id}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            notes: notes || null,
+            email_message: emailMessage || null,
+            due_date: dueDate,
+            line_items: body.lineItems,
+          }),
+        });
+        setPendingScheduleInvoice(invoice);
       }
 
       if (!pendingScheduleInvoice && queuedAttachments.length > 0 && invoice.id) {

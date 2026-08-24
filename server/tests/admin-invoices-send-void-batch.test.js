@@ -181,7 +181,10 @@ describe('POST /batch idempotency (batchKey)', () => {
   test('a keyed retry skips customers that already have a live same-title invoice from the last 24h (no duplicate row, no duplicate text)', async () => {
     // cust-1 already has the invoice (created by the first, partially-failed
     // request); cust-2 does not.
-    const dupResults = [{ id: 'inv-existing', invoice_number: 'WPC-1' }, undefined];
+    const dupResults = [
+      { id: 'inv-existing', invoice_number: 'WPC-1', status: 'sent', payer_id: null },
+      undefined,
+    ];
     db.mockImplementation(() => makeDupChain(dupResults.shift()));
     InvoiceService.create.mockResolvedValue({
       id: 'inv-new', invoice_number: 'WPC-2', total: 100, token: 'tok-2', payer_id: null,
@@ -232,6 +235,51 @@ describe('POST /batch idempotency (batchKey)', () => {
       expect(body.created_count).toBe(2);
       expect(body.skipped_count).toBe(0);
       expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a keyed retry COMPLETES an unfinished immediate send on the existing draft row instead of stranding it', async () => {
+    db.mockImplementation(() => makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
+    }));
+    InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000003',
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.created_count).toBe(0);
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].sent).toMatchObject({ sent: true });
+      // Completed on the EXISTING row — no new invoice minted.
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-existing', { operatorInitiated: true });
+    });
+  });
+
+  test('a keyed retry never re-texts an already-delivered row', async () => {
+    db.mockImplementation(() => makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'sent', payer_id: null,
+    }));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000003',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].sent).toBeUndefined();
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
   });
 

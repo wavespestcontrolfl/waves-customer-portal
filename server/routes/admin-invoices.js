@@ -692,14 +692,32 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number');
+            .first('id', 'invoice_number', 'status', 'payer_id');
           if (existing) {
-            skipped.push({
+            const entry = {
               customerId,
               invoiceId: existing.id,
               invoiceNumber: existing.invoice_number,
               reason: 'This batch key already created an invoice for this customer (retry detected)',
-            });
+            };
+            // Finish an UNFINISHED immediate send: the first attempt may have
+            // crashed between insert and delivery (or delivery failed),
+            // leaving the row draft — a keyed retry must complete it, not
+            // strand it. claimInvoiceForSend inside the send path is the
+            // concurrency guard (a send already in flight throws and is
+            // reported, never doubled). Non-draft rows were delivered or
+            // deliberately moved on — never re-text those.
+            if (sendImmediately && existing.status === 'draft') {
+              try {
+                entry.sent = existing.payer_id
+                  ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true })
+                  : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true });
+              } catch (sendErr) {
+                logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
+                entry.sent = { sent: false, error: sendErr.message };
+              }
+            }
+            skipped.push(entry);
             continue;
           }
         }
