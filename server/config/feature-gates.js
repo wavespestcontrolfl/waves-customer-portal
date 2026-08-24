@@ -44,6 +44,7 @@
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_ADMIN_SLOT_OVERLAP_GUARD=true (admin schedule writes 409 SLOT_CONFLICT on a time overlap — occupancy.js probe)
+ *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -299,6 +300,20 @@ const gates = {
   // offer-ordering tests stay deterministic. Kill switch: unset — ordering
   // instantly reverts to soonest-first.
   geoSlotRanking: process.env.GATE_GEO_SLOT_RANKING === 'true',
+
+  // South-zone estimate day funnel (2026-08-24): when ON, estimates that
+  // resolve to a funneled far-south service zone (default: the Venice zone;
+  // SOUTH_FUNNEL_ZONE_SLUGS overrides the slug list — which CITIES form the
+  // zone stays DB-authoritative in service_zones.cities) only offer days the
+  // calendar already has a live stop in that zone, so far-south trips cluster
+  // onto one day instead of scattering across the week. A window with no
+  // BOOKABLE cluster-day slot (no zone stop yet, or the zone days are full)
+  // offers exactly ONE seed day (cheapest-detour, else soonest) so the
+  // booking creates or extends the cluster. Offer-time only — already-signed
+  // slot offers stay redeemable. Opt-in in EVERY environment so slot tests
+  // stay deterministic. Kill switch: unset — offers instantly revert to the
+  // full pool.
+  southZoneDayFunnel: process.env.GATE_SOUTH_ZONE_DAY_FUNNEL === 'true',
 
   // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
   // /book funnel entries see zero conversions across a window — the July

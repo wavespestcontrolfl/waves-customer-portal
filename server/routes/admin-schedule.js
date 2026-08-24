@@ -2202,8 +2202,16 @@ function getZone(city, zip) {
   // Longboat Key + Siesta Key are Sarasota barrier islands.
   if (['sarasota', 'longboat key', 'siesta key'].includes(c)) return 'sarasota';
   // Osprey sits between Sarasota and Venice on the 41 corridor, same as
-  // Nokomis; North Venice is Venice.
-  if (['venice', 'north venice', 'nokomis', 'osprey', 'north port'].includes(c)) return 'venice_north_port';
+  // Nokomis; North Venice is Venice. The deep-south corridor (Englewood
+  // through Boca Grande) rides the same Venice route day — before this,
+  // these cities fell through to the lakewood_ranch default and their
+  // appointments carried a mis-stamped zone the south-zone day funnel
+  // (zone-day-funnel.js) would reject as evidence of a Venice-day stop.
+  if ([
+    'venice', 'north venice', 'nokomis', 'osprey', 'north port',
+    'englewood', 'port charlotte', 'punta gorda', 'murdock',
+    'rotonda west', 'placida', 'boca grande',
+  ].includes(c)) return 'venice_north_port';
   return 'lakewood_ranch';
 }
 

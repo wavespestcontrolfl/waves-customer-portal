@@ -2571,6 +2571,15 @@ async function reviseAdminEstimate({
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }
   clearEstimatePricingCache(estimate.id);
+  // The revised address can change the estimate's service zone, and the
+  // slot wrapper cache (5-min TTL) was keyed for the OLD address — left in
+  // place it keeps serving (and letting the customer redeem) offers built
+  // without the new zone's funnel/collision context (codex #3473 r2 P2).
+  // Best-effort, same as reserveSlot's invalidation; lazy require keeps
+  // this module free of a slot-availability import at load time.
+  try {
+    require('./estimate-slot-availability').invalidateEstimate(estimate.id);
+  } catch { /* best-effort */ }
   return { estimate: updated, memberLinkageWarning };
 }
 
