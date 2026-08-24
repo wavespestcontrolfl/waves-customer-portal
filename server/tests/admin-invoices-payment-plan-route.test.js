@@ -293,6 +293,23 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('the plan-owned PAUSED shape (create route pauses post-commit) is re-armed too (codex r5 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({
+      id: 'seq-1',
+      status: 'paused',
+      paused_reason: 'payment_plan_created',
+      stopped_reason: 'payment_plan_created:plan-1',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
   test('a sequence an admin stopped for an UNRELATED reason stays stopped after cancel (codex r2 P1)', async () => {
     db.followupsQB.first.mockResolvedValue({ id: 'seq-1', status: 'stopped', stopped_reason: 'admin_stop' });
     await withServer(async (baseUrl) => {

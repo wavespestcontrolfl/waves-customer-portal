@@ -2377,9 +2377,17 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     try {
       const seq = await db('invoice_followup_sequences')
         .where({ invoice_id: id })
-        .first('id', 'status', 'stopped_reason');
-      if (seq && seq.status === 'stopped'
-        && seq.stopped_reason === paymentPlanFollowupStopReason(plan.id)) {
+        .first('id', 'status', 'stopped_reason', 'paused_reason');
+      // Plan creation stamps stopped_reason=payment_plan_created:<id> in-trx,
+      // then its post-commit pauseSequence flips the row to
+      // paused/payment_plan_created (stopped_reason survives — pauseSequence
+      // doesn't touch it). Both shapes are plan-owned; anything else (an
+      // unrelated admin stop/pause) stays untouched.
+      const planOwned = seq
+        && seq.stopped_reason === paymentPlanFollowupStopReason(plan.id)
+        && (seq.status === 'stopped'
+          || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
+      if (planOwned) {
         const FollowUpsSvc = require('../services/invoice-followups');
         await FollowUpsSvc.resumeSequence(id);
       }

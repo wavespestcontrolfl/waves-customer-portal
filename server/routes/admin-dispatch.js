@@ -8997,6 +8997,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             note: svc.prepaid_note || null,
           }),
         });
+        if (paidByPrepayment) {
+          // The recorded prepayment fully settled the invoice — complete any
+          // active payment plan on the SAME trx (codex r5 P1; mirrors the
+          // admin-schedule prepaid-at-visit path).
+          await require('../services/payment-plans').completeActivePlansForInvoice(lockedInvoice.id, trx);
+        }
         return creditedInvoice;
       });
       // A cash/Zelle prepayment that fully covers the invoice flips it paid
