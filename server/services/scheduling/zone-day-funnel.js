@@ -18,6 +18,16 @@
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
  *     tap doesn't make the offered slot wrong, just no-longer-preferred.
+ *     ACCEPTED RACE (deliberate): two customers holding pre-cluster seed
+ *     offers for different days can both redeem, creating two "cluster"
+ *     days for that stretch. A redemption-side funnel check can't close it
+ *     safely — the redeem side cannot know the offer's window (a pinned
+ *     single-date request legitimately seeds a non-cluster day), so any
+ *     horizon-wide re-check reintroduces the offer→reserve→409 dead-end
+ *     loop (see filterCollidingSlots history). The race's worst case is
+ *     exactly the pre-funnel status quo (one extra scattered trip), bounded
+ *     by the offer-token TTL, and self-heals: funneled results are never
+ *     cached, so the first redeemed seed clusters every subsequent offer.
  *   - Window-scoped by design. The default rolling 14-day picker hard-funnels;
  *     an explicit single-date request (calendar pin, AI "next Tuesday" search)
  *     evaluates only that day, so a day without zone stops seeds rather than
