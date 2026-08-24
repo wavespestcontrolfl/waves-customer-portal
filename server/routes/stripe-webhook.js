@@ -463,6 +463,11 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
         amount,
         source: 'invoice_payment_webhook',
         original_db_error: reason.slice(0, 1000),
+        // A monthly-autopay PI carries the dues month it collected FOR;
+        // keep it on the orphan so membership coverage can count it.
+        ...(paymentIntent.metadata?.type === 'monthly_autopay' && paymentIntent.metadata?.billed_month
+          ? { metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: paymentIntent.metadata.billed_month }) }
+          : {}),
       })
       .onConflict('stripe_payment_intent_id')
       .ignore();

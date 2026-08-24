@@ -306,13 +306,15 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
   // monthlyDuesCollected against a fake knex: the visit-month key drives the
   // billed_month match, so the "dues payment present" scenario is exercised
   // end to end through the same helper the completion route now calls.
-  function fakeDb(paymentsRows) {
+  function fakeDb(paymentsRows, orphanRows = []) {
     return (table) => {
-      expect(table).toBe('payments');
-      const state = { customerId: null, monthKey: null };
+      expect(['payments', 'stripe_orphan_charges']).toContain(table);
+      const state = { customerId: null, monthKey: null, resolvedFalse: false, notesLike: null };
       const builder = {
-        where(arg) {
+        where(arg, op, val) {
           if (typeof arg === 'function') arg.call(builder);
+          else if (arg === 'resolved') state.resolvedFalse = op === false;
+          else if (arg === 'resolution_notes') state.notesLike = val;
           else state.customerId = arg.customer_id;
           return builder;
         },
@@ -321,10 +323,21 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
           if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
           return builder;
         },
-        orWhere(fn) { fn.call(builder); return builder; },
+        orWhere(arg, op, val) {
+          if (typeof arg === 'function') arg.call(builder);
+          else if (arg === 'resolution_notes') state.notesLike = val;
+          return builder;
+        },
         andWhereRaw() { return builder; },
         andWhere() { return builder; },
         async first() {
+          if (table === 'stripe_orphan_charges') {
+            expect(state.resolvedFalse).toBe(true);
+            expect(state.notesLike).toBe('%reconciled%');
+            return orphanRows.find((r) => r.customer_id === state.customerId
+              && r.metadata?.billed_month === state.monthKey
+              && (r.resolved === false || /reconciled/i.test(r.resolution_notes || ''))) || undefined;
+          }
           return paymentsRows.find((r) => r.customer_id === state.customerId
             && ['paid', 'processing'].includes(r.status)
             && r.metadata?.billed_month === state.monthKey) || undefined;
@@ -341,5 +354,28 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     await expect(monthlyDuesCollected(fakeDb([]), 42, visitMonth)).resolves.toBe(false);
     // A different month's dues do not cover this visit.
     await expect(monthlyDuesCollected(fakeDb(rows), 42, new Date('2026-09-03T12:00:00Z'))).resolves.toBe(false);
+  });
+
+  // Stripe took the dues but the payments insert failed (orphan ledger only):
+  // the customer WAS billed, so the month still counts as collected.
+  test('orphaned dues charge (no payments row) counts as collected for its billed month', async () => {
+    const visitMonth = new Date('2026-08-19T12:00:00Z');
+    const unresolved = [{ id: 'o1', customer_id: 42, resolved: false, metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb([], unresolved), 42, visitMonth)).resolves.toBe(true);
+    const reconciled = [{ id: 'o2', customer_id: 42, resolved: true, resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement', metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb([], reconciled), 42, visitMonth)).resolves.toBe(true);
+  });
+
+  test('orphan for a different month, or resolved as failed/refunded, does not count', async () => {
+    const visitMonth = new Date('2026-08-19T12:00:00Z');
+    const otherMonth = [{ id: 'o3', customer_id: 42, resolved: false, metadata: { billed_month: '2026-07' } }];
+    await expect(monthlyDuesCollected(fakeDb([], otherMonth), 42, visitMonth)).resolves.toBe(false);
+    const failed = [{ id: 'o4', customer_id: 42, resolved: true, resolution_notes: 'Stripe reported final payment failure; no funds collected', metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb([], failed), 42, visitMonth)).resolves.toBe(false);
+    const refunded = [{ id: 'o5', customer_id: 42, resolved: true, resolution_notes: 'Automatically resolved: the combined charge was fully refunded (re_x) — the unmatched cash was returned to the customer', metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb([], refunded), 42, visitMonth)).resolves.toBe(false);
+    // Unstamped legacy orphan: never matches a month.
+    const unstamped = [{ id: 'o6', customer_id: 42, resolved: false, metadata: null }];
+    await expect(monthlyDuesCollected(fakeDb([], unstamped), 42, visitMonth)).resolves.toBe(false);
   });
 });
