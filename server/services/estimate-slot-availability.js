@@ -1490,6 +1490,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     opts.dateFrom || 'auto',
     opts.dateTo || 'auto',
     opts.timeOfDay || 'any',
+    // Address in the key: zone resolution (and with it the funnel and the
+    // zone-capacity collision context) hangs off estimates.address, which
+    // several writers rewrite (admin revise, customer-address fan-out) —
+    // and this cache is per-process, so invalidation from the writing
+    // process can't reach other instances. Keying on the address makes any
+    // process recompute the moment it sees the new value; the residual
+    // linked-customer-city edge (city changes while the estimate address
+    // doesn't) stays TTL-bounded.
+    String(estimate.address || '').trim().toLowerCase(),
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {

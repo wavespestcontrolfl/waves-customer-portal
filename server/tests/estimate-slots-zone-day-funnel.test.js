@@ -343,6 +343,23 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(second.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
   });
 
+  test('an address rewrite busts the cache: the next request funnels for the new zone', async () => {
+    // First request: Sarasota address, non-funneled — this one IS cached.
+    mockDb({
+      scheduledRows: [],
+      estimateRow: { ...ESTIMATE_ROW, address: '55 Main St, Sarasota, FL 34231' },
+    });
+    const first = await getAvailableSlots('est-funnel-1', WINDOW);
+    expect(first.metadata.zoneDayFunnel).toBeUndefined();
+    // Any writer (admin revise, customer-address fan-out — possibly in a
+    // DIFFERENT process) rewrites the address to Venice. The address-keyed
+    // cache must miss and the request must funnel immediately.
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const second = await getAvailableSlots('est-funnel-1', WINDOW);
+    expect(second.metadata.cacheHit).toBe(false);
+    expect(second.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
+  });
+
   test('non-funneled zone: a Sarasota estimate keeps its multi-day pool', async () => {
     mockDb({
       scheduledRows: [],
