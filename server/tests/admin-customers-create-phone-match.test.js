@@ -156,7 +156,7 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
     const state = freshState();
     install(state);
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, '/', { addressLine1: '123 Main Street', confirmDuplicate: true });
+      const res = await post(baseUrl, '/', { addressLine1: '123 Main Street', confirmDuplicate: true, confirmMatchedAccountId: 'acct-1' });
       expect(res.status).toBe(201);
       const body = await res.json();
       expect(body.attachedToExistingAccount).toBe(true);
@@ -184,7 +184,7 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
     const state = freshState();
     install(state);
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', confirmAttach: true });
+      const res = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', confirmAttach: true, confirmMatchedAccountId: 'acct-1' });
       expect(res.status).toBe(201);
       const body = await res.json();
       expect(body.attachedToExistingAccount).toBe(true);
@@ -194,6 +194,20 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
     const inserts = customersInserts(state);
     expect(inserts).toHaveLength(1);
     expect(inserts[0].row).toMatchObject({ account_id: 'acct-1', is_primary_profile: false, profile_label: 'Rental property' });
+  });
+
+  it('confirm flag NOT bound to the displayed account (missing/mismatched confirmMatchedAccountId) → fresh 409, no insert', async () => {
+    const state = freshState();
+    install(state);
+    await withServer(async (baseUrl) => {
+      const bare = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', confirmAttach: true });
+      expect(bare.status).toBe(409);
+      expect((await bare.json()).code).toBe('PHONE_MATCH_CONFIRM');
+      const wrong = await post(baseUrl, '/', { addressLine1: '123 Main Street', confirmDuplicate: true, confirmMatchedAccountId: 'acct-other' });
+      expect(wrong.status).toBe(409);
+      expect((await wrong.json()).code).toBe('DUPLICATE_PROFILE');
+    });
+    expect(customersInserts(state)).toHaveLength(0);
   });
 
   it('no live phone match → plain create (fresh account, primary profile), no confirmation', async () => {
@@ -230,7 +244,7 @@ describe('POST /admin/customers/quick-add — phone-match confirm gate', () => {
     const state = freshState();
     install(state);
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, '/quick-add', { address: '456 Oak Ave', confirmAttach: true });
+      const res = await post(baseUrl, '/quick-add', { address: '456 Oak Ave', confirmAttach: true, confirmMatchedAccountId: 'acct-1' });
       expect(res.status).toBe(201);
       const { customer } = await res.json();
       expect(customer.attachedToExistingAccount).toBe(true);

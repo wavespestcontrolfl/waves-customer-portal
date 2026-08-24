@@ -187,6 +187,8 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Attach as additional property' }));
     await waitFor(() => expect(postBodies).toHaveLength(2));
     expect(postBodies[1].confirmAttach).toBe(true);
+    // The confirm is bound to the account the admin saw in the 409.
+    expect(postBodies[1].confirmMatchedAccountId).toBe('acct-a');
     // Attach success surfaces the account the profile landed on.
     expect(await screen.findByText(/additional property on Avery Customer's account/)).toBeInTheDocument();
   });

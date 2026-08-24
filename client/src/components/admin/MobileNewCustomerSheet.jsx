@@ -49,6 +49,16 @@ function formFromInitialValues(initialValues = null) {
   };
 }
 
+// Fields whose edit invalidates a pending phone-match confirmation.
+const PHONE_MATCH_SENSITIVE_FIELDS = new Set([
+  "phone",
+  "addressLine1",
+  "addressLine2",
+  "city",
+  "state",
+  "zip",
+]);
+
 export default function MobileNewCustomerSheet({
   open,
   onClose,
@@ -63,7 +73,12 @@ export default function MobileNewCustomerSheet({
   const [phoneMatch, setPhoneMatch] = useState(null);
   const sheetRef = useModalFocus(open, onClose);
 
-  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => {
+    // A pending phone-match confirmation is only valid for the phone/address
+    // the admin saw it for — editing either invalidates it.
+    if (PHONE_MATCH_SENSITIVE_FIELDS.has(k)) setPhoneMatch(null);
+    setForm((p) => ({ ...p, [k]: v }));
+  };
 
   // Server quick-add only requires first name and phone; last name can be filled later.
   const canSave = useMemo(
@@ -410,8 +425,14 @@ export default function MobileNewCustomerSheet({
               onClick={() =>
                 save(
                   phoneMatch.code === "DUPLICATE_PROFILE"
-                    ? { confirmDuplicate: true }
-                    : { confirmAttach: true },
+                    ? {
+                        confirmDuplicate: true,
+                        confirmMatchedAccountId: phoneMatch.match?.accountId,
+                      }
+                    : {
+                        confirmAttach: true,
+                        confirmMatchedAccountId: phoneMatch.match?.accountId,
+                      },
                 )
               }
               className="w-full rounded-full bg-zinc-900 text-white font-semibold u-focus-ring"

@@ -1852,8 +1852,16 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
 // unit-stripped, so "123 Main St" keys with "123 Main Street" but not with
 // "123 Main Ave". Both flags are admin-parsed at the route (requireAdmin
 // already guards these routes, so the match payload never reaches a tech).
-async function assertPhoneAttachConfirmed(trx, account, { streetLine1, confirmDuplicate, confirmAttach }) {
+async function assertPhoneAttachConfirmed(trx, account, { streetLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId }) {
   if (!account?.existingCustomer || account.matchType !== 'phone') return;
+  // A confirm flag is honored only for the account the admin actually saw:
+  // the 409 payload carries match.accountId, the client echoes it back as
+  // confirmMatchedAccountId, and it is re-checked here against the account
+  // the phone resolves to NOW (inside this transaction). A changed phone or
+  // a concurrent edit that moves the match to a different account gets a
+  // fresh 409 instead of silently attaching to an unapproved account.
+  const confirmedThisAccount = confirmMatchedAccountId != null
+    && String(confirmMatchedAccountId) === String(account.accountId);
   const { streetKey } = require('../services/customer-properties');
   const profiles = await trx('customers')
     .where({ account_id: account.accountId })
@@ -1880,10 +1888,10 @@ async function assertPhoneAttachConfirmed(trx, account, { streetLine1, confirmDu
   const submittedKey = streetKey(streetLine1);
   const dupe = submittedKey ? rows.find((row) => streetKey(row.address_line1) === submittedKey) : null;
   if (dupe) {
-    if (confirmDuplicate) return;
+    if (confirmDuplicate && confirmedThisAccount) return;
     raise('DUPLICATE_PROFILE', 'This phone belongs to an existing customer with a profile at this address — confirm before creating a duplicate profile.', dupe);
   }
-  if (confirmAttach) return;
+  if (confirmAttach && confirmedThisAccount) return;
   raise('PHONE_MATCH_CONFIRM', 'This phone belongs to an existing customer — confirm attaching this as an additional property on their account, or create a separate account.', rows[0]);
 }
 
@@ -2055,10 +2063,12 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     const confirmAttach = isAdmin && req.body.confirmAttach === true;
     const forceNewAccount = isAdmin && req.body.forceNewAccount === true;
     const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
+    const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
+      ? req.body.confirmMatchedAccountId.trim() : null;
 
     const customer = await db.transaction(async (trx) => {
       const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch });
-      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach });
+      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
         account_id: account.accountId,
@@ -3201,6 +3211,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // existing forceNewAccount/ignorePhoneMatch lane (built for lead-convert).
     const forceNewAccount = isAdmin && req.body.forceNewAccount === true;
     const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
+    // Binds a confirm flag to the account the 409 displayed (parsed like
+    // admin-leads.js's attachToAccountId).
+    const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
+      ? req.body.confirmMatchedAccountId.trim() : null;
 
     // Billing lane at create (#3140 resolution — the inferred-monthly
     // vector): a create with a real membership tier + a positive rate and
@@ -3241,7 +3255,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     const customer = await db.transaction(async (trx) => {
       const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch });
-      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach });
+      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
         account_id: account.accountId,

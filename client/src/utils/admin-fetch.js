@@ -44,7 +44,7 @@ function delay(ms) {
 
 export async function adminFetch(path, options = {}) {
   let attempt = 0;
-  // eslint-disable-next-line no-constant-condition
+   
   while (true) {
     const r = await fetch(`${API_BASE}${path}`, {
       ...options,
@@ -83,16 +83,19 @@ export async function adminFetch(path, options = {}) {
       // fall back to status text. Don't blow up if the body isn't JSON.
       let serverMsg = '';
       let serverCode = null;
+      let serverBody = null;
       try {
         const body = await r.clone().json();
         serverMsg = body?.error || '';
         serverCode = body?.code || null;
+        serverBody = body || null;
       } catch {
         try { serverMsg = await r.text(); } catch { /* ignore */ }
       }
       const err = new Error(serverMsg || `${r.status} ${r.statusText}`);
       err.status = r.status;
       if (serverCode) err.code = serverCode;
+      if (serverBody && typeof serverBody === 'object') err.details = serverBody;
       throw err;
     }
 

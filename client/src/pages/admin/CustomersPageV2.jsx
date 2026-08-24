@@ -461,6 +461,16 @@ function quickAddPresetFromSearchParams(searchParams) {
   return preset;
 }
 
+// Fields whose edit invalidates a pending phone-match confirmation.
+const PHONE_MATCH_SENSITIVE_FIELDS = new Set([
+  "phone",
+  "address",
+  "addressLine2",
+  "city",
+  "state",
+  "zip",
+]);
+
 function QuickAddModalV2({
   open,
   onClose,
@@ -483,7 +493,12 @@ function QuickAddModalV2({
   // with the matching confirm flag.
   const [phoneMatch, setPhoneMatch] = useState(null);
 
-  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => {
+    // A pending phone-match confirmation is only valid for the phone/address
+    // the admin saw it for — editing either invalidates it.
+    if (PHONE_MATCH_SENSITIVE_FIELDS.has(k)) setPhoneMatch(null);
+    setForm((p) => ({ ...p, [k]: v }));
+  };
   const selectedTags = Array.isArray(form.tags) ? form.tags : [];
   const resolvedProfileLabel =
     form.profileLabel === "__custom__"
@@ -609,8 +624,14 @@ function QuickAddModalV2({
                   onClick={() =>
                     submitCustomer(
                       phoneMatch.code === "DUPLICATE_PROFILE"
-                        ? { confirmDuplicate: true }
-                        : { confirmAttach: true },
+                        ? {
+                            confirmDuplicate: true,
+                            confirmMatchedAccountId: phoneMatch.match?.accountId,
+                          }
+                        : {
+                            confirmAttach: true,
+                            confirmMatchedAccountId: phoneMatch.match?.accountId,
+                          },
                     )
                   }
                 >
@@ -690,7 +711,8 @@ function QuickAddModalV2({
             <AddressAutocomplete
               value={form.address}
               onChange={(value) => set("address", value)}
-              onSelect={(parts) =>
+              onSelect={(parts) => {
+                setPhoneMatch(null);
                 setForm((p) => ({
                   ...p,
                   address: parts.line1 || parts.formatted || p.address,
@@ -698,8 +720,8 @@ function QuickAddModalV2({
                   city: parts.city || p.city,
                   state: parts.state || p.state || "FL",
                   zip: parts.zip || p.zip,
-                }))
-              }
+                }));
+              }}
               className={INPUT_CLS}
               style={{ height: 36 }}
             />{" "}

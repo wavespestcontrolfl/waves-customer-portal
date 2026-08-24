@@ -394,6 +394,23 @@ export function pickAutoScheduleEstimate({
 // doesn't resolve. A new appointment has no visit yet, and the selected
 // service here is a service-LIBRARY catalog row — its id is not a visit id.
 // Ranking is anchored on the customer instead.
+// Quick-add phone-match confirm support (server gate on
+// /admin/customers/quick-add): a 409 DUPLICATE_PROFILE / PHONE_MATCH_CONFIRM
+// becomes a conflict object the UI renders as an explicit choice, and the
+// resubmit carries the confirm flag bound to the account the admin saw.
+export function quickAddConflictFromError(err) {
+  if (!err || err.status !== 409) return null;
+  if (err.code !== 'DUPLICATE_PROFILE' && err.code !== 'PHONE_MATCH_CONFIRM') return null;
+  return { code: err.code, match: err.details?.match || null, message: err.message || '' };
+}
+
+export function quickAddConfirmFlags(conflict, { separateAccount = false } = {}) {
+  if (separateAccount) return { forceNewAccount: true, ignorePhoneMatch: true };
+  return conflict?.code === 'DUPLICATE_PROFILE'
+    ? { confirmDuplicate: true, confirmMatchedAccountId: conflict?.match?.accountId }
+    : { confirmAttach: true, confirmMatchedAccountId: conflict?.match?.accountId };
+}
+
 export function buildFindTimeRequestBody({
   customerId,
   serviceName,
@@ -437,6 +454,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [mosquitoQuote, setMosquitoQuote] = useState(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
+  // 409 phone-match conflict from quick-add ({ code, match }) — the admin
+  // picks attach / duplicate / separate account and we resubmit with the flag.
+  const [quickAddConflict, setQuickAddConflict] = useState(null);
+  // A pending confirmation is only valid for the phone/address it was shown
+  // for — editing either invalidates it.
+  const setQuickAddField = (k, v) => {
+    if (['phone', 'address', 'city', 'state', 'zip'].includes(k)) setQuickAddConflict(null);
+    setQuickAdd((q) => ({ ...q, [k]: v }));
+  };
 
   // Service state — mirrors ServiceLibraryPage's approach: ask the Service
   // Library endpoint directly, render what it returns. No local fallback
@@ -1082,21 +1108,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setCustomerResults([]);
   };
 
-  // Quick add customer
-  const handleQuickAdd = async () => {
+  // Quick add customer. `submitQuickAdd` takes explicit confirm flags;
+  // `handleQuickAdd` stays the zero-arg onClick handler so a click event
+  // never leaks into the request body.
+  const submitQuickAdd = async (extraFlags = {}) => {
     if (!quickAdd.firstName || !quickAdd.lastName || !quickAdd.phone) return;
     try {
       const r = await adminFetch('/admin/customers/quick-add', {
         method: 'POST',
-        body: JSON.stringify(quickAdd),
+        body: JSON.stringify({ ...quickAdd, ...extraFlags }),
       });
       if (r.customer) {
+        setQuickAddConflict(null);
         selectCustomer(r.customer);
         setShowQuickAdd(false);
         setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
       }
-    } catch (e) { alert('Failed to add customer: ' + e.message); }
+    } catch (e) {
+      const conflict = quickAddConflictFromError(e);
+      if (conflict) { setQuickAddConflict(conflict); return; }
+      alert('Failed to add customer: ' + e.message);
+    }
   };
+  const handleQuickAdd = () => submitQuickAdd();
 
   // Compute end time. Sum line-item durations across all services on the
   // appointment; if none are picked yet, honor the duration the operator
@@ -2067,30 +2101,53 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div><label style={labelStyle}>First Name</label><input value={quickAdd.firstName} onChange={e => setQuickAdd(q => ({ ...q, firstName: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
                   </div>
-                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAdd(q => ({ ...q, phone: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAddField('phone', e.target.value)} style={inputStyle} /></div>
                   <div style={{ marginBottom: 8 }}><label style={labelStyle}>Email</label><input type="email" value={quickAdd.email} onChange={e => setQuickAdd(q => ({ ...q, email: e.target.value }))} style={inputStyle} /></div>
                   <div style={{ marginBottom: 8 }}>
                     <label style={labelStyle}>Address</label>
                     <AddressAutocomplete
                       value={quickAdd.address}
-                      onChange={(val) => setQuickAdd(q => ({ ...q, address: val }))}
-                      onSelect={(parts) => setQuickAdd(q => ({
-                        ...q,
-                        address: parts.line1 || parts.formatted || '',
-                        city: parts.city || q.city,
-                        state: parts.state || q.state,
-                        zip: parts.zip || q.zip,
-                      }))}
+                      onChange={(val) => setQuickAddField('address', val)}
+                      onSelect={(parts) => {
+                        setQuickAddConflict(null);
+                        setQuickAdd(q => ({
+                          ...q,
+                          address: parts.line1 || parts.formatted || '',
+                          city: parts.city || q.city,
+                          state: parts.state || q.state,
+                          zip: parts.zip || q.zip,
+                        }));
+                      }}
                       style={inputStyle}
                       placeholder=""
                     />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: 8, marginBottom: 8 }}>
-                    <div><label style={labelStyle}>City</label><input value={quickAdd.city} onChange={e => setQuickAdd(q => ({ ...q, city: e.target.value }))} style={inputStyle} /></div>
-                    <div><label style={labelStyle}>State</label><input value={quickAdd.state} onChange={e => setQuickAdd(q => ({ ...q, state: e.target.value.toUpperCase().slice(0, 2) }))} style={inputStyle} /></div>
+                    <div><label style={labelStyle}>City</label><input value={quickAdd.city} onChange={e => setQuickAddField('city', e.target.value)} style={inputStyle} /></div>
+                    <div><label style={labelStyle}>State</label><input value={quickAdd.state} onChange={e => setQuickAddField('state', e.target.value.toUpperCase().slice(0, 2))} style={inputStyle} /></div>
                   </div>
-                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>ZIP</label><input value={quickAdd.zip} onChange={e => setQuickAdd(q => ({ ...q, zip: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>ZIP</label><input value={quickAdd.zip} onChange={e => setQuickAddField('zip', e.target.value)} style={inputStyle} /></div>
                   <div style={{ marginBottom: 8 }}><label style={labelStyle}>Property Label</label><input value={quickAdd.profileLabel || ''} onChange={e => setQuickAdd(q => ({ ...q, profileLabel: e.target.value }))} style={inputStyle} placeholder="Rental - Cape Coral" /></div>
+                  {quickAddConflict && (
+                    <div role="status" style={{ marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 13, color: '#18181B', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div>
+                        This phone belongs to <strong>{quickAddConflict.match?.name || 'an existing customer'}</strong>
+                        {quickAddConflict.match?.address ? ` at ${quickAddConflict.match.address}` : ''}.{' '}
+                        {quickAddConflict.code === 'DUPLICATE_PROFILE'
+                          ? 'They already have a profile at this address — adding again would create a duplicate.'
+                          : 'Attach this address to their account as an additional property, or create a separate account.'}
+                      </div>
+                      <button type="button" onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict))} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44 }}>
+                        {quickAddConflict.code === 'DUPLICATE_PROFILE' ? 'Create duplicate profile' : 'Attach as additional property'}
+                      </button>
+                      <button type="button" onClick={() => submitQuickAdd(quickAddConfirmFlags(quickAddConflict, { separateAccount: true }))} style={{ padding: '10px 16px', background: '#F4F4F5', color: '#18181B', border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44 }}>
+                        Create separate account
+                      </button>
+                      <button type="button" onClick={() => setQuickAddConflict(null)} style={{ padding: '10px 16px', background: 'none', color: '#18181B', border: '1px solid #E4E4E7', borderRadius: 6, fontSize: 13, cursor: 'pointer', minHeight: 44 }}>
+                        Cancel
+                      </button>
+                    </div>
+                  )}
                   <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add customer</button>
                 </div>
               )}
