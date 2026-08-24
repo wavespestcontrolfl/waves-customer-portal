@@ -4286,7 +4286,10 @@ function reconcileLiveVsRefunded(existing, refunded) {
   if (!existing) return { existing: null, terminal: refunded };
   const liveAt = new Date(existing.created_at || 0).getTime();
   const refundedAt = new Date(refunded.created_at || 0).getTime();
-  return refundedAt > liveAt
+  // Ties go to the refunded row (pre-push P1): rows minted in one
+  // transaction share created_at and JS Date truncates sub-millisecond
+  // precision — never let a possibly-newer refund lose to a stale pay link.
+  return refundedAt >= liveAt
     ? { existing: null, terminal: refunded }
     : { existing, terminal: null };
 }
@@ -8666,6 +8669,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       if (!recapReviewOnly) {
         preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+        // Refunded-invoice reconciliation wins here too (pre-push P0): when
+        // a newer refunded invoice beat an older live row above, this lookup
+        // would fetch that same older row again and its pay link would be
+        // reused via the preMintedInvoice branch. The visit is on the
+        // manual-billing path — nothing is reused.
+        if (terminalCompletionInvoice) preMintedInvoice = null;
       }
     } catch (e) { invoiceLookupFailed = true; /* column may not exist pre-migration — non-blocking */ }
     // Required-mint money authority (Codex P0, fix round 10): on a resume

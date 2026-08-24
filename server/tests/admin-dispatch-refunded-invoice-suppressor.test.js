@@ -266,9 +266,18 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const refundedOlder = { id: 'inv-ref-old', status: 'refunded', created_at: '2026-07-01T00:00:00Z' };
     expect(reconcileLiveVsRefunded(live, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
     expect(reconcileLiveVsRefunded(live, refundedOlder)).toEqual({ existing: live, terminal: null });
+    // Ties (same created_at — e.g. minted in one transaction) go to the refunded row.
+    const refundedTie = { id: 'inv-ref-tie', status: 'refunded', created_at: '2026-08-01T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedTie)).toEqual({ existing: null, terminal: refundedTie });
     expect(reconcileLiveVsRefunded(null, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
     expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });
     expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null });
+  });
+
+  test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
+    const at = src.indexOf("preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });");
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 600)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
   });
 
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
