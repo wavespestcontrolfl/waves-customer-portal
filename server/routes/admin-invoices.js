@@ -2346,7 +2346,13 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
 router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const reason = cleanOptionalText((req.body || {}).reason, 300);
+    const body = req.body || {};
+    const reason = cleanOptionalText(body.reason, 300);
+    // Expected plan id from the UI (codex r10 P1): a delayed/retried cancel
+    // for plan A must never cancel a REPLACEMENT plan B created since. When
+    // provided, both the locked lookup and the idempotent-retry probe are
+    // conditioned on this exact plan.
+    const expectedPlanId = cleanOptionalText(body.paymentPlanId || body.payment_plan_id, 64);
     const cancelledBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     let outcome;
     try {
@@ -2356,7 +2362,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           const e = new Error('Invoice not found'); e.statusCode = 404; throw e;
         }
         const plan = await trx('payment_plans')
-          .where({ invoice_id: id, status: 'active' })
+          .where({ invoice_id: id, status: 'active', ...(expectedPlanId ? { id: expectedPlanId } : {}) })
           .forUpdate()
           .first();
         if (!plan) {
@@ -2365,7 +2371,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           // Surface that plan so the re-arm below runs again instead of 409ing
           // the operator into a permanently reminder-less invoice.
           const lastCancelled = await trx('payment_plans')
-            .where({ invoice_id: id, status: 'cancelled' })
+            .where({ invoice_id: id, status: 'cancelled', ...(expectedPlanId ? { id: expectedPlanId } : {}) })
             .orderBy('cancelled_at', 'desc')
             .first();
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };

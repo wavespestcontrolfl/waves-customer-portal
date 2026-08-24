@@ -2148,6 +2148,11 @@ const StripeService = {
             // prepaid transition (return, don't throw — a throw would roll back
             // the apply AND the PI clearing, stranding the invoice) and skip the
             // card charge. Settled below, after the transaction commits.
+            // Complete any active plan IN THIS TRX (codex r10 P1): no Stripe
+            // charge happens here, so no webhook retry exists to repair a
+            // post-commit failure. (Defensive: applyAccountCreditToInvoice
+            // skips under an active plan, so coverage normally implies none.)
+            await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
             coveredByCredit = true;
             return;
           }
@@ -3375,6 +3380,9 @@ const StripeService = {
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            // Same-trx plan completion — no webhook retry exists for a
+            // credit-only settlement (codex r10 P1; defensive, see above).
+            await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
             coveredByCredit = true;
             return;
           }

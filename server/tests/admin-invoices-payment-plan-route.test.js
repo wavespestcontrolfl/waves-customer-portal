@@ -355,6 +355,28 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('a stale cancel naming plan A never cancels replacement plan B (codex r10 P1)', async () => {
+    // Active lookup conditioned on the expected id finds nothing (B is
+    // active, A is cancelled); the retry probe returns A → alreadyCancelled.
+    trxPlans.first
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...CANCELLED_PLAN, cancelled_at: new Date() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      // Both probes were conditioned on the EXPECTED plan id.
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active', id: 'plan-1' });
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'cancelled', id: 'plan-1' });
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('409 when the invoice has no active plan', async () => {
     trxPlans.first.mockResolvedValue(null);
     await withServer(async (baseUrl) => {

@@ -812,7 +812,7 @@ function InvoiceList({
     }
   };
 
-  const handleCancelPaymentPlan = async (id) => {
+  const handleCancelPaymentPlan = async (id, planId) => {
     if (
       !confirm(
         "Cancel this payment plan? The invoice reopens for normal collection and editing.",
@@ -823,6 +823,7 @@ function InvoiceList({
     try {
       await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
         method: "POST",
+        body: JSON.stringify({ paymentPlanId: planId }),
       });
       showToast("Payment plan cancelled");
       load();
@@ -1512,7 +1513,12 @@ function InvoiceList({
                           )}
                           {inv.active_payment_plan && (
                             <button
-                              onClick={() => handleCancelPaymentPlan(inv.id)}
+                              onClick={() =>
+                                handleCancelPaymentPlan(
+                                  inv.id,
+                                  inv.active_payment_plan.id,
+                                )
+                              }
                               disabled={cancellingPlanInvoiceId === inv.id}
                               style={sBtn(D.card, D.text, isMobile)}
                               title="Cancel the active payment plan — the invoice reopens for normal collection and editing"
