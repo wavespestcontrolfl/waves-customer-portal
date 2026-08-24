@@ -33,7 +33,7 @@ function makeBuilder(rawTable) {
   const table = String(rawTable).split(' ')[0];
   const b = {};
   [
-    'where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw',
+    'where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw',
     'whereBetween', 'whereExists', 'whereNotExists', 'leftJoin', 'join',
     'groupBy', 'orderBy', 'select', 'sum', 'count', 'limit',
   ].forEach((m) => { b[m] = jest.fn(() => b); });

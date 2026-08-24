@@ -20,7 +20,11 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 router.get('/dashboard', async (req, res, next) => {
   try {
-    const year = String(new Date().getFullYear());
+    // ET, not UTC (codex r4 P1): in the final five hours of Dec 31 ET the
+    // server is already in the next UTC year, so getFullYear() built an
+    // inverted `<next>-01-01 → <curr>-12-31` window that reported $0 YTD.
+    // Both boundaries derive from the same ET clock.
+    const year = String(etParts(new Date()).year);
 
     // YTD net sales tax collected on commercial invoices — same helper the
     // Revenue/P&L tabs use, so the dashboard can't disagree with them. (The
@@ -568,6 +572,25 @@ router.put('/filings/:id', async (req, res, next) => {
       confirmationNumber: 'confirmation_number', notes: 'notes',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
+    // Server-enforced (codex r4-push P1): a paid filing MUST carry a valid
+    // amount — the quarterly estimate credits SUM(amount_paid) of paid
+    // rows, and an amount-less paid row silently credits $0 and re-bills
+    // the installment. The client prompt is a convenience, not the gate.
+    if (update.status === 'paid' || update.amount_paid !== undefined) {
+      const row = await db('tax_filing_calendar').where({ id: req.params.id }).first();
+      if (!row) return res.status(404).json({ error: 'Filing not found' });
+      const mergedStatus = update.status !== undefined ? update.status : row.status;
+      if (mergedStatus === 'paid') {
+        // Explicit null/blank rejection BEFORE coercion (Number(null) is 0
+        // — r5-push P1): the merged row must carry a real amount whether
+        // the request changes status, the amount, or both.
+        const amtSource = update.amount_paid !== undefined ? update.amount_paid : row.amount_paid;
+        const amt = amtSource === null || amtSource === '' ? NaN : Number(amtSource);
+        if (!Number.isFinite(amt) || amt < 0) {
+          return res.status(400).json({ error: 'amountPaid is required when marking a filing paid — future estimates credit it' });
+        }
+      }
+    }
     await db('tax_filing_calendar').where({ id: req.params.id }).update(update);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -1121,7 +1144,7 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       quarter,
       ...est,
       dueDate: dueDates[quarter],
-      note: `Rough projection, not the IRS Form 2210 annualized-income worksheet (which uses periods ending Mar/May/Aug/Dec and factors 4/2.4/1.5/1). Assumes a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} calendar months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as filed/paid on the filing calendar for earlier ${year} quarters are credited. Consult CPA for precise figures.`,
+      note: `Rough projection, not the IRS Form 2210 annualized-income worksheet (which uses periods ending Mar/May/Aug/Dec and factors 4/2.4/1.5/1). Assumes a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} calendar months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as PAID on the filing calendar through Q${qNum} ${year} are credited. Deductions count expenses-table rows only — synced processing fees and equipment depreciation (which the P&L deducts) are NOT subtracted here, so the recommendation errs toward overpayment, never underpayment. Consult CPA for precise figures.`,
     });
   } catch (err) { next(err); }
 });

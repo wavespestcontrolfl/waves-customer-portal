@@ -348,7 +348,7 @@ async function getQuarterlyEstimate(quarter) {
     quarter: q,
     ...est,
     estimated_state: 0, // Florida has no state income tax
-    note: 'Same calculation as the Tax page quarterly estimate. Rough projection, not the IRS Form 2210 annualized-income worksheet. Assumes a flat 22% federal bracket (no standard deduction or QBI); SE tax is 15.3% on 92.35% of net earnings with 50% deducted before income tax; YTD net income (deductible expenses; sales tax excluded from revenue) is annualized over the elapsed months, and prior 1040-ES payments recorded as filed/paid are credited. Florida has no state income tax. Consult your CPA for precise calculations.',
+    note: 'Same calculation as the Tax page quarterly estimate. Rough projection, not the IRS Form 2210 annualized-income worksheet. Assumes a flat 22% federal bracket (no standard deduction or QBI); SE tax is 15.3% on 92.35% of net earnings with 50% deducted before income tax; YTD net income (deductible expenses; sales tax excluded from revenue) is annualized over the elapsed months, and 1040-ES payments recorded as PAID (through the selected quarter) are credited. Deductions count expenses-table rows only — synced processing fees and equipment depreciation are NOT subtracted, so the figure errs toward overpayment. Florida has no state income tax. Consult your CPA for precise calculations.',
   };
 }
 

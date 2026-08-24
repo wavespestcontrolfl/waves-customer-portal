@@ -1364,15 +1364,19 @@ function FilingCalendarTab() {
         // operator can be told to re-pay an installment. Prefill with the
         // row's amount due when it has one.
         const row = filings.find((f) => f.id === id);
+        // Cancel ABORTS and a paid filing REQUIRES a persisted amount
+        // (codex r4 P1): an amount-less "paid" row credits $0 to later
+        // estimates, which can then instruct re-paying the installment.
         const entered = window.prompt(
-          "Amount paid (used to credit future estimates):",
+          "Amount paid (required — credits future estimates):",
           row?.amountDue != null ? String(row.amountDue) : "",
         );
-        if (entered !== null && entered.trim() !== "") {
-          const amt = Number(entered);
-          if (Number.isFinite(amt) && amt >= 0) update.amountPaid = amt;
-          else return alert("Enter a valid non-negative amount (or leave blank to skip).");
+        if (entered === null) return; // operator cancelled — no status change
+        const amt = Number(entered);
+        if (entered.trim() === "" || !Number.isFinite(amt) || amt < 0) {
+          return alert("Enter a valid non-negative amount — a filing cannot be marked paid without one.");
         }
+        update.amountPaid = amt;
       }
       await adminFetch(`/admin/tax/filings/${id}`, {
         method: "PUT",

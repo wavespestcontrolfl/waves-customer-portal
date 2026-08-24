@@ -753,23 +753,90 @@ async function paidRevenueForWindow(db, startDate, endDate) {
  * tax_amount stays excluded from income even if part of the refunded cash
  * was tax (income slightly understated, never overstated) — invoices carry
  * no per-refund tax split, so refund-event proration isn't computable.
+ *
+ * KNOWN LIMITATION — SCOPE RULING (owner, 2026-08-24): attribution here is
+ * derived from CURRENT invoice/payment state plus the durable dispute and
+ * statement linkages below, NOT from an event-sourced tax ledger. Multi-hop
+ * settlement cycles therefore mis-attribute across periods in rare shapes:
+ * an invoice refunded and later RE-PAID (or a dispute later WON) returns to
+ * 'paid', so the earlier reversal leg stops matching it and the replacement
+ * receipt gets no fresh tax allocation; and the reversal date leans on
+ * refund markers / refunded_at / updated_at rather than one immutable
+ * refund clock. Every such cycle requires the payer-statements machinery or
+ * a dispute-then-resettle sequence — the statements feature is DARK in prod
+ * (GATE_PAYER_STATEMENTS off), and single-hop dispute/refund flows ARE
+ * handled by the legs below. Building true event-sourced tax-period
+ * attribution (per-receipt/per-outflow movements) is deliberately DEFERRED
+ * to the payer-statements activation lane, where it is a flip
+ * prerequisite; bolting it on here was ruled out as a redesign of money
+ * code outside this PR's scope. YTD totals converge once a cycle settles —
+ * only the intra-cycle month split is affected.
  */
 async function salesTaxCollectedForWindow(db, startDate, endDate) {
-  const etDay = (expr) => `DATE(${expr} AT TIME ZONE 'America/New_York')`;
-  const [collected, reversed] = await Promise.all([
+  const [collected, reversed, statementReversed] = await Promise.all([
     // Tax collected in the RECEIPT period. status IN ('paid','refunded') so a
     // later full refund can't retroactively rewrite the original period —
     // mirror of paidRevenueForWindow keeping the gross receipt there. NULL
-    // paid_at (legacy manual rows) falls back to updated_at so a paid, taxed
-    // invoice is never silently counted as income.
-    db('invoices')
-      .whereIn('status', ['paid', 'refunded'])
-      .where('tax_amount', '>', 0)
+    // paid_at falls back to the linked payment's ORIGINAL receipt date
+    // (codex r4 P1): the combined-charge full-refund webhook CLEARS each
+    // linked invoice's paid_at, so an updated_at fallback moved the tax
+    // collection into the refund period — cancelling the reversal there and
+    // leaving the original-period P&L to classify the tax as service
+    // revenue. Refund-marker rows are excluded so their (refund-time)
+    // payment_date can never be the stamp; updated_at remains the last
+    // resort for legacy manual rows with no payment linkage, so a paid,
+    // taxed invoice is never silently counted as income.
+    db('invoices as i')
+      .where('i.tax_amount', '>', 0)
+      .where(function collectedStatus() {
+        // Status OR a real receipt in the payment ledger (r6-push P1): the
+        // payer-statement dispute cascade reopens child invoices to 'draft'
+        // and clears paid_at, but the original receipt payment rows remain —
+        // without this leg the original period would reclassify that tax as
+        // service income. The linkage is DURABLE (codex r5 P1): the
+        // charge.dispute.created handler CLEARS the invoice's PI (keeping
+        // metadata.dispute_invoice_id on the payment), and statement
+        // children never carry the settlement PI at all (it lives on the
+        // payments row's statement_id) — so PI equality alone would lose
+        // both. (The refund-period add-back deliberately keys on
+        // status='refunded' only: for a cascade-reopened invoice the
+        // tax-inclusive outflow nets income DOWN in the refund period, so
+        // omitting its add-back UNDERSTATES income there — the safe
+        // direction — and no durable statement-refund stamp exists on the
+        // invoice to key a precise add-back.)
+        this.whereIn('i.status', ['paid', 'refunded'])
+          .orWhereExists(function receiptExists() {
+            this.select(db.raw('1')).from('payments as pr')
+              .whereRaw(`(
+               (i.stripe_payment_intent_id IS NOT NULL AND pr.stripe_payment_intent_id = i.stripe_payment_intent_id)
+               OR pr.metadata->>'dispute_invoice_id' = i.id::text
+               OR (i.payer_statement_id IS NOT NULL AND pr.statement_id = i.payer_statement_id)
+             )
+             AND COALESCE(pr.metadata->>'source', '') <> 'invoice_refund'
+             AND pr.status IN ('paid', 'refunded', 'disputed')`);
+          });
+      })
+      // The LEDGER receipt date buckets first (codex r5 P1): paid_at is
+      // stamped at webhook-HANDLER time, so a success event delivered or
+      // retried across an ET month boundary would put the gross revenue
+      // (payment_date, Stripe-event-derived) in one month and this tax
+      // exclusion in the next. Same durable linkage as the existence leg.
       .whereRaw(
-        `${etDay('COALESCE(paid_at, updated_at)')} BETWEEN ?::date AND ?::date`,
+        `DATE(COALESCE(
+          (SELECT MIN(pr.payment_date)::timestamp FROM payments pr
+             WHERE (
+               (i.stripe_payment_intent_id IS NOT NULL AND pr.stripe_payment_intent_id = i.stripe_payment_intent_id)
+               OR pr.metadata->>'dispute_invoice_id' = i.id::text
+               OR (i.payer_statement_id IS NOT NULL AND pr.statement_id = i.payer_statement_id)
+             )
+             AND COALESCE(pr.metadata->>'source', '') <> 'invoice_refund'
+             AND pr.status IN ('paid', 'refunded', 'disputed')),
+          i.paid_at AT TIME ZONE 'America/New_York',
+          i.updated_at AT TIME ZONE 'America/New_York'
+        )) BETWEEN ?::date AND ?::date`,
         [startDate, endDate],
       )
-      .select(db.raw("COALESCE(SUM(tax_amount)::text, '0') as total"))
+      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
     // Tax REVERSED in the refund period. A fully refunded invoice's outflow
@@ -798,8 +865,56 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
       .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
+    // Tax REVERSED for dispute/cascade-REOPENED invoices (codex r5-push
+    // P0 ×2): an ordinary charge dispute reopens its invoice to 'overdue'
+    // (payment marked 'disputed', PI cleared but metadata.dispute_invoice_id
+    // kept), and reverseStatementCascadeForDispute reopens statement
+    // children to 'draft' — neither ever reads status 'refunded', yet the
+    // collection leg keeps their receipt-period tax via the durable
+    // payment linkage. Without this leg a fully reversed $107 receipt
+    // carrying $7 tax nets the YTD revenue basis to -$7 instead of $0.
+    // Reversal period = the linked payment's dispute/refund outflow in
+    // stripe_payout_transactions — the SAME rows outflowTransactionsQuery
+    // nets revenue with, so the add-back always lands in the outflow's
+    // period; no outflow row yet = no reversal counted, matching the
+    // revenue side exactly. Linkage mirrors the collection leg's.
+    db('invoices as i')
+      .where('i.tax_amount', '>', 0)
+      .whereNotIn('i.status', ['paid', 'refunded'])
+      .whereRaw(
+        `EXISTS (
+          SELECT 1 FROM payments pr
+           WHERE (
+               (i.stripe_payment_intent_id IS NOT NULL AND pr.stripe_payment_intent_id = i.stripe_payment_intent_id)
+               OR pr.metadata->>'dispute_invoice_id' = i.id::text
+               OR (i.payer_statement_id IS NOT NULL AND pr.statement_id = i.payer_statement_id)
+             )
+             AND COALESCE(pr.metadata->>'source', '') <> 'invoice_refund'
+             AND pr.status IN ('paid', 'refunded', 'disputed'))`,
+      )
+      .whereRaw(
+        `DATE((
+          SELECT MAX(spt.created_at_stripe) FROM stripe_payout_transactions spt
+            JOIN payments pd ON spt.payment_id = pd.id
+           WHERE (
+               (i.stripe_payment_intent_id IS NOT NULL AND pd.stripe_payment_intent_id = i.stripe_payment_intent_id)
+               OR pd.metadata->>'dispute_invoice_id' = i.id::text
+               OR (i.payer_statement_id IS NOT NULL AND pd.statement_id = i.payer_statement_id)
+             )
+             AND (spt.reporting_category IN ('refund', 'refund_failure', 'dispute', 'dispute_reversal')
+                  OR spt.type = 'payment_reversal')
+        ) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date`,
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
   ]);
-  return round2(parseFloat(collected?.total || 0) - parseFloat(reversed?.total || 0));
+  return round2(
+    parseFloat(collected?.total || 0)
+    - parseFloat(reversed?.total || 0)
+    - parseFloat(statementReversed?.total || 0),
+  );
 }
 
 /**
@@ -873,6 +988,16 @@ async function computeQuarterlyEstimate(db, { year, qNum, today }) {
   const quarterEnd = `${year}-${pad2(startMonth + 3)}-${qEndDay}`;
   const ytdStart = `${year}-01-01`;
 
+  // A wholly-future period has no data window at all (r6-push P1): capping
+  // its end at "today" built an inverted future-Jan-1 → today range that
+  // returned a plausible-looking $0 estimate. Refuse instead.
+  if (today && today < startDate) {
+    const err = new Error(`Q${qNum} ${year} has not started — an estimate for a future period would be $0 by construction. Select the current or a past quarter.`);
+    err.statusCode = 400;
+    err.status = 400;
+    err.isOperational = true;
+    throw err;
+  }
   // Effective window end: never beyond "today" — querying into the future
   // adds nothing, and the elapsed-months figure must match the data window.
   const endDate = today && today < quarterEnd ? today : quarterEnd;
@@ -892,16 +1017,19 @@ async function computeQuarterlyEstimate(db, { year, qNum, today }) {
       // Missing table tolerated in dev ONLY — any real DB failure must
       // propagate. Swallowing it to $0 would inflate taxable income silently.
       .first().catch(missingTableOnly({ total: '0' })),
-    qNum > 1
-      ? db('tax_filing_calendar')
+    db('tax_filing_calendar')
         .where('filing_type', '1040es_quarterly')
-        .whereIn('status', ['filed', 'paid'])
-        .whereIn('period_label', Array.from({ length: qNum - 1 }, (_, i) => `Q${i + 1} ${year}`))
+        // PAID rows only (codex r4-push P1): 'filed' is a distinct calendar
+        // state — crediting a filed-but-unpaid row would understate the
+        // installment actually still owed. THROUGH the selected quarter
+        // (r5-push P1): once the operator marks this quarter paid, its own
+        // credit must zero the recommendation instead of re-billing it.
+        .whereIn('status', ['paid'])
+        .whereIn('period_label', Array.from({ length: qNum }, (_, i) => `Q${i + 1} ${year}`))
         .select(db.raw("COALESCE(SUM(amount_paid)::text, '0') as total"))
         // Same: a swallowed filing-calendar failure would zero the credit
         // and tell the operator to pay an already-paid installment again.
-        .first().catch(missingTableOnly({ total: '0' }))
-      : Promise.resolve({ total: '0' }),
+        .first().catch(missingTableOnly({ total: '0' })),
   ]);
 
   const est = buildQuarterlyEstimate({
