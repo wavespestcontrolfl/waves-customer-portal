@@ -286,7 +286,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
@@ -328,7 +328,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the alert transaction re-verifies the refunded row FOR UPDATE — a bounced refund (restored to paid) skips the alert instead of instructing a duplicate bill', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     const recheckAt = block.indexOf('.forUpdate()');
     const notifyAt = block.indexOf("notifyAdmin(");
     expect(recheckAt).toBeGreaterThan(-1);
@@ -357,6 +357,14 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // The sibling set is RE-DERIVED on the transaction (never a remembered
     // single row): the fresh sibling lookup runs on trx.
     expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx);');
+    // Every candidate row is re-LOCKED and re-classified under FOR UPDATE
+    // (advisory locks serialize mints only — refunds/cancels/payments still
+    // move rows): both the fresh on-visit row and the sibling selection
+    // flow through lockAndReclassify, which drops resolved-terminal rows.
+    expect(block).toContain('const lockAndReclassify = async (row) => {');
+    expect(block).toContain('const freshLiveOnVisit = await lockAndReclassify(await completionNewestLiveInvoiceLookup(trx, {');
+    expect(block).toContain('siblingLiveNow = await lockAndReclassify(');
+    expect(block).toContain('return locked && !terminalResolvedAway.includes(locked.status) ? locked : null;');
     // A concurrently canceled/void refunded row is DEAD, not restored —
     // never named as collectible (codex r12).
     expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');
@@ -450,7 +458,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 
   test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
-    const block = src.slice(at, at + 11000);
+    const block = src.slice(at, at + 12000);
     expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
     // No assignment inside the callback: success is signalled by returning
     // true, which only reaches the flag after the commit resolves.

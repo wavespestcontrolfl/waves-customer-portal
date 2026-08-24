@@ -8939,14 +8939,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
             && !terminalResolvedAway.includes(terminalNow.status)
             ? terminalNow : null;
+          // Every candidate row this decision reads is re-LOCKED (FOR
+          // UPDATE) and its status re-derived under the lock — the advisory
+          // locks serialize MINTS only; refunds, cancels, and payment
+          // updates still move rows between a plain select and the commit
+          // (codex P0). A row resolved-terminal under the lock is dropped;
+          // a settled one feeds the covered branch below.
+          const lockAndReclassify = async (row) => {
+            if (!row) return null;
+            const locked = await trx('invoices')
+              .where({ id: row.id })
+              .forUpdate()
+              .first('id', 'invoice_number', 'status');
+            return locked && !terminalResolvedAway.includes(locked.status) ? locked : null;
+          };
           // 2. A FRESH on-visit live-invoice lookup (not the pre-transaction
           //    snapshot): a concurrent Charge Now / mint may have created a
           //    collectible invoice after the unlocked lookups, and a "bill
           //    manually" alert beside it would invite a duplicate.
-          const freshLiveOnVisit = await completionNewestLiveInvoiceLookup(trx, {
+          const freshLiveOnVisit = await lockAndReclassify(await completionNewestLiveInvoiceLookup(trx, {
             serviceRecordId: record.id,
             scheduledServiceId: svc.id,
-          });
+          }));
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
           //    r13) — a sibling first-application invoice minted after the
@@ -8955,9 +8969,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           let siblingLiveNow = null;
           if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
             const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx);
-            siblingLiveNow = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
+            siblingLiveNow = await lockAndReclassify(siblingNow.invoice && siblingNow.invoice.status === 'refunded'
               ? (siblingNow.liveBeside || null)
-              : (siblingNow.invoice || null);
+              : (siblingNow.invoice || null));
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
