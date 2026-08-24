@@ -2907,55 +2907,44 @@ async function resolveRefundIdForCharge(charge) {
 
 // Monthly-autopay dues orphans (Stripe collected the dues, the payments
 // insert failed) are counted as collected dues by billing-lane's
-// monthlyDuesCollected while `resolved=false`. Generic refund/dispute
-// handling keys on the payments row, which an orphan does not have, so a
-// FULL refund or a whole-charge chargeback on the orphaned PI must
-// terminally classify the orphan here or completion keeps treating the
-// returned money as collected and suppresses an owed invoice.
-//  - Partial reversals (amount below the orphan's amount) leave the orphan
-//    OPEN on purpose — most of the dues stayed collected; the owner
-//    reconciles (same lane as partial refunds elsewhere).
-//  - A refund whose failure was already fenced (refund.failed arrived
-//    before charge.refunded — stripe_failed_refunds) never reverses:
-//    Stripe kept the money. The guard is a NOT EXISTS inside the update.
-//    The mirror case (charge.refunded reversed first, then the bounce)
-//    is handled by refund.failed's no-payments-row fence branch reopening
-//    the orphan in the same transaction as the fence.
-//  - DB errors PROPAGATE so the webhook is not acknowledged with stale
-//    coverage state (AGENTS.md webhook idempotency) — Stripe retries.
-// The marker prefix is what restoreAutopayDuesOrphan looks for when the
-// reversal itself bounces (refund failed / dispute won).
-const AUTOPAY_DUES_REVERSED_MARKER = 'Autopay dues reversed:';
-async function reverseAutopayDuesOrphan(paymentIntentId, note, { refundId = null, amountCents = null } = {}) {
-  if (!paymentIntentId) return 0;
-  const fenceTable = refundId ? await db.schema.hasTable('stripe_failed_refunds') : false;
-  return db('stripe_orphan_charges')
-    .where({ stripe_payment_intent_id: paymentIntentId, resolved: false })
-    .whereRaw("metadata->>'type' = ?", ['monthly_autopay'])
-    .modify((q) => {
-      // Whole-amount reversals only; a partial stays in the reconciliation lane.
-      if (amountCents != null) q.where('amount', '<=', Number(amountCents) / 100);
-      // Fenced-failure guard evaluated INSIDE the update (not a separate
-      // read), so a refund.failed fence committed before this statement
-      // runs always wins, whatever order the two events were delivered in.
-      if (fenceTable) q.whereNotExists(db('stripe_failed_refunds').where({ stripe_refund_id: refundId }));
-    })
-    .update({
-      resolved: true,
-      resolved_at: new Date(),
-      resolution_notes: `${AUTOPAY_DUES_REVERSED_MARKER} ${note}`,
-    });
-}
-async function restoreAutopayDuesOrphan(paymentIntentId, note, conn = db) {
-  if (!paymentIntentId) return 0;
-  return conn('stripe_orphan_charges')
-    .where({ stripe_payment_intent_id: paymentIntentId, resolved: true })
-    .where('resolution_notes', 'like', `${AUTOPAY_DUES_REVERSED_MARKER}%`)
-    .update({
-      resolved: false,
-      resolved_at: null,
-      resolution_notes: `Reopened: ${note}`,
-    });
+// monthlyDuesCollected while `resolved=false` AND no reversal on the PI
+// returned the money. Generic refund/dispute handling keys on the payments
+// row an orphan does not have, so the reversal events stamp their outcome
+// on the orphan itself: metadata.reversals[<refund or dispute id>] =
+//   'returned' — charge.refunded (full), dispute.created, dispute lost
+//   'kept'     — refund.failed (Stripe kept the money)
+//   'won'      — dispute closed won / warning_closed (funds reinstated)
+// Order-independent by construction: a terminal outcome ('kept'/'won')
+// is never overwritten by 'returned', and the precedence is evaluated
+// inside ONE atomic row UPDATE, so no cross-event serialization is needed
+// (Stripe does not guarantee created/closed or refunded/failed order).
+// Whole-amount reversals only: a partial refund/dispute (amount below the
+// orphan's amount) matches no row and the orphan stays in the
+// reconciliation lane. DB errors PROPAGATE so the webhook is not
+// acknowledged with stale coverage state (AGENTS.md webhook idempotency).
+const AUTOPAY_ORPHAN_TERMINAL_OUTCOMES = ['kept', 'won'];
+async function stampAutopayDuesOrphanReversal(paymentIntentId, key, outcome, { amountCents = null, conn = db } = {}) {
+  if (!paymentIntentId || !key) return 0;
+  const terminal = AUTOPAY_ORPHAN_TERMINAL_OUTCOMES.includes(outcome);
+  const bindings = [String(key), String(outcome), String(paymentIntentId)];
+  let sql = `UPDATE stripe_orphan_charges
+    SET metadata = COALESCE(metadata, '{}'::jsonb)
+      || jsonb_build_object('reversals', COALESCE(metadata->'reversals', '{}'::jsonb) || jsonb_build_object(?::text, ?::text)),
+      updated_at = NOW()
+    WHERE stripe_payment_intent_id = ?
+      AND metadata->>'type' = 'monthly_autopay'`;
+  if (!terminal) {
+    // 'returned' never overwrites a terminal outcome already stamped for
+    // the same refund/dispute id.
+    sql += ` AND COALESCE(metadata->'reversals'->>?::text, '') NOT IN ('kept', 'won')`;
+    bindings.push(String(key));
+    if (amountCents != null) {
+      sql += ' AND amount <= ?';
+      bindings.push(Number(amountCents) / 100);
+    }
+  }
+  const result = await conn.raw(sql, bindings);
+  return Number(result?.rowCount ?? 0);
 }
 
 async function handleChargeRefunded(charge) {
@@ -2973,11 +2962,9 @@ async function handleChargeRefunded(charge) {
   const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
   if (isFullRefund) {
-    await reverseAutopayDuesOrphan(
-      charge.payment_intent,
-      `charge ${chargeId} fully refunded (${refundId || 'refund id unknown'}) — funds returned to the customer`,
-      { refundId, amountCents: Number(charge.amount_refunded) || null },
-    );
+    await stampAutopayDuesOrphanReversal(charge.payment_intent, refundId || `charge:${chargeId}`, 'returned', {
+      amountCents: Number(charge.amount_refunded) || null,
+    });
   }
 
   // Estimate deposits have no payments row — a dashboard refund (or the
@@ -4129,11 +4116,11 @@ async function handleRefundFailed(refund) {
           stripe_payment_intent_id: piId,
           context: 'refund.failed before settlement row',
         });
-        // No payments row = the orphan lane. If charge.refunded already
-        // reversed a monthly-autopay dues orphan for this PI, the bounce
-        // means Stripe kept the dues — reopen it (same transaction as the
-        // fence, so the two can never disagree).
-        await restoreAutopayDuesOrphan(piId, `refund ${refundId} FAILED at the bank — Stripe kept the money`, trx);
+        // No payments row = the orphan lane. The bounce means Stripe kept
+        // the dues: stamp the refund id 'kept' on any monthly-autopay dues
+        // orphan for this PI (terminal — a late charge.refunded cannot
+        // flip it back to 'returned').
+        await stampAutopayDuesOrphanReversal(piId, refundId, 'kept', { conn: trx });
         await insertBounceNotification(trx, 'No payments row matched — the failed refund id was fenced, so its late charge.refunded creation event will be skipped. If an invoice or statement was already marked refunded, restore it manually.');
       });
       return;
@@ -6104,11 +6091,9 @@ async function handleDisputeCreated(dispute) {
   const reason = dispute.reason || 'unknown';
   const amount = (dispute.amount / 100).toFixed(2);
   logger.warn(`[stripe-webhook] Dispute created: ${dispute.id} on charge ${chargeId} — $${amount} (${reason})`);
-  await reverseAutopayDuesOrphan(
-    dispute.payment_intent,
-    `dispute ${dispute.id} opened on charge ${chargeId} — funds withdrawn`,
-    { amountCents: Number(dispute.amount) || null },
-  );
+  await stampAutopayDuesOrphanReversal(dispute.payment_intent, dispute.id, 'returned', {
+    amountCents: Number(dispute.amount) || null,
+  });
 
   // Deposit PIs have no payments row — flip the deposit ledger (disputed
   // money can never satisfy acceptance) and skip the payments path.
@@ -6651,8 +6636,14 @@ async function handleDisputeClosed(dispute) {
   const status = dispute.status;
   const amount = (dispute.amount / 100).toFixed(2);
   logger.info(`[stripe-webhook] Dispute closed: ${dispute.id} status=${status}`);
-  if (status === 'won') {
-    await restoreAutopayDuesOrphan(dispute.payment_intent, `dispute ${dispute.id} WON — funds reinstated`);
+  // Dues-orphan outcome for this dispute id (order-independent; see
+  // stampAutopayDuesOrphanReversal): won / warning_closed = funds stood.
+  if (status === 'won' || status === 'warning_closed') {
+    await stampAutopayDuesOrphanReversal(dispute.payment_intent, dispute.id, 'won');
+  } else if (status === 'lost') {
+    await stampAutopayDuesOrphanReversal(dispute.payment_intent, dispute.id, 'returned', {
+      amountCents: Number(dispute.amount) || null,
+    });
   }
 
   // Deposit PIs settle on the deposit ledger, not the payments table.
@@ -7708,8 +7699,7 @@ async function handleSetupIntentFailed(setupIntent) {
 module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
-module.exports._reverseAutopayDuesOrphan = reverseAutopayDuesOrphan;
-module.exports._restoreAutopayDuesOrphan = restoreAutopayDuesOrphan;
+module.exports._stampAutopayDuesOrphanReversal = stampAutopayDuesOrphanReversal;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._resolveRefundIdForCharge = resolveRefundIdForCharge;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

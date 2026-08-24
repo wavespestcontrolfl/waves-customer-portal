@@ -527,14 +527,10 @@ describe('handleRefundFailed', () => {
       where: jest.fn(() => emptyQuery),
       first: jest.fn(async () => undefined),
     };
-    // A reversed monthly-autopay dues orphan for this PI is reopened in the
-    // same transaction as the fence (Stripe kept the dues).
-    const orphanRestoreQuery = { where: jest.fn(() => orphanRestoreQuery), update: jest.fn(async () => 1) };
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
       if (table === 'appointment_card_requests') return emptyQuery;
       if (table === 'stripe_failed_refunds') return fenceQuery;
-      if (table === 'stripe_orphan_charges') return orphanRestoreQuery;
       if (table === 'notifications') return { insert: notificationInsert };
       throw new Error(`Unexpected db table: ${table}`);
     });
@@ -546,7 +542,9 @@ describe('handleRefundFailed', () => {
 
     await handleRefundFailed(failedRefund());
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(orphanRestoreQuery.update).toHaveBeenCalledWith(expect.objectContaining({ resolved: false }));
+    // No payments row = orphan lane: the bounced refund id is stamped
+    // 'kept' on any monthly-autopay dues orphan, on the fence transaction.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('UPDATE stripe_orphan_charges'), ['re_fail', 'kept', 'pi_1']);
     expect(db.raw).toHaveBeenCalledWith(
       expect.stringContaining('pg_advisory_xact_lock'),
       ['combined.refund.fence', 'ch_1'],
@@ -615,15 +613,8 @@ describe('handleRefundFailed', () => {
       update: jest.fn(async (patch) => { paymentUpdates.push(patch); return 1; }),
     };
     const emptyQuery = { where: jest.fn(() => emptyQuery), first: jest.fn(async () => undefined) };
-    // Full refund → the monthly-autopay dues orphan reversal runs first (no
-    // orphan for this PI here — plain 0-row update).
-    const orphanQuery = {
-      where: jest.fn(() => orphanQuery), whereRaw: jest.fn(() => orphanQuery), whereNotExists: jest.fn(() => orphanQuery),
-      modify: jest.fn((fn) => { fn(orphanQuery); return orphanQuery; }), update: jest.fn(async () => 0),
-    };
     db.mockImplementation((table) => {
       if (table === 'stripe_failed_refunds') return fenceQuery;
-      if (table === 'stripe_orphan_charges') return orphanQuery;
       if (table === 'payments') return paymentsQuery;
       if (table === 'payer_statements') return emptyQuery;
       if (table === 'appointment_card_requests') return emptyQuery;
@@ -670,77 +661,41 @@ describe('handleRefundFailed', () => {
 });
 
 // Monthly-autopay dues orphans count as collected dues (billing-lane
-// monthlyDuesCollected) while unresolved; a FULL refund or whole-charge
-// chargeback on the orphaned PI must terminally classify the row, a partial
-// reversal must leave it open, an already-fenced failed refund must not
-// reverse it, a bounced reversal (refund failed / dispute won) must reopen
-// it, and DB errors must propagate (no acknowledged-but-stale coverage).
+// monthlyDuesCollected) while unresolved and not 'returned'. Reversal
+// events stamp a per-refund/dispute outcome on the orphan in ONE atomic
+// UPDATE whose WHERE encodes the precedence (terminal 'kept'/'won' beats
+// 'returned' whatever the delivery order) and the whole-amount guard.
 describe('autopay dues orphan reversal stamps', () => {
-  const {
-    _reverseAutopayDuesOrphan: reverseAutopayDuesOrphan,
-    _restoreAutopayDuesOrphan: restoreAutopayDuesOrphan,
-  } = require('../routes/stripe-webhook');
+  const { _stampAutopayDuesOrphanReversal: stamp } = require('../routes/stripe-webhook');
 
   beforeEach(() => { jest.clearAllMocks(); });
 
-  function orphanTable() {
-    const q = {
-      where: jest.fn(() => q),
-      whereRaw: jest.fn(() => q),
-      whereNotExists: jest.fn(() => q),
-      modify: jest.fn((fn) => { fn(q); return q; }),
-      update: jest.fn(async () => 1),
-    };
-    const fence = { where: jest.fn(() => fence) };
-    db.schema = { hasTable: jest.fn(async () => true) };
-    db.mockImplementation((table) => {
-      if (table === 'stripe_failed_refunds') return fence;
-      expect(table).toBe('stripe_orphan_charges');
-      return q;
-    });
-    return { q, fence };
-  }
-
-  test('reverse: only an UNRESOLVED monthly_autopay orphan for that PI, and only for a whole-amount reversal', async () => {
-    const { q, fence } = orphanTable();
-    await expect(reverseAutopayDuesOrphan('pi_dues', 'charge ch_x fully refunded', { refundId: 're_ok', amountCents: 8970 })).resolves.toBe(1);
-    expect(q.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_dues', resolved: false });
-    expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'type' = ?", ['monthly_autopay']);
-    // Partial-reversal guard: the orphan must be no larger than the reversed amount.
-    expect(q.where).toHaveBeenCalledWith('amount', '<=', 89.7);
-    // Fenced-failure guard rides INSIDE the update as NOT EXISTS on the refund id.
-    expect(q.whereNotExists).toHaveBeenCalledWith(fence);
-    expect(fence.where).toHaveBeenCalledWith({ stripe_refund_id: 're_ok' });
-    const patch = q.update.mock.calls[0][0];
-    expect(patch.resolved).toBe(true);
-    expect(patch.resolution_notes).toMatch(/^Autopay dues reversed: /);
+  test("'returned' (full refund / dispute): only whole-amount, and never over a terminal outcome for the same id", async () => {
+    db.raw = jest.fn(async () => ({ rowCount: 1 }));
+    await expect(stamp('pi_dues', 're_1', 'returned', { amountCents: 8970 })).resolves.toBe(1);
+    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(sql).toMatch(/UPDATE stripe_orphan_charges/);
+    expect(sql).toMatch(/metadata->>'type' = 'monthly_autopay'/);
+    expect(sql).toMatch(/NOT IN \('kept', 'won'\)/);
+    expect(sql).toMatch(/AND amount <= \?/);
+    expect(bindings).toEqual(['re_1', 'returned', 'pi_dues', 're_1', 89.7]);
   });
 
-  test('reverse: a partial reversal (dispute/refund below the orphan amount) leaves the orphan open', async () => {
-    // The amount guard is the WHERE itself — a $30 partial dispute on an
-    // $89.70 dues orphan matches zero rows and the orphan stays collected.
-    const { q } = orphanTable();
-    q.update.mockResolvedValueOnce(0);
-    await expect(reverseAutopayDuesOrphan('pi_dues', 'partial dispute', { amountCents: 3000 })).resolves.toBe(0);
-    expect(q.where).toHaveBeenCalledWith('amount', '<=', 30);
-    expect(q.whereNotExists).not.toHaveBeenCalled();
+  test("'kept' / 'won' are terminal: no precedence or amount guard, and run on the caller's transaction", async () => {
+    const trx = { raw: jest.fn(async () => ({ rowCount: 1 })) };
+    await expect(stamp('pi_dues', 're_1', 'kept', { conn: trx })).resolves.toBe(1);
+    const [sql, bindings] = trx.raw.mock.calls[0];
+    expect(sql).not.toMatch(/NOT IN \('kept', 'won'\)/);
+    expect(sql).not.toMatch(/amount <=/);
+    expect(bindings).toEqual(['re_1', 'kept', 'pi_dues']);
   });
 
-  test('restore: reopens only rows carrying the reversal marker', async () => {
-    const { q } = orphanTable();
-    await expect(restoreAutopayDuesOrphan('pi_dues', 'dispute dp_x WON')).resolves.toBe(1);
-    expect(q.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_dues', resolved: true });
-    expect(q.where).toHaveBeenCalledWith('resolution_notes', 'like', 'Autopay dues reversed:%');
-    expect(q.update.mock.calls[0][0]).toMatchObject({ resolved: false, resolved_at: null });
-  });
-
-  test('DB errors propagate (webhook must not be acknowledged with stale coverage); no PI is a no-op', async () => {
-    db.schema = { hasTable: jest.fn(async () => false) };
-    db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(reverseAutopayDuesOrphan('pi_dues', 'x')).rejects.toThrow('db down');
-    await expect(restoreAutopayDuesOrphan('pi_dues', 'x')).rejects.toThrow('db down');
-    db.mockReset();
-    await expect(reverseAutopayDuesOrphan(null, 'x')).resolves.toBe(0);
-    expect(db).not.toHaveBeenCalled();
+  test('DB errors propagate (webhook must not be acknowledged with stale coverage); missing PI/key is a no-op', async () => {
+    db.raw = jest.fn(async () => { throw new Error('db down'); });
+    await expect(stamp('pi_dues', 'dp_1', 'returned')).rejects.toThrow('db down');
+    db.raw.mockClear();
+    await expect(stamp(null, 'dp_1', 'returned')).resolves.toBe(0);
+    await expect(stamp('pi_dues', null, 'returned')).resolves.toBe(0);
+    expect(db.raw).not.toHaveBeenCalled();
   });
 });
