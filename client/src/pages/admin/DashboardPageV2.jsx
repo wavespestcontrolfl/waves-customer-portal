@@ -569,8 +569,8 @@ export default function DashboardPageV2() {
   return (
     <div className="dashboard-blackout min-h-full bg-surface-page font-sans text-zinc-900">
       <header className="mb-3 max-md:mb-4">
-        <div className="flex items-start justify-between flex-wrap gap-3">
-          <div>
+        <div className="flex min-w-0 items-start justify-between flex-wrap gap-3">
+          <div className="min-w-0">
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
               {todayLabel} · {timeLabel}
             </div>
@@ -586,7 +586,7 @@ export default function DashboardPageV2() {
               </span>
             </h1>
           </div>
-          <div className="text-12 text-ink-tertiary flex items-center gap-1.5">
+          <div className="text-12 text-ink-tertiary flex shrink-0 items-center gap-1.5 max-md:-mr-2">
             {/* clockTick keeps this label fresh between auto-refreshes */}
             <span>Updated {relativeTime(lastUpdated, clockTick)}</span>{" "}
             <button

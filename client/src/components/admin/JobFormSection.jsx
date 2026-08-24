@@ -76,7 +76,7 @@ export default function JobFormSection({
     return () => {
       cancel = true;
     };
-  }, [serviceType]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [serviceType]);
 
   const { totalRequired, filledRequired } = useMemo(() => {
     if (!template?.sections) return { totalRequired: 0, filledRequired: 0 };
@@ -187,7 +187,7 @@ function Field({ field, value, onChange, P }) {
       style={{
         display: "block",
         fontSize: 12,
-        fontWeight: 600,
+        fontWeight: 500,
         color: P.text,
         marginBottom: 4,
       }}
@@ -282,7 +282,7 @@ function Field({ field, value, onChange, P }) {
                   padding: "5px 10px",
                   borderRadius: 8,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   background: active ? P.accent : P.input,
                   color: active ? "#fff" : P.text,

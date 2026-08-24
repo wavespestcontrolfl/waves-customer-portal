@@ -1187,6 +1187,13 @@ function InvoiceList({
                 {g.label}
               </div>
               {g.items.map((inv) => {
+                // Every row reserves the checkbox column once any sibling can
+                // select, so names line up regardless of status.
+                const anyRowSelectable = g.items.some((row) =>
+                  receiptMode
+                    ? row.status === "paid" && !row.receipt_sent_at
+                    : invoiceSendableStatuses.has(row.status),
+                );
                 const lineItems =
                   typeof inv.line_items === "string"
                     ? JSON.parse(inv.line_items)
@@ -1225,7 +1232,7 @@ function InvoiceList({
                         gap: 12,
                       }}
                     >
-                      {canSelect && (
+                      {canSelect ? (
                         <input
                           id={`invoice-row-select-${inv.id}`}
                           name="invoice_row_select"
@@ -1236,11 +1243,14 @@ function InvoiceList({
                           style={{
                             width: 18,
                             height: 18,
+                            flexShrink: 0,
                             cursor: "pointer",
                             accentColor: D.heading,
                           }}
                         />
-                      )}
+                      ) : anyRowSelectable ? (
+                        <span aria-hidden style={{ width: 18, height: 18, flexShrink: 0 }} />
+                      ) : null}
                       <div style={{ flex: 1, minWidth: 0 }}>
                         {" "}
                         <div

@@ -411,8 +411,8 @@ function FleetTab({
         <div
           style={{
             ...sCard,
-            background: "#2d1b1b",
-            borderColor: D.red,
+            background: D.card,
+            borderColor: D.border,
             padding: 16,
             marginBottom: 16,
           }}
@@ -443,7 +443,7 @@ function FleetTab({
               <span style={sBadge(SEV_COLORS[a.severity] || D.amber, D.white)}>
                 {a.severity}
               </span>{" "}
-              <span style={{ flex: 1, fontSize: 12, color: D.text }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: D.text }}>
                 {a.title}
               </span>{" "}
               <button
