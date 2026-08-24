@@ -4078,6 +4078,7 @@ async function handleRefundFailed(refund) {
   // in a retry loop; out here it just degrades the notification detail.
   let linkedInvoice = null;
   let cancelledPrepayTermId = null;
+  let replacementScopeSsId = null;
   try {
     let pMeta = {};
     try {
@@ -4098,6 +4099,17 @@ async function handleRefundFailed(refund) {
       linkedInvoice = await db('invoices').where({ stripe_charge_id: linkChargeId }).first('id', 'invoice_number', 'scheduled_service_id', 'service_record_id', 'updated_at');
     }
     if (linkedInvoice) {
+      // Visit scope for the mint lock + replacement scan below. A legacy
+      // invoice may carry only service_record_id (pre-push P0 round) — its
+      // service record still points at the scheduled visit, and the mint
+      // lock keys on THAT id, so resolve it here or the restore/scan runs
+      // unserialized against a completion mint.
+      replacementScopeSsId = linkedInvoice.scheduled_service_id || null;
+      if (!replacementScopeSsId && linkedInvoice.service_record_id) {
+        replacementScopeSsId = (await db('service_records')
+          .where({ id: linkedInvoice.service_record_id })
+          .first('scheduled_service_id'))?.scheduled_service_id || null;
+      }
       cancelledPrepayTermId = (await db('annual_prepay_terms')
         .where({ prepay_invoice_id: linkedInvoice.id, status: 'cancelled' })
         .first('id'))?.id || null;
@@ -4150,8 +4162,8 @@ async function handleRefundFailed(refund) {
     // lock AFTER the restore and adopts the now-'paid' original through
     // findAdoptableScheduledInvoice instead of minting a duplicate. Taken
     // before the payments row lock, same slot as the fee-lane advisory lock.
-    if (linkedInvoice?.scheduled_service_id) {
-      await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, linkedInvoice.scheduled_service_id);
+    if (replacementScopeSsId) {
+      await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, replacementScopeSsId);
     }
     const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
     if (!row) return;
@@ -4250,14 +4262,40 @@ async function handleRefundFailed(refund) {
     // the very flip to 'refunded', and a stale pre-lock 'paid' would skip
     // the restore entirely.
     let invoiceRestored = null;
+    // Cutoff for the replacement scan: the ORIGINAL's updated_at as locked
+    // inside this trx while it is still 'refunded' — i.e. the moment
+    // charge.refunded terminalized it. The pre-trx linkedInvoice.updated_at
+    // is NOT usable (pre-push P0 round): this trx can wait on the payments
+    // lock while charge.refunded commits the flip, so the pre-lock value
+    // predates the refund and would let the scan void a legitimate older
+    // sibling invoice. Null cutoff = no scan (fail closed, alert only).
+    let replacementCutoff = null;
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
+      const lockedOriginal = await trx('invoices')
+        .where({ id: linkedInvoice.id })
+        .forUpdate()
+        .first('id', 'status', 'updated_at', 'scheduled_service_id');
+      if (lockedOriginal?.status === 'refunded' && lockedOriginal.updated_at) {
+        replacementCutoff = lockedOriginal.updated_at;
+      }
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
         // paid_at restored with the status (codex r11 P1, same reasoning
         // as the combined unwind): AR and overdue alerts key on
         // paid_at IS NULL, so a status-only restore keeps the invoice on
         // every outstanding-balance surface.
-        .update({ status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() });
+        .update({
+          status: 'paid',
+          paid_at: nextMeta.settled_event_at || new Date().toISOString(),
+          updated_at: new Date(),
+          // Backfill the visit link on a legacy service_record-only invoice
+          // so a completion mint waking under the mint lock can ADOPT the
+          // restored row (findAdoptableScheduledInvoice keys on
+          // scheduled_service_id) instead of minting a duplicate.
+          ...(replacementScopeSsId && lockedOriginal && !lockedOriginal.scheduled_service_id
+            ? { scheduled_service_id: replacementScopeSsId }
+            : {}),
+        });
       if (flipped > 0) {
         invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
         restoredInvoiceId = linkedInvoice.id;
@@ -4285,20 +4323,23 @@ async function handleRefundFailed(refund) {
     // which is exactly what the shared void primitive would do for it.
     const voidedReplacements = [];
     const collectedReplacements = [];
-    if (restoredInvoiceId && (linkedInvoice.scheduled_service_id || linkedInvoice.service_record_id)) {
+    // Scan only under the mint lock (replacementScopeSsId resolved) and with
+    // an in-trx cutoff — either missing means the scan cannot be made safe,
+    // so it is skipped and the human reconciles from the alert.
+    if (restoredInvoiceId && replacementScopeSsId && replacementCutoff) {
       const InvoiceService = require('../services/invoice');
       const { CANCELLED_SERVICE_VOIDABLE_STATUSES } = InvoiceService;
-      let replacementQuery = trx('invoices')
+      const replacementQuery = trx('invoices')
         .whereNot({ id: linkedInvoice.id })
         .where((qb) => {
-          if (linkedInvoice.scheduled_service_id) qb.orWhere({ scheduled_service_id: linkedInvoice.scheduled_service_id });
+          qb.orWhere({ scheduled_service_id: replacementScopeSsId });
           if (linkedInvoice.service_record_id) qb.orWhere({ service_record_id: linkedInvoice.service_record_id });
         })
-        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled']);
-      // Only rows minted AFTER the refund flipped the original (its
-      // updated_at) — an older sibling invoice on the same visit is not a
-      // replacement for this refund.
-      if (linkedInvoice.updated_at) replacementQuery = replacementQuery.where('created_at', '>', linkedInvoice.updated_at);
+        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
+        // Only rows minted AFTER the refund flipped the original — an older
+        // sibling invoice on the same visit is not a replacement for this
+        // refund.
+        .where('created_at', '>', replacementCutoff);
       const replacements = await replacementQuery.select(
         'id', 'invoice_number', 'status', 'payment_recorded_at', 'stripe_payment_intent_id',
         'payer_statement_id', 'credit_applied', 'line_items',
