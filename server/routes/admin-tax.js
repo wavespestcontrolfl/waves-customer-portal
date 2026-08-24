@@ -8,7 +8,7 @@ const { taxPeriodFor } = require('../utils/tax-period');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, salesTaxCollectedForWindow,
   rateAsOf, dateCellStr, prorateAssetDepreciation, annotateMidQuarter,
-  outflowTransactionsQuery, buildQuarterlyEstimate, missingTableOnly,
+  outflowTransactionsQuery, computeQuarterlyEstimate,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -22,11 +22,13 @@ router.get('/dashboard', async (req, res, next) => {
   try {
     const year = String(new Date().getFullYear());
 
-    // Sales tax collected is NOT recorded anywhere in the portal (the old
-    // read targeted a revenue_daily table that never existed, so this was a
-    // permanent $0 masquerading as a real figure). null = "not recorded",
-    // which the client renders as "—" — never as a confident $0.
-    const ytdTaxCollected = null;
+    // YTD net sales tax collected on commercial invoices — same helper the
+    // Revenue/P&L tabs use, so the dashboard can't disagree with them. (The
+    // old read targeted a revenue_daily table that never existed, then a
+    // hard-coded null.)
+    const ytdTaxCollected = await salesTaxCollectedForWindow(
+      db, `${year}-01-01`, etDateString(new Date()),
+    );
 
     // Expenses YTD
     const expenseStats = await db('expenses')
@@ -1103,53 +1105,20 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       ? parseInt(req.query.year, 10)
       : etParts(now).year;
     const qNum = parseInt(quarter.replace('Q', ''));
-    const startMonth = (qNum - 1) * 3;
-    const pad2 = (n) => String(n).padStart(2, '0');
-    const startDate = `${year}-${pad2(startMonth + 1)}-01`;
-    // Day 0 of the month after the quarter's last = last day of quarter.
-    const qEnd = new Date(Date.UTC(year, startMonth + 3, 0, 12, 0, 0));
-    const qEndP = etParts(qEnd);
-    const endDate = `${qEndP.year}-${pad2(qEndP.month)}-${pad2(qEndP.day)}`;
-    const ytdStart = `${year}-01-01`;
 
-    // Revenue: SAME helper the P&L uses (refund-netted, deposits + gap rows),
-    // minus the pass-through sales tax inside those receipts. Expenses: the
-    // DEDUCTIBLE amount (meals 50%, non-deductible rows) — this is a tax
-    // estimate, not book P&L. Prior 1040-ES payments recorded on the filing
-    // calendar for earlier quarters of this year are credited.
-    const [paidRevenue, salesTaxCollected, expenses, priorRows] = await Promise.all([
-      paidRevenueForWindow(db, ytdStart, endDate),
-      salesTaxCollectedForWindow(db, ytdStart, endDate),
-      db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate])
-        .select(db.raw("COALESCE(SUM(LEAST(amount, GREATEST(0, COALESCE(tax_deductible_amount, amount))))::text, '0') as total"))
-        // Missing table tolerated in dev ONLY — any real DB failure must be a
-        // 500. Swallowing it to $0 would inflate taxable income silently.
-        .first().catch(missingTableOnly({ total: '0' })),
-      qNum > 1
-        ? db('tax_filing_calendar')
-          .where('filing_type', '1040es_quarterly')
-          .whereIn('status', ['filed', 'paid'])
-          .whereIn('period_label', Array.from({ length: qNum - 1 }, (_, i) => `Q${i + 1} ${year}`))
-          .select(db.raw("COALESCE(SUM(amount_paid)::text, '0') as total"))
-          // Same: a swallowed filing-calendar failure would zero the credit
-          // and tell the operator to pay an already-paid installment again.
-          .first().catch(missingTableOnly({ total: '0' }))
-        : Promise.resolve({ total: '0' }),
-    ]);
-
-    const est = buildQuarterlyEstimate({
-      qNum,
-      ytdRevenue: paidRevenue - salesTaxCollected,
-      ytdExpenses: parseFloat(expenses?.total || 0),
-      priorPayments: parseFloat(priorRows?.total || 0),
+    // ONE shared implementation (computeQuarterlyEstimate) for this route
+    // and the Intelligence Bar tax tool — P&L-basis revenue net of sales
+    // tax, deductible expenses, elapsed-months annualization, and prior
+    // 1040-ES credits. See pnl-report.js.
+    const est = await computeQuarterlyEstimate(db, {
+      year, qNum, today: etDateString(now),
     });
 
     // Quarterly due dates (1040-ES)
     const dueDates = { Q1: `${year}-04-15`, Q2: `${year}-06-15`, Q3: `${year}-09-15`, Q4: `${year + 1}-01-15` };
 
     res.json({
-      quarter, startDate, endDate,
-      salesTaxCollected,
+      quarter,
       ...est,
       dueDate: dueDates[quarter],
       note: `Rough projection, not the IRS Form 2210 annualized-income worksheet (which uses periods ending Mar/May/Aug/Dec and factors 4/2.4/1.5/1). Assumes a flat 22% federal bracket (no standard deduction or QBI). SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. YTD net income (deductible expenses; sales tax collected excluded from revenue) is annualized over ${est.monthsElapsed} calendar months, the annual liability is spread ${qNum}/4 cumulative, and 1040-ES payments recorded as filed/paid on the filing calendar for earlier ${year} quarters are credited. Consult CPA for precise figures.`,

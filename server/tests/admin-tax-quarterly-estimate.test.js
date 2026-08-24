@@ -64,7 +64,7 @@ jest.mock('../services/stripe-banking', () => ({ reconcilePayout: jest.fn() }));
 jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn() }));
 
 const express = require('express');
-const { buildPnlReport } = require('../services/pnl-report');
+const { buildPnlReport, computeQuarterlyEstimate } = require('../services/pnl-report');
 const taxRouter = require('../routes/admin-tax');
 
 let server;
@@ -88,10 +88,11 @@ const get = async (path) => {
 
 // paidRevenueForWindow construction order per table:
 //   payments: ledger receipts, then full-refund gap markers
-//   invoices: paid-Stripe gap rows, then (from salesTaxCollectedForWindow) tax
-function stageRevenueWindow({ ledger = '30700', salesTax = '700' } = {}) {
+//   invoices: paid-Stripe gap rows, then (from salesTaxCollectedForWindow)
+//   receipt-period tax collected, then refund-period tax reversed
+function stageRevenueWindow({ ledger = '30700', salesTax = '700', taxReversed = '0' } = {}) {
   stage('payments', { total: ledger }, { total: '0' });
-  stage('invoices', { total: '0' }, { total: salesTax });
+  stage('invoices', { total: '0' }, { total: salesTax }, { total: taxReversed });
   stage('estimate_deposits', { total: '0' });
   stage('stripe_payout_transactions', { total: '0' });
 }
@@ -137,6 +138,31 @@ describe('GET /admin/tax/revenue/quarterly-estimate', () => {
     expect(res.body.quarterlyPayment).toBeCloseTo(
       Math.max(0, res.body.requiredCumulative - 2000), 2,
     );
+  });
+
+  test('an unfinished quarter caps the window at today and annualizes over elapsed months', async () => {
+    stageRevenueWindow();
+    stage('expenses', { total: '5000' });
+    stage('tax_filing_calendar', { total: '0' });
+    // Q3 2026 viewed on Aug 24: window ends today, months elapsed = 7 + 24/31.
+    const est = await computeQuarterlyEstimate(mockDb, { year: 2026, qNum: 3, today: '2026-08-24' });
+    expect(est.endDate).toBe('2026-08-24');
+    expect(est.monthsElapsed).toBeCloseTo(7 + 24 / 31, 2);
+    expect(est.annualizedNet).toBeCloseTo((25000 / est.monthsElapsed) * 12, 0); // monthsElapsed is round2'd
+    // A finished quarter keeps its full three months per quarter.
+    stageRevenueWindow();
+    stage('expenses', { total: '5000' });
+    const past = await computeQuarterlyEstimate(mockDb, { year: 2026, qNum: 1, today: '2026-08-24' });
+    expect(past.endDate).toBe('2026-03-31');
+    expect(past.monthsElapsed).toBe(3);
+  });
+
+  test('tax reversed by a full refund in the window nets against tax collected', async () => {
+    stageRevenueWindow({ salesTax: '700', taxReversed: '200' });
+    stage('expenses', { total: '0' });
+    const est = await computeQuarterlyEstimate(mockDb, { year: 2026, qNum: 1, today: '2026-08-24' });
+    expect(est.salesTaxCollected).toBe(500); // 700 collected − 200 reversed
+    expect(est.ytdRevenue).toBe(30200); // 30700 − 500
   });
 
   test('a real expenses DB failure is a 500, never a silent $0 that inflates the estimate', async () => {

@@ -739,36 +739,67 @@ async function paidRevenueForWindow(db, startDate, endDate) {
 }
 
 /**
- * Sales tax collected on invoices PAID in [startDate, endDate] (ET days).
- * Commercial invoices carry invoices.tax_amount (TaxCalculator in
- * invoice.js); the customer pays subtotal + tax, so every receipt-based
- * revenue figure above includes that tax. It is a pass-through LIABILITY
- * (remitted on the DR-15), not income — callers subtract it from
- * paidRevenueForWindow and disclose it separately. Window: the invoice's
- * paid_at, same ET-day rule as the paid-invoice gap query. Fully refunded
- * invoices flip to status 'refunded' (their cash is netted by the outflow
- * ledger), so only status='paid' rows carry a live liability here.
+ * NET sales tax liability recognized in [startDate, endDate] (ET days):
+ * tax collected on invoices PAID in the window (by paid_at — receipt
+ * period, stable across later refunds) MINUS tax reversed by invoices
+ * FULLY refunded in the window (refund period — where the tax-inclusive
+ * outflow nets revenue). Commercial invoices carry invoices.tax_amount
+ * (TaxCalculator in invoice.js); the customer pays subtotal + tax, so every
+ * receipt-based revenue figure includes it. It is a pass-through LIABILITY
+ * (remitted on the DR-15), not income — callers subtract this from
+ * paidRevenueForWindow and disclose it separately.
  *
- * KNOWN LIMITATIONS (invoice-level, not refund-event-level): tax is
- * recognized by the invoice's paid_at while receipts recognize by
- * payments.payment_date and refund outflows by their Stripe date, so a
- * delayed webhook or cross-period refund can place the tax and its cash in
- * adjacent periods; a PARTIAL refund leaves the invoice 'paid' and its full
- * tax_amount excluded from revenue even if part of the refunded cash was
- * tax (income slightly understated, never overstated). Invoices carry no
- * per-refund tax split, so proportional refund-event attribution isn't
- * computable from portal data — disclosed here and in the PR for the CPA.
+ * KNOWN LIMITATION: PARTIAL refunds leave the invoice 'paid', so the full
+ * tax_amount stays excluded from income even if part of the refunded cash
+ * was tax (income slightly understated, never overstated) — invoices carry
+ * no per-refund tax split, so refund-event proration isn't computable.
  */
 async function salesTaxCollectedForWindow(db, startDate, endDate) {
-  const row = await db('invoices')
-    .where('status', 'paid')
-    .whereNotNull('paid_at')
-    .whereRaw("paid_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${startDate}T00:00:00`])
-    .whereRaw("paid_at < (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'", [`${endDate}T00:00:00`])
-    .select(db.raw("COALESCE(SUM(tax_amount)::text, '0') as total"))
-    .first()
-    .catch(missingTableOnly({ total: '0' }));
-  return round2(parseFloat(row?.total || 0));
+  const etDay = (expr) => `DATE(${expr} AT TIME ZONE 'America/New_York')`;
+  const [collected, reversed] = await Promise.all([
+    // Tax collected in the RECEIPT period. status IN ('paid','refunded') so a
+    // later full refund can't retroactively rewrite the original period —
+    // mirror of paidRevenueForWindow keeping the gross receipt there. NULL
+    // paid_at (legacy manual rows) falls back to updated_at so a paid, taxed
+    // invoice is never silently counted as income.
+    db('invoices')
+      .whereIn('status', ['paid', 'refunded'])
+      .where('tax_amount', '>', 0)
+      .whereRaw(
+        `${etDay('COALESCE(paid_at, updated_at)')} BETWEEN ?::date AND ?::date`,
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(tax_amount)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+    // Tax REVERSED in the refund period. A fully refunded invoice's outflow
+    // (tax-inclusive) is netted from revenue in the refund's period by
+    // outflowTransactionsQuery, so the tax excluded at receipt must be added
+    // back there or cumulative income understates by tax_amount. Refund date:
+    // the full-refund MARKER row's payment_date (webhook-stamped, gap
+    // invoices), else the linked refunded payment's refunded_at, else the
+    // invoice's own updated_at (the flip to 'refunded' IS the refund event;
+    // later writes to a refunded invoice are rare).
+    db('invoices as i')
+      .where('i.status', 'refunded')
+      .where('i.tax_amount', '>', 0)
+      .whereRaw(
+        `DATE(COALESCE(
+          (SELECT MAX(m.payment_date)::timestamp FROM payments m
+             WHERE m.stripe_payment_intent_id = i.stripe_payment_intent_id
+               AND m.metadata->>'source' = 'invoice_refund'),
+          (SELECT MAX(p.refunded_at AT TIME ZONE 'America/New_York') FROM payments p
+             WHERE p.stripe_payment_intent_id = i.stripe_payment_intent_id
+               AND p.status = 'refunded'),
+          i.updated_at AT TIME ZONE 'America/New_York'
+        )) BETWEEN ?::date AND ?::date`,
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+  ]);
+  return round2(parseFloat(collected?.total || 0) - parseFloat(reversed?.total || 0));
 }
 
 /**
@@ -786,9 +817,16 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
  * with factors 4/2.4/1.5/1 and 22.5/45/67.5/90% required percentages) —
  * the response note says so, and the CPA applies the worksheet if elected.
  */
-function buildQuarterlyEstimate({ qNum, ytdRevenue = 0, ytdExpenses = 0, priorPayments = 0 } = {}) {
+function buildQuarterlyEstimate({
+  qNum, ytdRevenue = 0, ytdExpenses = 0, priorPayments = 0, monthsElapsed: monthsIn,
+} = {}) {
   const q = Math.min(4, Math.max(1, parseInt(qNum, 10) || 1));
-  const monthsElapsed = q * 3;
+  // Months of the year actually ELAPSED in the data window — for a finished
+  // quarter that's q*3, but for the CURRENT quarter the caller passes the
+  // as-of fraction (e.g. 7.8 in late August), because dividing August data
+  // by 9 months would treat September as a zero-income month and understate
+  // the annualized figure. Floored at 1 so a Jan-2nd view can't explode.
+  const monthsElapsed = round2(Math.min(12, Math.max(1, Number(monthsIn) || q * 3)));
   const revenue = round2(Number(ytdRevenue) || 0);
   const expenses = round2(Number(ytdExpenses) || 0);
   const estimatedNetIncome = round2(Math.max(0, revenue - expenses));
@@ -816,6 +854,64 @@ function buildQuarterlyEstimate({ qNum, ytdRevenue = 0, ytdExpenses = 0, priorPa
     priorPaymentsCredited: prior,
     quarterlyPayment,
   };
+}
+
+/**
+ * Shared 1040-ES quarterly-estimate assembly — ONE implementation for the
+ * Tax page route and the Intelligence Bar tax tool, so they can never
+ * recommend different payments. YTD revenue = paidRevenueForWindow minus
+ * net sales tax (same basis as the P&L); expenses = deductible amounts
+ * (clamped); prior filed/paid 1040-ES rows credit the cumulative. `today`
+ * (ET 'YYYY-MM-DD') caps the data window for an unfinished quarter and
+ * drives the elapsed-months annualization.
+ */
+async function computeQuarterlyEstimate(db, { year, qNum, today }) {
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const startMonth = (qNum - 1) * 3;
+  const startDate = `${year}-${pad2(startMonth + 1)}-01`;
+  const qEndDay = new Date(Date.UTC(year, startMonth + 3, 0)).getUTCDate();
+  const quarterEnd = `${year}-${pad2(startMonth + 3)}-${qEndDay}`;
+  const ytdStart = `${year}-01-01`;
+
+  // Effective window end: never beyond "today" — querying into the future
+  // adds nothing, and the elapsed-months figure must match the data window.
+  const endDate = today && today < quarterEnd ? today : quarterEnd;
+  let monthsElapsed = qNum * 3;
+  if (endDate !== quarterEnd && endDate.startsWith(`${year}-`)) {
+    const m = parseInt(endDate.slice(5, 7), 10);
+    const d = parseInt(endDate.slice(8, 10), 10);
+    const daysInMonth = new Date(Date.UTC(year, m, 0)).getUTCDate();
+    monthsElapsed = (m - 1) + (d / daysInMonth);
+  }
+
+  const [paidRevenue, salesTaxCollected, expensesRow, priorRows] = await Promise.all([
+    paidRevenueForWindow(db, ytdStart, endDate),
+    salesTaxCollectedForWindow(db, ytdStart, endDate),
+    db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate])
+      .select(db.raw("COALESCE(SUM(LEAST(amount, GREATEST(0, COALESCE(tax_deductible_amount, amount))))::text, '0') as total"))
+      // Missing table tolerated in dev ONLY — any real DB failure must
+      // propagate. Swallowing it to $0 would inflate taxable income silently.
+      .first().catch(missingTableOnly({ total: '0' })),
+    qNum > 1
+      ? db('tax_filing_calendar')
+        .where('filing_type', '1040es_quarterly')
+        .whereIn('status', ['filed', 'paid'])
+        .whereIn('period_label', Array.from({ length: qNum - 1 }, (_, i) => `Q${i + 1} ${year}`))
+        .select(db.raw("COALESCE(SUM(amount_paid)::text, '0') as total"))
+        // Same: a swallowed filing-calendar failure would zero the credit
+        // and tell the operator to pay an already-paid installment again.
+        .first().catch(missingTableOnly({ total: '0' }))
+      : Promise.resolve({ total: '0' }),
+  ]);
+
+  const est = buildQuarterlyEstimate({
+    qNum,
+    monthsElapsed,
+    ytdRevenue: paidRevenue - salesTaxCollected,
+    ytdExpenses: parseFloat(expensesRow?.total || 0),
+    priorPayments: parseFloat(priorRows?.total || 0),
+  });
+  return { startDate, endDate, salesTaxCollected, ...est };
 }
 
 /**
@@ -1131,6 +1227,7 @@ module.exports = {
   paidRevenueForWindow,
   salesTaxCollectedForWindow,
   buildQuarterlyEstimate,
+  computeQuarterlyEstimate,
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,

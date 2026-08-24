@@ -140,6 +140,17 @@ describe('buildQuarterlyEstimate', () => {
     expect(est.quarterlyPayment).toBeCloseTo(Math.max(0, est.requiredCumulative - 2000), 2);
   });
 
+  test('monthsElapsed override annualizes a partial quarter over the months actually elapsed', () => {
+    // Late August (Q3): 25k YTD net over ~7.774 elapsed months — dividing by
+    // the full 9 would count September as a zero-income month.
+    const est = buildQuarterlyEstimate({ qNum: 3, ytdRevenue: 30000, ytdExpenses: 5000, monthsElapsed: 7.774 });
+    expect(est.monthsElapsed).toBeCloseTo(7.77, 2);
+    expect(est.annualizedNet).toBeCloseTo((25000 / 7.77) * 12, 0);
+    // Bad/absent override falls back to the full quarter, floored at 1 month.
+    expect(buildQuarterlyEstimate({ qNum: 1, ytdRevenue: 1200, monthsElapsed: 0.03 }).monthsElapsed).toBe(1);
+    expect(buildQuarterlyEstimate({ qNum: 2, ytdRevenue: 1200 }).monthsElapsed).toBe(6);
+  });
+
   test('prior payments can only reduce to zero — never a negative payment or a refund claim', () => {
     const est = buildQuarterlyEstimate({ qNum: 1, ytdRevenue: 1000, ytdExpenses: 900, priorPayments: 99999 });
     expect(est.quarterlyPayment).toBe(0);

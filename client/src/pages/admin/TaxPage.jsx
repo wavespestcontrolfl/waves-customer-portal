@@ -1357,7 +1357,23 @@ function FilingCalendarTab() {
     try {
       const update = { status };
       if (status === "filed") update.filedDate = etDateString();
-      if (status === "paid") update.paidDate = etDateString();
+      if (status === "paid") {
+        update.paidDate = etDateString();
+        // The quarterly estimate credits SUM(amount_paid) for filed/paid
+        // 1040-ES rows — without the amount the credit reads $0 and the
+        // operator can be told to re-pay an installment. Prefill with the
+        // row's amount due when it has one.
+        const row = filings.find((f) => f.id === id);
+        const entered = window.prompt(
+          "Amount paid (used to credit future estimates):",
+          row?.amountDue != null ? String(row.amountDue) : "",
+        );
+        if (entered !== null && entered.trim() !== "") {
+          const amt = Number(entered);
+          if (Number.isFinite(amt) && amt >= 0) update.amountPaid = amt;
+          else return alert("Enter a valid non-negative amount (or leave blank to skip).");
+        }
+      }
       await adminFetch(`/admin/tax/filings/${id}`, {
         method: "PUT",
         body: JSON.stringify(update),
@@ -2972,6 +2988,11 @@ function RevenueTab() {
           {quarterly.dueDate && (
             <div style={{ marginTop: 12, fontSize: 12, color: D.amber }}>
               Due: {fmtD(quarterly.dueDate)}
+            </div>
+          )}
+          {quarterly.note && (
+            <div style={{ marginTop: 8, fontSize: 11, color: D.muted }}>
+              {quarterly.note}
             </div>
           )}
         </div>
