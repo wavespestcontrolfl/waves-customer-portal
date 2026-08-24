@@ -2099,7 +2099,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // silent self-pay fallback that could freeze the wrong authority.
       expect((source.match(/const visitIsPayerBilled = completionTaxAuthorityError\s*\n\s*\? true\s*\n\s*: !!completionResolvedPayer\?\.payerId;/g) || []).length).toBe(1);
       // First runs rethrow (r10 P0); only a committed resume may capture.
-      expect(source).toMatch(/if \(!resumingCommittedCompletion\) throw payerErr;/);
+      expect(source).toMatch(/if \(!resumingCommittedCompletion && !completionCannotBill\) throw payerErr;/);
       expect(source).toMatch(/resolveForInvoice\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*throwOnError: true,\s*\n\s*\}\)/);
       const coverageDeriveAt = source.indexOf('const autopayCoversVisit = membershipDuesCoverVisit({');
       const freezeCallAt = source.indexOf('const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({');

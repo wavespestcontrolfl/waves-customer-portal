@@ -5465,8 +5465,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // closeout without the payer invoice (lost AR). A committed RESUME
       // reads the frozen contract instead: the error is captured and the
       // suppressors below treat the authority as UNKNOWN (never suppress).
-      if (!resumingCommittedCompletion) throw payerErr;
-      logger.warn(`[dispatch] payer resolve failed on completion resume for service ${svc.id} — coverage suppressors disabled, frozen contract governs the mint: ${payerErr.message}`);
+      // Completions that categorically CANNOT bill — recap-only, or no
+      // application performed (inspection_only / customer_declined) — are
+      // exempt (codex GH r2 P1): every billing gate suppresses their mint
+      // regardless of the payer, so a transient lookup blip must not block
+      // closing a never-billing visit.
+      const completionCannotBill = recapReviewOnly || !visitPerformed;
+      if (!resumingCommittedCompletion && !completionCannotBill) throw payerErr;
+      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id} (${resumingCommittedCompletion ? 'resume — frozen contract governs' : 'non-billing completion'}) — coverage suppressors disabled: ${payerErr.message}`);
       completionTaxAuthorityError = payerErr;
     }
     // UNKNOWN payer authority on a resume counts as payer-billed for every
