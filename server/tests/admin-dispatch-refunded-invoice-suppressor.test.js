@@ -141,13 +141,68 @@ describe('shouldAutoInvoiceCompletion: a terminal invoice on the visit suppresse
 describe('completion route: terminal invoice → no mint, no pay link, manual-billing alert, report-only SMS (source contract)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
 
-  test('the terminal lookup runs only after the whole suppressor chain (incl. the sibling lookup) resolved null, own-visit identifiers only', () => {
+  test('the own-visit terminal lookup runs after the direct suppressors and BEFORE the sibling first-application fallback, which is skipped when a terminal invoice exists', () => {
     const idx = src.indexOf('terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
-    expect(src.slice(idx - 300, idx)).toMatch(/findFirstApplicationInvoiceForEstimateService\(svc, db\);[\s\S]*if \(!existingCompletionInvoice && !recapReviewOnly\) \{\s*$/);
+    const chainStart = src.indexOf('let existingCompletionInvoice = null;');
+    const siblingAt = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);', chainStart);
+    expect(chainStart).toBeLessThan(idx);
+    expect(idx).toBeLessThan(siblingAt);
+    expect(src.slice(idx - 80, idx)).toMatch(/if \(!existingCompletionInvoice && !recapReviewOnly\) \{\s*$/);
+    expect(src.slice(siblingAt - 100, siblingAt)).toMatch(/if \(!existingCompletionInvoice && !terminalCompletionInvoice\) \{\s*$/);
     expect(src.slice(idx, idx + 160)).toMatch(/serviceRecordId: record\.id,\s*scheduledServiceId: svc\.id,/);
     const fn = src.slice(src.indexOf('async function completionTerminalInvoiceLookup'), src.indexOf('router.post', src.indexOf('async function completionTerminalInvoiceLookup')));
     expect(fn).not.toMatch(/source_estimate_id|first_visit|findFirstApplicationInvoiceForEstimateService/);
+  });
+
+  test('own-visit REFUNDED first-application invoice: the sibling fallback cannot resurrect it — no payUrl, alert path instead (chain simulation)', async () => {
+    // Simulate the route's chain with the same helpers and the same order
+    // the source contract pins: direct suppressors → own-visit terminal →
+    // sibling fallback only if no terminal.
+    const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
+    const refundedOwn = {
+      id: 'inv-own', status: 'refunded', scheduled_service_id: 'svc-1', token: 'dead-token', created_at: '2026-08-20',
+      title: 'WaveGuard Membership Setup + First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - $99 setup fee plus first application.',
+    };
+    const rows = [refundedOwn];
+    const chain = {
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg({ orWhere: () => ({ orWhere: () => {} }) }); return chain; }),
+      whereIn: jest.fn(() => chain),
+      whereNot: jest.fn(() => chain),
+      whereNotIn: jest.fn(() => chain),
+      join: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      first: jest.fn(async () => undefined),
+      select: jest.fn(async () => rows),
+    };
+    // Suppressor: refunded row excluded → null. Terminal: found.
+    chain.first
+      .mockResolvedValueOnce(undefined) // suppressor by service_record_id
+      .mockResolvedValueOnce(undefined) // suppressor by scheduled_service_id
+      .mockResolvedValueOnce({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded' }); // terminal lookup
+    const knex = jest.fn(() => chain);
+    const svc = { id: 'svc-1', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' };
+
+    let existing = await completionSuppressorInvoiceLookup(knex, { service_record_id: 'rec-1' });
+    if (!existing) existing = await completionSuppressorInvoiceLookup(knex, { scheduled_service_id: svc.id });
+    let terminal = null;
+    if (!existing) terminal = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: svc.id });
+    if (!existing && !terminal) existing = await findFirstApplicationInvoiceForEstimateService(svc, knex);
+
+    expect(existing).toBeFalsy();
+    expect(terminal).toEqual({ id: 'inv-own', invoice_number: 'WPC-9', status: 'refunded' });
+    // The sibling fallback never ran, so its dead token can't become a pay link.
+    expect(chain.join).not.toHaveBeenCalled();
+    expect(chain.select).not.toHaveBeenCalled();
+    // And with a terminal invoice the decision suppresses (alert path).
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false, alreadyPaid: false, prepaidCovered: false, autopayCoversVisit: false,
+      preMintedInvoice: null, existingCompletionInvoice: existing, terminalInvoiceOnVisit: !!terminal,
+      createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 120, serviceType: 'Pest Control', isCallback: false,
+    })).toBe(false);
+    // Sanity: WITHOUT the reorder the sibling fallback WOULD return the refunded own row.
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, knex)).resolves.toBe(refundedOwn);
   });
 
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {

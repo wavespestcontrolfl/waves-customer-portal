@@ -8551,14 +8551,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
       }
-      if (!existingCompletionInvoice) {
-        existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
-      }
+      // Own-visit terminal check BEFORE the sibling first-application
+      // fallback (pre-push P0): that fallback matches the current visit too
+      // (same customer/estimate/date) and filters only 'void', so it would
+      // hand back this visit's own refunded invoice as a dead pay link and
+      // skip the alert. A terminal own-visit invoice wins here; siblings are
+      // consulted only when the visit carries no terminal invoice.
       if (!existingCompletionInvoice && !recapReviewOnly) {
         terminalCompletionInvoice = await completionTerminalInvoiceLookup(db, {
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
         });
+      }
+      if (!existingCompletionInvoice && !terminalCompletionInvoice) {
+        existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
