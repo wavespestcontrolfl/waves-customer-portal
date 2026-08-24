@@ -504,10 +504,14 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // degenerate non-advancing patterns.
   for (let i = 1; i <= 1000; i++) {
     const next = dateOnly(nextRecurringDate(latestStr, pattern, i, rOpts)) || '';
-    if (!next || next > today || next <= anchor) break;
+    if (!next || next > today || next <= anchor) return anchor;
     anchor = next;
   }
-  return anchor;
+  // Walk exhausted with the anchor still in the past (e.g. a daily cadence
+  // dead 1,000+ days): give up on phase and re-anchor to today rather than
+  // let the extension loops' future-only floor reject every candidate and
+  // silently stall the series.
+  return anchor >= today ? anchor : today;
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
