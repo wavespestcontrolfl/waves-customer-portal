@@ -63,13 +63,6 @@ export default function AdminLayoutV2() {
   // bookmark can be installed as "Waves" with start_url "/". The html hook
   // also lets portaled admin dialogs inherit the mobile form safeguards even
   // though they render outside .admin-shell-v2.
-  // Font scope for portaled overlays: index.css keys the Roboto override
-  // (and index.html keys the customer brand headings) off body.admin-surface.
-  useEffect(() => {
-    document.body.classList.add("admin-surface");
-    return () => document.body.classList.remove("admin-surface");
-  }, []);
-
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
     const root = document.documentElement;

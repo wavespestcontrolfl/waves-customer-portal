@@ -174,8 +174,8 @@ input[type="week"] {
   color: #000 !important;
 }
 
-/* /admin/* — Roboto everywhere. Scoped to body.admin-surface, which
-   AdminLayoutV2 toggles on mount/unmount, so the customer portal and tech
+/* /admin/* — Roboto everywhere. Scoped to html.admin-app (mounted by
+   AdminLayoutV2, same hook the pointer:coarse block above uses), so the customer portal and tech
    portal keep their existing brand fonts (Luckiest Guy / Baloo 2 / Inter /
    Montserrat) while portaled admin overlays (Dialog / Sheet / Mobile*Sheet,
    rendered outside .admin-shell-v2) are covered too — previously they leaked
@@ -185,16 +185,16 @@ input[type="week"] {
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade. */
-body.admin-surface,
-body.admin-surface * {
+html.admin-app,
+html.admin-app * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
-body.admin-surface [class*="font-mono"],
-body.admin-surface [class*="font-mono"] *,
-body.admin-surface code,
-body.admin-surface code *,
-body.admin-surface pre,
-body.admin-surface pre * {
+html.admin-app [class*="font-mono"],
+html.admin-app [class*="font-mono"] *,
+html.admin-app code,
+html.admin-app code *,
+html.admin-app pre,
+html.admin-app pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 
@@ -214,7 +214,7 @@ body.admin-surface pre * {
    macOS/iOS give no hint that a table continues to the right (Inventory hides
    ~45% of its columns, Pricing Reality Check ~60%). Pure-CSS scroll shadows:
    the local-attached white covers hide the shadow at the scroll ends. */
-body.admin-surface .overflow-x-auto {
+html.admin-app .overflow-x-auto {
   background:
     linear-gradient(to right, #fff 30%, rgba(255, 255, 255, 0)),
     linear-gradient(to right, rgba(255, 255, 255, 0), #fff 70%) 100% 0,

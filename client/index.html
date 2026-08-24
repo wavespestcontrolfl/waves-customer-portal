@@ -31,8 +31,8 @@
       /* Customer/tech brand headings. Scoped away from the admin surface so
          portaled admin sheets/dialogs (rendered outside .admin-shell-v2) don't
          inherit Anton/Montserrat — admin stays Roboto (see index.css). */
-      body:not(.admin-surface) h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
-      body:not(.admin-surface) h2, body:not(.admin-surface) h3, body:not(.admin-surface) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
+      html:not(.admin-app) h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
+      html:not(.admin-app) h2, html:not(.admin-app) h3, html:not(.admin-app) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
       h5, h6 { font-family: 'Inter', system-ui, sans-serif; }
       input::placeholder, textarea::placeholder { color: #64748B; }
     </style>
