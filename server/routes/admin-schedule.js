@@ -678,6 +678,10 @@ function planCadenceRewriteTargets({
         if (!targetBooster) break;
         const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });
         if (!candidate) continue;
+        // Mirror the child-target guard: an older parent's booster walk can
+        // emit dates on or before today, and a pending FUTURE booster must
+        // never be re-dated into the past.
+        if (candidate <= etDateString()) continue;
         const targetCurrentDate = normalizeDateOnly(targetBooster.scheduled_date);
         if (seenDates.has(candidate) && candidate !== targetCurrentDate) continue;
         if (candidate !== targetCurrentDate) seenDates.add(candidate);

@@ -559,6 +559,31 @@ describe('planCadenceRewriteTargets — cadence edits stay future-only and clear
     for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
   });
 
+  test('booster rewrites of an older parent never target a past date', () => {
+    // Base 60 days back with a booster month covering roughly today: the
+    // recomputed booster walk emits candidates on/before today, which must
+    // be skipped — a pending FUTURE booster is never re-dated into the past.
+    const base = new Date(`${TODAY}T12:00:00Z`);
+    base.setUTCDate(base.getUTCDate() - 60);
+    const allMonths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: base.toISOString().slice(0, 10),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [
+        { id: 'b1', scheduled_date: daysOut(10) },
+        { id: 'b2', scheduled_date: daysOut(40) },
+      ],
+      boosterMonths: allMonths,
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    for (const d of boosterTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
   test('a child landing on a blacked-out day is nudged forward by the shared clear-of-blackout', () => {
     const args = {
       baseDateStr: '2098-03-10',
