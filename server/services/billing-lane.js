@@ -308,19 +308,15 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
   // Stripe collected the dues but the payments insert failed: the only
   // ledger trail is a stripe_orphan_charges row stamped with the same
   // billed_month (both orphan writers stamp monthly-autopay charges). The
-  // customer WAS billed, so the month counts as collected while the orphan
-  // is unresolved or was reconciled as settled; an orphan resolved as a
-  // Stripe-side failure / refund / chargeback ("no funds collected",
-  // "returned to the customer") does not count. Manual resolutions with
-  // other notes fall back to the payments-row check above (a properly
-  // reconciled orphan leaves a payments row) — fail toward not-collected.
+  // customer WAS billed, so the month counts as collected ONLY while the
+  // orphan is unresolved: a full refund / chargeback on the orphaned PI
+  // resolves it (stripe-webhook reverseAutopayDuesOrphan), and a
+  // reconciled orphan leaves a payments row whose own status (paid /
+  // refunded / disputed) is what the check above already honors. Any other
+  // resolution falls toward not-collected.
   const orphan = await dbConn('stripe_orphan_charges')
-    .where({ customer_id: customerId })
+    .where({ customer_id: customerId, resolved: false })
     .whereRaw("metadata->>'billed_month' = ?", [monthKey])
-    .where(function collectedOrphan() {
-      this.where('resolved', false)
-        .orWhere('resolution_notes', 'ilike', '%reconciled%');
-    })
     .first('id');
   return !!orphan;
 }

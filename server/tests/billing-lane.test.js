@@ -309,13 +309,14 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
   function fakeDb(paymentsRows, orphanRows = []) {
     return (table) => {
       expect(['payments', 'stripe_orphan_charges']).toContain(table);
-      const state = { customerId: null, monthKey: null, resolvedFalse: false, notesLike: null };
+      const state = { customerId: null, monthKey: null, resolvedFalse: false };
       const builder = {
-        where(arg, op, val) {
+        where(arg) {
           if (typeof arg === 'function') arg.call(builder);
-          else if (arg === 'resolved') state.resolvedFalse = op === false;
-          else if (arg === 'resolution_notes') state.notesLike = val;
-          else state.customerId = arg.customer_id;
+          else {
+            state.customerId = arg.customer_id;
+            if ('resolved' in arg) state.resolvedFalse = arg.resolved === false;
+          }
           return builder;
         },
         whereIn() { return builder; },
@@ -323,20 +324,15 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
           if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
           return builder;
         },
-        orWhere(arg, op, val) {
-          if (typeof arg === 'function') arg.call(builder);
-          else if (arg === 'resolution_notes') state.notesLike = val;
-          return builder;
-        },
+        orWhere(fn) { fn.call(builder); return builder; },
         andWhereRaw() { return builder; },
         andWhere() { return builder; },
         async first() {
           if (table === 'stripe_orphan_charges') {
             expect(state.resolvedFalse).toBe(true);
-            expect(state.notesLike).toBe('%reconciled%');
             return orphanRows.find((r) => r.customer_id === state.customerId
               && r.metadata?.billed_month === state.monthKey
-              && (r.resolved === false || /reconciled/i.test(r.resolution_notes || ''))) || undefined;
+              && r.resolved === false) || undefined;
           }
           return paymentsRows.find((r) => r.customer_id === state.customerId
             && ['paid', 'processing'].includes(r.status)
@@ -362,11 +358,16 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     const visitMonth = new Date('2026-08-19T12:00:00Z');
     const unresolved = [{ id: 'o1', customer_id: 42, resolved: false, metadata: { billed_month: '2026-08' } }];
     await expect(monthlyDuesCollected(fakeDb([], unresolved), 42, visitMonth)).resolves.toBe(true);
+    // A RECONCILED orphan leaves a payments row — that row's status governs
+    // (paid → collected via the payments check; refunded → not), so the
+    // resolved orphan itself never counts.
     const reconciled = [{ id: 'o2', customer_id: 42, resolved: true, resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement', metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb([], reconciled), 42, visitMonth)).resolves.toBe(true);
+    await expect(monthlyDuesCollected(fakeDb([], reconciled), 42, visitMonth)).resolves.toBe(false);
+    const reconciledPaid = [{ id: 7, customer_id: 42, status: 'paid', metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb(reconciledPaid, reconciled), 42, visitMonth)).resolves.toBe(true);
   });
 
-  test('orphan for a different month, or resolved as failed/refunded, does not count', async () => {
+  test('orphan for a different month, or resolved (failed / refunded / reversed), does not count', async () => {
     const visitMonth = new Date('2026-08-19T12:00:00Z');
     const otherMonth = [{ id: 'o3', customer_id: 42, resolved: false, metadata: { billed_month: '2026-07' } }];
     await expect(monthlyDuesCollected(fakeDb([], otherMonth), 42, visitMonth)).resolves.toBe(false);
@@ -374,6 +375,8 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     await expect(monthlyDuesCollected(fakeDb([], failed), 42, visitMonth)).resolves.toBe(false);
     const refunded = [{ id: 'o5', customer_id: 42, resolved: true, resolution_notes: 'Automatically resolved: the combined charge was fully refunded (re_x) — the unmatched cash was returned to the customer', metadata: { billed_month: '2026-08' } }];
     await expect(monthlyDuesCollected(fakeDb([], refunded), 42, visitMonth)).resolves.toBe(false);
+    const reversed = [{ id: 'o7', customer_id: 42, resolved: true, resolution_notes: 'Autopay dues reversed: charge ch_x fully refunded (re_y) — funds returned to the customer', metadata: { billed_month: '2026-08' } }];
+    await expect(monthlyDuesCollected(fakeDb([], reversed), 42, visitMonth)).resolves.toBe(false);
     // Unstamped legacy orphan: never matches a month.
     const unstamped = [{ id: 'o6', customer_id: 42, resolved: false, metadata: null }];
     await expect(monthlyDuesCollected(fakeDb([], unstamped), 42, visitMonth)).resolves.toBe(false);
