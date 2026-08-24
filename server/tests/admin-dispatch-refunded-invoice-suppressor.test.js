@@ -573,4 +573,16 @@ describe('canceled acceptance invoice → manual path with setup-fee wording (so
     // Only when NO live replacement stands — a live match still wins.
     expect(block).toContain('else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee)');
   });
+
+  test('estimate-linked lanes fail CLOSED on a failed lookup before ANY mint — the setup-fee safeguard cannot fail open', () => {
+    const at = src2.indexOf('refusing to mint for an estimate-linked visit');
+    expect(at).toBeGreaterThan(-1);
+    const guard = src2.slice(at - 900, at + 200);
+    expect(guard).toContain('if (invoiceLookupFailed && svc.source_estimate_id) {');
+    // Sits beside the typed-lane guard, ahead of the mint options.
+    const typedGuardAt = src2.indexOf('refusing to mint a possible duplicate invoice for this one-time completion');
+    expect(typedGuardAt).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(typedGuardAt);
+    expect(src2.indexOf('const mintOptions = {', typedGuardAt)).toBeGreaterThan(at);
+  });
 });

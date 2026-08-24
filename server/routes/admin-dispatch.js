@@ -9511,6 +9511,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (typedLiveRequiredMint && invoiceLookupFailed) {
           throw new Error('existing-invoice lookups failed — refusing to mint a possible duplicate invoice for this one-time completion');
         }
+        // EVERY estimate-linked lane fails closed on a failed lookup before
+        // minting (codex hardening P0): the sibling first-application lookup
+        // is what detects a canceled ACCEPTANCE invoice that carried the
+        // one-time setup fee — if it errored, minting here would recreate
+        // only the visit charge and permanently drop the fee (and could
+        // duplicate an unseen suppressor invoice). The throw lands in the
+        // same release-for-resume/503 catch as the typed lane; the retry
+        // re-runs the lookups.
+        if (invoiceLookupFailed && svc.source_estimate_id) {
+          throw new Error('existing-invoice lookups failed — refusing to mint for an estimate-linked visit whose sibling/setup-fee suppressors could not be verified');
+        }
         const mintOptions = {
           // The frozen money on a required resume — the exact number the
           // decision's amount guard just passed (mintInvoiceAmount /
