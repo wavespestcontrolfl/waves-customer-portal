@@ -184,9 +184,15 @@ input[type="week"] {
    same Roboto family while preserving tabular numeric spacing.
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
-   beats class-based rules in the cascade. */
+   beats class-based rules in the cascade.
+   .admin-shell-v2 stays as an additional selector because html.admin-app is
+   only added by AdminLayoutV2's useEffect, which can run after the browser's
+   first paint on a cold /admin mount — the shell class is present in the
+   initial markup, so keeping it avoids a Roboto font flash / layout shift. */
 html.admin-app,
-html.admin-app * {
+html.admin-app *,
+.admin-shell-v2,
+.admin-shell-v2 * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 html.admin-app [class*="font-mono"],
@@ -194,7 +200,13 @@ html.admin-app [class*="font-mono"] *,
 html.admin-app code,
 html.admin-app code *,
 html.admin-app pre,
-html.admin-app pre * {
+html.admin-app pre *,
+.admin-shell-v2 [class*="font-mono"],
+.admin-shell-v2 [class*="font-mono"] *,
+.admin-shell-v2 code,
+.admin-shell-v2 code *,
+.admin-shell-v2 pre,
+.admin-shell-v2 pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 
