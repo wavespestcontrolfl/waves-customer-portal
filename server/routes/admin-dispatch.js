@@ -8625,6 +8625,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Never assigned to `invoice` / `payUrl` (no pay link to a dead invoice).
     let terminalCompletionInvoice = null;
     let completionLiveBesideInvoice = null;
+    let completionTerminalIncludedSetupFee = false;
     try {
       existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
@@ -8705,6 +8706,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // the manual-billing alert names it (codex #3456 r7), same as
             // the own-visit reconciliation's liveBeside.
             completionLiveBesideInvoice = siblingFirstApplication.liveBeside || null;
+          } else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee) {
+            // Canceled ACCEPTANCE invoice with no live replacement (codex
+            // #3456 late-round P1): it carried the one-time setup fee
+            // beside the visit charge, so an ordinary completion mint would
+            // recreate only the visit charge and silently drop the fee.
+            // Park the manual path instead — the alert tells the office to
+            // bill BOTH charges by hand.
+            const c = siblingFirstApplication.canceledSetupFee;
+            terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };
+            completionTerminalIncludedSetupFee = true;
           }
         }
       }
@@ -8970,7 +8981,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               : (terminalRestored
                 ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
                 : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
-            : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
+            : (completionTerminalIncludedSetupFee
+              ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
+              : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
           const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
@@ -8983,7 +8996,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
-            'Completed visit needs manual billing — prior invoice was refunded',
+            `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );

@@ -415,12 +415,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 8600);
+    const block = src.slice(at - 1600, at + 10500);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
     expect(block).toContain("'billing',");
-    expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded');
+    expect(block).toContain('Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}');
     expect(block).toContain('bell: true');
     expect(block).toMatch(/whereRaw\("metadata->>'dedupeKey' = \?", \[dedupeKey\]\)/);
     // Same mechanism as the dues-covered alert (not a parallel one).
@@ -495,8 +495,10 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const canceledNewer = { id: 'inv-canceled', status: 'canceled', created_at: '2026-08-20', ...matchFields };
     const liveOlder = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01', ...matchFields };
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toEqual({ invoice: liveOlder, liveBeside: null });
-    // Only canceled matches → nothing suppresses, the mint proceeds.
-    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null });
+    // Only canceled ACCEPTANCE matches → surfaced as canceledSetupFee so the
+    // caller PARKS instead of partial-reminting (the acceptance invoice
+    // carried the one-time setup fee beside the visit charge).
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toEqual({ invoice: null, liveBeside: null, canceledSetupFee: canceledNewer });
     // A refunded match wins in ANY mint order — there is no reliable
     // refund-event clock, so it always reaches the caller's terminal path
     // instead of a live sibling's pay link going out while the refund
@@ -529,3 +531,21 @@ describe('completion route wiring (source contract)', () => {
 function chainCalled(knex, method) {
   return knex.calls.some((c) => c[0] === method);
 }
+
+describe('canceled acceptance invoice → manual path with setup-fee wording (source contract)', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const src2 = fs2.readFileSync(path2.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+
+  test('the route parks the manual path (no partial remint) and flags the setup fee', () => {
+    const at = src2.indexOf('siblingFirstApplication.canceledSetupFee');
+    expect(at).toBeGreaterThan(-1);
+    const block = src2.slice(at - 200, at + 700);
+    expect(block).toContain('terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };');
+    expect(block).toContain('completionTerminalIncludedSetupFee = true;');
+    // The alert copy tells the office to bill BOTH charges.
+    expect(src2).toContain('bill BOTH charges manually; an auto-mint here would have recreated only the visit charge');
+    // Only when NO live replacement stands — a live match still wins.
+    expect(block).toContain('else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee)');
+  });
+});
