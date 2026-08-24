@@ -136,7 +136,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       // the plan — a plan without a stopped sequence keeps dunning customers.
       expect(trx).toHaveBeenCalledWith('invoice_followup_sequences');
       expect(trxFollowups.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
-      expect(trxFollowups.whereIn).toHaveBeenCalledWith('status', ['active', 'paused', 'autopay_hold']);
+      expect(trxFollowups.where).toHaveBeenCalledWith(expect.any(Function));
       expect(trxFollowups.update).toHaveBeenCalledWith(
         expect.objectContaining({
           status: 'stopped',
@@ -269,7 +269,7 @@ describe('POST /:id/payment-plan/cancel', () => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'created in error' }),
+        body: JSON.stringify({ paymentPlanId: 'plan-1', reason: 'created in error' }),
       });
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -304,6 +304,8 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(200);
       const FollowUps = require('../services/invoice-followups');
@@ -316,6 +318,8 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(200);
       const FollowUps = require('../services/invoice-followups');
@@ -331,6 +335,8 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(502);
       const body = await res.json();
@@ -344,6 +350,8 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(200);
       const FollowUps = require('../services/invoice-followups');
@@ -359,11 +367,14 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.alreadyCancelled).toBe(true);
       // No second cancel write — but the re-arm runs again for the retry.
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'cancelled', id: 'plan-1' });
       expect(trxPlans.update).not.toHaveBeenCalled();
       const FollowUps = require('../services/invoice-followups');
       expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1', expect.anything());
@@ -392,11 +403,25 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test('400 when paymentPlanId is missing — cancel must name the exact plan (codex r12 P1)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('409 when the invoice has no active plan', async () => {
     trxPlans.first.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(409);
       expect(trxPlans.update).not.toHaveBeenCalled();
@@ -408,6 +433,8 @@ describe('POST /:id/payment-plan/cancel', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
       });
       expect(res.status).toBe(404);
       expect(trxPlans.update).not.toHaveBeenCalled();

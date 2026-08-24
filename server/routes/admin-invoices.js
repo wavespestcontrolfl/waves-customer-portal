@@ -253,7 +253,18 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
   if (!invoiceId) return 0;
   return database('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', ['active', 'paused', 'autopay_hold'])
+    .where(function planStoppableSequences() {
+      // Live shapes, plus a sequence left 'stopped' by a PRIOR payment plan
+      // (codex r12 P1): a settled plan's stop survives (stopOnPayment skips
+      // stopped rows), and without restamping it to the NEW plan's reason the
+      // replacement plan's cancel would fail the ownership check and leave
+      // reminders off. Admin stops with unrelated reasons keep their stamp.
+      this.whereIn('status', ['active', 'paused', 'autopay_hold'])
+        .orWhere(function stalePlanOwnedStop() {
+          this.where('status', 'stopped')
+            .where('stopped_reason', 'like', 'payment_plan_created:%');
+        });
+    })
     .update({
       status: 'stopped',
       stopped_reason: paymentPlanFollowupStopReason(paymentPlanId),
@@ -2353,6 +2364,11 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     // provided, both the locked lookup and the idempotent-retry probe are
     // conditioned on this exact plan.
     const expectedPlanId = cleanOptionalText(body.paymentPlanId || body.payment_plan_id, 64);
+    if (!expectedPlanId) {
+      // Required (codex r12 P1): without it a delayed/duplicate cancel could
+      // select whichever plan is active NOW — possibly a replacement plan.
+      return res.status(400).json({ error: 'paymentPlanId is required — cancel names the exact plan being cancelled' });
+    }
     const cancelledBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     let outcome;
     try {
@@ -2362,7 +2378,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           const e = new Error('Invoice not found'); e.statusCode = 404; throw e;
         }
         const plan = await trx('payment_plans')
-          .where({ invoice_id: id, status: 'active', ...(expectedPlanId ? { id: expectedPlanId } : {}) })
+          .where({ invoice_id: id, status: 'active', id: expectedPlanId })
           .forUpdate()
           .first();
         if (!plan) {
@@ -2371,7 +2387,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           // Surface that plan so the re-arm below runs again instead of 409ing
           // the operator into a permanently reminder-less invoice.
           const lastCancelled = await trx('payment_plans')
-            .where({ invoice_id: id, status: 'cancelled', ...(expectedPlanId ? { id: expectedPlanId } : {}) })
+            .where({ invoice_id: id, status: 'cancelled', id: expectedPlanId })
             .orderBy('cancelled_at', 'desc')
             .first();
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
