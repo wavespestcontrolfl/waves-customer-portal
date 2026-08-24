@@ -74,7 +74,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -116,6 +116,9 @@ function scenario({
   invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
+  // Weekly days-off JSON served through the fake conn (getBlackoutDates reads
+  // via the caller's conn/trx).
+  weeklyDaysOff = null,
 }) {
   const parent = {
     id: 10,
@@ -185,6 +188,10 @@ function scenario({
       }
       return [];
     }
+    if (table === 'system_settings') {
+      return weeklyDaysOff ? { value: weeklyDaysOff } : null;
+    }
+    if (table === 'schedule_blackout_dates') return [];
     return null;
   };
   return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };
@@ -502,6 +509,81 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
     expect(r2.cancelledIds).toHaveLength(0);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — blackout days and weekly closures', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('top-up visits honor weekly days off even when the row does not skip weekends', async () => {
+    // schedule_weekly_days_off=[0,6] (Sat+Sun closed, the 08-18 owner setting):
+    // a daily-cadence top-up spans more than a week, so without the blackout
+    // nudge some rows MUST land on a weekend. Every landed date has to be a
+    // weekday, strictly future, and unique.
+    const { conn, parent, inserted } = scenario({
+      upcoming: 1,
+      weeklyDaysOff: '[0,6]',
+      parentOverrides: { recurring_interval_days: 1, skip_weekends: false },
+    });
+    const result = await reconcile(conn, parent, 8);
+    expect(result.added).toHaveLength(7);
+    const dates = inserted.map((r) => r.scheduled_date);
+    expect(new Set(dates).size).toBe(7);
+    for (const d of dates) {
+      expect(d > TODAY).toBe(true);
+      expect([0, 6]).not.toContain(new Date(`${d}T12:00:00`).getDay());
+    }
+  });
+});
+
+describe('planCadenceRewriteTargets — cadence edits stay future-only and clear of blackouts', () => {
+  const { planCadenceRewriteTargets } = adminScheduleRouter._test;
+
+  test('re-dating pending children of an older parent never targets a past date', () => {
+    const { childTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [
+        { id: 'c1', scheduled_date: daysOut(-30) },
+        { id: 'c2', scheduled_date: daysOut(1) },
+      ],
+      pendingBoosters: [],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(childTargets.size).toBe(2);
+    for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
+  test('a child landing on a blacked-out day is nudged forward by the shared clear-of-blackout', () => {
+    const args = {
+      baseDateStr: '2098-03-10',
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingBoosters: [],
+      boosterMonths: [],
+    };
+    const clear = planCadenceRewriteTargets({
+      ...args,
+      pendingChildren: [{ id: 'c1', scheduled_date: '2098-04-01' }],
+      seenDates: new Set(),
+      blackoutDates: null,
+    }).childTargets.get('c1');
+    const nudged = planCadenceRewriteTargets({
+      ...args,
+      pendingChildren: [{ id: 'c1', scheduled_date: '2098-04-01' }],
+      seenDates: new Set(),
+      blackoutDates: new Set([clear]),
+    }).childTargets.get('c1');
+    const next = new Date(`${clear}T12:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    expect(nudged).toBe(next.toISOString().slice(0, 10));
   });
 });
 

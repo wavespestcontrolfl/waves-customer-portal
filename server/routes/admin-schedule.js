@@ -343,6 +343,8 @@ function sanitizeServiceType(serviceType) {
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('../services/recurring-appointment-seeder');
+const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
+const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -447,8 +449,62 @@ function shiftPastWeekend(dateStr, skip, direction) {
 // (a forward-shifted Oct 31 lands Nov 2), breaking the cadence's no-Nov-Jan
 // contract. Every series date this file computes must go through this instead
 // of a bare shiftPastWeekend; the clamp is a no-op for all other patterns.
-function seasonalSafeShift(rawDate, pattern, skip, direction) {
-  return clampDateToSeason(pattern, shiftPastWeekend(rawDate, skip, direction), { skipWeekends: !!skip });
+// Blackout days (one-off dates + weekly days off) are BUSINESS closures, so
+// when a caller threads a preloaded blackout set they are honored regardless
+// of the row's own skip_weekends preference: the shared clear-of-blackout
+// nudge (scheduling/blackout-nudge — the seeder's behavior) walks the date
+// forward off any blacked-out day before the season clamp.
+function seasonalSafeShift(rawDate, pattern, skip, direction, blackoutDates = null) {
+  const shifted = clearOfBlackout(shiftPastWeekend(rawDate, skip, direction), blackoutDates, { skipWeekends: !!skip });
+  return clampDateToSeason(pattern, shifted, { skipWeekends: !!skip, blackoutDates });
+}
+
+// Owner blackout days over the whole series horizon (~460 days covers every
+// planned-count/pattern combination — the seeder uses the same window),
+// preloaded once per request and threaded into every series-date generator
+// below. Reads through the caller's conn/trx. Fail-open null (the seeder's
+// stance): a lookup outage must not block scheduling.
+async function loadSeriesBlackoutDates(conn, anchorDateStr) {
+  try {
+    const today = etDateString();
+    const base = dateOnly(anchorDateStr) || today;
+    const from = base < today ? base : today;
+    const far = base > today ? base : today;
+    return await getBlackoutDates(from, etDateString(addETDays(parseETDateTime(`${far}T12:00`), 460)), conn);
+  } catch { return null; }
+}
+
+// Upper-bound days of one cadence step — only used to decide whether an
+// extension anchor is stale (seriesExtendAnchor below), so generous is fine.
+function cadenceStepUpperBoundDays(pattern, intervalDays) {
+  if (pattern === 'custom') {
+    const n = parseInt(intervalDays, 10);
+    return Number.isInteger(n) && n > 0 ? n : 31;
+  }
+  if (pattern === SEASONAL_FEB_OCT) return 4 * 31; // widest gap: across the winter
+  if (pattern === 'weekly') return 7;
+  if (pattern === 'biweekly') return 14;
+  if (pattern === 'every_6_weeks') return 42;
+  const months = MONTH_RECURRENCE_INTERVALS[pattern];
+  return months ? months * 31 : 31;
+}
+
+// Anchor for the series-extension walks. The latest live visit keeps the
+// cadence phase (and refills a cancelled next slot — the P1 on
+// latestLiveSeriesVisit), but a series stale by MORE than one cadence step
+// re-anchors to today: walking forward from a months-old anchor used to seed
+// past-dated pending children (whose reminders then text customers about
+// visits that never happen), and the extension loops' future-only floor
+// would burn the whole attempt budget stepping through the missed dates.
+function seriesExtendAnchor(latest, pattern, intervalDays) {
+  const today = etDateString();
+  const latestStr = dateOnly(latest?.scheduled_date) || '';
+  if (!latestStr) return today;
+  if (latestStr >= today) return latestStr;
+  const staleDays = etDateDiffDays(latestStr, today);
+  return staleDays != null && staleDays > cadenceStepUpperBoundDays(pattern, intervalDays) + 3
+    ? today
+    : latestStr;
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -583,7 +639,7 @@ const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', '
 // date key mid-txn).
 
 function planCadenceRewriteTargets({
-  baseDateStr, pattern, rOpts, skip, dir, pendingChildren, pendingBoosters, boosterMonths, seenDates,
+  baseDateStr, pattern, rOpts, skip, dir, pendingChildren, pendingBoosters, boosterMonths, seenDates, blackoutDates,
 }) {
   const childTargets = new Map();
   const boosterTargets = new Map();
@@ -594,8 +650,11 @@ function planCadenceRewriteTargets({
     while (!nextDateStr && attempt < maxAttempts) {
       const rawNext = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
       attempt++;
-      const candidate = seasonalSafeShift(rawNext, pattern, skip, dir);
+      const candidate = seasonalSafeShift(rawNext, pattern, skip, dir, blackoutDates);
       if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, candidate)) continue;
+      // A cadence/anchor edit on an older parent must never re-date pending
+      // children into the past (mirror of the extend planner's floor).
+      if (candidate <= etDateString()) continue;
       if (seenDates.has(candidate)) continue;
       seenDates.add(candidate);
       nextDateStr = candidate;
@@ -609,7 +668,7 @@ function planCadenceRewriteTargets({
       for (const rawDate of computeBoosterDates(baseDateStr, boosterMonths, 12)) {
         const targetBooster = pendingBoosters[recomputedTargetIndex];
         if (!targetBooster) break;
-        const candidate = shiftPastWeekend(rawDate, skip, dir);
+        const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });
         const targetCurrentDate = normalizeDateOnly(targetBooster.scheduled_date);
         if (seenDates.has(candidate) && candidate !== targetCurrentDate) continue;
         if (candidate !== targetCurrentDate) seenDates.add(candidate);
@@ -622,7 +681,7 @@ function planCadenceRewriteTargets({
       if (boosterTargets.has(booster.id)) continue;
       const rawDate = dateOnly(booster.scheduled_date) || '';
       if (!rawDate) continue;
-      const candidate = shiftPastWeekend(rawDate, skip, dir);
+      const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });
       const currentDate = normalizeDateOnly(booster.scheduled_date);
       if (seenDates.has(candidate) && candidate !== currentDate) continue;
       if (candidate !== currentDate) seenDates.add(candidate);
@@ -635,15 +694,19 @@ function planCadenceRewriteTargets({
 // Iterate by placed dates, not attempts (matches the POST spawn): skip-
 // weekends can collapse consecutive recurrences onto the same shifted
 // weekday, and a fixed-count plan still owes spawnTarget children.
-function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spawnCount, spawnTarget }) {
+function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spawnCount, spawnTarget, blackoutDates }) {
   const dates = [];
   const maxAttempts = (spawnCount - 1) * 4 + 30;
   let attempt = 1;
   while (dates.length < spawnTarget && attempt < maxAttempts) {
     const rawNext = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
     attempt++;
-    const nextDateStr = seasonalSafeShift(rawNext, pattern, skip, dir);
+    const nextDateStr = seasonalSafeShift(rawNext, pattern, skip, dir, blackoutDates);
     if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nextDateStr)) continue;
+    // Spawn anchors are validated today-or-future, but keep the same
+    // future-only floor as the other planners so a child can never land in
+    // the past.
+    if (nextDateStr <= etDateString()) continue;
     if (seen.has(nextDateStr)) continue;
     seen.add(nextDateStr);
     dates.push(nextDateStr);
@@ -651,14 +714,14 @@ function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spa
   return dates;
 }
 
-function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, need }) {
+function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, need, blackoutDates }) {
   const dates = [];
   const maxAttempts = need * 4 + 30;
   let attempt = 1;
   while (dates.length < need && attempt < maxAttempts) {
     const raw = nextRecurringDate(baseDateStr, pattern, attempt, rOpts);
     attempt++;
-    const nd = seasonalSafeShift(raw, pattern, skip, dir);
+    const nd = seasonalSafeShift(raw, pattern, skip, dir, blackoutDates);
     if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nd)) continue;
     if (seen.has(nd)) continue;
     // The anchor can itself be in the past on a stalled series; a top-up must
@@ -752,6 +815,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!before) return dates;
   const cols = await conn('scheduled_services').columnInfo();
   const after = { ...before, ...updates };
+  const blackoutDates = await loadSeriesBlackoutDates(conn, dateOnly(after.scheduled_date));
   const shouldSpawn = spawnRecurringChildren !== false;
   const editOpts = (parent) => ({
     nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
@@ -798,6 +862,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
         pendingBoosters,
         boosterMonths: normalizeBoosterMonths(after.booster_months),
         seenDates,
+        blackoutDates,
       });
       for (const d of childTargets.values()) dates.add(d);
       for (const d of boosterTargets.values()) dates.add(d);
@@ -836,7 +901,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     } catch { existingUpcomingChildren = 0; }
     const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
     for (const d of planSpawnChildDates({
-      baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget,
+      baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
     })) dates.add(d);
   }
 
@@ -873,11 +938,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
           const skip = cols.skip_weekends ? !!parent.skip_weekends : false;
           const dir = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
           const latest = await latestLiveSeriesVisit(conn, parentId);
-          const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+          const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, parent.recurring_interval_days);
           const seen = await loadActiveSeriesDates(conn, parentId);
           seen.add(baseDateStr);
           for (const d of planSeriesExtendDates({
-            baseDateStr, pattern: parent.recurring_pattern, rOpts, skip, dir, seen, need,
+            baseDateStr, pattern: parent.recurring_pattern, rOpts, skip, dir, seen, need, blackoutDates,
           })) dates.add(d);
         }
       }
@@ -3929,6 +3994,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       : 0;
     const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
     const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    // Blackout days (one-off + weekly days off) over the series horizon —
+    // every generated child/booster date runs through the shared nudge.
+    const seriesBlackoutDates = (isRecurring && recurringPattern)
+      ? await loadSeriesBlackoutDates(db, dateOnly(scheduledDate))
+      : null;
     if (isRecurring && recurringPattern && plannedCount > 1) {
       // Iterate by inserts, not by attempts: when skip-weekends collapses
       // consecutive recurrences onto the same shifted weekday (e.g. custom
@@ -3940,7 +4010,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir, seriesBlackoutDates);
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
         seriesDates.add(nextDateStr);
@@ -3955,7 +4025,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
       const dates = computeBoosterDates(scheduledDate, cleaned, 12);
       for (const rawDate of dates) {
-        const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
+        const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, !!skipWeekends, shiftDir), seriesBlackoutDates, { skipWeekends: !!skipWeekends });
         // Skip if this date already has a row on the series (parent or
         // recurring child). Common case: monthly Jan 15 → child Apr 15
         // PLUS April booster → Apr 15 collision.
@@ -6856,6 +6926,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           && shouldRewritePendingRecurringRows(recurringParentBefore, parent)
         ) {
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
+          const rewriteBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
@@ -6922,6 +6993,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               pendingBoosters,
               boosterMonths: normalizeBoosterMonths(parent.booster_months),
               seenDates,
+              blackoutDates: rewriteBlackoutDates,
             });
             const rewriteProbeExcludeIds = [parent.id, ...pendingRewriteIds];
             for (const child of pendingChildren) {
@@ -7151,6 +7223,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           } catch { memberSeriesCovered = false; }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
+          const spawnBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
@@ -7213,8 +7286,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           while (inserted < spawnTarget && attempt < maxAttempts) {
             const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
             attempt++;
-            const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
+            const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild, spawnBlackoutDates);
             if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
+            // Mirror planSpawnChildDates' future-only floor (the pre-trx lock
+            // plan) — the two walks must stay candidate-for-candidate equal.
+            if (nextDateStr <= etDateString()) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
             const childData = {
@@ -8905,7 +8981,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
   const latest = await latestLiveSeriesVisit(trx, parentId);
-  const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+  const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, parent.recurring_interval_days);
   const seen = await loadActiveSeriesDates(trx, parentId);
   seen.add(baseDateStr);
   let parentAddons = [];
@@ -8922,8 +8998,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
 
   // Extend dates from the shared generator (update-details' pre-trx lock
   // plan runs the same one).
+  const extendBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
   const extendDates = planSeriesExtendDates({
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
+    blackoutDates: extendBlackoutDates,
   });
   for (const nd of extendDates) {
     const data = {
@@ -9151,7 +9229,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
       // exclusion + booster exclusion rationale on the helper).
       const latest = await latestLiveSeriesVisit(conn, parentId);
       if (latest) {
-        const latestStr = dateOnly(latest.scheduled_date);
+        const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, parent.recurring_interval_days);
         const rOpts = {
           ...recurrenceOrdinalOptions(parent.scheduled_date, {
             nth: parent.recurring_nth,
@@ -9165,6 +9243,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         // insert dedupes against future booster rows — shared preload
         // (booster double-book rationale on the helper).
         const existingDates = await loadActiveSeriesDates(conn, parentId);
+        const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
         // Advance until we find an open date or give up. Each step
         // moves one cadence interval forward from latestStr; capped to
         // avoid runaway loops on degenerate patterns.
@@ -9172,8 +9251,13 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         let nextStr = null;
         while (attempt <= 12) {
           const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-          const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent);
+          const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
           if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+            attempt++;
+            continue;
+          }
+          // Never seed a past-dated visit (+ its reminder) off a stale anchor.
+          if (candidate <= etDateString()) {
             attempt++;
             continue;
           }
@@ -13755,9 +13839,10 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // Shared anchor + occupied-dates preload (cancelled/rescheduled rows
     // excluded from BOTH — rationale on the helpers).
     const latest = await latestLiveSeriesVisit(trx, parentId);
-    const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+    const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, parent.recurring_interval_days);
     const seriesDateSeed = await loadActiveSeriesDates(trx, parentId);
     seriesDateSeed.add(baseDateStr);
+    const alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
 
     let created = 0;
     if (action === 'extend') {
@@ -13769,8 +13854,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < n && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent, alertBlackoutDates);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
+        // The anchor can itself be in the past on a stalled series; an
+        // extension must still only ever land on future dates.
+        if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
         const data = {
@@ -13821,8 +13909,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < need && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent, alertBlackoutDates);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
+        // The anchor can itself be in the past on a stalled series; an
+        // extension must still only ever land on future dates.
+        if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
         const data = {
@@ -14184,6 +14275,10 @@ router._test = {
   findBillingCoveredVisits,
   reconcileRecurringSeriesVisitCount,
   MAX_SERIES_VISIT_COUNT,
+  planCadenceRewriteTargets,
+  planSpawnChildDates,
+  planSeriesExtendDates,
+  seriesExtendAnchor,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,

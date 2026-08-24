@@ -45,9 +45,9 @@ function dowOfDateStr(dateStr) {
 
 // Set of day-of-week ints the business takes off every week. Fail-open
 // (empty set), like the date helpers.
-async function getWeeklyDaysOff() {
+async function getWeeklyDaysOff(conn = db) {
   try {
-    const row = await db('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
+    const row = await conn('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
     if (!row || !row.value) return new Set();
     const parsed = JSON.parse(row.value);
     if (!Array.isArray(parsed)) return new Set();
@@ -73,17 +73,19 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
 
 // Set of YYYY-MM-DD blackout dates within [fromStr, toStr] (inclusive) —
 // one-off dates plus every weekly-day-off occurrence in the range.
-async function getBlackoutDates(fromStr, toStr) {
+// `conn` (optional) lets a caller inside a transaction read through its own
+// trx instead of the pool — same fail-open stance either way.
+async function getBlackoutDates(fromStr, toStr, conn = db) {
   let dates = new Set();
   try {
-    const rows = await db('schedule_blackout_dates')
+    const rows = await conn('schedule_blackout_dates')
       .whereBetween('date', [fromStr, toStr])
       .select('date');
     dates = new Set(rows.map((r) => toDateStr(r.date)));
   } catch (err) {
     logger.warn(`[blackout-dates] range lookup failed (failing open): ${err.message}`);
   }
-  const weekly = await getWeeklyDaysOff();
+  const weekly = await getWeeklyDaysOff(conn);
   for (const d of expandWeeklyDaysOff(fromStr, toStr, weekly)) dates.add(d);
   return dates;
 }

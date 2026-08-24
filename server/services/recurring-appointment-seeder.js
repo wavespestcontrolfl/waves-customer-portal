@@ -7,6 +7,7 @@ const {
   etNthWeekdayOfMonth,
 } = require('../utils/datetime-et');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { clearOfBlackout: nudgeOffBlackoutDates } = require('./scheduling/blackout-nudge');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -371,18 +372,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // forward a day at a time (re-applying the weekend shift) until clear —
   // skipping the visit entirely would silently shrink the customer's plan.
   const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
-  const clearOfBlackout = (dateStr) => {
-    if (!blackoutDates || !blackoutDates.size) return dateStr;
-    let candidate = dateStr;
-    for (let nudge = 0; nudge < 14 && blackoutDates.has(candidate); nudge++) {
-      candidate = shiftPastWeekend(
-        etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), 1)),
-        skipWeekends,
-        'forward',
-      );
-    }
-    return candidate;
-  };
+  const clearOfBlackout = (dateStr) => nudgeOffBlackoutDates(dateStr, blackoutDates, { skipWeekends });
 
   // Weekend shift and blackout nudge can cross the season edge — clamp back
   // into Feb–Oct (see clampDateToSeason for the direction rules).

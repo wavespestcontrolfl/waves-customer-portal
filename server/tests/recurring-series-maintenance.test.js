@@ -27,6 +27,15 @@ const { etDateString } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
+// Relative dates for the stale-anchor cases — those fixtures must sit in the
+// real past relative to the run date (everything else lives in 2098 so the
+// future-only floor never rots the fixture).
+function daysOut(n) {
+  const d = new Date(`${etDateString()}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 const COLS = {
   recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
   create_invoice_on_complete: {}, estimated_price: {}, is_callback: {}, discount_dollars: {},
@@ -68,7 +77,7 @@ function makeConn(handler, opts = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -110,10 +119,16 @@ function makeConn(handler, opts = {}) {
   return build(false);
 }
 
-function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOngoing = true, statusAfterRegistration = 'pending' }) {
+function ongoingScenario({
+  upcomingCount, sibling, parentOverrides = {}, stillOngoing = true, statusAfterRegistration = 'pending',
+  // Blackout layers served through the fake conn (getBlackoutDates reads via
+  // the caller's conn): weekly days-off JSON + one-off blackout rows.
+  weeklyValue = null, blackoutRows = [],
+  latestDate = '2098-07-15', seriesDates = ['2098-01-15', '2098-04-15', '2098-07-15'],
+}) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
-    recurring_ongoing: true, scheduled_date: '2026-01-15',
+    recurring_ongoing: true, scheduled_date: '2098-01-15',
     window_start: '08:00', window_end: '10:00',
     service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
     estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
@@ -136,16 +151,12 @@ function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOn
         if (firstCall[1] === 'status') {
           return statusAfterRegistration == null ? undefined : { status: statusAfterRegistration };
         }
-        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: '2026-07-15' }; // latest
+        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: latestDate }; // latest
         return parent;
       }
       if (op === 'await') {
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
-          return [
-            { scheduled_date: '2026-01-15' },
-            { scheduled_date: '2026-04-15' },
-            { scheduled_date: '2026-07-15' },
-          ];
+          return seriesDates.map((scheduled_date) => ({ scheduled_date }));
         }
         return [];
       }
@@ -165,6 +176,14 @@ function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOn
       if (op === 'first') return null;
       if (op === 'insert' || op === 'insertReturning') { alertInserts.push(data); return [1]; }
     }
+    if (table === 'system_settings') {
+      if (op === 'first') return weeklyValue ? { value: weeklyValue } : null;
+      return null;
+    }
+    if (table === 'schedule_blackout_dates') {
+      if (op === 'await') return blackoutRows.map((date) => ({ date }));
+      return [];
+    }
     return null;
   };
   return { conn: makeConn(handler), inserted, alertInserts, reminderWrites, parent };
@@ -178,7 +197,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       upcomingCount: 1,
       sibling: { create_invoice_on_complete: true },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
 
     expect(inserted).toHaveLength(1);
     const row = inserted[0];
@@ -187,7 +206,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(row.recurring_ongoing).toBe(true);
     expect(row.status).toBe('pending');
     expect(row.scheduled_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(row.scheduled_date > '2026-07-15').toBe(true);
+    expect(row.scheduled_date > '2098-07-15').toBe(true);
     // Fix (4): the extension row carries invoice-on-complete — the latest
     // non-cancelled sibling's value wins over the (false) parent template.
     expect(row.create_invoice_on_complete).toBe(true);
@@ -213,7 +232,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
         service_address_zip: '34285', lat: 27.0998, lng: -82.4543,
       },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     // Billing must resolve identically to the rest of the series at
     // completion (payer invoice, not the homeowner), and dispatch must roll
@@ -233,7 +252,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       sibling: undefined,
       parentOverrides: { payer_id: null, po_number: null, self_pay_override: true },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     expect(inserted[0].self_pay_override).toBe(true);
     expect(inserted[0].payer_id).toBe(null);
@@ -263,7 +282,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       sibling: undefined,
       statusAfterRegistration: 'cancelled',
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     // The reminder WAS registered (registration won no ordering guarantees)…
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
@@ -291,34 +310,75 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       sibling: undefined,
       parentOverrides: { create_invoice_on_complete: true },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     expect(inserted[0].create_invoice_on_complete).toBe(true);
   });
 
+  test('the auto-extend never lands on a blacked-out day — the shared nudge walks it forward', async () => {
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      blackoutRows: ['2098-10-15'],
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date).toBe('2098-10-16');
+  });
+
+  test('weekly days off (Sat+Sun closed) are honored even with skip_weekends=false — business closures beat row preferences', async () => {
+    // A Saturday-anchored quarterly series (parent 2098-01-18 = 3rd Saturday,
+    // latest 2098-07-19 = 3rd Saturday) puts the next candidate on Saturday
+    // 2098-10-18; with schedule_weekly_days_off=[0,6] it must nudge to Monday
+    // 2098-10-20 even though the row itself does not skip weekends.
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      weeklyValue: '[0,6]',
+      latestDate: '2098-07-19',
+      seriesDates: ['2098-01-18', '2098-04-19', '2098-07-19'],
+      parentOverrides: { scheduled_date: '2098-01-18', skip_weekends: false },
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-19' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date).toBe('2098-10-20');
+  });
+
+  test('a stale latest visit never seeds a past-dated child — the anchor floors to today and the walk stays future-only', async () => {
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      latestDate: daysOut(-200),
+      seriesDates: [daysOut(-380), daysOut(-290), daysOut(-200)],
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: daysOut(-200) });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date > etDateString()).toBe(true);
+  });
+
   test('does NOT extend when 2+ visits are already upcoming', async () => {
     const { conn, inserted } = ongoingScenario({ upcomingCount: 2, sibling: undefined });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(0);
   });
 
   test('P1: a cancelled FUTURE visit never anchors the next extension date — the cancelled slot is refilled', async () => {
     const parent = {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
-      recurring_ongoing: true, scheduled_date: '2026-01-15',
+      recurring_ongoing: true, scheduled_date: '2098-01-15',
       window_start: '08:00', window_end: '10:00',
       service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
       estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
       create_invoice_on_complete: false,
     };
     const rows = [
-      { scheduled_date: '2026-01-15', status: 'completed' },
-      { scheduled_date: '2026-04-15', status: 'completed' },
-      { scheduled_date: '2026-07-15', status: 'completed' },
+      { scheduled_date: '2098-01-15', status: 'completed' },
+      { scheduled_date: '2098-04-15', status: 'completed' },
+      { scheduled_date: '2098-07-15', status: 'completed' },
       // Cancelled FUTURE visit. Before the fix, the latest-row query had no
       // status filter, so this row became latestStr and the extension landed
-      // a full cadence past it (2027-01-15) — a quarter-long service gap.
-      { scheduled_date: '2026-10-15', status: 'cancelled' },
+      // a full cadence past it (2099-01-15) — a quarter-long service gap.
+      { scheduled_date: '2098-10-15', status: 'cancelled' },
     ];
     const inserted = [];
     const handler = ({ table, calls, op, data }) => {
@@ -356,11 +416,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
       return null;
     };
-    await runRecurringSeriesMaintenance(makeConn(handler), { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(makeConn(handler), { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
-    // Anchored to the last LIVE visit (2026-07-15): one quarter forward
-    // refills the cancelled 2026-10-15 slot instead of skipping past it.
-    expect(inserted[0].scheduled_date).toBe('2026-10-15');
+    // Anchored to the last LIVE visit (2098-07-15): one quarter forward
+    // refills the cancelled 2098-10-15 slot instead of skipping past it.
+    expect(inserted[0].scheduled_date).toBe('2098-10-15');
   });
 
   test('the latest-anchor query pins the cancelled/rescheduled exclusion — one shared helper, every consumer (source guard)', () => {
@@ -387,7 +447,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
     const { conn, inserted } = ongoingScenario({ upcomingCount: 1, sibling: undefined, stillOngoing: false });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     // Pre-insert re-check reads recurring_ongoing=false → no insert at all.
     expect(inserted).toHaveLength(0);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
@@ -401,14 +461,14 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
 function concurrentScenario() {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
-    recurring_ongoing: true, scheduled_date: '2026-01-15',
+    recurring_ongoing: true, scheduled_date: '2098-01-15',
     window_start: '08:00', window_end: '10:00',
     service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
     estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
     create_invoice_on_complete: false,
   };
   const inserted = [];
-  const baseDates = ['2026-01-15', '2026-04-15', '2026-07-15'];
+  const baseDates = ['2098-01-15', '2098-04-15', '2098-07-15'];
   const allDates = () => [...baseDates, ...inserted.map((d) => d.scheduled_date)];
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
@@ -452,8 +512,8 @@ describe('runRecurringSeriesMaintenance — concurrency (P0: no duplicate billab
     const mutex = { tail: Promise.resolve() };
     const conn = makeConn(handler, { mutex });
     await Promise.all([
-      runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' }),
-      runRecurringSeriesMaintenance(conn, { id: 23, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' }),
+      runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' }),
+      runRecurringSeriesMaintenance(conn, { id: 23, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' }),
     ]);
     expect(inserted).toHaveLength(1);
   });
@@ -477,14 +537,14 @@ describe('runRecurringSeriesMaintenance — fixed plan end-of-plan alert', () =>
       sibling: undefined,
       parentOverrides: { recurring_ongoing: false },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(0);
     expect(alertInserts).toHaveLength(1);
     expect(alertInserts[0]).toMatchObject({
       recurring_parent_id: 10,
       customer_id: 5,
       alert_type: 'plan_ending',
-      last_visit_date: '2026-07-15',
+      last_visit_date: '2098-07-15',
       remaining_visits: 0,
     });
   });
@@ -500,7 +560,7 @@ describe('runRecurringSeriesMaintenance — fixed plan end-of-plan alert', () =>
       sibling: undefined,
       parentOverrides: { recurring_ongoing: false },
     });
-    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(0);
     // One visit still ahead, so it is not end-of-plan yet either.
     expect(alertInserts).toHaveLength(0);
@@ -512,7 +572,7 @@ describe('runRecurringSeriesMaintenance — fixed plan end-of-plan alert', () =>
       if (op === 'first') return { id: 30, is_recurring: false };
       return null;
     };
-    await expect(runRecurringSeriesMaintenance(makeConn(handler), { id: 30, customer_id: 5, scheduled_date: '2026-07-15' }))
+    await expect(runRecurringSeriesMaintenance(makeConn(handler), { id: 30, customer_id: 5, scheduled_date: '2098-07-15' }))
       .resolves.toBeUndefined();
   });
 });
@@ -754,6 +814,23 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(out.body.created).toBe(1);
     expect(state.insertedVisits).toHaveLength(1);
     expect(state.insertedVisits[0].scheduled_date).toBe('2098-10-15');
+  });
+
+  test('extend on a long-stalled series never inserts past-dated visits (anchor floors to today)', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: daysOut(-290), status: 'completed' },
+        { scheduled_date: daysOut(-200), status: 'completed' },
+      ],
+      alertRow: { id: 59, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '59', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(out.body.created).toBe(2);
+    expect(state.insertedVisits).toHaveLength(2);
+    for (const v of state.insertedVisits) {
+      expect(v.scheduled_date > etDateString()).toBe(true);
+    }
   });
 
   test('a series cancelled before the click is refused under the lock (409), inserting nothing', async () => {
