@@ -7901,7 +7901,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       title: formatServiceDisplay(svc.service_type, []),
       lineItems: scheduledInvoice.lineItems,
       discountIds: scheduledInvoice.discountIds || [],
-      taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
+      // No taxRate override (same fix as billing recovery #3448): an
+      // explicit rate (even 0) pre-empts TaxCalculator in
+      // InvoiceService.create (tax_exemptions, service_taxability, county
+      // tax_rates) and mis-billed `business` property_type at 0%. Leave
+      // the key ABSENT so this mint resolves tax the same way a fresh
+      // invoice does.
       trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
       dueDate: etDateString(),
     }),
@@ -8581,7 +8586,9 @@ router.post('/:id/invoice', async (req, res, next) => {
         title: formatServiceDisplay(svc.service_type, []),
         lineItems: scheduledInvoice.lineItems,
         discountIds: scheduledInvoice.discountIds || [],
-        taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
+        // No taxRate override — see mintOrReuseScheduledServiceInvoice:
+        // absent key lets InvoiceService.create fall through to
+        // TaxCalculator (exemptions / service taxability / county rates).
         trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
         dueDate: etDateString(),
       }),
@@ -14224,6 +14231,7 @@ router._test = {
   findBillingCoveredVisits,
   reconcileRecurringSeriesVisitCount,
   MAX_SERIES_VISIT_COUNT,
+  mintOrReuseScheduledServiceInvoice,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,

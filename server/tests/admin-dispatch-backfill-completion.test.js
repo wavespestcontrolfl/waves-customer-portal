@@ -881,6 +881,22 @@ describe('frozenResumeCompletionState — resume derives mode AND duration from 
     expect(frozenResumeCompletionState(null, { requestBackfill: true }).isBackfillCompletion).toBe(false);
   });
 
+  test('frozen payer id survives the numeric JSONB round-trip (r7 P0) — restored as the comparison string', () => {
+    const base = { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 12500, backfillMintTaxRate: 0.065 };
+    // payers.id is numeric — a raw number in the stamp must restore, normalized.
+    expect(frozenResumeCompletionState({ ...base, backfillMintPayerId: 42 }).backfillMintPayerId).toBe('42');
+    // The stamp itself stringifies; strings restore verbatim.
+    expect(frozenResumeCompletionState({ ...base, backfillMintPayerId: '42' }).backfillMintPayerId).toBe('42');
+    // Frozen self-pay is a REAL value (null), distinct from an absent stamp.
+    expect(frozenResumeCompletionState({ ...base, backfillMintPayerId: null }).backfillMintPayerId).toBeNull();
+    expect(frozenResumeCompletionState(base).backfillMintPayerId).toBeUndefined();
+    // Garbage never invents an authority.
+    expect(frozenResumeCompletionState({ ...base, backfillMintPayerId: '' }).backfillMintPayerId).toBeUndefined();
+    expect(frozenResumeCompletionState({ ...base, backfillMintPayerId: NaN }).backfillMintPayerId).toBeUndefined();
+    // No identity without the required posture.
+    expect(frozenResumeCompletionState({ backfill: true, backfillMintPayerId: 42 }).backfillMintPayerId).toBeUndefined();
+  });
+
   test('frozen duration wins over the retry timer — the helper has no request-duration input at all', () => {
     // A flagless retry carries the panel's auto-elapsed value in its body;
     // the helper's shape makes it unforwardable: duration comes ONLY from the
@@ -1965,6 +1981,29 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
   describe('route wiring (source contracts)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
+    test('the completion tax basis is CALCULATOR-derived at the freeze point, not a flat property_type hard-code', () => {
+      // TaxCalculator owns verified exemptions, service_taxability, and
+      // county tax_rates, and treats `business` as commercial — the old
+      // `commercial ? 0.07 : 0` hard-code billed `business` at 0% and every
+      // county at flat 7%. The single derivation still feeds both the
+      // frozen backfillMintTaxRate and the live mint (round-10 contract),
+      // and the returned rate is bounded to what the resume validator
+      // accepts (finite, 0 <= rate < 1).
+      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*visitIsPayerBilled \? \{ skipCustomerExemption: true \} : \{\},\s*\n\s*\);/);
+      // Payer authority at the freeze (pre-push P0): the payer resolves
+      // BEFORE the rate derivation; an exempt payer freezes 0, a non-exempt
+      // payer's rate excludes the service customer's certificate.
+      expect(source.indexOf('const visitIsPayerBilled')).toBeGreaterThan(-1);
+      expect(source.indexOf('const visitIsPayerBilled')).toBeLessThan(source.indexOf('const completionInvoiceTaxRate'));
+      expect(source).toMatch(/if \(completionPayerTaxExempt\) return 0;/);
+      expect(source).toMatch(/if \(Number\.isFinite\(r\) && r >= 0 && r < 1\) return r;/);
+      // Calculator failure fails CLOSED (pre-push P0 r3): no flat-rate
+      // guess is ever frozen — the completion errors and is retried. NO
+      // flat tax expression remains anywhere on the route.
+      expect(source).toMatch(/refusing to freeze a guessed rate/);
+      expect((source.match(/\? 0\.07 : 0/g) || []).length).toBe(0);
+    });
+
     test('a SCHEDULED_PRICE_MOVED refusal restamps the frozen mint cents from the locked price BEFORE releasing for resume (codex #3344 r5 P1)', () => {
       // The refusal's release promises a resume that mints the FROZEN cents
       // with replay disabled and price movement allowed — without the
@@ -2055,7 +2094,13 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // and the freeze sits after it.
       expect((source.match(/const autopayCoversVisit = membershipDuesCoverVisit\(\{/g) || []).length).toBe(1);
       expect((source.match(/const customerAutopayActive = await customerOnAutopay\(\{/g) || []).length).toBe(1);
-      expect((source.match(/let visitIsPayerBilled = false;/g) || []).length).toBe(1);
+      // Payer resolution is fail-CLOSED at the freeze (pre-push P0 r2):
+      // one throwOnError resolveForInvoice above the tax derivation, no
+      // silent self-pay fallback that could freeze the wrong authority.
+      expect((source.match(/const visitIsPayerBilled = completionTaxAuthorityError\s*\n\s*\? true\s*\n\s*: !!completionResolvedPayer\?\.payerId;/g) || []).length).toBe(1);
+      // First runs rethrow (r10 P0); only a committed resume may capture.
+      expect(source).toMatch(/if \(!resumingCommittedCompletion && !completionCannotBill\) throw payerErr;/);
+      expect(source).toMatch(/resolveForInvoice\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*throwOnError: true,\s*\n\s*\}\)/);
       const coverageDeriveAt = source.indexOf('const autopayCoversVisit = membershipDuesCoverVisit({');
       const freezeCallAt = source.indexOf('const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({');
       expect(coverageDeriveAt).toBeGreaterThan(-1);
@@ -2072,7 +2117,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       const stamp = '...(backfillMintRequiredAtCommit ? {';
       const stampAt = source.indexOf(stamp);
       expect(stampAt).toBeGreaterThan(-1);
-      expect(source).toMatch(/\.\.\.\(backfillMintRequiredAtCommit \? \{\s*\n\s*backfillMintRequired: true,\s*\n(?:\s*\/\/[^\n]*\n)*\s*backfillMintAmountCents: Math\.round\(Number\(invoiceAmount\) \* 100\),\s*\n\s*backfillMintTaxRate: completionInvoiceTaxRate,\s*\n\s*\} : \{\}\),/);
+      expect(source).toMatch(/\.\.\.\(backfillMintRequiredAtCommit \? \{\s*\n\s*backfillMintRequired: true,\s*\n(?:\s*\/\/[^\n]*\n)*\s*backfillMintAmountCents: Math\.round\(Number\(invoiceAmount\) \* 100\),\s*\n\s*backfillMintTaxRate: completionInvoiceTaxRate,\s*\n(?:\s*\/\/[^\n]*\n)*\s*backfillMintPayerId: completionResolvedPayer\?\.payerId != null\s*\n\s*\? String\(completionResolvedPayer\.payerId\)\s*\n\s*: null,\s*\n\s*\} : \{\}\),/);
       // The tax basis is hoisted beside the amount — one derivation feeds
       // the freeze AND the mint (property_type is a mutable input).
       expect((source.match(/const completionInvoiceTaxRate = /g) || []).length).toBe(1);
@@ -2129,7 +2174,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // …ONE derivation decides the number both consumers read: the frozen
       // amount on a required resume, the live derivation otherwise…
       expect(source).toMatch(/const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null\s*\n\s*\? backfillFrozenMintAmount\s*\n\s*: invoiceAmount;/);
-      expect(source).toMatch(/const mintInvoiceTaxRate = backfillReviewMintRequired && backfillFrozenMintTaxRate != null\s*\n\s*\? backfillFrozenMintTaxRate\s*\n\s*: completionInvoiceTaxRate;/);
+      expect(source).toMatch(/const resolveMintInvoiceTaxRate = async \(\) => \(\s*\n\s*backfillReviewMintRequired && backfillFrozenMintTaxRate != null\s*\n\s*\? backfillFrozenMintTaxRate\s*\n\s*: deriveCompletionTaxRate\(\)\s*\n\s*\);/);
       // …the decision's amount guard reads it…
       expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
       // …and the mint itself reads the SAME pair — never the live values.
@@ -2142,7 +2187,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // minted total despite the freeze. Backfill mints (all REQUIRED —
       // the posture governs every branch) mint a single line at the frozen
       // amount on BOTH first run and resume; live completions keep replay.
-      expect(source).toMatch(/taxRate: mintInvoiceTaxRate,\s*\n(?:\s*\/\/[^\n]*\n)*\s*useScheduledReplay: !isBackfillCompletion\s*\n\s*&& !\(backfillReviewMintRequired && resumingCommittedCompletion\),/);
+      expect(source).toMatch(/taxRate: mintInvoiceTaxRate,\s*\n(?:\s*\/\/[^\n]*\n)*\s*frozenPayerId: backfillReviewMintRequired \? mintInvoicePayerId : undefined,\s*\n(?:\s*\/\/[^\n]*\n)*\s*frozenTaxAuthority: backfillReviewMintRequired,\s*\n(?:\s*\/\/[^\n]*\n)*\s*useScheduledReplay: !isBackfillCompletion\s*\n\s*&& !\(backfillReviewMintRequired && resumingCommittedCompletion\),/);
       // No unconditional replay remains anywhere on this route — the other
       // replay callers (billing-recovery bill, card-hold charge) live in
       // files the backfill quiet path never mints through.
@@ -2775,7 +2820,7 @@ describe('completion route wiring (source contracts)', () => {
 
   test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
     // The route passes the opt-out on the completion mint…
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4500}skipDepositCredit: isBackfillCompletion,/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5000}skipDepositCredit: isBackfillCompletion,/);
     // …and logs the unapplied balance for review, like the prepaid skip.
     expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
     // The service honors the opt-out BEFORE any ledger read: the
@@ -2791,7 +2836,7 @@ describe('completion route wiring (source contracts)', () => {
   test('the backfill mint opts out of payer-statement accrual and leaves the reviewer a breadcrumb (fix round 5)', () => {
     // The route passes BOTH opt-outs on the completion mint — the same
     // options object, so the accrual skip rides the deposit skip's gate.
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4500}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5000}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
     // …and logs the skipped accrual for the reviewer — only when an accrual
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:
@@ -2802,8 +2847,8 @@ describe('completion route wiring (source contracts)', () => {
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
     // (the destructure may carry later options after it — e.g. the codex r6
     // threaded-transaction `database` param)
-    expect(invoiceSource).toMatch(/skipAccrual = false,[\s\S]{0,800}\},\s*\n\s*\) \{/);
-    expect(invoiceSource).toMatch(/trustedStoredDiscountSources: scheduledInvoice\s*\n\s*\? \["scheduled_service"\]\s*\n\s*: \[\],\s*\n\s*skipAccrual,\s*\n\s*\};/);
+    expect(invoiceSource).toMatch(/skipAccrual = false,[\s\S]{0,1200}\},\s*\n\s*\) \{/);
+    expect(invoiceSource).toMatch(/trustedStoredDiscountSources: scheduledInvoice\s*\n\s*\? \["scheduled_service"\]\s*\n\s*: \[\],\s*\n\s*skipAccrual,\s*\n\s*frozenTaxAuthority,\s*\n\s*frozenPayerId,\s*\n\s*\};/);
     // And create() honors it at BOTH accrual sites: the NET-terms preflight
     // transaction wrap and the statement get-or-create/attach itself.
     expect(invoiceSource).toMatch(/if \(!skipAccrual && database === db && require\("\.\.\/config\/feature-gates"\)\.isEnabled\("payerStatements"\)\) \{/);

@@ -48,7 +48,10 @@ jest.mock('../services/notification-triggers', () => ({
 const db = require('../models/db');
 const adminScheduleRouter = require('../routes/admin-schedule');
 
-const { mintScheduledServiceInvoiceWithDeposit } = adminScheduleRouter._test;
+const {
+  mintScheduledServiceInvoiceWithDeposit,
+  mintOrReuseScheduledServiceInvoice,
+} = adminScheduleRouter._test;
 
 function makeTrx({ replayedInvoice = undefined, lockedSvcRow } = {}) {
   const trx = (table) => {
@@ -275,6 +278,52 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
       const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
       expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+  });
+
+  describe('schedule mints leave tax to TaxCalculator (no hard-coded taxRate)', () => {
+    it('mintOrReuseScheduledServiceInvoice builds create params WITHOUT a taxRate key', async () => {
+      // Tax is the calculator's call (verified exemptions / service
+      // taxability / county rates), not a flat per-property_type override:
+      // the key must be ABSENT — an explicit value (even 0) pre-empts
+      // TaxCalculator in InvoiceService.create, and the old
+      // `cust_property_type === 'commercial' ? 0.07 : 0` billed `business`
+      // customers at 0%. Same contract as billing recovery (#3448).
+      db.mockImplementation(() => {
+        const q = {};
+        q.where = jest.fn(() => q);
+        q.whereNot = jest.fn(() => q);
+        q.orderBy = jest.fn(() => q);
+        q.first = jest.fn(async () => undefined); // no existing invoice
+        return q;
+      });
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 100, primary_line_price: null },
+      }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintOrReuseScheduledServiceInvoice({
+        ...svc,
+        estimated_price: 100,
+        cust_property_type: 'business',
+      });
+
+      expect(result).toMatchObject({ invoice: { id: 'inv-1' }, reused: false });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      const opts = mockCreate.mock.calls[0][0];
+      expect(opts).toMatchObject({ customerId: 'cust-1', scheduledServiceId: 'svc-1' });
+      expect(Object.prototype.hasOwnProperty.call(opts, 'taxRate')).toBe(false);
+    });
+
+    it('no schedule mint passes an explicit taxRate (source contract for the tech-checkout mint too)', () => {
+      // The POST /:id/invoice tech-checkout mint shares the contract but is
+      // impractical to drive here — pin the source: no `taxRate:` key
+      // anywhere on the route.
+      const fs = require('fs');
+      const path = require('path');
+      const routeSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+      expect(routeSource).not.toMatch(/taxRate:/);
     });
   });
 });

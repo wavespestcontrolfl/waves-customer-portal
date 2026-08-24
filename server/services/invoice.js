@@ -895,6 +895,23 @@ const InvoiceService = {
       // (project send dry-run). Accruing those would double-bill (already paid) or
       // leave a phantom statement line (cancelled preview).
       skipAccrual = false,
+      // frozenTaxAuthority: the caller's explicit taxRate is FROZEN money
+      // (the completion resume contract: backfillMintTaxRate →
+      // mintInvoiceTaxRate → here) — it was derived by the calculator at
+      // the freeze point, and the resume validator proves the mint against
+      // those exact frozen numbers. Skip the verified-exemption recheck for
+      // these callers only: an exemption verified AFTER the freeze would
+      // otherwise mint a total that contradicts the frozen contract and
+      // wedge the retry. Ordinary caller-supplied rates keep the recheck.
+      frozenTaxAuthority = false,
+      // The Bill-To identity the frozen rate was derived FOR (undefined =
+      // caller didn't freeze one; null = frozen self-pay). Meaningful only
+      // with frozenTaxAuthority: mint-time payer resolution must land on
+      // this same entity or create() fails CLOSED — a payer assigned or
+      // removed after the freeze would otherwise mint the frozen rate for
+      // a party it was never derived for (e.g. a self-pay exempt 0% onto a
+      // newly assigned non-exempt payer's AP invoice).
+      frozenPayerId = undefined,
     } = createArgs;
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -962,7 +979,11 @@ const InvoiceService = {
       // a NET-terms job must NOT silently fall back to self-pay and create an
       // individually-collectible invoice instead of accruing. (Default fail-soft
       // when the gate is off — unchanged for everyone today.)
-      throwOnError: isEnabled("payerStatements"),
+      // Also fail closed under a FROZEN Bill-To contract (codex pre-push r5
+      // P0): a fail-soft lookup error would report self-pay, match a frozen
+      // frozenPayerId === null, and mint the frozen (possibly exempt-0)
+      // rate onto the homeowner while a real non-exempt payer exists.
+      throwOnError: isEnabled("payerStatements") || frozenTaxAuthority,
     });
 
     // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
@@ -1006,10 +1027,36 @@ const InvoiceService = {
         throw err;
       }
     }
+    // Frozen Bill-To identity check (codex pre-push r4 P0): when the
+    // caller's taxRate is frozen money, the mint-time payer must be the
+    // same entity the rate was derived for. Divergence fails CLOSED with a
+    // retryable conflict — never mint a frozen rate for a different party.
+    // A frozen contract is EFFECTIVE only when the identity stamp is
+    // complete (r8 P0): a legacy record frozen before backfillMintPayerId
+    // existed may carry the old flat 7% rate that never encoded payer
+    // exemption — for those, create()'s normal exemption semantics stay in
+    // force (resolvedTaxExempt zeroing + the self-pay recheck), exactly as
+    // they corrected legacy rates before this contract existed.
+    const frozenContractComplete = frozenTaxAuthority && frozenPayerId !== undefined;
+    if (frozenContractComplete
+      && String(resolvedPayerId || '') !== String(frozenPayerId || '')) {
+      const divergedErr = new Error(
+        'Bill-To changed since this completion froze its tax basis — re-run the completion so the invoice is derived for the current payer.',
+      );
+      divergedErr.statusCode = 409;
+      divergedErr.status = 409;
+      divergedErr.isOperational = true;
+      divergedErr.code = 'FROZEN_PAYER_DIVERGED';
+      throw divergedErr;
+    }
+
     // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
     // zeroes tax on its invoices — even commercial jobs that would otherwise
     // carry the +7%. Force the rate to 0 so the tax block below resolves to 0.
-    if (resolvedTaxExempt) taxRate = 0;
+    // NOT under frozenTaxAuthority: the frozen rate already encoded the
+    // payer's exemption at the freeze (identity pinned above), so a
+    // post-freeze exemption flip must not mutate the frozen contract.
+    if (resolvedTaxExempt && !frozenContractComplete) taxRate = 0;
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
@@ -1340,19 +1387,70 @@ const InvoiceService = {
       customer.property_type === "commercial" ||
       customer.property_type === "business";
     let rate, taxAmount;
-    if (!isCommercial) {
+    // A COMPLETE frozen contract outranks the current property_type (codex
+    // pre-push r9 P0): the committed rate is the money truth for a required
+    // resume — a post-freeze flip to residential must not re-derive 0% and
+    // underbill the frozen commercial tax. Ordinary invoices and incomplete
+    // legacy freezes keep the residential zero.
+    if (!isCommercial && !frozenContractComplete) {
       rate = 0;
       taxAmount = 0;
     } else if (taxRate !== undefined) {
       rate = taxRate;
+      // An explicit rate must not override the customer's VERIFIED tax
+      // exemption: TaxCalculator zeroes tax for a verified certificate
+      // (and preview runs the calculator), so honoring a caller's flat
+      // rate here minted tax the preview never showed and the certificate
+      // forbids. One implementation — the calculator's own helper. Fail
+      // SAFE on lookup error: keep the caller's rate (tax stays charged),
+      // never fail open to 0. Self-pay ONLY: on a payer-billed invoice the
+      // snapshotted Bill-To entity owes the tax and its own tax_exempt flag
+      // (resolvedTaxExempt above) governs — the service customer's
+      // certificate must not zero a non-exempt payer's bill.
+      if (Number(rate) > 0 && !resolvedPayerId && !frozenContractComplete) {
+        try {
+          // SAVEPOINT when riding a caller transaction (codex r11 P1): a
+          // caught statement error would otherwise leave the transaction
+          // aborted and the invoice insert below would fail instead of
+          // using this catch's fallback. A nested knex transaction is a
+          // savepoint — the failed statement rolls back to it alone.
+          const exemption = await (database !== db && typeof database.transaction === "function"
+            ? database.transaction((sp) => TaxCalculator.findVerifiedExemption(customerId, { database: sp }))
+            : TaxCalculator.findVerifiedExemption(customerId, { database }));
+          if (exemption) rate = 0;
+        } catch (err) {
+          logger.warn(
+            `[invoice] verified-exemption check failed for explicit taxRate (customer ${customerId}): ${err.message}`,
+          );
+        }
+      }
       taxAmount = Math.round(afterDiscount * rate * 100) / 100;
     } else {
       try {
-        const taxResult = await TaxCalculator.calculateTax(
-          customerId,
-          serviceData.service_type || title,
-          afterDiscount,
-        );
+        // Ride the caller's connection: when create() runs inside a caller's
+        // transaction (schedule mint under acquireScheduledInvoiceMintLock),
+        // a bare calculateTax would grab a SECOND pool connection while the
+        // first is held — concurrent mints can then deadlock-wait the pool.
+        // Payer-billed: the service customer's certificate must not zero a
+        // non-exempt payer's automatic rate either — an EXEMPT payer already
+        // zeroed via resolvedTaxExempt (explicit rate 0) and never reaches
+        // this branch.
+        // Same savepoint discipline as the exemption recheck above (r11
+        // P1): the legacy-fallback catch below is only reachable if the
+        // failed statement did not abort the caller's transaction.
+        const taxResult = await (database !== db && typeof database.transaction === "function"
+          ? database.transaction((sp) => TaxCalculator.calculateTax(
+              customerId,
+              serviceData.service_type || title,
+              afterDiscount,
+              { database: sp, skipCustomerExemption: !!resolvedPayerId },
+            ))
+          : TaxCalculator.calculateTax(
+              customerId,
+              serviceData.service_type || title,
+              afterDiscount,
+              { database, skipCustomerExemption: !!resolvedPayerId },
+            ));
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
       } catch (err) {
@@ -1576,6 +1674,7 @@ const InvoiceService = {
     // so the confirmation total matches the invoice that will actually be
     // created (esp. for WDO report+invoice bundles billed to an exempt builder).
     let payerTaxExempt = false;
+    let previewPayerBilled = false;
     try {
       const PayerService = require("./payer");
       // Mirror create(): when linked only by serviceRecordId, derive the visit's
@@ -1594,6 +1693,7 @@ const InvoiceService = {
         database, customerId, customer: cust, scheduledServiceId: previewScheduledServiceId,
       });
       payerTaxExempt = !!resolved.taxExempt;
+      previewPayerBilled = !!resolved.payerId;
     } catch { /* preview proceeds with the normal tax calc */ }
 
     const isCommercial =
@@ -1604,10 +1704,14 @@ const InvoiceService = {
       taxAmount = 0;
     } else {
       try {
+        // Mirror create(): a non-exempt payer's preview must not show the
+        // service customer's certificate zeroing tax the payer invoice will
+        // actually charge.
         const taxResult = await TaxCalculator.calculateTax(
           customerId,
           serviceType || title,
           subtotal,
+          { database, skipCustomerExemption: previewPayerBilled },
         );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
@@ -1660,6 +1764,10 @@ const InvoiceService = {
       // intact, individually sendable). Attachment happens only at create,
       // so a reviewer who wants it consolidated voids + re-creates it.
       skipAccrual = false,
+      // Threaded to create(): the completion mint's taxRate is frozen money
+      // — see create()'s frozenTaxAuthority / frozenPayerId comments.
+      frozenTaxAuthority = false,
+      frozenPayerId = undefined,
       // Caller's open transaction (codex r6 P1): a caller that already
       // holds the schedule.invoice.mint advisory lock (billing recovery)
       // MUST thread its transaction here — the replay mint otherwise opens
@@ -1758,6 +1866,8 @@ const InvoiceService = {
           ? ["scheduled_service"]
           : [],
         skipAccrual,
+        frozenTaxAuthority,
+        frozenPayerId,
       };
     };
 
