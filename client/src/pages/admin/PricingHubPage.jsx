@@ -5,19 +5,23 @@ import PricingLogicPage from "./PricingLogicPage";
 import PricingStrategyPage from "./PricingStrategyPage";
 import AdminPriceChangePage from "./AdminPriceChangePage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { getAdminUser } from "../../lib/adminAuth";
 
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
-  { key: "strategy", label: "Strategy & Offers", Icon: BarChart3 },
+  // /api/admin/pricing is admin-only (requireAdmin) — hide the area for
+  // technicians rather than mounting a page whose every request 403s.
+  { key: "strategy", label: "Strategy & Offers", Icon: BarChart3, adminOnly: true },
   { key: "notices", label: "Price Notices", Icon: Megaphone },
 ];
 
-const PRICING_AREA_KEYS = new Set(PRICING_AREAS.map(({ key }) => key));
-
 export default function PricingHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const isAdmin = getAdminUser()?.role === "admin";
+  const visibleAreas = PRICING_AREAS.filter(({ adminOnly }) => !adminOnly || isAdmin);
+  const visibleAreaKeys = new Set(visibleAreas.map(({ key }) => key));
   const requestedArea = searchParams.get("area");
-  const activeArea = PRICING_AREA_KEYS.has(requestedArea)
+  const activeArea = visibleAreaKeys.has(requestedArea)
     ? requestedArea
     : "logic";
 
@@ -49,7 +53,7 @@ export default function PricingHubPage() {
         aria-label="Pricing areas"
         className="max-w-[1300px] mx-auto mb-4 grid grid-cols-1 sm:grid-cols-3 gap-1 rounded-md border-hairline border-zinc-200 bg-white p-2"
       >
-        {PRICING_AREAS.map(({ key, label, Icon }) => {
+        {visibleAreas.map(({ key, label, Icon }) => {
           const active = activeArea === key;
           return (
             <button

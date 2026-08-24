@@ -113,7 +113,11 @@ router.post('/offers', async (req, res, next) => {
 
 router.put('/offers/:id', async (req, res, next) => {
   try {
-    const updates = { ...pickColumns(req.body, OFFER_PACKAGE_COLUMNS), updated_at: new Date() };
+    const picked = pickColumns(req.body, OFFER_PACKAGE_COLUMNS);
+    if (Object.keys(picked).length === 0) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+    const updates = { ...picked, updated_at: new Date() };
     if (updates.core_services) updates.core_services = JSON.stringify(updates.core_services);
     if (updates.bonuses) updates.bonuses = JSON.stringify(updates.bonuses);
 

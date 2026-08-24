@@ -177,4 +177,12 @@ describe('PUT /offers/:id allowlist', () => {
     expect(calls).toHaveLength(1);
     expect(Object.keys(calls[0].updates).sort()).toEqual(['name', 'updated_at']);
   });
+
+  test('only unknown / protected columns → 400, no update (updated_at alone is not an update)', async () => {
+    const calls = setupDb();
+    await withServer(async (base) => {
+      expect((await put(base, '/offers/o1', { id: 'other', times_triggered: 5, bogus: 1 })).status).toBe(400);
+    });
+    expect(calls).toHaveLength(0);
+  });
 });
