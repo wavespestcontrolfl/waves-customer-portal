@@ -8939,39 +8939,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
             && !terminalResolvedAway.includes(terminalNow.status)
             ? terminalNow : null;
-          // Every candidate row this decision reads is re-LOCKED (FOR
-          // UPDATE) and its status re-derived under the lock — the advisory
-          // locks serialize MINTS only; refunds, cancels, and payment
-          // updates still move rows between a plain select and the commit
-          // (codex P0). A row resolved-terminal under the lock is dropped;
-          // a settled one feeds the covered branch below.
-          const lockAndReclassify = async (row) => {
-            if (!row) return null;
-            const locked = await trx('invoices')
-              .where({ id: row.id })
-              .forUpdate()
-              .first('id', 'invoice_number', 'status');
-            return locked && !terminalResolvedAway.includes(locked.status) ? locked : null;
-          };
-          // 2. A FRESH on-visit live-invoice lookup (not the pre-transaction
-          //    snapshot): a concurrent Charge Now / mint may have created a
-          //    collectible invoice after the unlocked lookups, and a "bill
-          //    manually" alert beside it would invite a duplicate.
-          const freshLiveOnVisit = await lockAndReclassify(await completionNewestLiveInvoiceLookup(trx, {
-            serviceRecordId: record.id,
-            scheduledServiceId: svc.id,
-          }));
+          // 2. EVERY on-visit invoice row, locked FIRST with NO status
+          //    filter, then classified from the locked statuses (codex P0
+          //    round: a status-filtered select can MISS a row that a
+          //    concurrent transaction is restoring to collectible — its
+          //    transition commits after our snapshot; FOR UPDATE returns
+          //    the latest committed versions and holds them to commit).
+          //    Also covers a collectible invoice minted after the unlocked
+          //    lookups — the advisory mint locks make new mints wait, and
+          //    existing rows are all locked here.
+          const onVisitLockedRows = await trx('invoices')
+            .where((qb) => {
+              qb.orWhere({ service_record_id: record.id });
+              qb.orWhere({ scheduled_service_id: svc.id });
+            })
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc')
+            .select('id', 'invoice_number', 'status');
+          const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
+            && !terminalResolvedAway.includes(r.status)) || null;
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
-          //    r13) — a sibling first-application invoice minted after the
-          //    unlocked lookup has no snapshot id to re-read, so the set is
-          //    re-derived, never a single remembered row.
+          //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
+          //    so the classification reads locked statuses, never a
+          //    snapshot a concurrent refund/cancel/restore invalidates.
           let siblingLiveNow = null;
           if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
-            const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx);
-            siblingLiveNow = await lockAndReclassify(siblingNow.invoice && siblingNow.invoice.status === 'refunded'
+            const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });
+            const siblingCandidate = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
               ? (siblingNow.liveBeside || null)
-              : (siblingNow.invoice || null));
+              : (siblingNow.invoice || null);
+            siblingLiveNow = siblingCandidate && !terminalResolvedAway.includes(siblingCandidate.status)
+              ? { id: siblingCandidate.id, invoice_number: siblingCandidate.invoice_number, status: siblingCandidate.status }
+              : null;
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;

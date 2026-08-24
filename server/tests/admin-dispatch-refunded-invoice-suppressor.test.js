@@ -344,7 +344,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // The FRESH on-visit live lookup runs on the TRANSACTION (codex r11) —
     // a concurrently minted invoice is seen, and even a pre-existing dedupe
     // notification is rewritten so stale "bill/collect" advice cannot stand.
-    expect(block).toContain('await completionNewestLiveInvoiceLookup(trx, {');
+    // EVERY on-visit row is locked with NO status filter, then classified
+    // from locked statuses — a filtered select could miss a row being
+    // restored to collectible by a concurrent transaction.
+    expect(block).toContain('const onVisitLockedRows = await trx(\'invoices\')');
+    expect(block.slice(block.indexOf('onVisitLockedRows'), block.indexOf('freshLiveOnVisit ='))).toContain('.forUpdate()');
+    expect(block.slice(block.indexOf('onVisitLockedRows'), block.indexOf('freshLiveOnVisit ='))).not.toContain('whereIn');
     // Shared mint serialization (codex r12): the alert transaction holds the
     // SAME schedule.invoice.mint advisory lock every invoice writer takes —
     // before the dedupe lock — so no mint can land mid-revalidation.
@@ -356,15 +361,11 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(block.indexOf('acquireScheduledInvoiceMintLock')).toBeLessThan(block.indexOf('pg_advisory_xact_lock(hashtext(?))'));
     // The sibling set is RE-DERIVED on the transaction (never a remembered
     // single row): the fresh sibling lookup runs on trx.
-    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx);');
-    // Every candidate row is re-LOCKED and re-classified under FOR UPDATE
-    // (advisory locks serialize mints only — refunds/cancels/payments still
-    // move rows): both the fresh on-visit row and the sibling selection
-    // flow through lockAndReclassify, which drops resolved-terminal rows.
-    expect(block).toContain('const lockAndReclassify = async (row) => {');
-    expect(block).toContain('const freshLiveOnVisit = await lockAndReclassify(await completionNewestLiveInvoiceLookup(trx, {');
-    expect(block).toContain('siblingLiveNow = await lockAndReclassify(');
-    expect(block).toContain('return locked && !terminalResolvedAway.includes(locked.status) ? locked : null;');
+    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });');
+    // The sibling re-query locks its rows too (lockRows → FOR UPDATE OF i)
+    // and the chosen candidate is classified from the locked status.
+    expect(block).toContain('await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });');
+    expect(block).toContain('!terminalResolvedAway.includes(siblingCandidate.status)');
     // A concurrently canceled/void refunded row is DEAD, not restored —
     // never named as collectible (codex r12).
     expect(block).toContain('!terminalResolvedAway.includes(terminalNow.status)');
