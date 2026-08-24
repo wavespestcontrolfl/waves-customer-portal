@@ -41,8 +41,12 @@ function makeDb(state) {
     q.first = async () => {
       if (table === 'customers') {
         if (q._count) return { count: state.accountProfiles.length };
-        // findAccountByContact's phone lookup (last-10-digits regexp).
+        // findAccountByContact's phone lookup (last-10-digits regexp). The
+        // fenceAttach lane re-runs it after the advisory lock; a fixture can
+        // make the re-resolve drift to exercise the CUSTOMER_BUSY fail-close.
         if (q._ops.some((o) => o.op === 'whereRaw' && /regexp_replace/.test(String(o.args[0])))) {
+          state.phoneLookups = (state.phoneLookups || 0) + 1;
+          if (state.phoneLookups > 1 && 'phoneMatchRowAfterLock' in state) return state.phoneMatchRowAfterLock;
           return state.phoneMatchRow;
         }
       }
@@ -67,8 +71,10 @@ function makeDb(state) {
     return q;
   };
   const dbFn = (table) => builder(table);
-  dbFn.transaction = jest.fn(async (fn) => fn(Object.assign((t) => builder(t), { isTransaction: true })));
-  dbFn.raw = jest.fn(async () => ({ rows: [] }));
+  // Advisory try-lock (customer-comms-lock) grants by default.
+  const raw = jest.fn(async () => ({ rows: [{ locked: true }] }));
+  dbFn.transaction = jest.fn(async (fn) => fn(Object.assign((t) => builder(t), { isTransaction: true, raw })));
+  dbFn.raw = raw;
   return dbFn;
 }
 
@@ -206,6 +212,18 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
       const wrong = await post(baseUrl, '/', { addressLine1: '123 Main Street', confirmDuplicate: true, confirmMatchedAccountId: 'acct-other' });
       expect(wrong.status).toBe(409);
       expect((await wrong.json()).code).toBe('DUPLICATE_PROFILE');
+    });
+    expect(customersInserts(state)).toHaveLength(0);
+  });
+
+  it('matched row drifts between lookup and fence re-resolve → 409 CUSTOMER_BUSY, no insert', async () => {
+    const state = freshState();
+    state.phoneMatchRowAfterLock = { ...MATCH_ROW, id: 'cust-repointed', account_id: 'acct-2' };
+    install(state);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/', { addressLine1: '456 Oak Ave', confirmAttach: true, confirmMatchedAccountId: 'acct-1' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CUSTOMER_BUSY');
     });
     expect(customersInserts(state)).toHaveLength(0);
   });

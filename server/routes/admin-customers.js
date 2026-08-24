@@ -2067,7 +2067,10 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       ? req.body.confirmMatchedAccountId.trim() : null;
 
     const customer = await db.transaction(async (trx) => {
-      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch });
+      // fenceAttach: same concurrency fence as POST / below — lock + re-
+      // resolve the matched row inside this transaction, CUSTOMER_BUSY on
+      // any drift.
+      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
@@ -3254,7 +3257,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     const customer = await db.transaction(async (trx) => {
-      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch });
+      // fenceAttach (comms-lock try-lock + re-resolve, #3453's lane): a
+      // concurrent phone/account edit between lookup and insert fails closed
+      // with CUSTOMER_BUSY instead of attaching on stale match data. Safe
+      // here because this caller always runs inside db.transaction.
+      const account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
