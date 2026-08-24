@@ -350,7 +350,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at - 1600, at + 1800);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
-    expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {');
+    expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
     expect(block).toContain("'billing',");
     expect(block).toContain('Completed visit needs manual billing — prior invoice was refunded');
@@ -358,6 +358,39 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(block).toMatch(/whereRaw\("metadata->>'dedupeKey' = \?", \[dedupeKey\]\)/);
     // Same mechanism as the dues-covered alert (not a parallel one).
     expect(src).toContain("const dedupeKey = `dues_covered_priced_series:${svc.recurring_parent_id || svc.id}`;");
+  });
+
+  test('the alert fires only when the refunded invoice is the DECIDING suppressor — the guard re-asks the same gate with the terminal flag cleared', () => {
+    const at = src.indexOf('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
+    expect(at).toBeGreaterThan(-1);
+    const guard = src.slice(at, at + 500);
+    expect(guard).toContain('&& shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false })) {');
+    // The re-ask reads the SAME hoisted input the route's decision read —
+    // not a second hand-built derivation that could drift.
+    expect(src).toContain('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
+    // Semantics: a visit that would not invoice even WITHOUT the refunded
+    // row (no scheduler flag, no tier/lane, gate off — nothing triggers
+    // billing) owes nothing — no bell, no exposure to the alert-failure 503.
+    const owesNothing = {
+      recapReviewOnly: false, alreadyPaid: false, prepaidCovered: false, autopayCoversVisit: false,
+      preMintedInvoice: null, existingCompletionInvoice: null, terminalInvoiceOnVisit: false,
+      createInvoiceOnComplete: false, waveguardTier: null, autoInvoicePricedVisits: false,
+      hasVisitPrice: true, invoiceAmount: 120, serviceType: 'Pest Control', isCallback: false,
+    };
+    expect(shouldAutoInvoiceCompletion(owesNothing)).toBe(false); // deciding reason ≠ refund → guard skips the alert
+    expect(shouldAutoInvoiceCompletion({ ...owesNothing, createInvoiceOnComplete: true })).toBe(true); // refund IS deciding → alert parks
+  });
+
+  test('the manual-billing flag flips only from the transaction\'s RESOLVED value — a failed COMMIT cannot leave it true', () => {
+    const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
+    const block = src.slice(at, at + 3600);
+    expect(block).toContain('manualBillingAlerted = true === await db.transaction(async (trx) => {');
+    // No assignment inside the callback: success is signalled by returning
+    // true, which only reaches the flag after the commit resolves.
+    const cb = block.slice(block.indexOf('db.transaction'), block.indexOf('} catch (e) {'));
+    expect(cb).not.toContain('manualBillingAlerted = true;');
+    expect(cb).toContain('if (already) return true;');
+    expect(cb.trimEnd().endsWith('return true;\n        });')).toBe(true);
   });
 
   test('the completion SMS pay-link branch requires an invoice the completion created — with none, the report-only template is used', () => {

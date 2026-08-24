@@ -8757,7 +8757,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
     // where priced, self-pay, non-WaveGuard visits completed uninvoiced.
     // Default OFF = behaviour identical to before.
-    const shouldInvoice = shouldAutoInvoiceCompletion({
+    // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
+    // with only the terminal flag cleared (deciding-reason check).
+    const completionInvoiceGateInput = {
       recapReviewOnly,
       alreadyPaid,
       prepaidCovered,
@@ -8799,7 +8801,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // resume-safe here — re-derived from the structured_notes freeze above.
       isBackfillCompletion,
       annualPrepayCovered,
-    });
+    };
+    const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
     // priced add-on invoices normally — Codex round-11) means the term
@@ -8815,9 +8818,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // beside it). Park it on the admin billing bell — same notification
     // mechanism and dedupe pattern as the dues-covered alert below — so a
     // human bills it once the refund is final. Skipped when something else
-    // already covers the money (paid / prepaid / dues / pre-minted).
+    // already covers the money (paid / prepaid / dues / pre-minted), and —
+    // deciding-reason check, same convention as the dues alert below — when
+    // the gate would decline to invoice even WITHOUT the refunded row
+    // (callback, always-free type, visit not performed, unpriced, no billing
+    // trigger): such a visit owes nothing, so it must neither ring the
+    // manual-billing bell nor expose the closeout to the alert-failure 503.
     if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
-      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {
+      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
+      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false })) {
       logger.warn(`[dispatch] visit ${svc.id}: prior invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status} — NO replacement invoice minted; manual billing alert parked`);
       // This alert is the ONLY durable follow-up for the owed money, so it
       // fails CLOSED (pre-push P0): notifyAdmin returns null on an insert
@@ -8831,13 +8840,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       let manualBillingAlertError = null;
       try {
         const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;
-        await db.transaction(async (trx) => {
+        // The flag flips only from the transaction's RESOLVED value — an
+        // assignment inside the callback survives a failed COMMIT (the
+        // insert rolls back but the flag stays true) and would let the
+        // closeout finalize without its only durable follow-up.
+        manualBillingAlerted = true === await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
             .first();
-          if (already) { manualBillingAlerted = true; return; }
+          if (already) return true;
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',
             'Completed visit needs manual billing — prior invoice was refunded',
@@ -8845,7 +8858,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
-          manualBillingAlerted = true;
+          return true;
         });
       } catch (e) {
         manualBillingAlertError = e;
