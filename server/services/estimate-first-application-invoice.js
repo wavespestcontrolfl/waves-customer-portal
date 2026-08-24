@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const InvoiceService = require('./invoice');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -25,7 +26,10 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db) {
     .where('i.customer_id', customerId)
     .where('first_visit.source_estimate_id', sourceEstimateId)
     .where('first_visit.scheduled_date', scheduledDate)
-    .whereNot('i.status', 'void')
+    // Collectible-or-settled only: a refunded/cancelled first-application
+    // invoice must not be reused as the completion's invoice (see
+    // completionSuppressorInvoiceLookup in routes/admin-dispatch.js).
+    .whereNotIn('i.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .orderBy('i.created_at', 'desc')
     .select('i.*');
 

@@ -14,8 +14,8 @@ function makeKnex(rows = []) {
       calls.push(['where', ...args]);
       return chain;
     }),
-    whereNot: jest.fn((...args) => {
-      calls.push(['whereNot', ...args]);
+    whereNotIn: jest.fn((...args) => {
+      calls.push(['whereNotIn', ...args]);
       return chain;
     }),
     orderBy: jest.fn((...args) => {
@@ -83,7 +83,7 @@ describe('estimate first-application invoice lookup', () => {
     expect(knex.calls).toContainEqual(['where', 'i.customer_id', 'customer-1']);
     expect(knex.calls).toContainEqual(['where', 'first_visit.source_estimate_id', 'est-1']);
     expect(knex.calls).toContainEqual(['where', 'first_visit.scheduled_date', '2026-06-08']);
-    expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
+    expect(knex.calls).toContainEqual(['whereNotIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled']]);
   });
 
   test('does not query when the service is not linked to an estimate date', async () => {

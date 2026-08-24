@@ -4224,6 +4224,27 @@ router.get('/:serviceId/completion-status', async (req, res) => {
   }
 });
 
+// Completion invoice-suppressor lookup. Finds the invoice already attached
+// to this visit that the completion should REUSE (existingCompletionInvoice /
+// preMintedInvoice) instead of minting a fresh one. Only an invoice that can
+// still settle counts: the Stripe webhook writes 'refunded' on a full refund
+// and 'canceled' on a PaymentIntent cancel, and admins cancel invoices by
+// hand — none of those collect anything, so a `whereNot('status', 'void')`
+// filter let a pre-minted/prepaid one-time invoice that was later fully
+// refunded (dispute, rain-out then rebook, goodwill) suppress the completion
+// mint, flip invoiceCreated, and send the customer a pay link to the REFUNDED
+// invoice while shouldAutoInvoiceCompletion saw "invoice exists" and never
+// raised the bill-manually alert — the visit completed unbilled. Same
+// vocabulary as the setup-fee proof and voidOpenInvoicesForCancelledService.
+function completionSuppressorInvoiceLookup(conn, where) {
+  const InvoiceService = require('../services/invoice');
+  return conn('invoices')
+    .where(where)
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first();
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -8486,17 +8507,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     let existingCompletionInvoice = null;
     try {
-      existingCompletionInvoice = await db('invoices')
-        .where({ service_record_id: record.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
+      existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
-        existingCompletionInvoice = await db('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .orderBy('created_at', 'desc')
-          .first();
+        existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
           await db('invoices').where({ id: existingCompletionInvoice.id }).update({
             service_record_id: record.id,
@@ -8555,11 +8568,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let preMintedInvoice = null;
     try {
       if (!recapReviewOnly) {
-        preMintedInvoice = await db('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .orderBy('created_at', 'desc')
-          .first();
+        preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
       }
     } catch (e) { invoiceLookupFailed = true; /* column may not exist pre-migration — non-blocking */ }
     // Required-mint money authority (Codex P0, fix round 10): on a resume
@@ -14122,6 +14131,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  completionSuppressorInvoiceLookup,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,
