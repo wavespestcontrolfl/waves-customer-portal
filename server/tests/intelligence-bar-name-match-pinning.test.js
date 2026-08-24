@@ -125,8 +125,8 @@ describe('update_lead_status (leads)', () => {
     expect(leads.update).not.toHaveBeenCalled();
   });
 
-  test('a pinned lead_id executes against exactly that lead', async () => {
-    const leads = chain({ first: LEAD_A, update: 1 });
+  test('a pinned lead_id executes against exactly that lead, with the read status re-asserted in the UPDATE', async () => {
+    const leads = chain({ first: LEAD_A, update: [{ id: 'lead-1' }] });
     const activities = chain({ insert: undefined });
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
@@ -134,7 +134,22 @@ describe('update_lead_status (leads)', () => {
     expect(res.success).toBe(true);
     expect(res.old_status).toBe('contacted');
     expect(leads.where).toHaveBeenCalledWith('id', 'lead-1');
+    // Atomic guard: the UPDATE's WHERE carries the status the card was built
+    // from, so a concurrent transition matches zero rows.
+    expect(leads.where).toHaveBeenCalledWith('status', 'contacted');
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
+  });
+
+  test('a zero-row guarded update (concurrent transition) refuses instead of claiming success', async () => {
+    const leads = chain({ first: LEAD_A, update: [] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+
+    const res = await executeLeadsTool('update_lead_status', { lead_id: 'lead-1', new_status: 'lost' });
+    expect(res.preview_changed).toBe(true);
+    expect(res.success).toBeUndefined();
+    expect(activities.insert).not.toHaveBeenCalled();
   });
 
   test('a pinned confirmation refuses a stale transition when the lead moved inside the pending window', async () => {

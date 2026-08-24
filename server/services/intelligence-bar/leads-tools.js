@@ -520,7 +520,21 @@ async function updateLeadStatus(input) {
   if (lost_reason) updates.lost_reason = lost_reason;
   if (notes) updates.notes = db.raw("COALESCE(notes, '') || '\n' || ?", [notes]);
 
-  await db('leads').where('id', lead.id).update(updates);
+  // Atomic guard: the UPDATE's own WHERE re-asserts the status we just read
+  // (and liveness), so a concurrent transition between the SELECT above and
+  // this statement matches zero rows instead of being overwritten — the
+  // _expected_status pre-check alone cannot close that race (codex P1).
+  const updatedRows = await db('leads')
+    .where('id', lead.id)
+    .where('status', oldStatus)
+    .whereNull('deleted_at')
+    .update(updates, ['id']);
+  if (!updatedRows || updatedRows.length === 0) {
+    return {
+      error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
 
   // Mirror the transition onto the lead's ad_service_attribution funnel row
   // (same guarded pattern as the admin-leads routes — monotonic, best-effort).

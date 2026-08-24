@@ -192,6 +192,11 @@ const PII_TOOL_NAMES = new Set([
   'list_call_partners',
   'get_partner_call_history',
   'send_sms',
+  // Lead write tools accept/echo lead names, and their ambiguity and bulk
+  // previews return candidate names + phone last4 — taint so telemetry is
+  // redacted like the comms tools (codex P1 on the pinning round).
+  'update_lead_status',
+  'bulk_update_leads',
   'draft_sms_reply',
   'draft_sms',
   'lookup_property',
