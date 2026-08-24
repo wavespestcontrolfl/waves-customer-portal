@@ -233,7 +233,10 @@ test('rejecting a signed_up pending_service referral unwinds the staged promoter
     const refUpd = state.updates.find((u) => u.table === 'referrals');
     expect(refUpd.vals.status).toBe('rejected');
     expect(refUpd.vals.referrer_reward_status).toBe('superseded');
-    expect(refUpd.vals.first_service_completed).toBe(true);
+    // NOT stamped: first_service_completed is creditReferralOnFirstService's
+    // phone-wide already-rewarded witness — a rejected duplicate earned nothing
+    // and must not disqualify the legitimate sibling referral for this phone.
+    expect(refUpd.vals.first_service_completed).toBe(false);
     expect(refUpd.vals.lost_reason).toBe('duplicate submission');
 
     // Staged cents drained (floored at 0 via GREATEST).

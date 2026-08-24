@@ -850,7 +850,14 @@ async function updateReferralStatus(referralId, { status, adminNotes, lostReason
       // must do so before any referral-row write, though the transaction would
       // roll both back either way.
       await unwindConversionPromoterEffects(trx, referral.promoter_id);
-      await supersedeAndUnwindRows(trx, [referral], upd);
+      // first_service_completed stays FALSE (override the helper's default):
+      // that flag is the phone-wide "this referee already earned a reward"
+      // witness in creditReferralOnFirstService. A rejected duplicate earned
+      // nothing — stamping it would permanently disqualify the legitimate
+      // sibling referral for the same phone. The rejected row is still inert
+      // everywhere: status 'rejected' + reward status 'superseded' exclude it
+      // from the credit candidate query, the sibling sweep, and reconversion.
+      await supersedeAndUnwindRows(trx, [referral], { ...upd, first_service_completed: false });
       return { referralId, status, unwound: true };
     }
 
