@@ -283,6 +283,32 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
     expect(inserts[0].row).toMatchObject({ account_id: 'acct-2', is_primary_profile: false });
   });
 
+  it('forceNewAccount outranks a carried attachToCustomerId — fresh account, no origin re-pin', async () => {
+    // Add-Property always carries the origin id; choosing "Create separate
+    // account" retries with forceNewAccount+ignorePhoneMatch AND the stale
+    // attachToCustomerId. The explicit choice must win: fresh account, not
+    // an attach back onto the origin's account.
+    const state = freshState();
+    state.customersById['cust-second'] = { ...MATCH_ROW, id: 'cust-second', account_id: 'acct-2', address_line1: '789 Pine Rd' };
+    install(state);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/', {
+        addressLine1: '456 Oak Ave',
+        attachToCustomerId: 'cust-second',
+        forceNewAccount: true,
+        ignorePhoneMatch: true,
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.attachedToExistingAccount).toBe(false);
+    });
+    expect(state.inserts.filter((i) => i.table === 'customer_accounts')).toHaveLength(1);
+    const inserts = customersInserts(state);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({ is_primary_profile: true, profile_label: 'Primary' });
+    expect(inserts[0].row.account_id).not.toBe('acct-2');
+  });
+
   it('no live phone match → plain create (fresh account, primary profile), no confirmation', async () => {
     const state = freshState({ phoneMatch: false });
     install(state);

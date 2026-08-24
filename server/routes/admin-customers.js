@@ -1860,7 +1860,13 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
 // but only when its live row still matches the submitted phone (all inside
 // the create transaction); otherwise the hint is ignored and the standard
 // visible confirm flow applies.
-async function resolveExplicitAttachTarget(trx, account, attachToCustomerId, submittedPhone) {
+async function resolveExplicitAttachTarget(trx, account, attachToCustomerId, submittedPhone, forceNewAccount = false) {
+  // "Create separate account" outranks the origin hint (codex #3469 r4 P1):
+  // Add-Property always carries attachToCustomerId, so a retry that adds
+  // forceNewAccount would otherwise mint the fresh account and then
+  // immediately re-pin to the origin — attaching against the admin's
+  // explicit choice and committing an orphan account row.
+  if (forceNewAccount) return account;
   if (!attachToCustomerId) return account;
   const origin = await trx('customers').where({ id: attachToCustomerId }).whereNull('deleted_at').first();
   if (!origin) return account;
@@ -2111,7 +2117,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       // resolve the matched row inside this transaction, CUSTOMER_BUSY on
       // any drift.
       let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
-      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone);
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
@@ -3307,7 +3313,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // with CUSTOMER_BUSY instead of attaching on stale match data. Safe
       // here because this caller always runs inside db.transaction.
       let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
-      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone);
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
