@@ -316,7 +316,7 @@ function VisualServiceNotesSettingsCard({ settings, saving, message, onChange })
         <div className="grid gap-4 md:grid-cols-2">
           <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
             <div>
-              <div className="text-14 font-semibold text-ink-primary">
+              <div className="text-14 font-medium text-ink-primary">
                 Enabled globally
               </div>
               <div className="mt-1 text-12 leading-5 text-ink-secondary">
@@ -333,7 +333,7 @@ function VisualServiceNotesSettingsCard({ settings, saving, message, onChange })
           </div>
           <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
             <div>
-              <div className="text-14 font-semibold text-ink-primary">
+              <div className="text-14 font-medium text-ink-primary">
                 Required
               </div>
               <div className="mt-1 text-12 leading-5 text-ink-secondary">

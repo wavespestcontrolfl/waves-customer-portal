@@ -192,7 +192,7 @@ export default function MobileNewCustomerSheet({
         <button
           type="button"
           onClick={() => alert("Import from contacts — coming soon")}
-          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-semibold u-focus-ring"
+          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
           style={{ padding: "14px 20px", fontSize: 15, marginBottom: 18 }}
         >
           Import from contacts
@@ -254,7 +254,7 @@ export default function MobileNewCustomerSheet({
         {/* Address */}
         <h2
           className="text-zinc-900"
-          style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}
+          style={{ fontSize: 22, fontWeight: 500, marginBottom: 12 }}
         >
           Address
         </h2>{" "}
@@ -268,7 +268,7 @@ export default function MobileNewCustomerSheet({
             <div className="flex-1 min-w-0" style={{ lineHeight: 1.2 }}>
               {" "}
               <div
-                className="text-zinc-900 font-semibold"
+                className="text-zinc-900 font-medium"
                 style={{ fontSize: 13 }}
               >
                 Country
@@ -389,7 +389,7 @@ export default function MobileNewCustomerSheet({
           type="button"
           onClick={handleSave}
           disabled={!canSave || submitting}
-          className="w-full rounded-full font-semibold u-focus-ring"
+          className="w-full rounded-full font-medium u-focus-ring"
           style={{
             minHeight: 50,
             fontSize: 16,

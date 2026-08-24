@@ -32,6 +32,12 @@ jest.mock('../services/conversations', () => ({
 }));
 
 const db = require('../models/db');
+// The pre-send archived-link relink sweep (relinkArchivedLinkedSubscribers)
+// runs in its own small transaction (advisory lock + one raw UPDATE) at the
+// top of sendCampaign; nothing stale in these scenarios, so it's a 0-row
+// no-op.
+db.raw = jest.fn(async () => ({ rowCount: 0 }));
+db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
 const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');

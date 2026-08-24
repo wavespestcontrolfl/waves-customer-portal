@@ -30,7 +30,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -4243,6 +4243,120 @@ router.get('/:serviceId/completion-status', async (req, res) => {
   }
 });
 
+// Completion invoice-suppressor lookup. Finds the invoice already attached
+// to this visit that the completion should REUSE (existingCompletionInvoice /
+// preMintedInvoice) instead of minting a fresh one. Only an invoice that can
+// still settle counts: the Stripe webhook writes 'refunded' on a full refund
+// and 'canceled' on a PaymentIntent cancel, and admins cancel invoices by
+// hand — none of those collect anything, so a `whereNot('status', 'void')`
+// filter let a pre-minted/prepaid one-time invoice that was later fully
+// refunded (dispute, rain-out then rebook, goodwill) suppress the completion
+// mint, flip invoiceCreated, and send the customer a pay link to the REFUNDED
+// invoice while shouldAutoInvoiceCompletion saw "invoice exists" and never
+// raised the bill-manually alert — the visit completed unbilled. Same
+// vocabulary as the setup-fee proof and voidOpenInvoicesForCancelledService.
+function completionSuppressorInvoiceLookup(conn, where) {
+  const InvoiceService = require('../services/invoice');
+  return conn('invoices')
+    .where(where)
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first();
+}
+
+// Terminal status that BLOCKS the completion mint instead of being
+// re-billed (codex #3456): a refunded invoice's money may still come back
+// (refund.failed at the bank), and a replacement minted in that window can
+// never be reconciled safely against the restored original. So the
+// completion mints NOTHING for a visit that carries one and reuses NOTHING
+// either (no pay link to a dead invoice) — it parks the visit on the admin
+// billing bell for a human to bill once the refund is final. ONLY
+// 'refunded': a canceled/cancelled invoice collected nothing and nothing
+// can restore it (a canceled PaymentIntent is terminal), so it is merely
+// excluded from reuse (CANCELLED_SERVICE_RESOLVED_STATUSES) and the
+// completion mints its replacement normally; 'void' likewise.
+const COMPLETION_TERMINAL_INVOICE_STATUSES = ['refunded'];
+
+// The refunded invoice on THIS visit (its own service_record_id /
+// scheduled_service_id — never the sibling first-application lookup), or
+// null. Newest wins across both identifiers in one ordered query.
+async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId) return null;
+  return (await conn('invoices')
+    .where((qb) => {
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
+    .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('id', 'invoice_number', 'status', 'created_at')) || null;
+}
+
+// The newest LIVE (collectible-or-settled) invoice on THIS visit across
+// both identifiers in one ordered query — the comparison row for the
+// refunded reconciliation below. The suppressor chain itself checks
+// service_record_id first and scheduled_service_id only as a fallback, so
+// the row it hands back is not necessarily the newest live row.
+async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId) return null;
+  const InvoiceService = require('../services/invoice');
+  return (await conn('invoices')
+    .where((qb) => {
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    // FULL row — when live wins the reconciliation the NEWEST live row IS
+    // the row the completion reuses (pay link/token, alreadyPaid status),
+    // never the chain's possibly-stale one (pre-push P0 round 3).
+    .first()) || null;
+}
+
+// Invoices are not unique per visit (pre-push P0): a refunded invoice can
+// coexist with a live one, in either mint order — and there is NO reliable
+// refund-event clock to order them by (invoices carry no refunded_at;
+// created_at is the MINT time, not the refund; updated_at moves on
+// unrelated edits — pre-push P0 rounds 2–6 walked every timestamp option
+// and each one mis-orders some real sequence). So the reconciliation never
+// auto-picks: whenever a refunded row exists beside a live row, the visit
+// goes to the MANUAL path — nothing is reused (no pay link while the
+// refund could still bounce and restore the refunded row to paid), nothing
+// is minted, and the parked alert names the live row (`liveBeside`) so the
+// office collects THAT invoice once the refund is final instead of cutting
+// a duplicate. `newestLive` (completionNewestLiveInvoiceLookup, full row)
+// beats the chain's `existing` as the named row — the chain may hold an
+// OLDER row via service_record_id while a newer live row hangs off
+// scheduled_service_id. A refunded row alone (no live row) parks exactly
+// as before; no refunded row → the chain's row stands untouched.
+function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
+  if (!refunded) return { existing, terminal: null, liveBeside: null };
+  return { existing: null, terminal: refunded, liveBeside: newestLive || existing || null };
+}
+
+// The sibling first-application lookup (services/estimate-first-application-
+// invoice.js) deliberately keeps its void-only filter, so it can return a
+// refunded/canceled row — a SIBLING visit's, or (same customer/estimate/
+// date) this visit's own. Such a row must never become the completion
+// invoice / pay link (pre-push P0): a REFUNDED row goes to the terminal
+// path (suppress + manual-billing alert) exactly like an own-visit refunded
+// invoice; a canceled/cancelled row is simply dropped from reuse (same
+// vocabulary as the direct suppressors) so the completion mints normally.
+// A live row stays the existing invoice, as before.
+function splitTerminalCompletionInvoice(row) {
+  if (!row) return { existing: null, terminal: null };
+  if (COMPLETION_TERMINAL_INVOICE_STATUSES.includes(row.status)) {
+    return { existing: null, terminal: { id: row.id, invoice_number: row.invoice_number, status: row.status } };
+  }
+  const InvoiceService = require('../services/invoice');
+  if (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(row.status)) {
+    return { existing: null, terminal: null };
+  }
+  return { existing: row, terminal: null };
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -5425,11 +5539,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
+    // Dues already collected for the VISIT's month (ET, keyed on the row's
+    // scheduled_date; noon-Z anchor keeps the ET month stable) cover a
+    // membership visit even when autopay has since lapsed — the cron charged
+    // the dues on the 1st, so a mid-month card expiry / autopay pause must
+    // not mint a full monthly_rate invoice on every remaining plan visit.
+    // Only looked up where membership coverage is still reachable; a lookup
+    // error falls back to the autopay-only decision (never widens coverage).
+    let duesCollectedThisMonth = false;
+    if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
+      && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
+      try {
+        duesCollectedThisMonth = await monthlyDuesCollected(
+          db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+        );
+      } catch (e) {
+        logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
+      }
+    }
     const autopayCoversVisit = membershipDuesCoverVisit({
       visitIsPayerBilled,
       perApplicationBilling,
       annualPrepayBilling,
       customerAutopayActive,
+      duesCollectedThisMonth,
       hasVisitPrice,
       isRecurring: svc.is_recurring,
       waveguardTier: svc.cust_waveguard_tier,
@@ -8598,18 +8731,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     let existingCompletionInvoice = null;
+    // A REFUNDED invoice on THIS visit (codex #3456): the suppressor
+    // above skips it (it collects nothing), but a fresh mint beside it is
+    // unsafe while its refund can still bounce — so it blocks the mint via
+    // shouldAutoInvoiceCompletion and parks a manual-billing alert below.
+    // Never assigned to `invoice` / `payUrl` (no pay link to a dead invoice).
+    let terminalCompletionInvoice = null;
+    let completionLiveBesideInvoice = null;
+    let completionTerminalIncludedSetupFee = false;
     try {
-      existingCompletionInvoice = await db('invoices')
-        .where({ service_record_id: record.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
+      existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
       if (!existingCompletionInvoice) {
-        existingCompletionInvoice = await db('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .orderBy('created_at', 'desc')
-          .first();
+        existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
           await db('invoices').where({ id: existingCompletionInvoice.id }).update({
             service_record_id: record.id,
@@ -8618,8 +8751,86 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
       }
-      if (!existingCompletionInvoice) {
-        existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
+    } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+    // Own-visit refunded check right after the direct suppressors and
+    // BEFORE the sibling first-application fallback (pre-push P0): that
+    // fallback matches the current visit too (same customer/estimate/
+    // date) and filters only 'void', so it would hand back this visit's
+    // own refunded invoice as a dead pay link and skip the alert. Runs
+    // UNCONDITIONALLY (not only when the suppressors found nothing) and
+    // reconciles by recency: a refunded invoice NEWER than the live row
+    // the suppressor found wins (manual path, older live row not reused);
+    // an older refunded one is history. Siblings are consulted only when
+    // neither a live nor a refunded own-visit invoice stands.
+    // OUTSIDE the non-blocking try above and FAIL CLOSED (pre-push P0):
+    // invoiceLookupFailed only blocks the typed-required lane, so a
+    // swallowed failure here would let every other billable lane mint
+    // beside an unseen refunded invoice that refund.failed may restore to
+    // paid. The service_record is already committed, so a failure releases
+    // the attempt for resume and 503s — the same exit as a required mint
+    // failure; the retry re-runs this check.
+    if (!recapReviewOnly) {
+      let refundedOnVisit = null;
+      let newestLiveOnVisit = null;
+      try {
+        refundedOnVisit = await completionTerminalInvoiceLookup(db, {
+          serviceRecordId: record.id,
+          scheduledServiceId: svc.id,
+        });
+        if (refundedOnVisit && existingCompletionInvoice) {
+          newestLiveOnVisit = await completionNewestLiveInvoiceLookup(db, {
+            serviceRecordId: record.id,
+            scheduledServiceId: svc.id,
+          });
+        }
+      } catch (lookupErr) {
+        logger.error(`[dispatch] refunded-invoice check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The refunded-invoice check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The refunded-invoice check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'terminal_invoice_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
+      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit);
+      existingCompletionInvoice = reconciled.existing;
+      terminalCompletionInvoice = reconciled.terminal;
+      // Live invoice coexisting with the refunded one — the manual-billing
+      // alert names it so the office collects IT instead of cutting a
+      // duplicate (see reconcileLiveVsRefunded).
+      completionLiveBesideInvoice = reconciled.liveBeside;
+    }
+    try {
+      if (!existingCompletionInvoice && !terminalCompletionInvoice) {
+        const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);
+        existingCompletionInvoice = siblingFirstApplication.invoice;
+        if (!recapReviewOnly) {
+          const split = splitTerminalCompletionInvoice(existingCompletionInvoice);
+          existingCompletionInvoice = split.existing;
+          if (split.terminal) {
+            terminalCompletionInvoice = split.terminal;
+            // A live first-application sibling beside the refunded one —
+            // the manual-billing alert names it (codex #3456 r7), same as
+            // the own-visit reconciliation's liveBeside.
+            completionLiveBesideInvoice = siblingFirstApplication.liveBeside || null;
+          } else if (!existingCompletionInvoice && siblingFirstApplication.canceledSetupFee) {
+            // Canceled ACCEPTANCE invoice with no live replacement (codex
+            // #3456 late-round P1): it carried the one-time setup fee
+            // beside the visit charge, so an ordinary completion mint would
+            // recreate only the visit charge and silently drop the fee.
+            // Park the manual path instead — the alert tells the office to
+            // bill BOTH charges by hand.
+            const c = siblingFirstApplication.canceledSetupFee;
+            terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };
+            completionTerminalIncludedSetupFee = true;
+          }
+        }
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
@@ -8640,7 +8851,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           else invoiceCreated = true;
         }
       }
-    } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+    } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -8668,11 +8879,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let preMintedInvoice = null;
     try {
       if (!recapReviewOnly) {
-        preMintedInvoice = await db('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .orderBy('created_at', 'desc')
-          .first();
+        preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+        // Refunded-invoice reconciliation wins here too (pre-push P0): when
+        // a newer refunded invoice beat an older live row above, this lookup
+        // would fetch that same older row again and its pay link would be
+        // reused via the preMintedInvoice branch. The visit is on the
+        // manual-billing path — nothing is reused.
+        if (terminalCompletionInvoice) preMintedInvoice = null;
       }
     } catch (e) { invoiceLookupFailed = true; /* column may not exist pre-migration — non-blocking */ }
     // Required-mint money authority (Codex P0, fix round 10): on a resume
@@ -8714,13 +8927,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
     // where priced, self-pay, non-WaveGuard visits completed uninvoiced.
     // Default OFF = behaviour identical to before.
-    const shouldInvoice = shouldAutoInvoiceCompletion({
+    // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
+    // with only the terminal flag cleared (deciding-reason check).
+    const completionInvoiceGateInput = {
       recapReviewOnly,
       alreadyPaid,
       prepaidCovered,
       autopayCoversVisit,
       preMintedInvoice,
       existingCompletionInvoice,
+      // Refunded invoice on this visit → never mint a replacement (codex
+      // #3456); the manual-billing alert below owns the follow-up.
+      terminalInvoiceOnVisit: !!terminalCompletionInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -8753,7 +8971,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // resume-safe here — re-derived from the structured_notes freeze above.
       isBackfillCompletion,
       annualPrepayCovered,
-    });
+    };
+    const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
     // priced add-on invoices normally — Codex round-11) means the term
@@ -8762,6 +8981,191 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (annualPrepayBilling && !shouldInvoice && !recapReviewOnly && !prepaidCovered && !alreadyPaid
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
+    }
+    // Refunded invoice blocked the mint (codex #3456): the visit ran and is
+    // owed money, but its prior invoice was refunded and NO
+    // replacement is minted (a bounced refund could restore the original
+    // beside it). Park it on the admin billing bell — same notification
+    // mechanism and dedupe pattern as the dues-covered alert below — so a
+    // human bills it once the refund is final. Skipped when something else
+    // already covers the money (paid / prepaid / dues / pre-minted), and —
+    // deciding-reason check, same convention as the dues alert below — when
+    // the gate would decline to invoice even WITHOUT the refunded row
+    // (callback, always-free type, visit not performed, unpriced, no billing
+    // trigger): such a visit owes nothing, so it must neither ring the
+    // manual-billing bell nor expose the closeout to the alert-failure 503.
+    if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
+      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
+      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false })) {
+      logger.warn(`[dispatch] visit ${svc.id}: prior invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status} — NO replacement invoice minted; manual billing alert parked`);
+      // This alert is the ONLY durable follow-up for the owed money, so it
+      // fails CLOSED (pre-push P0): notifyAdmin returns null on an insert
+      // failure and a transaction error must not be swallowed either. On
+      // failure exit through the same release-for-resume + 503 the
+      // typed-required mint failure uses — the service_record is already
+      // committed above, the attempt goes back to side_effects_pending, and
+      // the tech's retry re-enters here (the dedupe lock makes a second
+      // attempt idempotent).
+      let manualBillingAlerted = false;
+      let manualBillingAlertError = null;
+      try {
+        const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;
+        // The flag flips only from the transaction's RESOLVED value — an
+        // assignment inside the callback survives a failed COMMIT (the
+        // insert rolls back but the flag stays true) and would let the
+        // closeout finalize without its only durable follow-up.
+        manualBillingAlerted = true === await db.transaction(async (trx) => {
+          // Shared mint serialization FIRST (codex r12 P1): every
+          // scheduled-service invoice writer keys on the schedule.invoice.mint
+          // advisory lock — holding it here means no Charge Now / scheduled
+          // mint can insert a live invoice between the fresh lookup below
+          // and this transaction's commit. Taken BEFORE the dedupe lock so
+          // the lock order is deterministic across retries.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          // Estimate/date SIBLING visits can carry the first-application
+          // invoice, and a sibling mint contends on the SIBLING's lock key —
+          // so the lock set is this visit PLUS its siblings, acquired in
+          // sorted order (codex r13: two sibling completions locking
+          // own-then-other would ABBA-deadlock; a global sort cannot).
+          let alertSiblingServiceIds = [];
+          if (svc.source_estimate_id) {
+            const { dateOnly } = require('../services/estimate-first-application-invoice');
+            alertSiblingServiceIds = await trx('scheduled_services')
+              .where({ source_estimate_id: svc.source_estimate_id, customer_id: svc.customer_id })
+              .where('scheduled_date', dateOnly(svc.scheduled_date))
+              .pluck('id');
+          }
+          const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
+          for (const lockId of alertMintLockIds) {
+            await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id');
+          // ATOMIC revalidation (codex #3456 r8–r11), even when a dedupe
+          // notification already exists — a retry must not preserve stale
+          // advice. All reads happen on THIS transaction:
+          // 1. The refunded row FOR UPDATE (serialized with the webhook's
+          //    row update): restored to paid/prepaid → covered; restored to
+          //    a collectible/in-flight status (refund.failed can reopen a
+          //    failed-ACH invoice via nextInvoiceStatusAfterFailedPayment)
+          //    → still owed, and the reinstated invoice is the row to act
+          //    on. Still refunded → park as designed.
+          const terminalNow = await trx('invoices')
+            .where({ id: terminalCompletionInvoice.id })
+            .forUpdate()
+            .first('id', 'invoice_number', 'status');
+          // "Restored" means LEFT the refunded state for a non-resolved one —
+          // a concurrently canceled/cancelled/void row is dead, not restored
+          // (codex r12 P1): naming it "collect THAT invoice" would point
+          // staff at a non-collectible row. Resolved-away rows fall through
+          // to the fresh-live/sibling/generic note, whose "bill manually"
+          // instruction is then exactly right (no invoice stands).
+          const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+          const terminalRestored = terminalNow
+            && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+            && !terminalResolvedAway.includes(terminalNow.status)
+            ? terminalNow : null;
+          // 2. EVERY on-visit invoice row, locked FIRST with NO status
+          //    filter, then classified from the locked statuses (codex P0
+          //    round: a status-filtered select can MISS a row that a
+          //    concurrent transaction is restoring to collectible — its
+          //    transition commits after our snapshot; FOR UPDATE returns
+          //    the latest committed versions and holds them to commit).
+          //    Also covers a collectible invoice minted after the unlocked
+          //    lookups — the advisory mint locks make new mints wait, and
+          //    existing rows are all locked here.
+          const onVisitLockedRows = await trx('invoices')
+            .where((qb) => {
+              qb.orWhere({ service_record_id: record.id });
+              qb.orWhere({ scheduled_service_id: svc.id });
+            })
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc')
+            .select('id', 'invoice_number', 'status');
+          const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
+            && !terminalResolvedAway.includes(r.status)) || null;
+          // 3. The COMPLETE estimate/date sibling set, re-queried on this
+          //    transaction under the sibling mint locks taken above (codex
+          //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
+          //    so the classification reads locked statuses, never a
+          //    snapshot a concurrent refund/cancel/restore invalidates.
+          let siblingLiveNow = null;
+          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
+            const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });
+            const siblingCandidate = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
+              ? (siblingNow.liveBeside || null)
+              : (siblingNow.invoice || null);
+            siblingLiveNow = siblingCandidate && !terminalResolvedAway.includes(siblingCandidate.status)
+              ? { id: siblingCandidate.id, invoice_number: siblingCandidate.invoice_number, status: siblingCandidate.status }
+              : null;
+          }
+          const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
+          const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
+          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status);
+          if (covered) {
+            // Settled coverage: no NEW alert — and an already-parked one is
+            // rewritten so its "bill/collect" instruction cannot cause a
+            // duplicate collection (codex r11).
+            logger.warn(`[dispatch] visit ${svc.id}: refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is covered by SETTLED invoice ${liveBesideLabel} (${liveBesideNow.status}) — manual-billing alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`,
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
+              });
+            }
+            return true;
+          }
+          const liveBesideNote = liveBesideNow
+            ? (liveBesideNow.status === 'processing'
+              ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
+              : (terminalRestored
+                ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
+                : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
+            : (completionTerminalIncludedSetupFee
+              ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
+              : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
+          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
+          if (already) {
+            // Keep the parked alert's advice CURRENT on every retry — the
+            // situation may have changed since it was written (codex r11).
+            await trx('notifications').where({ id: already.id }).update({
+              body: alertBody,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {})]),
+            });
+            return true;
+          }
+          const created = await require('../services/notification-service').notifyAdmin(
+            'billing',
+            `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
+            alertBody,
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+          );
+          if (!created) throw new Error('manual-billing notification insert failed');
+          return true;
+        });
+      } catch (e) {
+        manualBillingAlertError = e;
+      }
+      if (!manualBillingAlerted) {
+        const alertErr = manualBillingAlertError || new Error('manual-billing notification was not recorded');
+        logger.error(`[dispatch] terminal-invoice manual-billing alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'This visit needs manual billing (its prior invoice was refunded) and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `This visit needs manual billing (its prior invoice was refunded) and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'terminal_invoice_manual_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
     }
     // Membership dues suppressed a PRICED recurring visit: log + park a
     // one-bell-per-series review alert. Emitted only here — after the
@@ -9235,6 +9639,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const typedLiveRequiredMint = backfillReviewMintRequired && !isBackfillCompletion;
         if (typedLiveRequiredMint && invoiceLookupFailed) {
           throw new Error('existing-invoice lookups failed — refusing to mint a possible duplicate invoice for this one-time completion');
+        }
+        // EVERY estimate-linked lane fails closed on a failed lookup before
+        // minting (codex hardening P0): the sibling first-application lookup
+        // is what detects a canceled ACCEPTANCE invoice that carried the
+        // one-time setup fee — if it errored, minting here would recreate
+        // only the visit charge and permanently drop the fee (and could
+        // duplicate an unseen suppressor invoice). The throw lands in the
+        // same release-for-resume/503 catch as the typed lane; the retry
+        // re-runs the lookups.
+        if (invoiceLookupFailed && svc.source_estimate_id) {
+          throw new Error('existing-invoice lookups failed — refusing to mint for an estimate-linked visit whose sibling/setup-fee suppressors could not be verified');
         }
         // Resolved here — inside the mint try — so a derivation failure
         // follows the lane's own failure posture (r5/r6): required lanes
@@ -14006,6 +14421,11 @@ function shouldAutoInvoiceCompletion({
   autopayCoversVisit,
   preMintedInvoice,
   existingCompletionInvoice,
+  // A REFUNDED invoice on the visit (codex #3456): suppresses like an
+  // existing invoice — no replacement is ever minted while the refund can
+  // still bounce — but the route parks a manual-billing alert instead of
+  // reusing it. Canceled invoices do not block (nothing can restore them).
+  terminalInvoiceOnVisit = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -14052,6 +14472,11 @@ function shouldAutoInvoiceCompletion({
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
+  // Refunded invoice on the visit (codex #3456): a suppressor like
+  // the ones above — sits ABOVE the governed posture too, because even a
+  // frozen REQUIRED mint must not cut a replacement beside an invoice whose
+  // refund can still bounce; the route parks the manual-billing alert.
+  if (terminalInvoiceOnVisit) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every
@@ -14319,6 +14744,12 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  completionSuppressorInvoiceLookup,
+  completionTerminalInvoiceLookup,
+  completionNewestLiveInvoiceLookup,
+  splitTerminalCompletionInvoice,
+  reconcileLiveVsRefunded,
+  COMPLETION_TERMINAL_INVOICE_STATUSES,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,

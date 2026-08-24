@@ -61,7 +61,7 @@ function HeaderButton({ onClick, disabled = false, primary = false, icon: Icon, 
       disabled={disabled}
       style={{
         display: "inline-flex", alignItems: "center", gap: 6, minHeight: 32,
-        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
         fontFamily: "inherit", cursor: disabled ? "default" : "pointer",
         background: primary ? D.heading : "transparent",
         color: primary ? "#FFFFFF" : D.text,
@@ -138,7 +138,7 @@ export default function AutoDispatchPage({ embedded = false }) {
     <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
       {embedded ? (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: D.heading }}>Auto-Dispatch</h2>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Auto-Dispatch</h2>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
             <HeaderButton onClick={loadRuns} icon={RefreshCw}>
               Refresh

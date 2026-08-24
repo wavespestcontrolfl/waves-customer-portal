@@ -78,7 +78,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -87,7 +87,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 const sInput = {
@@ -335,7 +335,7 @@ export default function SocialMediaPage() {
           }}
         >
           <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: D.red }}>
+            <div style={{ fontSize: 13, fontWeight: 500, color: D.red }}>
               {alert.message}
             </div>
             <div style={{ fontSize: 11, color: D.muted }}>
@@ -391,7 +391,7 @@ export default function SocialMediaPage() {
               }}
             />
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 Automation:{" "}
                 {status.automation.paused
                   ? "Paused"
@@ -493,7 +493,7 @@ export default function SocialMediaPage() {
                 <div
                   style={{
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     textTransform: "capitalize",
                   }}
@@ -779,7 +779,7 @@ function AutonomousStudioPanel({ showToast, onRan }) {
     >
       <div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-          <div style={{ fontSize: 15, color: D.heading, fontWeight: 600 }}>
+          <div style={{ fontSize: 15, color: D.heading, fontWeight: 500 }}>
             Autonomous Social Studio
           </div>
           <span style={sBadge(`${stateColor}18`, stateColor)}>{stateLabel}</span>
@@ -944,7 +944,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
         }}
       >
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Autonomous Run Audit
           </div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
@@ -1023,7 +1023,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
                     <div>
-                      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+                      <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
                         {run.topic || run.post?.title || "Autonomous social run"}
                       </div>
                       <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
@@ -1191,7 +1191,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                               fontSize: 12,
                             }}
                           >
-                            <span style={{ color: D.heading, fontWeight: 600 }}>{label || "platform"}</span>
+                            <span style={{ color: D.heading, fontWeight: 500 }}>{label || "platform"}</span>
                             <span style={{ color: resultColor }}>{detail}</span>
                           </div>
                         );
@@ -1330,7 +1330,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
       >
       <div>
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 14 }}>
             Local Campaign
           </div>
           <div style={{ marginBottom: 12 }}>
@@ -1394,7 +1394,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
 
         {preview?.sources?.length > 0 && (
           <div style={sCard}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 10 }}>
               Source Facts
             </div>
             <div style={{ display: "grid", gap: 8 }}>
@@ -1402,7 +1402,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
                 <div key={`${source.type}-${index}`} style={{ borderTop: index ? `1px solid ${D.border}` : "none", paddingTop: index ? 8 : 0 }}>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 3 }}>
                     <span style={sBadge(`${D.heading}10`, D.heading)}>{source.type}</span>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>{source.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 500, color: D.heading }}>{source.label}</span>
                   </div>
                   <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45 }}>{source.detail}</div>
                 </div>
@@ -1416,7 +1416,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
         {!preview ? (
           <div style={{ ...sCard, minHeight: 280, display: "grid", placeItems: "center", color: D.muted, textAlign: "center" }}>
             <div>
-              <div style={{ fontSize: 15, color: D.heading, fontWeight: 600, marginBottom: 6 }}>
+              <div style={{ fontSize: 15, color: D.heading, fontWeight: 500, marginBottom: 6 }}>
                 Build autonomous local posts
               </div>
               <div style={{ fontSize: 12 }}>
@@ -1431,7 +1431,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
               return (
                 <div key={platform} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${PLATFORM_COLORS[platform] || D.heading}` }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: "capitalize" }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, textTransform: "capitalize" }}>
                       {platform === "gbp" ? "Google Business Profile" : platform}
                     </div>
                     <span style={sBadge(validation?.valid === false ? `${D.red}18` : `${D.green}18`, validation?.valid === false ? D.red : D.green)}>
@@ -1544,7 +1544,7 @@ function ReviewGraphicsTab({ showToast }) {
       }}
     >
       <div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
           Eligible 5-star Reviews
         </div>
         <div style={{ display: "grid", gap: 10 }}>
@@ -1552,7 +1552,7 @@ function ReviewGraphicsTab({ showToast }) {
             <div key={candidate.googleReviewId} style={{ ...sCard, marginBottom: 0 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                     {candidate.reviewerDisplayName}
                   </div>
                   <div style={{ fontSize: 11, color: D.muted }}>
@@ -1594,7 +1594,7 @@ function ReviewGraphicsTab({ showToast }) {
 
       <div>
         <div style={{ ...sCard, marginBottom: 12 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 10 }}>
             Graphic Preview
           </div>
           <div
@@ -1613,7 +1613,7 @@ function ReviewGraphicsTab({ showToast }) {
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: D.muted }}>
                 Waves Pest Control
               </div>
-              <div style={{ fontSize: 24, color: D.heading, fontWeight: 600, marginTop: 10 }}>
+              <div style={{ fontSize: 24, color: D.heading, fontWeight: 500, marginTop: 10 }}>
                 5-star Google review
               </div>
             </div>
@@ -1627,7 +1627,7 @@ function ReviewGraphicsTab({ showToast }) {
         </div>
 
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 10 }}>
             Saved Graphics
           </div>
           <div style={{ display: "grid", gap: 8 }}>
@@ -1636,7 +1636,7 @@ function ReviewGraphicsTab({ showToast }) {
               return (
                 <div key={graphic.id} style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.heading, fontWeight: 600 }}>
+                    <div style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}>
                       {graphic.reviewer_display_name}
                     </div>
                     <span style={sBadge(graphic.status === "approved" ? `${D.green}18` : `${D.amber}18`, graphic.status === "approved" ? D.green : D.amber)}>
@@ -1753,7 +1753,7 @@ function CompetitorSwipeTab({ showToast }) {
     >
       <div>
         <div style={{ ...sCard, marginBottom: 16 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
             Fastest Risers From PCT 2026
           </div>
           <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
@@ -1762,7 +1762,7 @@ function CompetitorSwipeTab({ showToast }) {
               return (
                 <div key={profile.id || profileName(profile)} style={{ padding: 12, border: `1px solid ${D.border}`, borderRadius: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{profileName(profile)}</div>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>{profileName(profile)}</div>
                     <span style={sBadge(`${D.green}18`, D.green)}>+{growth(profile)}%</span>
                   </div>
                   <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>{location(profile)}</div>
@@ -1782,13 +1782,13 @@ function CompetitorSwipeTab({ showToast }) {
         </div>
 
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
             Copyable Patterns
           </div>
           <div style={{ display: "grid", gap: 8 }}>
             {(data.patterns || []).map((pattern) => (
               <div key={pattern.key} style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{pattern.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>{pattern.label}</div>
                 <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45 }}>{pattern.copyablePattern}</div>
               </div>
             ))}
@@ -1796,14 +1796,14 @@ function CompetitorSwipeTab({ showToast }) {
         </div>
 
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
             Captured Posts
           </div>
           <div style={{ display: "grid", gap: 10 }}>
             {(data.posts || []).map((post) => (
               <div key={post.id} style={{ padding: 12, border: `1px solid ${D.border}`, borderRadius: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{post.company_name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>{post.company_name}</div>
                   <span style={sBadge(`${D.heading}10`, D.heading)}>Score {post.engagement_score}</span>
                 </div>
                 <div style={{ fontSize: 11, color: D.muted, marginTop: 3 }}>
@@ -1829,7 +1829,7 @@ function CompetitorSwipeTab({ showToast }) {
       </div>
 
       <div style={sCard}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
           Manual Engagement Capture
         </div>
         <div style={{ display: "grid", gap: 10 }}>
@@ -1987,7 +1987,7 @@ function ComposeTab({ showToast, onPublished }) {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 16,
             }}
@@ -2132,7 +2132,7 @@ function ComposeTab({ showToast, onPublished }) {
                   <span
                     style={{
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       textTransform: "capitalize",
                     }}
@@ -2215,7 +2215,7 @@ function RSSTab({ showToast, onPublished }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Blog RSS Feed
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
@@ -2249,7 +2249,7 @@ function RSSTab({ showToast, onPublished }) {
               <div
                 style={{
                   fontSize: 14,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 4,
                 }}
@@ -2328,7 +2328,7 @@ function HistoryTab({ history, onRefresh }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
           Post History
         </div>{" "}
         <button onClick={onRefresh} style={sBtn(D.teal, D.white)}>
@@ -2368,7 +2368,7 @@ function HistoryTab({ history, onRefresh }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {post.title}
                   </div>
@@ -2562,7 +2562,7 @@ function AnalyticsTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -2590,7 +2590,7 @@ function AnalyticsTab() {
               <div
                 style={{
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   textTransform: "capitalize",
                 }}
@@ -2622,7 +2622,7 @@ function AnalyticsTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2746,7 +2746,7 @@ function TemplatesTab({ showToast }) {
       <div
         style={{
           fontSize: 15,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 16,
         }}
@@ -2786,7 +2786,7 @@ function TemplatesTab({ showToast }) {
             >
               {" "}
               <span style={{ fontSize: 20 }}>{t.icon}</span>{" "}
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 {t.name}
               </div>{" "}
             </div>{" "}

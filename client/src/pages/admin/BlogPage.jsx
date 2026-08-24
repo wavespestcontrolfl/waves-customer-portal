@@ -298,7 +298,7 @@ function PostList({ status, onSelectPost }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -317,7 +317,7 @@ function PostList({ status, onSelectPost }) {
                     style={{
                       fontSize: 11,
                       color: D.red,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       marginBottom: 4,
                     }}
                   >
@@ -732,7 +732,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 background: D.bg,
                 color: D.heading,
                 fontSize: 15,
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             />{" "}
           </div>{" "}
@@ -921,7 +921,7 @@ function PostEditor({ post, onBack, onUpdate }) {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 10,
           }}
@@ -1266,7 +1266,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Content
           </div>{" "}
           <div style={{ display: "flex", gap: 8 }}>
@@ -1281,7 +1281,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                   background: D.teal,
                   color: D.heading,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   opacity: generating ? 0.5 : 1,
                 }}
@@ -1351,7 +1351,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 padding: "4px 10px",
                 borderRadius: 6,
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 border: `1px solid ${D.teal}`,
                 background: "transparent",
                 color: D.teal,
@@ -1476,7 +1476,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 12,
             }}
@@ -1590,7 +1590,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 fontSize: 13,
                 color: D.green,
                 marginTop: 8,
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             >
               Estimated new SEO score: {optimization.estimated_new_score}/100
@@ -1605,7 +1605,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: D.amber,
               color: D.bg,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               marginTop: 12,
             }}
@@ -1640,7 +1640,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             background: D.teal,
             color: D.white,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -1660,7 +1660,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: "transparent",
               color: D.purple,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: sharing ? 0.5 : 1,
             }}
@@ -1711,7 +1711,7 @@ function AstroPublishPanel({
             padding: "4px 10px",
             borderRadius: 999,
             fontSize: 11,
-            fontWeight: 600,
+            fontWeight: 500,
             background: pill.bg,
             color: pill.fg,
             border: `1px solid ${pill.border}`,
@@ -1751,7 +1751,7 @@ function AstroPublishPanel({
               background: D.green,
               color: D.white,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: publishing ? 0.5 : 1,
             }}
@@ -1805,7 +1805,7 @@ function AstroPublishPanel({
                   background: D.green,
                   color: D.white,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   opacity: merging ? 0.5 : 1,
                 }}
@@ -1824,7 +1824,7 @@ function AstroPublishPanel({
                   background: "transparent",
                   color: D.red,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   opacity: publishing ? 0.5 : 1,
                 }}
@@ -1852,7 +1852,7 @@ function AstroPublishPanel({
                   color: D.green,
                   fontSize: 12,
                   textDecoration: "none",
-                  fontWeight: 600,
+                  fontWeight: 500,
                 }}
               >
                 Expected Live URL
@@ -1907,7 +1907,7 @@ function AstroPublishPanel({
                   color: D.green,
                   fontSize: 12,
                   textDecoration: "none",
-                  fontWeight: 600,
+                  fontWeight: 500,
                 }}
               >
                 View Live
@@ -1961,7 +1961,7 @@ function AstroPublishPanel({
                 background: "#991B1B",
                 color: D.white,
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 opacity: merging ? 0.5 : 1,
               }}
@@ -1981,7 +1981,7 @@ function AstroPublishPanel({
               background: D.red,
               color: D.white,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: publishing ? 0.5 : 1,
             }}
@@ -2141,7 +2141,7 @@ function AuditTab() {
               >
                 {prioLabel}
               </div>{" "}
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
                 {rec.title}
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted }}>
@@ -2157,7 +2157,7 @@ function AuditTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -2214,7 +2214,7 @@ function AuditTab() {
                 </div>
                 {isLow && (
                   <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 600 }}
+                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
                   >
                     LOW
                   </span>
@@ -2235,7 +2235,7 @@ function AuditTab() {
             <div
               style={{
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.amber,
                 marginBottom: 6,
               }}
@@ -2259,7 +2259,7 @@ function AuditTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -2319,13 +2319,13 @@ function AuditTab() {
                 </div>
                 {isHigh && (
                   <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 600 }}
+                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
                   >
                     overweight
                   </span>
                 )}
                 {isLow && (
-                  <span style={{ fontSize: 10, color: D.red, fontWeight: 600 }}>
+                  <span style={{ fontSize: 10, color: D.red, fontWeight: 500 }}>
                     LOW
                   </span>
                 )}
@@ -2340,7 +2340,7 @@ function AuditTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.red,
               marginBottom: 12,
             }}
@@ -2382,7 +2382,7 @@ function AuditTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.green,
               marginBottom: 12,
             }}
@@ -2566,7 +2566,7 @@ function GenerateTab({ onGenerated }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2597,7 +2597,7 @@ function GenerateTab({ onGenerated }) {
                 <div
                   style={{
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: contentType === ct.id ? D.teal : D.heading,
                   }}
                 >
@@ -2616,7 +2616,7 @@ function GenerateTab({ onGenerated }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -2680,7 +2680,7 @@ function GenerateTab({ onGenerated }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
             }}
@@ -2761,7 +2761,7 @@ function GenerateTab({ onGenerated }) {
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
             }}
@@ -2820,7 +2820,7 @@ function GenerateTab({ onGenerated }) {
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.amber,
                 marginBottom: 8,
               }}
@@ -2849,7 +2849,7 @@ function GenerateTab({ onGenerated }) {
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
             }}
@@ -2867,7 +2867,7 @@ function GenerateTab({ onGenerated }) {
               }}
             >
               {" "}
-              <span style={{ fontSize: 11, color: D.green, fontWeight: 600 }}>
+              <span style={{ fontSize: 11, color: D.green, fontWeight: 500 }}>
                 </span>{" "}
               <span style={{ fontSize: 11, color: D.text }}>
                 {item.label}

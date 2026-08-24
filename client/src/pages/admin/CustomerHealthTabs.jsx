@@ -84,7 +84,7 @@ function Badge({ label, color, style }) {
         padding: "2px 10px",
         borderRadius: 9999,
         fontSize: 11,
-        fontWeight: 600,
+        fontWeight: 500,
         backgroundColor: color + "22",
         color,
         border: `1px solid ${color}44`,
@@ -135,7 +135,7 @@ function TabBar({ tabs, active, onChange }) {
             border: "none",
             color: active === t.key ? COLORS.teal : COLORS.textMuted,
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
             borderBottom:
               active === t.key
@@ -387,7 +387,7 @@ function DashboardTab({ data }) {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: COLORS.heading,
             marginBottom: 12,
           }}
@@ -467,7 +467,7 @@ function DashboardTab({ data }) {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: COLORS.heading,
             marginBottom: 12,
           }}
@@ -608,7 +608,7 @@ function DashboardTab({ data }) {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: COLORS.heading,
             marginBottom: 12,
           }}
@@ -782,7 +782,7 @@ function CustomerDetail({ customerId, onClose }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.heading }}>
           {s.first_name} {s.last_name}
         </div>{" "}
         <button
@@ -843,7 +843,7 @@ function CustomerDetail({ customerId, onClose }) {
               style={{
                 fontSize: 12,
                 color: GRADE_COLORS[s.score_grade],
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             >
               {s.score_grade}
@@ -946,7 +946,7 @@ function CustomerDetail({ customerId, onClose }) {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: COLORS.heading,
                   marginBottom: 8,
                 }}
@@ -1602,7 +1602,7 @@ function AlertsTab() {
                     <div
                       style={{
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: COLORS.heading,
                         marginBottom: 4,
                       }}

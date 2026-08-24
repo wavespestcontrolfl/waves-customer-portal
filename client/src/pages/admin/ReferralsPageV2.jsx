@@ -9,6 +9,7 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` + `purple` fold to zinc-900. Semantic green/amber/red preserved.
@@ -163,7 +164,7 @@ const thSt = {
   padding: "10px 14px",
   textAlign: "left",
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
   textTransform: "uppercase",
@@ -195,7 +196,7 @@ const btnPrimary = {
   background: D.teal,
   color: "#fff",
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 };
 const btnSmall = (color) => ({
@@ -205,7 +206,7 @@ const btnSmall = (color) => ({
   background: color,
   color: D.heading,
   fontSize: 10,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 
@@ -331,12 +332,21 @@ export default function ReferralsPageV2() {
     }
   };
 
+  // Status changes are admin-only server-side (PATCH /:id/status is
+  // requireAdmin); the buttons are hidden for technicians below, and the
+  // catch keeps any refusal (403/409 guard) visible instead of an
+  // unhandled rejection.
+  const isAdmin = getAdminUser()?.role === "admin";
   const handleStatusChange = async (id, status) => {
-    await af(`/admin/referrals/${id}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
-    });
-    load();
+    try {
+      await af(`/admin/referrals/${id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      load();
+    } catch (e) {
+      flash("Error: " + e.message);
+    }
   };
 
   const handleConvert = async () => {
@@ -575,7 +585,7 @@ export default function ReferralsPageV2() {
               <div
                 style={{
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 14,
                 }}
@@ -611,7 +621,7 @@ export default function ReferralsPageV2() {
                       <div
                         style={{
                           fontSize: 14,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -645,7 +655,7 @@ export default function ReferralsPageV2() {
               <div
                 style={{
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 14,
                 }}
@@ -681,7 +691,7 @@ export default function ReferralsPageV2() {
                         <div
                           style={{
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -728,7 +738,7 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 12,
               }}
@@ -817,7 +827,7 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 14,
               }}
@@ -855,7 +865,7 @@ export default function ReferralsPageV2() {
                         {" "}
                         <td style={tdSt}>
                           {" "}
-                          <div style={{ fontWeight: 600 }}>
+                          <div style={{ fontWeight: 500 }}>
                             {r.referee_name ||
                               `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
                           </div>{" "}
@@ -886,7 +896,7 @@ export default function ReferralsPageV2() {
                               justifyContent: "flex-end",
                             }}
                           >
-                            {["pending", "sms_failed"].includes(r.status) && (
+                            {isAdmin && ["pending", "sms_failed"].includes(r.status) && (
                               <button
                                 onClick={() =>
                                   handleStatusChange(r.id, "contacted")
@@ -918,7 +928,7 @@ export default function ReferralsPageV2() {
                                 Convert
                               </button>
                             )}
-                            {!["signed_up", "credited", "rejected"].includes(
+                            {isAdmin && !["signed_up", "credited", "rejected"].includes(
                               r.status,
                             ) && (
                               <button
@@ -986,7 +996,7 @@ export default function ReferralsPageV2() {
                   <tr key={p.id}>
                     {" "}
                     <td style={tdSt}>
-                      <span style={{ fontWeight: 600 }}>
+                      <span style={{ fontWeight: 500 }}>
                         {p.first_name} {p.last_name}
                       </span>
                       <br />
@@ -1051,7 +1061,7 @@ export default function ReferralsPageV2() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 14,
             }}
@@ -1303,7 +1313,7 @@ export default function ReferralsPageV2() {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 12,
                     }}
@@ -1410,7 +1420,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}
@@ -1462,7 +1472,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}
@@ -1511,7 +1521,7 @@ export default function ReferralsPageV2() {
                 <div
                   style={{
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 14,
                   }}

@@ -450,11 +450,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       <div style={{ background: BLUE.bg, border: `1px solid ${BLUE.border}`, borderRadius: 4, padding: '10px 12px' }}>
         {/* Header: FROM ESTIMATE EST-2026-NNNN · Quoted $X */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 11, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink, whiteSpace: 'nowrap' }}>
             From Estimate
           </span>
           {refLabel && (
-            <span style={{ fontSize: 11, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span style={{ fontSize: 11, fontWeight: 500, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {refLabel}
             </span>
           )}
@@ -462,7 +462,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           {/* Wrapping allowed (Codex #3173 r2 P2): a multi-service breakdown
               is wider than a phone-width card — nowrap forced horizontal
               page overflow on the exact surface this targets. */}
-          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
+          <span style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
             Quoted {quotedLabel}
           </span>
         </div>
@@ -483,7 +483,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           >
             <span aria-hidden style={{ fontSize: 14, lineHeight: '18px' }}>⚠</span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: WARN.ink }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: WARN.ink }}>
                 Billed to a third party
               </div>
               <div style={{ fontSize: 12, color: WARN.ink, marginTop: 1 }}>
@@ -497,14 +497,14 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 6 }}>
             {/* Micro-label so the rows read as the estimate's accepted service
                 mix, not this appointment's line items. */}
-            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
+            <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
               Estimate includes
             </div>
             {serviceLines.map((line, i) => (
               <div key={`${line.name}-${i}`} style={lineStyle}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
                 {(line.cadence || line.perAppPrice != null || line.oneTimePrice != null) && (
-                  <div style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, whiteSpace: 'nowrap' }}>
                     {line.perAppPrice != null
                       ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
                       : line.monthlyPrice != null
@@ -527,7 +527,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
                   <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK }}>{row.label}</div>
                   {row.sub && <div style={{ fontSize: 11, color: row.tone === 'paid' ? GREEN : MUTED, marginTop: 1 }}>{row.sub}</div>}
                 </div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: row.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                   {row.value}
                 </div>
               </div>

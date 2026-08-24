@@ -2176,7 +2176,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(source).toMatch(/const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null\s*\n\s*\? backfillFrozenMintAmount\s*\n\s*: invoiceAmount;/);
       expect(source).toMatch(/const resolveMintInvoiceTaxRate = async \(\) => \(\s*\n\s*backfillReviewMintRequired && backfillFrozenMintTaxRate != null\s*\n\s*\? backfillFrozenMintTaxRate\s*\n\s*: deriveCompletionTaxRate\(\)\s*\n\s*\);/);
       // …the decision's amount guard reads it…
-      expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\}\);/);
+      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
       // …and the mint itself reads the SAME pair — never the live values.
       expect(source).toMatch(/const mintOptions = \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*amount: mintInvoiceAmount,\s*\n\s*description: svc\.service_type,\s*\n\s*taxRate: mintInvoiceTaxRate,/);
       expect(source).not.toMatch(/amount: invoiceAmount,/);
@@ -2210,10 +2210,10 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       const resumeAssignAt = source.indexOf(resumeAssign);
       expect(resumeAssignAt).toBeGreaterThan(source.indexOf('const frozenResume = frozenResumeCompletionState('));
       // …before the invoice decision reads it…
-      const invoiceDecisionAt = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion({');
+      const invoiceDecisionAt = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
       expect(invoiceDecisionAt).toBeGreaterThan(resumeAssignAt);
       // …and the decision call carries the effective posture.
-      expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?backfillMintRequired: backfillReviewMintRequired,[\s\S]*?\}\);/);
+      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?backfillMintRequired: backfillReviewMintRequired,[\s\S]*?\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
       // No consumer recomputes the posture from live state past the commit
       // derivation: the broadened commit posture is called only at the
       // single freeze site (plus its definition), and the retired narrow
@@ -2440,12 +2440,12 @@ describe('completion route wiring (source contracts)', () => {
     // shouldAutoInvoiceCompletion (behavioral coverage above): out-of-band
     // prepaid coverage stops suppressing, annual-prepay coverage keeps
     // suppressing.
-    expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?visitPerformed,[\s\S]*?isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\}\);/);
+    expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?visitPerformed,[\s\S]*?isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
     // And the structured_notes resume re-derivation sits BEFORE the invoice
     // decision, so a crash-resumed retry (body flag absent) reaches the same
     // override instead of silently re-suppressing the invoice.
     const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
-    const invoiceDecision = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion({');
+    const invoiceDecision = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
     expect(rederivation).toBeGreaterThan(-1);
     expect(invoiceDecision).toBeGreaterThan(rederivation);
     // The minted invoice is OPEN by construction ('draft' from
@@ -2509,7 +2509,7 @@ describe('completion route wiring (source contracts)', () => {
     // The population is fed into the in-transaction invoice decision, where
     // the typed branch mints the invoice live and under backfill alike
     // (behavioral coverage above).
-    expect(source).toMatch(/typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n(\s*\/\/[^\n]*\n)*\s*isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\}\);/);
+    expect(source).toMatch(/typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n(\s*\/\/[^\n]*\n)*\s*isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
   });
 
   test('live typed REQUIRED mint: fail-closed lookups + serialized find-or-create (gate-removal round 2)', () => {

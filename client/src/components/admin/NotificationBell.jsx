@@ -258,7 +258,7 @@ export default function NotificationBell() {
                   border: "none",
                   borderRadius: 6,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >

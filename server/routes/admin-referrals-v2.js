@@ -4,7 +4,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 
@@ -135,16 +135,18 @@ router.get('/queue', async (req, res, next) => {
 // =========================================================================
 // PATCH /:id/status — update referral status
 // =========================================================================
-router.patch('/:id/status', async (req, res, next) => {
+// Admin-only: the engine whitelists target statuses, locks the row, and
+// refuses any transition that would let an already-rewarded referral convert
+// again (fail closed; see updateReferralStatus).
+router.patch('/:id/status', requireAdmin, async (req, res, next) => {
   try {
     const { status, adminNotes, lostReason } = req.body;
-    const upd = { status, updated_at: new Date() };
-    if (adminNotes) upd.admin_notes = adminNotes;
-    if (status === 'rejected' || lostReason) upd.lost_reason = lostReason || 'Rejected by admin';
-
-    await db('referrals').where({ id: req.params.id }).update(upd);
-    res.json({ success: true });
-  } catch (err) { next(err); }
+    const result = await engine.updateReferralStatus(req.params.id, { status, adminNotes, lostReason });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 // =========================================================================
@@ -157,6 +159,7 @@ router.post('/:id/convert', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     if (err.message === 'Referral not found') return res.status(404).json({ error: err.message });
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
     next(err);
   }
 });

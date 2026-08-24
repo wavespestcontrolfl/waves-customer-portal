@@ -62,7 +62,7 @@ export default function ExpenseCapture({
   const label = {
     display: "block",
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 500,
     color: P.text,
     marginBottom: 4,
   };

@@ -32,6 +32,7 @@ const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -758,14 +759,34 @@ async function fallbackZoneCenter(city) {
   if (!normalizedCity) return null;
   try {
     const zones = await db('service_zones').select('zone_name', 'cities', 'center_lat', 'center_lng');
-    const match = zones.find((zone) => {
+    const validCoords = (zone) => {
+      const lat = zone?.center_lat != null ? Number(zone.center_lat) : null;
+      const lng = zone?.center_lng != null ? Number(zone.center_lng) : null;
+      return Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0
+        ? { lat, lng }
+        : null;
+    };
+    // Deep-south cities keep the retained Port Charlotte row's CENTER even
+    // though the consolidation moved their zone ownership to the Venice row
+    // (whose cities scan would otherwise hand back Venice coords ~25mi
+    // north) — see fallbackCenterZoneName in zone-day-funnel.js. A missing
+    // or coord-less alias row falls through to the normal cities scan.
+    const aliasName = fallbackCenterZoneName(normalizedCity);
+    const candidates = [];
+    if (aliasName) {
+      candidates.push(zones.find(
+        (zone) => String(zone.zone_name || '').trim().toLowerCase() === aliasName,
+      ));
+    }
+    candidates.push(zones.find((zone) => {
       const cities = Array.isArray(zone.cities) ? zone.cities : [];
       return cities.some((candidate) => String(candidate || '').trim().toLowerCase() === normalizedCity);
-    });
-    const lat = match?.center_lat != null ? Number(match.center_lat) : null;
-    const lng = match?.center_lng != null ? Number(match.center_lng) : null;
-    if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
-      return { lat, lng, source: 'service_zone_fallback', city, zoneName: match.zone_name || null };
+    }));
+    for (const match of candidates) {
+      const coords = validCoords(match);
+      if (coords) {
+        return { ...coords, source: 'service_zone_fallback', city, zoneName: match.zone_name || null };
+      }
     }
   } catch (err) {
     logger.warn(`[estimate-slots] service-zone fallback failed: ${err.message}`);
@@ -1489,6 +1510,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     opts.dateFrom || 'auto',
     opts.dateTo || 'auto',
     opts.timeOfDay || 'any',
+    // Address in the key: zone resolution (and with it the funnel and the
+    // zone-capacity collision context) hangs off estimates.address, which
+    // several writers rewrite (admin revise, customer-address fan-out) —
+    // and this cache is per-process, so invalidation from the writing
+    // process can't reach other instances. Keying on the address makes any
+    // process recompute the moment it sees the new value; the residual
+    // linked-customer-city edge (city changes while the estimate address
+    // doesn't) stays TTL-bounded.
+    String(estimate.address || '').trim().toLowerCase(),
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
@@ -1558,11 +1588,25 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // shared helper) for its zone-capacity gate. Degrade to null on failure:
   // offering slots without the zone exclusion beats offering none.
   let estimateZone = null;
+  let zoneResolutionFailed = false;
   try {
     estimateZone = await resolveEstimateZone(db, estimate);
   } catch (zoneErr) {
+    zoneResolutionFailed = true;
     logger.warn(`[estimate-slots] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
   }
+  // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL): for far-south zones,
+  // restrict offers to days the calendar already has a live stop in the zone
+  // — evaluated over THIS request's window, so a pinned single-date request
+  // seeds that day instead of returning nothing. days null = funnel
+  // inactive; the helper fails open on its own.
+  const { days: funnelDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  // Fail-open must stay REQUEST-scoped: when the gate is on and either the
+  // zone resolution or the zone-stop lookup failed, this request may be
+  // serving an unfunneled pool to a funnel-zone estimate — caching that
+  // would extend one transient failure across the whole TTL. Gate off keeps
+  // today's caching untouched.
+  const skipResultCache = isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed);
   const coords = await resolveEstimateCoords(estimate);
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
@@ -1589,7 +1633,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
     );
-    const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
+    // Funnel AFTER the timeOfDay preference (a seed day must be chosen from
+    // days that can actually satisfy the request — seeding a morning-only
+    // day for an afternoon search would return nothing while another day
+    // qualifies) and BEFORE firstDayAvailability, so the scarcity badge
+    // counts only days the customer can see. No route data on this path, so
+    // a seed falls back to the soonest day.
+    const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
+      filterTimeOfDay(bookable, opts.timeOfDay), funnelDays,
+    );
+    const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
     stampSlotRainChances(primary, rainOutlook);
@@ -1603,7 +1656,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         // this payload feeds the PUBLIC token-gated slot picker, which reads
         // none of them — echoing exact lat/lng back out is a location leak.
         // Admin diagnostics use getSlotDebug, which carries coords itself.
-        firstDayAvailability: firstDayAvailability(bookable),
+        // Funnel active → count the (time-filtered) days the customer can
+        // see; inactive → the full bookable pool, exactly as before.
+        firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
@@ -1611,6 +1666,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         serviceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
+        ...(funnel ? { zoneDayFunnel: funnel } : {}),
       },
     };
     return fallback;
@@ -1666,9 +1722,34 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
     serviceProfile,
   );
+  // Funnel AFTER the timeOfDay preference (a seed day must come from days
+  // that can satisfy the request — a morning-only seed day for an afternoon
+  // search would return nothing while another day qualifies) and BEFORE
+  // firstDayAvailability (the scarcity badge must count visible days). Seed
+  // preference follows find-time's score order — classifiedRaw preserves it
+  // per segment — so an empty-zone window seeds the cheapest-detour day,
+  // not just the soonest.
+  // Ranked over route candidates that SURVIVE every customer-facing filter
+  // — collision, requested daypart, lead time, season — in find-time's
+  // preserved score order (filter() keeps it). A best-scored window that
+  // collided, falls outside the daypart, or has entered today's lead
+  // cutoff must not rank its date: a later ASAP window can keep that date
+  // in the pool, and the funnel would seed it on a detour score belonging
+  // to an unavailable window (codex #3473 r2+r3 P2s).
+  const seedRankedRoute = filterSeasonalSlots(
+    filterPastSlotsForToday(filterTimeOfDay(classified, opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes }),
+    serviceProfile,
+  );
+  const preferredSeedDates = [];
+  for (const s of seedRankedRoute) {
+    if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
+  }
+  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
+    filterTimeOfDay(bookable, opts.timeOfDay), funnelDays, { preferredSeedDates },
+  );
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
-  const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL, {
+  const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
@@ -1690,7 +1771,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // this payload feeds the PUBLIC token-gated slot picker, which reads
       // none of them — echoing exact lat/lng back out is a location leak.
       // Admin diagnostics use getSlotDebug, which carries coords itself.
-      firstDayAvailability: firstDayAvailability(bookable),
+      // Funnel active → count the (time-filtered) days the customer can
+      // see; inactive → the full bookable pool, exactly as before.
+      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
@@ -1698,13 +1781,26 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       serviceProfile,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
+      ...(funnel ? { zoneDayFunnel: funnel } : {}),
       // TODO: PR B's accept-handler invalidates this cache on every new
       // scheduled_services insert. For now, the 5-min TTL is the only
       // staleness guard.
     },
   };
 
-  wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
+  // Never cache a funnel-ACTIVE result: the funnel's day set changes with
+  // EVERY zone-stop mutation (create/cancel/reschedule/hold-expiry on ANY
+  // estimate in the zone), and reserveSlot only invalidates the booking
+  // estimate's own entries — a cached cluster/seed day could steer other
+  // estimates to yesterday's answer for the whole TTL. Keyed off funnelDays,
+  // not the result descriptor: an empty funneled pool returns funnel:null
+  // but must not be cached either, or a cancellation that opens a
+  // cluster-day slot stays invisible until TTL expiry. Funneled-zone
+  // estimates are a small slice of traffic; recomputing beats versioning
+  // the cache by schedule state. Non-funneled results keep today's caching.
+  if (funnelDays == null && !skipResultCache) {
+    wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
+  }
   return result;
 }
 

@@ -220,7 +220,7 @@ describe('window intake by explicit presence (clear both or 422)', () => {
   });
 
   test('a partial clear in either direction throws 422; absent fields are "no opinion"; supplied values pass through', () => {
-    for (const bad of [{ windowStart: null }, { windowEnd: '' }, { windowStart: null, windowEnd: '10:00' }, { windowStart: '09:00', windowEnd: null }]) {
+    for (const bad of [{ windowStart: null }, { windowEnd: '' }, { windowStart: null, windowEnd: '10:00' }]) {
       let caught;
       try { windowIntakeFromBody(bad); } catch (err) { caught = err; }
       expect(caught?.status).toBe(422);
@@ -229,6 +229,19 @@ describe('window intake by explicit presence (clear both or 422)', () => {
     expect(windowIntakeFromBody({ notes: 'x' })).toEqual({ clearBoth: false, windowStart: undefined, windowEnd: undefined });
     expect(windowIntakeFromBody({ windowStart: '09:00' })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: undefined });
     expect(windowIntakeFromBody({ windowStart: '09:00', windowEnd: '10:00' })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: '10:00' });
+  });
+
+  test('an empty end beside a SUPPLIED start is "end not supplied" (editors echo the whole form) — the end derives downstream', async () => {
+    expect(windowIntakeFromBody({ windowStart: '09:00', windowEnd: '' })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: undefined });
+    expect(windowIntakeFromBody({ windowStart: '09:00', windowEnd: null })).toEqual({ clearBoth: false, windowStart: '09:00', windowEnd: undefined });
+    // Regression (#3454): a notes-only save of an END-LESS row, as the
+    // desktop editor submits it, reads as an unchanged slot and reaches the
+    // transaction — it used to 422 "Clear both".
+    db.mockImplementation(() => chain({ ...STORED, window_start: '09:00:00', window_end: null, estimated_duration_minutes: 60 }));
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    expect((await put({ windowStart: '09:00', windowEnd: '', notes: 'gate code' })).status).toBe(418);
+    expect((await put({ windowStart: '09:00', windowEnd: null, notes: 'gate code' })).status).toBe(418);
+    expect(db.transaction).toHaveBeenCalledTimes(2);
   });
 
   test('the route only ever writes the intake result (never `windowStart || null`)', () => {

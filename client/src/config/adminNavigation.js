@@ -232,6 +232,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/pricing-logic",
     label: "Pricing",
     icon: Calculator,
+    adminOnly: true,
   },
   toolHealth: {
     id: "toolHealth",

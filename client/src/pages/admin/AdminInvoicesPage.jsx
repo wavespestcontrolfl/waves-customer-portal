@@ -170,7 +170,7 @@ const sBtn = (bg, color, isMobile) => ({
   border: "none",
   borderRadius: 8,
   fontSize: isMobile ? 14 : 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
   minHeight: isMobile ? 44 : undefined,
   textTransform: "uppercase",
@@ -182,7 +182,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
   display: "inline-block",
 });
 
@@ -1287,7 +1287,7 @@ function InvoiceList({
                         <div
                           style={{
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: display.color,
                             marginTop: 4,
                           }}
@@ -1650,7 +1650,7 @@ function InvoiceList({
           }}
         >
           {" "}
-          <span style={{ fontWeight: 600, fontSize: 14 }}>
+          <span style={{ fontWeight: 500, fontSize: 14 }}>
             {selected.size} selected
           </span>{" "}
           <button
@@ -2233,7 +2233,7 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                   }}
                 >
                   {attachment.file_name}
@@ -2331,7 +2331,7 @@ function DeliveryRow({ label, value, detail, missing }) {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 650,
+            fontWeight: 700,
             color: missing ? D.red : D.heading,
             overflowWrap: "anywhere",
           }}
@@ -2528,7 +2528,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                 gap: 10,
                 marginTop: 18,
                 fontSize: 14,
-                fontWeight: 650,
+                fontWeight: 700,
                 color: D.text,
                 cursor: "pointer",
               }}
@@ -5137,7 +5137,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
                 {editMode
                   ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
                   : "Invoice Builder"}
@@ -5170,7 +5170,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               {" "}
               <div>
                 {" "}
-                <span style={{ color: D.heading, fontWeight: 600 }}>
+                <span style={{ color: D.heading, fontWeight: 500 }}>
                   {selectedCustomer.first_name} {selectedCustomer.last_name}
                 </span>{" "}
                 <span style={{ color: D.muted, fontSize: 12, marginLeft: 8 }}>
@@ -5424,7 +5424,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                               <div
                                 style={{
                                   color: D.heading,
-                                  fontWeight: 600,
+                                  fontWeight: 500,
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",
@@ -5620,7 +5620,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                             <span
                               style={{
                                 color: D.heading,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 minWidth: 0,
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
@@ -5726,7 +5726,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
                         fontSize: 13,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                       }}
                     >
@@ -6382,7 +6382,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
         <div
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             textTransform: "uppercase",
             letterSpacing: 0.5,

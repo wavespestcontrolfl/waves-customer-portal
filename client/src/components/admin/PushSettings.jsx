@@ -209,7 +209,7 @@ export default function PushSettings() {
               color: D.white,
               borderRadius: 8,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
@@ -234,7 +234,7 @@ export default function PushSettings() {
         {" "}
         <div>
           {" "}
-          <div style={{ color: "#0F172A", fontSize: 14, fontWeight: 600 }}>
+          <div style={{ color: "#0F172A", fontSize: 14, fontWeight: 500 }}>
             Push notifications on this device
           </div>{" "}
           <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
@@ -253,7 +253,7 @@ export default function PushSettings() {
             border: "none",
             borderRadius: 8,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
             minWidth: 96,
           }}
@@ -403,7 +403,7 @@ export default function PushSettings() {
             color: D.white,
             borderRadius: 8,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             boxShadow: "0 8px 20px rgba(0,0,0,0.15)",
           }}
         >

@@ -228,7 +228,7 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
         style={{
           fontFamily: "Roboto, Arial, sans-serif",
           fontSize: 16,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 4,
         }}
@@ -288,7 +288,7 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
             borderRadius: 8,
             fontSize: 13,
             fontFamily: "Roboto, Arial, sans-serif",
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -406,7 +406,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                 alignItems: "center",
                 justifyContent: "center",
                 fontSize: 15,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
               }}
             >
@@ -419,7 +419,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               style={{
                 fontFamily: "Roboto, Arial, sans-serif",
                 fontSize: 15,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
               }}
             >
@@ -453,7 +453,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                   style={{
                     fontSize: 11,
                     fontFamily: "Roboto, Arial, sans-serif",
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.white,
                     background: D.amber,
                     padding: "2px 8px",
@@ -697,7 +697,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                   borderRadius: 8,
                   fontSize: 13,
                   fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: submitting ? "not-allowed" : "pointer",
                   opacity: submitting || !replyText.trim() ? 0.5 : 1,
                 }}
@@ -719,7 +719,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                   borderRadius: 8,
                   fontSize: 13,
                   fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                   opacity: aiLoading ? 0.5 : 1,
                 }}
@@ -739,7 +739,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                     borderRadius: 8,
                     fontSize: 13,
                     fontFamily: "Roboto, Arial, sans-serif",
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -882,10 +882,10 @@ function PolicyInfoCard({ Icon, label, value, sub, color = D.teal }) {
     >
       <Icon size={18} color={color} style={{ marginTop: 1 }} />
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 800, color: D.muted, marginBottom: 4 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: D.muted, marginBottom: 4 }}>
           {label}
         </div>
-        <div style={{ fontSize: 14, fontWeight: 800, color: D.heading, lineHeight: 1.25 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, lineHeight: 1.25 }}>
           {value}
         </div>
         {sub && (
@@ -912,7 +912,7 @@ function RepairCandidateCard({ review, candidate, matching, onAttribute, badge }
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
           {candidate.name}
         </span>
         {badge}
@@ -1292,7 +1292,7 @@ function ReviewIncentivesPanel() {
             >
               <CheckCircle2 size={18} color={D.green} style={{ marginTop: 1 }} />
               <div>
-                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
                   No eligible post-launch Google reviews yet.
                 </div>
                 <div style={{ fontSize: 12, color: D.text, marginTop: 4, lineHeight: 1.45 }}>
@@ -1426,7 +1426,7 @@ function ReviewIncentivesPanel() {
                               flexWrap: "wrap",
                             }}
                           >
-                            <span style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
                               {review.reviewerName}
                             </span>
                             <Stars count={Number(review.starRating) || 0} size={13} />
@@ -1537,7 +1537,7 @@ function ReviewIncentivesPanel() {
                             <div style={{ display: "grid", gap: 8 }}>
                               {likelyReviewers.length > 0 && (
                                 <>
-                                  <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>
                                     Likely reviewers
                                     <span style={{ fontWeight: 400, color: D.muted }}>
                                       {" — tapped their review link near this review's timestamp"}
@@ -1568,7 +1568,7 @@ function ReviewIncentivesPanel() {
                                     />
                                   ))}
                                   {candidateResults.length > 0 && (
-                                    <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginTop: 4 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: D.heading, marginTop: 4 }}>
                                       Name search
                                     </div>
                                   )}
@@ -1635,7 +1635,7 @@ function ReviewIncentivesPanel() {
                         borderBottom: index === data.leaderboard.length - 1 ? "none" : `1px solid ${D.border}`,
                       }}
                     >
-                      <div style={{ fontWeight: 800, color: D.muted }}>{index + 1}</div>
+                      <div style={{ fontWeight: 700, color: D.muted }}>{index + 1}</div>
                       <div>
                         <div style={{ fontSize: 14, fontWeight: 700, color: D.text }}>
                           {row.technicianName}
@@ -1644,7 +1644,7 @@ function ReviewIncentivesPanel() {
                           {row.reviewCount} review{row.reviewCount === 1 ? "" : "s"}
                         </div>
                       </div>
-                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 800 }}>
+                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 700 }}>
                         {money(row.earnedCents)}
                       </div>
                     </div>
@@ -1730,7 +1730,7 @@ function ReviewIncentivesPanel() {
                       <div
                         style={{
                           fontSize: 12,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: p.status === "paid" ? D.green : D.amber,
                           textTransform: "uppercase",
                         }}
@@ -1739,7 +1739,7 @@ function ReviewIncentivesPanel() {
                             keep the ledger vocab aligned (status is 'earned'). */}
                         {p.status === "paid" ? "Paid" : "Pending"}
                       </div>
-                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 800 }}>
+                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 700 }}>
                         {money(p.amountCents)}
                       </div>
                     </div>

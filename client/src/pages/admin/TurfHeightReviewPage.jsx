@@ -88,7 +88,7 @@ export default function TurfHeightReviewPage() {
               ? <img src={it.gaugePhotoUrl} alt="Gauge" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: `1px solid ${M.line}` }} />
               : <div style={{ width: 72, height: 72, borderRadius: 8, background: M.wash, border: `1px solid ${M.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: M.muted }}>No photo</div>}
             <div style={{ flex: 1, minWidth: 180 }}>
-              <div style={{ fontWeight: 600 }}>{it.customerName || "Customer"}</div>
+              <div style={{ fontWeight: 500 }}>{it.customerName || "Customer"}</div>
               <div style={{ fontSize: 12, color: M.muted }}>{fmtDate(it.measuredAt)} · {it.grassType?.replace(/_/g, " ") || "—"} · ideal {it.band.min}–{it.band.max}″</div>
             </div>
             <div style={{ display: "flex", gap: 18, alignItems: "center" }}>

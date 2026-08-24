@@ -496,6 +496,23 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
 // ---------------------------------------------------------------------------
 // 3. convertReferral
 // ---------------------------------------------------------------------------
+function referralError(statusCode, code, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
+
+// A reward has been staged/credited for this referral iff conversion already
+// ran against it — regardless of what `status` says now.
+const STAGED_REWARD_STATUSES = ['pending_service', 'earned', 'paid', 'superseded'];
+const CONVERTIBLE_STATUSES = ['pending', 'contacted', 'sms_failed', 'estimated'];
+function referralRewardAlreadyStaged(referral) {
+  return Boolean(referral.converted_at)
+    || Boolean(referral.first_service_completed)
+    || STAGED_REWARD_STATUSES.includes(referral.referrer_reward_status);
+}
+
 async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   const settings = await getSettings();
 
@@ -510,10 +527,18 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // Money-critical section. Lock the referral row and only credit when it is still in a
   // pre-conversion state, so a double-click / retry that hits convert twice can no longer
   // credit the promoter balance twice. The referral flip + balance increment commit together.
-  const CONVERTIBLE_STATUSES = ['pending', 'contacted', 'sms_failed', 'estimated'];
   const outcome = await db.transaction(async (trx) => {
     const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
     if (!referral) throw new Error('Referral not found');
+
+    // Hard guard, independent of `status`: once a reward has been staged or
+    // credited for this referral (converted_at set, reward status past
+    // 'pending', or first service already credited) it can NEVER convert again —
+    // even if the status column was later moved back to a convertible value.
+    // A second conversion would increment the promoter balance a second time.
+    if (referralRewardAlreadyStaged(referral)) {
+      throw referralError(409, 'ALREADY_CONVERTED', 'Referral was already converted; refusing to credit the promoter again');
+    }
 
     // Idempotency guard: anything already converted/rejected/lost is a no-op (no re-credit).
     if (!CONVERTIBLE_STATUSES.includes(referral.status)) {
@@ -721,13 +746,20 @@ async function supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId = null 
   // rows this run superseded) and can't drain the same promoter cents twice.
   const siblings = await q.forUpdate().select('id', 'promoter_id', 'referrer_reward_amount');
   if (!siblings.length) return;
+  await supersedeAndUnwindRows(trx, siblings);
+}
 
+// Mark the given pending_service referral rows 'superseded' and drain the
+// promoter cents staged for them at conversion. Shared by the same-phone
+// sibling sweep above and the admin reject path (updateReferralStatus).
+async function supersedeAndUnwindRows(trx, siblings, extraUpdates = {}) {
   await trx('referrals')
     .whereIn('id', siblings.map((s) => s.id))
     .update({
       first_service_completed: true,
       referrer_reward_status: 'superseded',
       updated_at: new Date(),
+      ...extraUpdates,
     });
 
   // Each sibling's promoter had pending_earnings_cents AND total_earned_cents
@@ -748,6 +780,90 @@ async function supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId = null 
       updated_at: new Date(),
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// 4a. updateReferralStatus — admin status change, fail closed
+// ---------------------------------------------------------------------------
+// Only a fixed set of admin targets is accepted, and a referral that already
+// has a reward staged/credited can never be moved back to a convertible status
+// (that would let /convert credit the promoter a second time). The ONE
+// transition allowed out of that state is rejecting a signed_up referral whose
+// reward is still pending_service: its staged promoter cents are unwound via
+// the supersede machinery in the same transaction. Anything already earned/paid
+// stays locked (409) — unwinding a paid balance could overdraw.
+const ADMIN_STATUS_TARGETS = ['contacted', 'estimated', 'rejected', 'lost'];
+
+// Reverse the promoter-side effects convertReferral applied for ONE conversion
+// that is now being rejected. The total_referrals_converted increment is safely
+// reversible (GREATEST floor). The milestone bonus is NOT: it was paid straight
+// into the payable balance from a mutable settings value and may already have
+// been paid out, so reversing it here would mean guessing the original amount
+// and silently forgiving paid money. When the promoter's current milestone
+// level was minted exactly at this conversion's count, we therefore REFUSE the
+// rejection (409 MILESTONE_LOCKED, fail closed) — the milestone bonus has to be
+// handled deliberately by the owner, never auto-unwound. A milestone earned by
+// EARLIER conversions (count past its threshold) does not block. Caller must
+// run this inside the same transaction as the referral unwind; the promoter
+// row is locked here so the check and the decrement are atomic.
+const MILESTONE_THRESHOLDS = { advocate: 3, ambassador: 5, champion: 10 };
+async function unwindConversionPromoterEffects(trx, promoterId) {
+  if (!promoterId) return;
+  const promoter = await trx('referral_promoters').where({ id: promoterId }).forUpdate().first();
+  if (!promoter) return;
+
+  const converted = Number(promoter.total_referrals_converted) || 0;
+  if (MILESTONE_THRESHOLDS[promoter.milestone_level] === converted) {
+    throw referralError(409, 'MILESTONE_LOCKED',
+      'Rejecting this referral would unwind the conversion that earned the promoter\'s '
+      + `'${promoter.milestone_level}' milestone bonus; that bonus may already be paid out. `
+      + 'Resolve the milestone manually before rejecting.');
+  }
+
+  await trx('referral_promoters').where({ id: promoterId }).update({
+    total_referrals_converted: db.raw('GREATEST(total_referrals_converted - 1, 0)'),
+    updated_at: new Date(),
+  });
+}
+
+async function updateReferralStatus(referralId, { status, adminNotes, lostReason } = {}) {
+  if (!ADMIN_STATUS_TARGETS.includes(status)) {
+    throw referralError(400, 'INVALID_STATUS', `Status must be one of: ${ADMIN_STATUS_TARGETS.join(', ')}`);
+  }
+  return db.transaction(async (trx) => {
+    const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
+    if (!referral) throw referralError(404, 'NOT_FOUND', 'Referral not found');
+
+    const upd = { status, updated_at: new Date() };
+    if (adminNotes) upd.admin_notes = adminNotes;
+    if (status === 'rejected' || lostReason) upd.lost_reason = lostReason || 'Rejected by admin';
+
+    if (referralRewardAlreadyStaged(referral) || !CONVERTIBLE_STATUSES.includes(referral.status)) {
+      const rejectableSignup = status === 'rejected'
+        && referral.status === 'signed_up'
+        && referral.referrer_reward_status === 'pending_service'
+        && !referral.first_service_completed;
+      if (!rejectableSignup) {
+        throw referralError(409, 'REFERRAL_LOCKED', `Referral in status '${referral.status}' cannot be changed to '${status}'`);
+      }
+      // Promoter-effects check runs FIRST: it can refuse (MILESTONE_LOCKED) and
+      // must do so before any referral-row write, though the transaction would
+      // roll both back either way.
+      await unwindConversionPromoterEffects(trx, referral.promoter_id);
+      // first_service_completed stays FALSE (override the helper's default):
+      // that flag is the phone-wide "this referee already earned a reward"
+      // witness in creditReferralOnFirstService. A rejected duplicate earned
+      // nothing — stamping it would permanently disqualify the legitimate
+      // sibling referral for the same phone. The rejected row is still inert
+      // everywhere: status 'rejected' + reward status 'superseded' exclude it
+      // from the credit candidate query, the sibling sweep, and reconversion.
+      await supersedeAndUnwindRows(trx, [referral], { ...upd, first_service_completed: false });
+      return { referralId, status, unwound: true };
+    }
+
+    await trx('referrals').where({ id: referralId }).update(upd);
+    return { referralId, status, unwound: false };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1357,7 @@ module.exports = {
   enrollPromoter,
   submitReferral,
   convertReferral,
+  updateReferralStatus,
   confirmFirstService,
   creditReferralOnFirstService,
   checkMilestones,

@@ -188,8 +188,8 @@ export default function AdminLayoutV2() {
       className="admin-shell-v2"
       style={{
         display: "flex",
-        height: "100vh",
-        minHeight: "100vh",
+        height: "var(--admin-vh, 100vh)",
+        minHeight: "var(--admin-vh, 100vh)",
         overflow: "hidden",
         boxSizing: "border-box",
         background: "var(--surface-page)",
@@ -592,8 +592,8 @@ export default function AdminLayoutV2() {
             : 24,
           paddingLeft: isMobile ? 16 : 28,
           paddingRight: isMobile ? 16 : 28,
-          height: "100vh",
-          minHeight: "100vh",
+          height: "var(--admin-vh, 100vh)",
+          minHeight: "var(--admin-vh, 100vh)",
           boxSizing: "border-box",
           overflowY: "auto",
           WebkitOverflowScrolling: "touch",

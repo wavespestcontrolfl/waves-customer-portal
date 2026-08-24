@@ -377,11 +377,10 @@ function proofBannerText(recipientCount) {
 }
 
 async function countRecipients(send) {
-  const customerIds = await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter);
-  const row = await NewsletterSender.buildSubscriberQuery(send.segment_filter, customerIds)
-    .count('* as c')
-    .first();
-  return Number(row?.c || 0);
+  // Shared preflight (codex #3472 r3): runs the archived-link relink sweep
+  // before counting, so a proof approval can't block on stale links the
+  // send itself would repair.
+  return NewsletterSender.countSegmentRecipients(send.segment_filter);
 }
 
 async function notifyProof(type, payload) {

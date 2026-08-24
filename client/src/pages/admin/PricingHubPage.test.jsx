@@ -3,7 +3,12 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const mockGetAdminUser = vi.fn(() => ({ role: "admin" }));
+vi.mock("../../lib/adminAuth", () => ({
+  getAdminUser: (...args) => mockGetAdminUser(...args),
+}));
 
 vi.mock("./PricingLogicPage", () => ({
   default: () => <div>Logic workspace</div>,
@@ -18,6 +23,10 @@ vi.mock("./AdminPriceChangePage", () => ({
 import PricingHubPage from "./PricingHubPage";
 
 afterEach(cleanup);
+beforeEach(() => {
+  mockGetAdminUser.mockReset();
+  mockGetAdminUser.mockReturnValue({ role: "admin" });
+});
 
 function LocationProbe() {
   const location = useLocation();
@@ -56,6 +65,18 @@ describe("PricingHubPage", () => {
 
     expect(screen.getByText("Strategy workspace")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Strategy & Offers" }))
+      .toHaveAttribute("aria-current", "page");
+  });
+
+  it("hides the admin-only Strategy area from technicians", () => {
+    mockGetAdminUser.mockReturnValue({ role: "tech" });
+    renderHub("/admin/pricing-logic?area=strategy");
+
+    expect(screen.queryByRole("button", { name: "Strategy & Offers" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Strategy workspace")).not.toBeInTheDocument();
+    // A deep link to the hidden area falls back to Logic & Margins.
+    expect(screen.getByText("Logic workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Logic & Margins" }))
       .toHaveAttribute("aria-current", "page");
   });
 

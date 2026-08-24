@@ -502,7 +502,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {c.windowStart && (
                       <span style={{ color: D.teal, marginRight: 8 }}>
@@ -563,7 +563,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           {" "}
           <div style={{ ...cardStyle, textAlign: "center", marginBottom: 16 }}>
             {" "}
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.teal }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.teal }}>
               {selectedCustomer.firstName} {selectedCustomer.lastName}
             </div>{" "}
             <div style={{ fontSize: 12, color: D.muted }}>
@@ -674,7 +674,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -718,7 +718,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
             <div
               style={{
                 fontSize: 15,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 12,
               }}
@@ -760,7 +760,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     style={{ fontSize: 11, color: D.muted, lineHeight: 1.5 }}
                   >
                     Tiles below marked{" "}
-                    <span style={{ color: D.amber, fontWeight: 600 }}>
+                    <span style={{ color: D.amber, fontWeight: 500 }}>
                       DIVERGENCE
                     </span>
                     are where Claude and Gemini gave scores that differed by
@@ -816,7 +816,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                       style={{
                         fontSize: 9,
                         color: D.muted,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         letterSpacing: 0.5,
                       }}
                     >
@@ -835,7 +835,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                         marginTop: 2,
                       }}
@@ -874,7 +874,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                         style={{
                           fontSize: 9,
                           color: overridden ? D.teal : D.muted,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           letterSpacing: 0.5,
                         }}
                       >
@@ -1025,7 +1025,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 <div
                   style={{
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -1038,12 +1038,12 @@ export default function LawnAssessmentPanel({ embedded = false }) {
             {/* Season badge */}
             <div style={{ marginTop: 12, fontSize: 11, color: D.muted }}>
               Season:{" "}
-              <span style={{ color: D.teal, fontWeight: 600 }}>
+              <span style={{ color: D.teal, fontWeight: 500 }}>
                 {result.season}
               </span>
               {result.isBaseline && (
                 <span
-                  style={{ color: D.amber, marginLeft: 8, fontWeight: 600 }}
+                  style={{ color: D.amber, marginLeft: 8, fontWeight: 500 }}
                 >
                   This is the baseline assessment
                 </span>
@@ -1091,7 +1091,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -1130,7 +1130,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     <span
                       style={{
                         fontSize: 13,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         color: D.heading,
                       }}
                     >
@@ -1224,7 +1224,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -1393,7 +1393,7 @@ const btnStyle = (bg) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const btnOutline = {

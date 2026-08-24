@@ -628,23 +628,23 @@ function DeliverabilityPanel({ data, loading, onRefresh }) {
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div className="rounded-sm border-hairline border-zinc-200 p-3">
                   <div className="text-11 uppercase tracking-label text-ink-tertiary">30d messages</div>
-                  <div className="mt-1 text-22 font-semibold text-zinc-900">{health.total_messages || 0}</div>
+                  <div className="mt-1 text-22 font-medium text-zinc-900">{health.total_messages || 0}</div>
                 </div>
                 <div className="rounded-sm border-hairline border-zinc-200 p-3">
                   <div className="text-11 uppercase tracking-label text-ink-tertiary">Delivery</div>
-                  <div className="mt-1 text-22 font-semibold text-zinc-900">{rateText(rates.delivery_rate)}</div>
+                  <div className="mt-1 text-22 font-medium text-zinc-900">{rateText(rates.delivery_rate)}</div>
                 </div>
                 <div className="rounded-sm border-hairline border-zinc-200 p-3">
                   <div className="text-11 uppercase tracking-label text-ink-tertiary">Bounce</div>
-                  <div className="mt-1 text-22 font-semibold text-zinc-900">{rateText(rates.bounce_rate)}</div>
+                  <div className="mt-1 text-22 font-medium text-zinc-900">{rateText(rates.bounce_rate)}</div>
                 </div>
                 <div className="rounded-sm border-hairline border-zinc-200 p-3">
                   <div className="text-11 uppercase tracking-label text-ink-tertiary">Complaint</div>
-                  <div className="mt-1 text-22 font-semibold text-zinc-900">{rateText(rates.complaint_rate)}</div>
+                  <div className="mt-1 text-22 font-medium text-zinc-900">{rateText(rates.complaint_rate)}</div>
                 </div>
                 <div className="rounded-sm border-hairline border-zinc-200 p-3">
                   <div className="text-11 uppercase tracking-label text-ink-tertiary">Active suppressions</div>
-                  <div className="mt-1 text-22 font-semibold text-zinc-900">{health.active_suppressions || 0}</div>
+                  <div className="mt-1 text-22 font-medium text-zinc-900">{health.active_suppressions || 0}</div>
                 </div>
               </div>
 
@@ -1180,7 +1180,7 @@ function AutomationsPanel({
                     <div className="flex items-start justify-between gap-3 flex-wrap">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <div className="text-14 font-semibold text-zinc-900">{row.name}</div>
+                          <div className="text-14 font-medium text-zinc-900">{row.name}</div>
                           <Badge tone={automationStatusTone(row.status)}>{row.status}</Badge>
                           <Badge tone="neutral">{minutesLabel(row.delay_minutes)}</Badge>
                         </div>

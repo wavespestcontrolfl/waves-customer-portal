@@ -104,7 +104,7 @@ const thStyle = {
   padding: "10px 14px",
   textAlign: "left",
   fontSize: 12,
-  fontWeight: 600,
+  fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
   textTransform: "uppercase",
@@ -314,7 +314,7 @@ function OverviewTab() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -386,7 +386,7 @@ function EmptyState() {
       <div
         style={{
           fontSize: 18,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.heading,
           marginBottom: 8,
         }}
@@ -530,7 +530,7 @@ function CallBridgeTab() {
                   border: "none",
                   cursor: "pointer",
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   background: period === p ? D.heading : "transparent",
                   color: period === p ? D.white : D.muted,
                 }}
@@ -608,7 +608,7 @@ function CallBridgeTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -676,7 +676,7 @@ function CallBridgeTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -823,7 +823,7 @@ function ServiceLinesTab() {
             <span style={{ fontSize: 18 }}>
               {bucketIcons[b.bucket] || ""}
             </span>{" "}
-            <span style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+            <span style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
               {bucketLabels[b.bucket] || b.bucket.toUpperCase()}
             </span>{" "}
           </div>{" "}
@@ -949,7 +949,7 @@ function ServiceLinesTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -1209,7 +1209,7 @@ function AdvisorTab() {
           <div
             style={{
               fontSize: 18,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -1237,7 +1237,7 @@ function AdvisorTab() {
                   alignItems: "center",
                   justifyContent: "center",
                   fontSize: 32,
-                  fontWeight: 800,
+                  fontWeight: 700,
                   fontFamily: MONO,
                   background: gradeColor(data.grade) + "22",
                   color: gradeColor(data.grade),
@@ -1251,7 +1251,7 @@ function AdvisorTab() {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -1271,7 +1271,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 16,
                 }}
@@ -1326,7 +1326,7 @@ function AdvisorTab() {
                             <div
                               style={{
                                 fontSize: 14,
-                                fontWeight: 600,
+                                fontWeight: 500,
                                 color: D.heading,
                                 marginBottom: 4,
                               }}
@@ -1376,7 +1376,7 @@ function AdvisorTab() {
                                           borderRadius: 6,
                                           border: "none",
                                           fontSize: 12,
-                                          fontWeight: 600,
+                                          fontWeight: 500,
                                           cursor:
                                             done || pending || generating ? "default" : "pointer",
                                           background: done ? D.green + "22" : D.teal,
@@ -1428,7 +1428,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.red,
                   marginBottom: 12,
                 }}
@@ -1476,7 +1476,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.green,
                   marginBottom: 12,
                 }}
@@ -1513,7 +1513,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -1547,7 +1547,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.amber,
                   marginBottom: 12,
                 }}
@@ -1581,7 +1581,7 @@ function AdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -1700,7 +1700,7 @@ function CapacityTab() {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
                 {areaLabels[area] || area}
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted }}>
@@ -1739,7 +1739,7 @@ function CapacityTab() {
                   <div
                     style={{
                       fontSize: 11,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.muted,
                       marginBottom: 4,
                     }}
@@ -1776,7 +1776,7 @@ function CapacityTab() {
                     {modeEmoji[day.budgetMode] || ""}{" "}
                     <span
                       style={{
-                        fontWeight: 600,
+                        fontWeight: 500,
                         fontSize: 9,
                         letterSpacing: "0.5px",
                         color: D.muted,
@@ -1920,7 +1920,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 18,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -2089,7 +2089,7 @@ function SEODashboardTab() {
         <div
           style={{
             fontSize: 15,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -2161,7 +2161,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2198,7 +2198,7 @@ function SEODashboardTab() {
                   <div
                     style={{
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.heading,
                       textTransform: "capitalize",
                     }}
@@ -2237,7 +2237,7 @@ function SEODashboardTab() {
           }}
         >
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             Top Queries
           </div>{" "}
           <div style={{ display: "flex", gap: 4 }}>
@@ -2337,7 +2337,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 4,
             }}
@@ -2397,7 +2397,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.red,
               marginBottom: 12,
             }}
@@ -2441,7 +2441,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 16,
             }}
@@ -2524,7 +2524,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2597,7 +2597,7 @@ function SEODashboardTab() {
                         style={{
                           ...tdText,
                           color: statusColor[c.overall_status] || D.muted,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           fontSize: 12,
                         }}
                       >
@@ -2619,7 +2619,7 @@ function SEODashboardTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.red,
               marginBottom: 12,
             }}
@@ -2759,7 +2759,7 @@ function SEOAdvisorTab() {
           <div
             style={{
               fontSize: 18,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
             }}
@@ -2788,7 +2788,7 @@ function SEOAdvisorTab() {
                   alignItems: "center",
                   justifyContent: "center",
                   fontSize: 32,
-                  fontWeight: 800,
+                  fontWeight: 700,
                   fontFamily: MONO,
                   background: gradeColor(data.grade) + "22",
                   color: gradeColor(data.grade),
@@ -2802,7 +2802,7 @@ function SEOAdvisorTab() {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -2860,7 +2860,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.green,
                   marginBottom: 12,
                 }}
@@ -2893,7 +2893,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 16,
                 }}
@@ -2940,7 +2940,7 @@ function SEOAdvisorTab() {
                         <div
                           style={{
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                             marginBottom: 4,
                           }}
@@ -3001,7 +3001,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.amber,
                   marginBottom: 12,
                 }}
@@ -3021,7 +3021,7 @@ function SEOAdvisorTab() {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                   >
                     "{opp.query}" — Position {opp.position}
                   </div>{" "}
@@ -3040,7 +3040,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.red,
                   marginBottom: 12,
                 }}
@@ -3080,7 +3080,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -3098,7 +3098,7 @@ function SEOAdvisorTab() {
                   }}
                 >
                   {" "}
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.teal }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: D.teal }}>
                     {g.location}
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.text }}>
@@ -3116,7 +3116,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.red,
                   marginBottom: 12,
                 }}
@@ -3153,7 +3153,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -3186,7 +3186,7 @@ function SEOAdvisorTab() {
               <div
                 style={{
                   fontSize: 15,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 12,
                 }}
@@ -3464,7 +3464,7 @@ function BacklinksTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -3536,7 +3536,7 @@ function BacklinksTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.red,
               marginBottom: 12,
             }}
@@ -3621,7 +3621,7 @@ function ContentQATab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 12,
             }}
@@ -3663,7 +3663,7 @@ function ContentQATab() {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -3787,7 +3787,7 @@ function AIOverviewTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.amber,
               marginBottom: 12,
             }}
@@ -3822,7 +3822,7 @@ function AIOverviewTab() {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -3962,7 +3962,7 @@ function SEOFunnelTab() {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -4079,7 +4079,7 @@ function CitationsTab() {
           <div
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 6,
             }}
@@ -4097,7 +4097,7 @@ function CitationsTab() {
         <div
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -4195,7 +4195,7 @@ function SiteAuditTab() {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 8,
           }}
@@ -4216,7 +4216,7 @@ function SiteAuditTab() {
               background: D.teal,
               color: "#fff",
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               opacity: running ? 0.5 : 1,
             }}
@@ -4286,7 +4286,7 @@ function SiteAuditTab() {
           <div
             style={{
               fontSize: 32,
-              fontWeight: 800,
+              fontWeight: 700,
               color: scoreColor(parseFloat(run.avg_health_score || 0)),
               fontFamily: MONO,
             }}
@@ -4357,7 +4357,7 @@ function SiteAuditTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -4418,7 +4418,7 @@ function SiteAuditTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -4502,7 +4502,7 @@ function SiteAuditTab() {
           <div
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}

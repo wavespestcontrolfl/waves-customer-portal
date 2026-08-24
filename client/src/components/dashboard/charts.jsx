@@ -123,7 +123,7 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
   return (
     <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl max-md:min-h-[128px]">
       <CardBody className="p-4 max-md:p-4">
-        <div className="u-label text-ink-secondary max-md:text-11 max-md:font-semibold max-md:tracking-label max-md:uppercase max-md:text-zinc-600">
+        <div className="u-label text-ink-secondary max-md:text-11 max-md:font-medium max-md:tracking-label max-md:uppercase max-md:text-zinc-600">
           {label}
         </div>
         <div className="flex items-end justify-between gap-3 mt-2 max-md:block">

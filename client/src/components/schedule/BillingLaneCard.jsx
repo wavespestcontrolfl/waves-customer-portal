@@ -88,7 +88,7 @@ export default function BillingLaneCard({ billingLane, style }) {
               borderRadius: 4,
               padding: '8px 10px',
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: HOLD.ink,
             }}
           >
@@ -96,10 +96,10 @@ export default function BillingLaneCard({ billingLane, style }) {
           </div>
         )}
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 11, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED, whiteSpace: 'nowrap' }}>
             Billing
           </span>
-          <span style={{ fontSize: 13, fontWeight: 600, color: NEUTRAL.ink }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: NEUTRAL.ink }}>
             {laneLabel}
             {showRate && (
               <span style={{ fontWeight: 400, color: MUTED }}> · {money(rate)}/mo dues</span>

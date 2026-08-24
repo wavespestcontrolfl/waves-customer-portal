@@ -136,7 +136,7 @@ function renderInline(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
     if (part.startsWith("**") && part.endsWith("**"))
       return (
-        <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>
+        <strong key={i} style={{ color: D.heading, fontWeight: 500 }}>
           {part.slice(2, -2)}
         </strong>
       );
@@ -161,7 +161,7 @@ function QuickChip({ icon, label, onClick }) {
         border: `1px solid ${hover ? D.purple + "55" : D.border}`,
         color: hover ? D.purple : "#000",
         fontSize: 12,
-        fontWeight: 600,
+        fontWeight: 500,
         fontFamily: "'Roboto', system-ui, sans-serif",
         cursor: "pointer",
         transition: "all 0.15s",
@@ -377,7 +377,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
                   background: `${D.purple}22`,
                   color: D.purple,
                   fontSize: 11,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   fontFamily: "JetBrains Mono, monospace",
                   animation: "pulse 1.5s ease infinite",
                 }}
@@ -447,7 +447,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
               borderRadius: 6,
               color: "#000",
               fontSize: 10,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
             }}
           >
