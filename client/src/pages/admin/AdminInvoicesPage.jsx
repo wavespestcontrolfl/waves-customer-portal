@@ -442,6 +442,18 @@ export function invoiceCreatedSendToast(invoiceNumber, res) {
     : `Invoice created & sent: ${invoiceNumber} (${sent.join(" + ")})`;
 }
 
+// After an AMBIGUOUS send/schedule failure (the request threw, but the
+// server may have committed and delivered before the response was lost),
+// classify the re-fetched persisted row: only a still-draft row is provably
+// unsent — anything else must NOT be offered an automatic resend (duplicate
+// customer comms). null/unfetchable → "unknown" (fail closed). Exported for
+// tests.
+export function persistedSendDisposition(persisted) {
+  const status = String(persisted?.status || "").toLowerCase();
+  if (!status) return "unknown";
+  return status === "draft" ? "unsent" : "committed";
+}
+
 // Toast for a send/schedule request that failed AFTER the invoice row was
 // persisted. The builder must still close (onCreated) — leaving the form
 // intact invites a second Create click that duplicates the invoice.
@@ -5013,16 +5025,40 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           // The POST /admin/invoices above already persisted the row — a
           // failed send is a POST-create problem. Never leave the builder
           // open with the same form (the outer catch used to, and the next
-          // Create click duplicated the invoice + the send). Close it and
-          // hand the id to the list so it opens the resend dialog.
-          showToast(
-            invoiceCreatedSendFailedToast(
-              invoice.invoice_number,
-              "sent",
-              sendErr,
-            ),
-          );
-          onCreated({ promptResendId: invoice.id });
+          // Create click duplicated the invoice + the send).
+          // A rejected request also does not prove the send FAILED: the
+          // server may have delivered and committed 'sent' before the
+          // response was lost. Re-read the persisted row and offer Resend
+          // only when it is provably still unsent — anything else (or an
+          // unverifiable state) gets no automatic resend prompt, because a
+          // resend on a delivered row duplicates customer comms.
+          let persisted = null;
+          try {
+            persisted = await adminFetch(`/admin/invoices/${invoice.id}`);
+          } catch {
+            persisted = null;
+          }
+          const disposition = persistedSendDisposition(persisted);
+          if (disposition === "unsent") {
+            showToast(
+              invoiceCreatedSendFailedToast(
+                invoice.invoice_number,
+                "sent",
+                sendErr,
+              ),
+            );
+            onCreated({ promptResendId: invoice.id });
+          } else if (disposition === "committed") {
+            showToast(
+              `Invoice created: ${invoice.invoice_number} — the send went through (status: ${persisted.status}) despite a network error`,
+            );
+            onCreated();
+          } else {
+            showToast(
+              `Invoice created: ${invoice.invoice_number} — send state unknown (${sendErr.message}). Check it in the list before resending.`,
+            );
+            onCreated();
+          }
           setSaving(false);
           return;
         }
@@ -5252,11 +5288,39 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     setSaving(false);
   };
 
-  const keepAsDraft = () => {
+  const keepAsDraft = async () => {
     const pInv = pendingScheduleInvoice?.invoice;
-    showToast(
-      `Invoice created: ${pInv?.invoice_number || ""} (draft) — edit or send it from the list`,
-    );
+    if (!pInv || saving) return;
+    setSaving(true);
+    // The schedule request may have COMMITTED even though its response was
+    // lost (that's how this panel can appear over an actually-scheduled
+    // row). Verify before promising a draft — a false "draft" toast would
+    // hide a live scheduled send that will text the customer.
+    let persisted = null;
+    try {
+      persisted = await adminFetch(`/admin/invoices/${pInv.id}`);
+    } catch {
+      persisted = null;
+    }
+    setSaving(false);
+    const status = String(persisted?.status || "").toLowerCase();
+    if (status === "scheduled") {
+      showToast(
+        `Scheduling actually went through — ${pInv.invoice_number} will send as scheduled. Use Send (now) or Void from the list if you don't want that.`,
+      );
+    } else if (status && status !== "draft") {
+      showToast(
+        `Invoice ${pInv.invoice_number} is ${persisted.status} — review it in the list`,
+      );
+    } else if (status === "draft") {
+      showToast(
+        `Invoice created: ${pInv.invoice_number} (draft) — edit or send it from the list`,
+      );
+    } else {
+      showToast(
+        `Invoice created: ${pInv.invoice_number} — state could not be verified, review it in the list before sending`,
+      );
+    }
     onCreated();
   };
 

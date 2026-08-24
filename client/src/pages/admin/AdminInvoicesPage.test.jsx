@@ -11,6 +11,7 @@ import {
   invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
+  persistedSendDisposition,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
 
@@ -217,5 +218,22 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
     ).toBe(
       "Invoice WPC-2026-0001 created but not scheduled — scheduledFor must be in the future. Adjust the time and press the button again to schedule this same invoice.",
     );
+  });
+});
+
+describe("AdminInvoicesPage ambiguous-send disposition", () => {
+  it("only a provably-draft row is offered an automatic resend", () => {
+    expect(persistedSendDisposition({ status: "draft" })).toBe("unsent");
+  });
+
+  it("any committed/delivering state blocks the auto-resend prompt (duplicate comms hazard)", () => {
+    for (const status of ["sending", "scheduled", "sent", "viewed", "overdue", "paid", "prepaid"]) {
+      expect(persistedSendDisposition({ status })).toBe("committed");
+    }
+  });
+
+  it("an unverifiable row fails closed as unknown", () => {
+    expect(persistedSendDisposition(null)).toBe("unknown");
+    expect(persistedSendDisposition({})).toBe("unknown");
   });
 });

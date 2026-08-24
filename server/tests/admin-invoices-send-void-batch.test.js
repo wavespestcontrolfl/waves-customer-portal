@@ -56,10 +56,11 @@ const post = (baseUrl, path, body) => fetch(`${baseUrl}/admin/invoices${path}`, 
 
 // Chainable stub for the batch-dedupe lookup:
 // db('invoices').where(...).whereNotIn(...).whereNull(...).where(...).first(...)
-function makeDupChain(result) {
+function makeDupChain(result, { updateResult = 1 } = {}) {
   const chain = {};
   for (const m of ['where', 'whereNotIn', 'whereNull']) chain[m] = jest.fn(() => chain);
   chain.first = jest.fn(async () => result);
+  chain.update = jest.fn(async () => updateResult);
   return chain;
 }
 
@@ -260,6 +261,56 @@ describe('POST /batch idempotency (batchKey)', () => {
       // Completed on the EXISTING row — no new invoice minted.
       expect(InvoiceService.create).not.toHaveBeenCalled();
       expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-existing', { operatorInitiated: true });
+    });
+  });
+
+  test('a keyed retry releases a STALE sending claim back to draft without re-texting (crashed worker recovery)', async () => {
+    const chain = makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'sending', payer_id: null,
+      updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    db.mockImplementation(() => chain);
+    db.fn = { now: jest.fn(() => 'NOW') };
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000004',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].reason).toMatch(/stale send claim/i);
+      // Status restore only — release must NEVER deliver.
+      expect(chain.update).toHaveBeenCalledWith({ status: 'draft', updated_at: 'NOW' });
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a keyed retry leaves a FRESH sending claim alone (live concurrent send)', async () => {
+    const chain = makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'sending', payer_id: null,
+      updated_at: new Date().toISOString(),
+    });
+    db.mockImplementation(() => chain);
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000004',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].reason).toMatch(/in progress/i);
+      expect(chain.update).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
     });
   });
 

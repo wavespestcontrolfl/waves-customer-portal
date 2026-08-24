@@ -678,6 +678,10 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
     const created = [];
     const failed = [];
     const skipped = [];
+    // A 'sending' claim older than this is treated as a crashed worker's
+    // stale claim (claimInvoiceForSend stamps updated_at when it takes the
+    // claim); a live send finishes in seconds, not minutes.
+    const STALE_SEND_CLAIM_MS = 15 * 60 * 1000;
 
     for (const customerId of customerIds) {
       try {
@@ -692,7 +696,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at');
           if (existing) {
             const entry = {
               customerId,
@@ -700,6 +704,29 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
               invoiceNumber: existing.invoice_number,
               reason: 'This batch key already created an invoice for this customer (retry detected)',
             };
+            // A row stuck in 'sending' is either a live concurrent send or a
+            // crashed worker's stale claim. A stale claim would otherwise be
+            // locked FOREVER (manual sends reject 'sending'): release it back
+            // to draft — a pure status restore, no delivery — and tell the
+            // operator. We deliberately do NOT auto-resend a released claim:
+            // the crashed worker may have texted before dying, and without
+            // provider evidence an automatic retry risks duplicate customer
+            // comms (fail closed; the operator resends with eyes on it).
+            if (existing.status === 'sending') {
+              const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
+              if (claimAgeMs > STALE_SEND_CLAIM_MS) {
+                const released = await db('invoices')
+                  .where({ id: existing.id, status: 'sending' })
+                  .update({ status: 'draft', updated_at: db.fn.now() });
+                entry.reason = released
+                  ? 'Stale send claim from a crashed batch worker released back to draft — verify whether the customer was texted, then resend manually'
+                  : 'Send state changed while checking a stale claim — review the invoice before resending';
+              } else {
+                entry.reason = 'A send for this invoice is in progress right now — not re-sent';
+              }
+              skipped.push(entry);
+              continue;
+            }
             // Finish an UNFINISHED immediate send: the first attempt may have
             // crashed between insert and delivery (or delivery failed),
             // leaving the row draft — a keyed retry must complete it, not
