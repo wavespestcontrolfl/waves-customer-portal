@@ -306,9 +306,10 @@ const gates = {
   // SOUTH_FUNNEL_ZONE_SLUGS overrides the slug list — which CITIES form the
   // zone stays DB-authoritative in service_zones.cities) only offer days the
   // calendar already has a live stop in that zone, so far-south trips cluster
-  // onto one day instead of scattering across the week. A window with NO zone
-  // stop yet offers exactly ONE seed day (cheapest-detour, else soonest) so
-  // the first booking creates the cluster. Offer-time only — already-signed
+  // onto one day instead of scattering across the week. A window with no
+  // BOOKABLE cluster-day slot (no zone stop yet, or the zone days are full)
+  // offers exactly ONE seed day (cheapest-detour, else soonest) so the
+  // booking creates or extends the cluster. Offer-time only — already-signed
   // slot offers stay redeemable. Opt-in in EVERY environment so slot tests
   // stay deterministic. Kill switch: unset — offers instantly revert to the
   // full pool.

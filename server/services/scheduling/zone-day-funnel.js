@@ -6,11 +6,15 @@
  * Two-step policy, evaluated per request over THAT request's date window:
  *   1. clustered — the window already has live scheduled stops in the
  *      estimate's zone: only those days' slots are offered.
- *   2. seeded — the window has NO zone stop yet: exactly ONE day is offered
- *      (the cheapest-detour day when route data exists, else the soonest
- *      bookable day), so the first booking CREATES the cluster day that later
- *      customers in the zone funnel onto. reserveSlot stamps the zone slug on
- *      the hold row, which is what makes the seed visible to step 1.
+ *   2. seeded — no cluster-day slot is bookable in the window (no zone stop
+ *      yet, or every zone-stop day's windows are taken/filtered): exactly
+ *      ONE day is offered (the cheapest-detour day when route data exists,
+ *      else the soonest bookable day), so the booking CREATES or EXTENDS the
+ *      cluster days later customers funnel onto. Seeding on a FULL cluster
+ *      day is deliberate — returning nothing there loses the booking, and a
+ *      full zone day means it's time to open the next one. reserveSlot
+ *      stamps the zone slug on the hold row, which is what makes a seed
+ *      visible to step 1.
  *
  * Deliberate boundaries:
  *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
@@ -144,11 +148,13 @@ async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
 
 // Pure pool filter. funnelDays null → untouched. Otherwise clustered mode
 // keeps only zone-stop days; when none of those days survives in the pool
-// (no zone stop in the window, or every zone day's windows are gone), seeded
-// mode keeps exactly one day: the first preferredSeedDate present in the
-// pool (callers pass find-time's score-ordered dates, so this is the
+// (no zone stop in the window, or every zone day's windows are taken or
+// filtered — seeding on a full cluster day is deliberate, see header),
+// seeded mode keeps exactly one day: the first preferredSeedDate present in
+// the pool (callers pass find-time's score-ordered dates, so this is the
 // cheapest-detour day) or the soonest date. Returns the surviving slots plus
-// a metadata descriptor (null when the funnel didn't apply).
+// a metadata descriptor — null when the funnel didn't apply, INCLUDING the
+// empty-input case, so cache decisions must key off funnelDays, not this.
 function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = {}) {
   const pool = Array.isArray(bookable) ? bookable : [];
   if (!funnelDays || !pool.length) return { slots: pool, funnel: null };
