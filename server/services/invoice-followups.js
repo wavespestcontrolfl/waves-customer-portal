@@ -1151,13 +1151,13 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
   });
 }
 
-async function resumeSequence(invoiceId) {
-  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+async function resumeSequence(invoiceId, dbc = db) {
+  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq) return;
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    updated_at: db.fn.now(),
+  await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: dbc.fn.now(),
     status: 'active',
     paused_reason: null,
     paused_until: null,

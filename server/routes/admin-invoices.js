@@ -262,6 +262,31 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
     });
 }
 
+/**
+ * Re-arm dunning for a cancelled payment plan, INSIDE the cancel transaction
+ * (codex r6 P1: a post-commit read raced concurrent plan creation — a fresh
+ * plan's stop could be resumed under a live plan). The invoice row is locked
+ * by the caller, which serializes against plan creation's own locked trx.
+ * Resumes ONLY a plan-owned sequence: stopped_reason carries this plan's
+ * payment_plan_created:<id> stamp, in either the in-trx 'stopped' shape or
+ * the post-commit pauseSequence 'paused'/payment_plan_created shape (the
+ * stamp survives the pause). Returns 'schedule' when no sequence exists so
+ * the caller arms one post-commit via scheduleForInvoice.
+ */
+async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
+  const seq = await trx('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId })
+    .first('id', 'status', 'stopped_reason', 'paused_reason');
+  if (!seq) return 'schedule';
+  const planOwned = seq.stopped_reason === paymentPlanFollowupStopReason(planId)
+    && (seq.status === 'stopped'
+      || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
+  if (!planOwned) return 'untouched';
+  const FollowUpsSvc = require('../services/invoice-followups');
+  await FollowUpsSvc.resumeSequence(invoiceId, trx);
+  return 'resumed';
+}
+
 function cleanOptionalText(value, max = 120) {
   if (value == null) return null;
   const trimmed = String(value).trim().replace(/\s+/g, ' ');
@@ -2347,7 +2372,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
             .where({ invoice_id: id, status: 'cancelled' })
             .orderBy('cancelled_at', 'desc')
             .first();
-          if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true };
+          if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
         const now = new Date();
@@ -2358,7 +2383,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
         if (!cancelled) {
           const e = new Error('Payment plan changed before it could be cancelled'); e.statusCode = 409; throw e;
         }
-        return { invoice, plan: cancelled };
+        return { invoice, plan: cancelled, rearm: await rearmFollowupsForCancelledPlan(trx, id, cancelled.id) };
       });
     } catch (err) {
       if (err?.statusCode === 404 || err?.statusCode === 409) {
@@ -2367,32 +2392,20 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       throw err;
     }
 
-    const { invoice, plan, alreadyCancelled } = outcome;
+    const { invoice, plan, alreadyCancelled, rearm } = outcome;
 
-    // Plan creation stopped the dunning sequence; cancelling the plan returns
-    // the invoice to normal collection, so re-arm reminders — but ONLY a
-    // sequence THIS plan stopped (stopped_reason carries the plan id). A
-    // sequence an admin stopped for an unrelated reason must stay stopped
-    // (codex r2 P1); resuming it here would undo that decision.
-    try {
-      const seq = await db('invoice_followup_sequences')
-        .where({ invoice_id: id })
-        .first('id', 'status', 'stopped_reason', 'paused_reason');
-      // Plan creation stamps stopped_reason=payment_plan_created:<id> in-trx,
-      // then its post-commit pauseSequence flips the row to
-      // paused/payment_plan_created (stopped_reason survives — pauseSequence
-      // doesn't touch it). Both shapes are plan-owned; anything else (an
-      // unrelated admin stop/pause) stays untouched.
-      const planOwned = seq
-        && seq.stopped_reason === paymentPlanFollowupStopReason(plan.id)
-        && (seq.status === 'stopped'
-          || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
-      if (planOwned) {
+    // No sequence row existed at cancel time (decided under the invoice lock):
+    // arm one now via the existing mechanism, exactly like reverse-prepaid —
+    // scheduleForInvoice takes its own invoice lock and re-verifies
+    // schedulability, and a concurrent plan creation serializes on that same
+    // lock (its in-trx stop runs before or after this whole arm).
+    if (rearm === 'schedule') {
+      try {
         const FollowUpsSvc = require('../services/invoice-followups');
-        await FollowUpsSvc.resumeSequence(id);
+        await FollowUpsSvc.scheduleForInvoice(id);
+      } catch (err) {
+        logger.warn(`[admin-invoices:payment-plan-cancel] follow-up scheduling failed: ${err.message}`);
       }
-    } catch (err) {
-      logger.warn(`[admin-invoices:payment-plan-cancel] follow-up re-arm failed: ${err.message}`);
     }
 
     if (!alreadyCancelled) await db('activity_log').insert({
