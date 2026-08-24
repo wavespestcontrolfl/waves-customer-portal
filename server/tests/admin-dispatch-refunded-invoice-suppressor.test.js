@@ -311,9 +311,12 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(reconcileLiveVsRefunded(null, refundedNewer)).toEqual({ existing: null, terminal: refundedNewer });
     // The chain may hand back an OLDER live row (service_record_id first)
     // while a NEWER live row hangs off scheduled_service_id — compare the
-    // refund against the NEWEST live row, not the chain's row.
-    const newestLive = { id: 'inv-live-2', status: 'sent', created_at: '2026-08-25T00:00:00Z' };
-    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLive)).toEqual({ existing: live, terminal: null });
+    // refund against the NEWEST live row, not the chain's row. And when
+    // live wins, the NEWEST live row is what the completion reuses — the
+    // chain's stale row must not keep its pay link (a paid newer row would
+    // otherwise be double-collected via the older collectible one).
+    const newestLive = { id: 'inv-live-2', status: 'sent', token: 't2', created_at: '2026-08-25T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedNewer, newestLive)).toEqual({ existing: newestLive, terminal: null });
     const newestLiveOlderThanRefund = { id: 'inv-live-2', status: 'sent', created_at: '2026-08-10T00:00:00Z' };
     expect(reconcileLiveVsRefunded(live, refundedNewer, newestLiveOlderThanRefund)).toEqual({ existing: null, terminal: refundedNewer });
     expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });

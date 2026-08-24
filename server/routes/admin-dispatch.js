@@ -4290,7 +4290,10 @@ async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null,
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
-    .first('id', 'status', 'created_at')) || null;
+    // FULL row — when live wins the reconciliation the NEWEST live row IS
+    // the row the completion reuses (pay link/token, alreadyPaid status),
+    // never the chain's possibly-stale one (pre-push P0 round 3).
+    .first()) || null;
 }
 
 // Invoices are not unique per visit (pre-push P0): a NEWER refunded
@@ -4313,9 +4316,14 @@ function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
   // Ties go to the refunded row (pre-push P1): rows minted in one
   // transaction share created_at and JS Date truncates sub-millisecond
   // precision — never let a possibly-newer refund lose to a stale pay link.
+  // When live wins, the row the completion reuses is the NEWEST live row —
+  // handing back the chain's older `existing` while a newer live row hangs
+  // off the other identifier would text the stale row's pay link (and, if
+  // the newer row is already paid, collect twice). `newestLive` is a full
+  // invoice row for exactly this reason (pre-push P0 round 3).
   return refundedAt >= liveAt
     ? { existing: null, terminal: refunded }
-    : { existing, terminal: null };
+    : { existing: newestLive || existing, terminal: null };
 }
 
 // The sibling first-application lookup (services/estimate-first-application-
