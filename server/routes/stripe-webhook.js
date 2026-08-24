@@ -4270,13 +4270,15 @@ async function handleRefundFailed(refund) {
     // predates the refund and would let the scan void a legitimate older
     // sibling invoice. Null cutoff = no scan (fail closed, alert only).
     let replacementCutoff = null;
+    let originalTotalCents = null;
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const lockedOriginal = await trx('invoices')
         .where({ id: linkedInvoice.id })
         .forUpdate()
-        .first('id', 'status', 'updated_at', 'scheduled_service_id');
+        .first('id', 'status', 'updated_at', 'scheduled_service_id', 'total');
       if (lockedOriginal?.status === 'refunded' && lockedOriginal.updated_at) {
         replacementCutoff = lockedOriginal.updated_at;
+        originalTotalCents = Math.round((parseFloat(lockedOriginal.total) || 0) * 100);
       }
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
@@ -4323,6 +4325,7 @@ async function handleRefundFailed(refund) {
     // which is exactly what the shared void primitive would do for it.
     const voidedReplacements = [];
     const collectedReplacements = [];
+    const reviewReplacements = [];
     // Scan only under the mint lock (replacementScopeSsId resolved) and with
     // an in-trx cutoff — either missing means the scan cannot be made safe,
     // so it is skipped and the human reconciles from the alert.
@@ -4342,16 +4345,39 @@ async function handleRefundFailed(refund) {
         .where('created_at', '>', replacementCutoff);
       const replacements = await replacementQuery.select(
         'id', 'invoice_number', 'status', 'payment_recorded_at', 'stripe_payment_intent_id',
-        'payer_statement_id', 'credit_applied', 'line_items',
+        'payer_statement_id', 'credit_applied', 'line_items', 'total',
       );
       for (const rep of replacements || []) {
         const repLabel = rep.invoice_number || rep.id;
+        // Replacement identity (pre-push P0 round 3): one visit may carry
+        // unrelated live invoices (add-ons, adjustments — invoice.js's
+        // switch-restore classification relies on it). Only a same-visit
+        // invoice minted after the refund AT THE ORIGINAL'S TOTAL is the
+        // completion's re-bill of the same money; anything else is left
+        // alone and surfaced for review, never voided.
+        const repTotalCents = Math.round((parseFloat(rep.total) || 0) * 100);
+        if (originalTotalCents === null || repTotalCents !== originalTotalCents) {
+          reviewReplacements.push(repLabel);
+          continue;
+        }
         const moneyApplied = ['paid', 'prepaid'].includes(rep.status) || !!rep.payment_recorded_at;
         const ledgerBound = !!rep.stripe_payment_intent_id
           || !!rep.payer_statement_id
           || (parseFloat(rep.credit_applied) || 0) > 0
           || InvoiceService._invoiceHasDepositCreditLine(rep);
         if (moneyApplied || ledgerBound || !CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(rep.status)) {
+          collectedReplacements.push(repLabel);
+          continue;
+        }
+        // Canonical in-trx payments-ledger guard (same predicate as
+        // voidInvoice / voidOpenInvoicesForCancelledService): payments
+        // reference invoices via metadata.invoice_id, and a paid/processing
+        // row can exist with neither payment_recorded_at nor a paid status.
+        const appliedPayment = await trx('payments')
+          .whereIn('status', ['paid', 'processing'])
+          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(rep.id)])
+          .first('id');
+        if (appliedPayment) {
           collectedReplacements.push(repLabel);
           continue;
         }
@@ -4374,6 +4400,7 @@ async function handleRefundFailed(refund) {
     let sideEffectHint = '';
     if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
     if (voidedReplacements.length) sideEffectHint += ` Replacement invoice${voidedReplacements.length > 1 ? 's' : ''} ${voidedReplacements.map((r) => r.label).join(', ')} (minted by a completion after the refund) ${voidedReplacements.length > 1 ? 'were' : 'was'} voided — superseded: refund bounced, original invoice restored.`;
+    if (reviewReplacements.length) sideEffectHint += ` Same-visit invoice${reviewReplacements.length > 1 ? 's' : ''} ${reviewReplacements.join(', ')} minted after the refund at a different total ${reviewReplacements.length > 1 ? 'were' : 'was'} left untouched — review whether it re-bills this visit.`;
     if (collectedReplacements.length) sideEffectHint += ` Replacement invoice${collectedReplacements.length > 1 ? 's' : ''} ${collectedReplacements.join(', ')} for the same visit ${collectedReplacements.length > 1 ? 'were' : 'was'} NOT auto-voided (collected, payment in flight, on a statement, or carrying applied credit) — DOUBLE PAYMENT risk: refund if collected, otherwise void it through the invoice void action so its credit/statement ledgers restore.`;
     else if (linkedInvoice) sideEffectHint += ` Check invoice ${linkedInvoice.invoice_number || linkedInvoice.id}: restored account credit may need to be re-applied/clawed back.`;
     if (cancelledPrepayTermId) sideEffectHint += ` Annual-prepay term ${cancelledPrepayTermId} was CANCELLED by the refund — the paid-sync is re-run, but refund-cancelled terms are not auto-revived (revival is dispute-marker-gated); if coverage stays cancelled, reactivate it manually.`;
