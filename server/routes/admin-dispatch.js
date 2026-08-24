@@ -5470,7 +5470,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // exempt (codex GH r2 P1): every billing gate suppresses their mint
       // regardless of the payer, so a transient lookup blip must not block
       // closing a never-billing visit.
-      const completionCannotBill = recapReviewOnly || !visitPerformed;
+      // …and completions with NO billable amount (GH r3 P1): the amount
+      // guard in the invoice decision categorically rejects
+      // invoiceAmount <= 0, so no invoice or tax authority can ever be
+      // needed for an unpriced/free visit either.
+      const completionCannotBill = recapReviewOnly || !visitPerformed || !(Number(invoiceAmount) > 0);
       if (!resumingCommittedCompletion && !completionCannotBill) throw payerErr;
       logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id} (${resumingCommittedCompletion ? 'resume — frozen contract governs' : 'non-billing completion'}) — coverage suppressors disabled: ${payerErr.message}`);
       completionTaxAuthorityError = payerErr;
