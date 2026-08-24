@@ -4148,6 +4148,29 @@ async function handleRefundFailed(refund) {
     }
   }
 
+  // Every provenance DESCENDANT of the original (codex #3456 pre-push P0):
+  // A refunded → completion mints B (replaces A) → B refunded/canceled →
+  // completion mints C (replaces B). A bounce on A must reach C, so the
+  // walk follows replaces_invoice_id hop by hop with NO status filter
+  // (terminal hops are traversed, not neutralized). Callers classify.
+  const REPLACEMENT_OPEN_EXCLUDED = ['paid', 'void', 'refunded', 'canceled', 'cancelled'];
+  const collectReplacementDescendants = async (conn, rootId) => {
+    const seen = new Set([String(rootId)]);
+    const rows = [];
+    let frontier = [String(rootId)];
+    while (frontier.length) {
+      const level = await conn('invoices').whereIn('replaces_invoice_id', frontier).select('*');
+      frontier = [];
+      for (const row of level || []) {
+        if (seen.has(String(row.id))) continue;
+        seen.add(String(row.id));
+        rows.push(row);
+        frontier.push(String(row.id));
+      }
+    }
+    return rows;
+  };
+
   // Pre-lock Stripe triage for marked replacements (codex #3456, pre-push
   // P0): the canonical operator void (InvoiceService.voidInvoice) verifies
   // an attached PaymentIntent BEFORE locking — refuses if money is in
@@ -4176,11 +4199,9 @@ async function handleRefundFailed(refund) {
   }
   if (triageWorthwhile) {
     try {
-      const openMarked = await db('invoices')
-        .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereNotIn('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .select('id', 'invoice_number', 'stripe_payment_intent_id', 'payment_recorded_at');
-      for (const rep of openMarked || []) {
+      const openMarked = (await collectReplacementDescendants(db, linkedInvoice.id))
+        .filter((rep) => !REPLACEMENT_OPEN_EXCLUDED.includes(rep.status));
+      for (const rep of openMarked) {
         const triagedPiId = rep.stripe_payment_intent_id || null;
         if (!triagedPiId || rep.payment_recorded_at) {
           replacementTriage.set(String(rep.id), { triagedVoidPiId: null });
@@ -4402,21 +4423,29 @@ async function handleRefundFailed(refund) {
       // returned, which the canonical void does; a CASH-backed prepayment
       // (payment_recorded_at / paid payment row) is refused by its ledger
       // guards and lands in the manual list.
-      const replacements = await trx('invoices')
-        .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereNotIn('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .select('*');
-      for (const rep of replacements || []) {
+      const descendants = await collectReplacementDescendants(trx, linkedInvoice.id);
+      for (const rep of descendants) {
         const repLabel = rep.invoice_number || rep.id;
-        if (rep.payment_recorded_at) {
+        if (rep.status === 'paid' || rep.payment_recorded_at) {
           collectedReplacements.push(repLabel);
           continue;
         }
-        const triage = replacementTriage.get(String(rep.id));
+        if (REPLACEMENT_OPEN_EXCLUDED.includes(rep.status)) continue; // terminal hop, nothing to neutralize
+        let triage = replacementTriage.get(String(rep.id));
         if (!triage) {
-          // Landed after the pre-lock read — untriaged, never voided blind.
-          manualReplacements.push(`${repLabel} (minted during the bounce — not triaged)`);
-          continue;
+          // Minted between the pre-lock read and the mint lock (pre-push
+          // P0). No PaymentIntent attached = safe to void now: the
+          // canonical void's in-lock PI re-check (triagedVoidPiId null)
+          // refuses if one attaches meanwhile. A PI attached = it needs the
+          // pre-lock Stripe triage — throw so the whole restore rolls back
+          // and Stripe redelivers; the retry's pre-lock read triages it.
+          // A notification is not a money guard.
+          if (rep.stripe_payment_intent_id) {
+            const retry = new Error(`[stripe-webhook] replacement ${repLabel} minted during refund bounce ${refundId} with an open payment session — retrying the event after triage`);
+            retry.retryable = true;
+            throw retry;
+          }
+          triage = { triagedVoidPiId: null };
         }
         if (triage.skip) {
           manualReplacements.push(`${repLabel} (${triage.skip})`);
@@ -4432,13 +4461,6 @@ async function handleRefundFailed(refund) {
           manualReplacements.push(`${repLabel} (${voidErr.message})`);
         }
       }
-      // Collected replacements are excluded from the FOR UPDATE scan above
-      // by status; name them from a plain read so the alert is complete.
-      const collected = await trx('invoices')
-        .where({ replaces_invoice_id: linkedInvoice.id })
-        .whereIn('status', ['paid'])
-        .select('id', 'invoice_number');
-      for (const rep of collected || []) collectedReplacements.push(rep.invoice_number || rep.id);
     }
 
     // Operator signal: the reverts above are mechanical, but the remaining
