@@ -198,6 +198,7 @@ function predictCompletionBilling({
   prepaidMethod,
   annualCoverageValidated,
   billingMode,
+  duesCollectedThisMonth = false,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
@@ -264,6 +265,7 @@ function predictCompletionBilling({
     perApplicationBilling: false,
     annualPrepayBilling: false,
     customerAutopayActive: autopayActive,
+    duesCollectedThisMonth,
     hasVisitPrice,
     isRecurring,
     waveguardTier: lane === 'monthly_membership',

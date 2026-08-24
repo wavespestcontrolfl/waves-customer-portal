@@ -134,6 +134,13 @@ describe('predictCompletionBilling', () => {
     prepaidAmount: null,
   };
 
+  test('autopay lapsed but dues already collected this month → still predicted covered (matches completion)', () => {
+    expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: true }))
+      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: false }))
+      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+  });
+
   test('membership recurring visit → covered, and a stamped price flags the conflict', () => {
     expect(predictCompletionBilling(memberBase)).toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...memberBase, estimatedPrice: 100 }))

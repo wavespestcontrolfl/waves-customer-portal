@@ -2555,6 +2555,7 @@ router.get('/', async (req, res, next) => {
           prepaidAmount: s.prepaid_amount,
           prepaidMethod: s.prepaid_method || null,
           annualCoverageValidated,
+          duesCollectedThisMonth: duesPaidThisMonth === true,
         }),
       };
       // Payment-capture flag — the tech needs to know at the doorstep that
@@ -3064,6 +3065,7 @@ router.get('/week', async (req, res, next) => {
             prepaidAmount: s.prepaid_amount,
             prepaidMethod: s.prepaid_method || null,
             annualCoverageValidated,
+            duesCollectedThisMonth: duesPaidThisMonth === true,
           }),
         };
         return {
