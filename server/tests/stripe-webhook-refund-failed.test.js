@@ -143,6 +143,8 @@ describe('handleRefundFailed', () => {
   let trxRaw;
   let dbServiceRecords;
   let trxTransaction;
+  let paymentsSelect;
+  let trxPaymentsForUpdate;
 
   const failedRefund = (over = {}) => ({
     id: 're_fail',
@@ -177,6 +179,7 @@ describe('handleRefundFailed', () => {
       first: jest.fn(async () => paymentRow),
       update: trxUpdate,
     };
+    trxPaymentsForUpdate = trxPaymentsQuery.forUpdate;
     trxInvoices = {
       where: jest.fn(() => trxInvoices),
       whereNot: jest.fn(() => trxInvoices),
@@ -208,7 +211,10 @@ describe('handleRefundFailed', () => {
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
       first: paymentsFirst,
+      // Combined-lane pre-read of the allocation rows (replacement inputs).
+      select: jest.fn(async () => []),
     };
+    paymentsSelect = paymentsQuery.select;
     dbInvoices = {
       where: jest.fn(() => dbInvoices),
       whereIn: jest.fn(() => dbInvoices),
@@ -605,6 +611,75 @@ describe('handleRefundFailed', () => {
     await handleRefundFailed(failedRefund());
     expect(trxInvoices.select).not.toHaveBeenCalled();
     expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
+  });
+
+  describe('combined balance charge lane (same helper as the single-row lane)', () => {
+    const combinedRow = (over = {}) => ({
+      id: 'pay-c1', status: 'refunded', amount: '102.90', refund_amount: '102.90',
+      stripe_refund_id: 're_fail', stripe_charge_id: 'ch_1', stripe_payment_intent_id: 'pi_1',
+      metadata: JSON.stringify({ combined_payment: true, invoice_id: 'inv-1' }),
+      ...over,
+    });
+    const seedCombined = (rows) => {
+      // Payment pre-read (payment) must say combined.
+      paymentRow.metadata = rows[0].metadata;
+      paymentsSelect.mockResolvedValue(rows.map((r) => ({ id: r.id, metadata: r.metadata })));
+      // The trx FOR UPDATE read of the allocation rows resolves to the rows.
+      trxPaymentsForUpdate.mockImplementation(() => Promise.resolve(rows));
+    };
+
+    test('a restored combined invoice with a MARKED open replacement → replacement voided via the canonical void, under the visit mint lock', async () => {
+      seedCombined([combinedRow()]);
+      dbInvoices.first.mockResolvedValue({ id: 'inv-1', scheduled_service_id: 'ss-1', service_record_id: null });
+      dbInvoices.select.mockReset().mockResolvedValueOnce([replacement()]).mockResolvedValue([]);
+      trxInvoices.select.mockReset().mockResolvedValueOnce([replacement()]).mockResolvedValue([]);
+      await handleRefundFailed(failedRefund());
+
+      expect(trxRaw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['combined.refund.fence', 'ch_1']);
+      expect(trxRaw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['schedule.invoice.mint', 'ss-1']);
+      // Mint lock taken BEFORE the allocation rows are locked/restored.
+      const mintLockOrder = trxRaw.mock.invocationCallOrder[trxRaw.mock.calls.findIndex((c) => c[1][0] === 'schedule.invoice.mint')];
+      expect(mintLockOrder).toBeLessThan(trxPaymentsForUpdate.mock.invocationCallOrder[0]);
+      expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
+      expect(require('../services/invoice').voidInvoiceInTransaction).toHaveBeenCalledWith(
+        expect.anything(), expect.objectContaining({ id: 'inv-2' }), { triagedVoidPiId: null, createdBy: 'system:refund_bounce' },
+      );
+      const body = notificationInsert.mock.calls[0][0].body;
+      expect(body).toContain('Combined balance charge ch_1');
+      expect(body).toContain('1 invoices restored');
+      expect(body).toContain('Replacement invoice WPC-2026-0002');
+      expect(body).toContain('was voided');
+      expect(require('../services/invoice-followups').stopSequence).toHaveBeenCalledWith('inv-2', { reason: 'invoice_voided' });
+    });
+
+    test('two visits → both mint locks taken in SORTED visit-id order before any restore', async () => {
+      seedCombined([
+        combinedRow({ id: 'pay-c1', metadata: JSON.stringify({ combined_payment: true, invoice_id: 'inv-1' }) }),
+        combinedRow({ id: 'pay-c2', metadata: JSON.stringify({ combined_payment: true, invoice_id: 'inv-9' }) }),
+      ]);
+      // inv-1 → visit ss-zeta (read first), inv-9 → legacy row resolved via service_records → ss-alpha.
+      dbInvoices.first
+        .mockResolvedValueOnce({ id: 'inv-1', scheduled_service_id: 'ss-zeta', service_record_id: null })
+        .mockResolvedValueOnce({ id: 'inv-9', scheduled_service_id: null, service_record_id: 'sr-9' });
+      dbServiceRecords.first.mockResolvedValue({ scheduled_service_id: 'ss-alpha' });
+      await handleRefundFailed(failedRefund());
+
+      const mintLocks = trxRaw.mock.calls.filter((c) => c[1][0] === 'schedule.invoice.mint').map((c) => c[1][1]);
+      expect(mintLocks).toEqual(['ss-alpha', 'ss-zeta']);
+      expect(trxInvoices.update).toHaveBeenCalledTimes(2);
+      expect(notificationInsert.mock.calls[0][0].body).toContain('2 invoices restored');
+    });
+
+    test('replay (refund id already fenced on the combined payment) → no Stripe triage, no pre-read, nothing voided', async () => {
+      seedCombined([combinedRow({ metadata: JSON.stringify({ combined_payment: true, invoice_id: 'inv-1', failed_refund_ids: ['re_fail'] }) })]);
+      dbInvoices.select.mockReset().mockResolvedValue([replacement({ stripe_payment_intent_id: 'pi_open' })]);
+      await handleRefundFailed(failedRefund());
+
+      expect(paymentsSelect).not.toHaveBeenCalled();
+      expect(require('../services/stripe').cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(require('../services/invoice').voidInvoiceInTransaction).not.toHaveBeenCalled();
+      expect(notificationInsert).not.toHaveBeenCalled();
+    });
   });
 
   test('reaches a charge-only linked invoice via invoices.stripe_charge_id', async () => {

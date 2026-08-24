@@ -4257,11 +4257,20 @@ const COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES = ['refunded', 'canceled', 'canc
 // The terminal invoice the suppressor lookup skipped for this visit, if
 // any — newest wins, same shape as the suppressor query. Returns the id to
 // stamp as invoices.replaces_invoice_id on the completion mint, or null.
-async function completionSupersededTerminalInvoiceLookup(conn, where) {
+// ONE globally ordered query across both visit identifiers (pre-push P0,
+// codex #3456): an `a || b` pair let an older service_record_id row win
+// over a newer scheduled_service_id row, and a bounce on the newer one
+// could not find its replacement.
+async function completionSupersededTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId) return null;
   const row = await conn('invoices')
-    .where(where)
+    .where((qb) => {
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
     .whereIn('status', COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES)
     .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
     .first('id');
   return row ? row.id : null;
 }
@@ -8549,8 +8558,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
       }
       if (!existingCompletionInvoice) {
-        supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, { service_record_id: record.id })
-          || await completionSupersededTerminalInvoiceLookup(db, { scheduled_service_id: svc.id });
+        supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {
+          serviceRecordId: record.id,
+          scheduledServiceId: svc.id,
+        });
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;

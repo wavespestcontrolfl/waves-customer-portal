@@ -64,22 +64,70 @@ describe('completionSuppressorInvoiceLookup', () => {
 });
 
 describe('completionSupersededTerminalInvoiceLookup (replacement provenance, codex #3456)', () => {
+  // Knex-shaped mock: where(fn) collects orWhere scopes, whereIn pins the
+  // vocabulary, orderBy(created_at desc, id desc) is applied to the rows so
+  // the newest terminal row wins regardless of which identifier matched.
+  function makeOrderedKnex(rows) {
+    const calls = [];
+    let scopes = [];
+    let included = null;
+    const orders = [];
+    const chain = {
+      where: jest.fn((arg) => {
+        if (typeof arg === 'function') {
+          const qb = { orWhere: jest.fn((cond) => { scopes.push(cond); return qb; }) };
+          arg(qb);
+        }
+        calls.push(['where', typeof arg === 'function' ? 'fn' : arg]);
+        return chain;
+      }),
+      whereIn: jest.fn((col, list) => { calls.push(['whereIn', col, list]); included = list; return chain; }),
+      orderBy: jest.fn((col, dir) => { orders.push([col, dir]); return chain; }),
+      first: jest.fn(async () => {
+        const matches = rows.filter((r) => included.includes(r.status)
+          && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
+        matches.sort((a, b) => (b.created_at.localeCompare(a.created_at)) || String(b.id).localeCompare(String(a.id)));
+        return matches[0] ? { id: matches[0].id } : undefined;
+      }),
+    };
+    const knex = jest.fn(() => chain);
+    knex.calls = calls; knex.scopes = () => scopes; knex.orders = orders;
+    return knex;
+  }
+
   test.each(['refunded', 'canceled', 'cancelled'])('returns the skipped %s invoice id so the mint can stamp replaces_invoice_id', async (status) => {
-    const knex = makeKnex([{ id: `inv-${status}`, status }]);
-    await expect(completionSupersededTerminalInvoiceLookup(knex, { scheduled_service_id: 'svc-1' })).resolves.toBe(`inv-${status}`);
+    const knex = makeOrderedKnex([{ id: `inv-${status}`, status, scheduled_service_id: 'svc-1', created_at: '2026-08-20' }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { scheduledServiceId: 'svc-1' })).resolves.toBe(`inv-${status}`);
     expect(knex.calls).toContainEqual(['whereIn', 'status', COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES]);
-    expect(knex.calls).toContainEqual(['where', { scheduled_service_id: 'svc-1' }]);
+    expect(knex.scopes()).toEqual([{ scheduled_service_id: 'svc-1' }]);
+  });
+
+  test('ONE globally ordered query across both identifiers — a newer scheduled_service_id row beats an older service_record_id row', async () => {
+    const knex = makeOrderedKnex([
+      { id: 'inv-old', status: 'refunded', service_record_id: 'rec-1', created_at: '2026-08-01' },
+      { id: 'inv-new', status: 'canceled', scheduled_service_id: 'svc-1', created_at: '2026-08-20' },
+    ]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' })).resolves.toBe('inv-new');
+    expect(knex.scopes()).toEqual([{ service_record_id: 'rec-1' }, { scheduled_service_id: 'svc-1' }]);
+    expect(knex.orders).toEqual([['created_at', 'desc'], ['id', 'desc']]);
+    expect(knex).toHaveBeenCalledTimes(1);
   });
 
   test('a VOID invoice is never a superseded terminal (nothing restores a void — the mint is a plain new invoice)', async () => {
-    const knex = makeKnex([{ id: 'inv-void', status: 'void' }]);
-    await expect(completionSupersededTerminalInvoiceLookup(knex, { service_record_id: 'rec-1' })).resolves.toBeNull();
+    const knex = makeOrderedKnex([{ id: 'inv-void', status: 'void', service_record_id: 'rec-1', created_at: '2026-08-20' }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1' })).resolves.toBeNull();
     expect(COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES).not.toContain('void');
   });
 
   test('a live invoice is not a terminal either (the suppressor would have reused it)', async () => {
-    const knex = makeKnex([{ id: 'inv-sent', status: 'sent' }]);
-    await expect(completionSupersededTerminalInvoiceLookup(knex, { service_record_id: 'rec-1' })).resolves.toBeNull();
+    const knex = makeOrderedKnex([{ id: 'inv-sent', status: 'sent', service_record_id: 'rec-1', created_at: '2026-08-20' }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1' })).resolves.toBeNull();
+  });
+
+  test('no identifiers → null without querying', async () => {
+    const knex = makeOrderedKnex([]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, {})).resolves.toBeNull();
+    expect(knex).not.toHaveBeenCalled();
   });
 });
 
@@ -96,11 +144,9 @@ describe('sibling first-application invoices are OUT of the replacement mechanis
   test('the marker lookup only ever scopes to the CURRENT visit (service_record_id / scheduled_service_id), never the sibling lookup', () => {
     const fn = dispatchSrc.slice(dispatchSrc.indexOf('async function completionSupersededTerminalInvoiceLookup'), dispatchSrc.indexOf('router.post', dispatchSrc.indexOf('async function completionSupersededTerminalInvoiceLookup')));
     expect(fn).not.toMatch(/source_estimate_id|first_visit|findFirstApplicationInvoiceForEstimateService/);
-    const calls = dispatchSrc.match(/completionSupersededTerminalInvoiceLookup\(db, \{ [a-z_]+: [a-z.]+ \}\)/g);
-    expect(calls).toEqual([
-      'completionSupersededTerminalInvoiceLookup(db, { service_record_id: record.id })',
-      'completionSupersededTerminalInvoiceLookup(db, { scheduled_service_id: svc.id })',
-    ]);
+    const calls = dispatchSrc.match(/completionSupersededTerminalInvoiceLookup\(db, \{[\s\S]{0,120}?\}\)/g);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].replace(/\s+/g, ' ')).toBe('completionSupersededTerminalInvoiceLookup(db, { serviceRecordId: record.id, scheduledServiceId: svc.id, })');
   });
 });
 
@@ -109,11 +155,10 @@ describe('completion mint stamps replaces_invoice_id (source contract)', () => {
   const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
 
   test('the superseded-terminal lookup runs only after the whole suppressor chain resolved null', () => {
-    const idx = dispatchSrc.indexOf('supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, { service_record_id: record.id })');
+    const idx = dispatchSrc.indexOf('supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
     const before = dispatchSrc.slice(idx - 400, idx);
     expect(before).toMatch(/findFirstApplicationInvoiceForEstimateService\(svc, db\);[\s\S]*if \(!existingCompletionInvoice\) \{\s*$/);
-    expect(dispatchSrc).toContain('|| await completionSupersededTerminalInvoiceLookup(db, { scheduled_service_id: svc.id });');
   });
 
   test('BOTH completion mint lanes carry the marker through the create options (no post-insert UPDATE)', () => {
