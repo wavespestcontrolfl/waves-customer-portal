@@ -332,13 +332,13 @@ describe('POST /approvals/bulk', () => {
       'ap-2': { id: 'ap-2', product_id: 'prod-2', vendor_id: 'v-2', new_price: 30, new_quantity: '1 gal', source_url: 'https://vendor.example/p2', status: 'pending' },
     };
     const pricingInserts = [];
-    db.mockImplementation((table) => makeChain(table, (q) => {
-      if (table === 'price_approvals') {
-        if (q.called('update')) return 1;
+    const route = (q) => {
+      if (q._table === 'price_approvals') {
+        if (q.called('update')) return 1; // claim succeeds
         const id = q.args('where')[0]?.id;
         return approvals[id] || null;
       }
-      if (table === 'vendor_pricing') {
+      if (q._table === 'vendor_pricing') {
         if (q.called('insert')) {
           const row = q.args('insert')[0];
           if (row.product_id === 'prod-2') throw new Error('insert failed');
@@ -349,10 +349,18 @@ describe('POST /approvals/bulk', () => {
         if (q.called('join')) return [];
         return null; // no existing vendor_pricing row
       }
-      if (table === 'price_history') return 1;
-      if (table === 'products_catalog') return { unit_size_oz: 64 };
-      throw new Error(`Unexpected table ${table}`);
-    }));
+      if (q._table === 'price_history') return 1;
+      if (q._table === 'products_catalog') {
+        if (q.called('update')) return 1;
+        return { unit_size_oz: 64 };
+      }
+      throw new Error(`Unexpected table ${q._table}`);
+    };
+    // Approvals run inside one transaction per id (claim + price + history + recalc).
+    const trx = (table) => makeChain(table, route);
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, route));
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/inventory/approvals/bulk`, {
@@ -378,6 +386,7 @@ describe('POST /approvals/bulk', () => {
         is_active: true,
       }));
       expect(body.processed).toBe(1);
+      // ap-2's transaction threw (rolled back) and is reported, not swallowed
       expect(body.failed).toEqual(['ap-2']);
       expect(body.skipped).toEqual(['ap-gone']);
       expect(body.success).toBe(false);

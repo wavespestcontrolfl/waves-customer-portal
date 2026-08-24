@@ -2161,14 +2161,16 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         if (snapshot?.source_confidence != null) pricingUpdate.source_confidence = snapshot.source_confidence;
 
         await trx('vendor_pricing').where({ id: vendorPricingId }).update(pricingUpdate);
+
+        // Single best-price writer, in the same transaction as the approval:
+        // the canonical recalculation scores per-oz and persists best_price
+        // scaled to the product's own unit_size_oz. The old inline writer here
+        // selected by normalized unit price but wrote the raw vendor pack
+        // price, which consumers divide by unit_size_oz.
+        await recalcBestPrice(approval.product_id, trx);
       }
     });
     if (stale) return res.status(409).json({ error: 'Approval event was already decided; refresh the queue' });
-    // Single best-price writer: the canonical recalculation scores per-oz and
-    // persists best_price scaled to the product's own unit_size_oz. The old
-    // inline writer here selected by normalized unit price but wrote the raw
-    // vendor pack price, which consumers divide by unit_size_oz.
-    await recalcBestPrice(approval.product_id);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2399,6 +2401,48 @@ router.get('/approvals', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// One transaction per legacy approval: atomically claim the pending row,
+// apply the vendor price, record history, and recalculate the catalog best
+// price. A failure anywhere rolls the whole approval back (still pending, no
+// partial price state), so it can simply be retried. Returns false when the
+// approval was already decided by a concurrent request.
+async function applyPriceApproval(approval, reviewedBy) {
+  return db.transaction(async (trx) => {
+    const claimed = await trx('price_approvals')
+      .where({ id: approval.id, status: 'pending' })
+      .update({ status: 'approved', reviewed_by: reviewedBy, reviewed_at: new Date() });
+    if (!claimed) return false;
+
+    const existing = await trx('vendor_pricing')
+      .where({ product_id: approval.product_id, vendor_id: approval.vendor_id })
+      .forUpdate().first();
+    if (existing) {
+      const quantity = approval.new_quantity || existing.quantity;
+      await trx('vendor_pricing').where({ id: existing.id }).update({
+        previous_price: existing.price, price: approval.new_price,
+        quantity,
+        ...approvedPerOzFields(approval.new_price, quantity),
+        last_checked_at: trx.fn.now(),
+      });
+    } else {
+      await trx('vendor_pricing').insert({
+        product_id: approval.product_id, vendor_id: approval.vendor_id,
+        price: approval.new_price, quantity: approval.new_quantity,
+        ...approvedPerOzFields(approval.new_price, approval.new_quantity),
+        vendor_product_url: approval.source_url, last_checked_at: trx.fn.now(),
+      });
+    }
+
+    await trx('price_history').insert({
+      product_id: approval.product_id, vendor_id: approval.vendor_id,
+      price: approval.new_price, quantity: approval.new_quantity, source: 'scrape_approved',
+    });
+
+    await recalcBestPrice(approval.product_id, trx);
+    return true;
+  });
+}
+
 // =========================================================================
 // POST /approvals/:id/approve — approve a price change
 // =========================================================================
@@ -2408,38 +2452,8 @@ router.post('/approvals/:id/approve', async (req, res, next) => {
     if (!approval) return res.status(404).json({ error: 'Not found' });
     if (approval.status !== 'pending') return res.status(400).json({ error: `Already ${approval.status}` });
 
-    // Apply the new price
-    const existing = await db('vendor_pricing')
-      .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
-
-    if (existing) {
-      const quantity = approval.new_quantity || existing.quantity;
-      await db('vendor_pricing').where({ id: existing.id }).update({
-        previous_price: existing.price, price: approval.new_price,
-        quantity,
-        ...approvedPerOzFields(approval.new_price, quantity),
-        last_checked_at: db.fn.now(),
-      });
-    } else {
-      await db('vendor_pricing').insert({
-        product_id: approval.product_id, vendor_id: approval.vendor_id,
-        price: approval.new_price, quantity: approval.new_quantity,
-        ...approvedPerOzFields(approval.new_price, approval.new_quantity),
-        vendor_product_url: approval.source_url, last_checked_at: db.fn.now(),
-      });
-    }
-
-    // Record history
-    await db('price_history').insert({
-      product_id: approval.product_id, vendor_id: approval.vendor_id,
-      price: approval.new_price, quantity: approval.new_quantity, source: 'scrape_approved',
-    });
-
-    await db('price_approvals').where({ id: req.params.id }).update({
-      status: 'approved', reviewed_by: req.adminUser?.name || 'admin', reviewed_at: new Date(),
-    });
-
-    await recalcBestPrice(approval.product_id);
+    const applied = await applyPriceApproval(approval, req.adminUser?.name || 'admin');
+    if (!applied) return res.status(409).json({ error: 'Approval was already decided; refresh the queue' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2469,41 +2483,22 @@ router.post('/approvals/bulk', async (req, res, next) => {
     let processed = 0;
     const skipped = [];
     const failed = [];
+    const reviewedBy = req.adminUser?.name || 'admin';
     for (const id of ids) {
       try {
         if (action === 'approve') {
           const approval = await db('price_approvals').where({ id, status: 'pending' }).first();
           if (!approval) { skipped.push(id); continue; }
-          // Same field set as the single approve route (quantity + source url)
-          // so bulk-approved prices carry their container size into per-oz costing.
-          const existing = await db('vendor_pricing')
-            .where({ product_id: approval.product_id, vendor_id: approval.vendor_id }).first();
-          if (existing) {
-            const quantity = approval.new_quantity || existing.quantity;
-            await db('vendor_pricing').where({ id: existing.id }).update({
-              previous_price: existing.price, price: approval.new_price,
-              quantity,
-              ...approvedPerOzFields(approval.new_price, quantity),
-              last_checked_at: db.fn.now(),
-            });
-          } else {
-            await db('vendor_pricing').insert({
-              product_id: approval.product_id, vendor_id: approval.vendor_id,
-              price: approval.new_price, quantity: approval.new_quantity,
-              ...approvedPerOzFields(approval.new_price, approval.new_quantity),
-              vendor_product_url: approval.source_url, last_checked_at: db.fn.now(),
-            });
-          }
-          await db('price_history').insert({
-            product_id: approval.product_id, vendor_id: approval.vendor_id,
-            price: approval.new_price, quantity: approval.new_quantity, source: 'scrape_approved',
+          // Same atomic path as the single approve route (claim + price +
+          // history + recalc in one transaction, same field set including
+          // quantity + source url for per-oz costing).
+          const applied = await applyPriceApproval(approval, reviewedBy);
+          if (!applied) { skipped.push(id); continue; }
+        } else {
+          await db('price_approvals').where({ id }).update({
+            status: 'rejected', reviewed_by: reviewedBy, reviewed_at: new Date(),
           });
-          await recalcBestPrice(approval.product_id);
         }
-        await db('price_approvals').where({ id }).update({
-          status: action === 'approve' ? 'approved' : 'rejected',
-          reviewed_by: req.adminUser?.name || 'admin', reviewed_at: new Date(),
-        });
         processed++;
       } catch (err) {
         logger.warn(`[admin-inventory] bulk ${action} failed for approval ${id}: ${err.message}`);
@@ -3272,13 +3267,13 @@ function vendorRowPricePerOz(row) {
 // product's unit_size_oz before being persisted. Rows with no size info
 // (no normalized price and an unparseable quantity) only compete on raw
 // price when no sized row exists, and are persisted as the raw price.
-async function recalcBestPrice(productId) {
+async function recalcBestPrice(productId, dbc = db) {
   // Eligibility mirrors the control-layer contract (see the review-queue
   // approve path): only active, approved/auto-approved, unexpired rows may
   // become the catalog best price — a pending or rejected scrape must never
   // feed best_price consumers. The control-layer migration backfilled all
   // legacy rows to approved/is_active=true, so this excludes nothing valid.
-  const rows = await db('vendor_pricing')
+  const rows = await dbc('vendor_pricing')
     .where({ product_id: productId })
     .where(function priced() {
       this.where('vendor_pricing.price', '>', 0).orWhere('vendor_pricing.price_amount', '>', 0);
@@ -3293,7 +3288,7 @@ async function recalcBestPrice(productId) {
   if (!rows || !rows.length) {
     // No eligible (active, approved, unexpired) vendor price remains — the
     // previous winner must not keep feeding costing as if it were current.
-    await db('products_catalog').where({ id: productId }).update({
+    await dbc('products_catalog').where({ id: productId }).update({
       best_price: null,
       best_vendor: null,
       best_vendor_pricing_id: null,
@@ -3303,11 +3298,11 @@ async function recalcBestPrice(productId) {
       best_price_status: 'no_valid_price',
       needs_pricing: true,
     });
-    await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+    await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
     return;
   }
 
-  const product = await db('products_catalog').where({ id: productId }).select('unit_size_oz').first();
+  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz').first();
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
   const scored = rows.map((row) => ({
     row,
@@ -3327,7 +3322,7 @@ async function recalcBestPrice(productId) {
   // best_vendor_pricing_id references the (active, approved) winning row, so
   // leaving it pointed at the previous row would strand or misattribute the
   // price. best_price_amount_cached mirrors the persisted best_price.
-  await db('products_catalog').where({ id: productId }).update({
+  await dbc('products_catalog').where({ id: productId }).update({
     best_price: bestPrice,
     best_vendor: best.row.vendor_name,
     best_vendor_pricing_id: best.row.id,
@@ -3337,8 +3332,8 @@ async function recalcBestPrice(productId) {
     best_price_status: 'current',
     needs_pricing: false,
   });
-  await db('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
-  await db('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
+  await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+  await dbc('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
 }
 
 // POST / — create a new product
