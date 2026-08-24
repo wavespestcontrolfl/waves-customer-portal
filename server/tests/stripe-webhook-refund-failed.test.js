@@ -542,9 +542,6 @@ describe('handleRefundFailed', () => {
 
     await handleRefundFailed(failedRefund());
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    // No payments row = orphan lane: the bounced refund id is stamped
-    // 'kept' on any monthly-autopay dues orphan, on the fence transaction.
-    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('UPDATE stripe_orphan_charges'), ['re_fail', 'kept', 'pi_1']);
     expect(db.raw).toHaveBeenCalledWith(
       expect.stringContaining('pg_advisory_xact_lock'),
       ['combined.refund.fence', 'ch_1'],
@@ -657,45 +654,5 @@ describe('handleRefundFailed', () => {
     expect(db.transaction).not.toHaveBeenCalled();
     expect(notificationInsert).toHaveBeenCalledTimes(1);
     expect(notificationInsert.mock.calls[0][0].body).toContain('deposit ledger');
-  });
-});
-
-// Monthly-autopay dues orphans count as collected dues (billing-lane
-// monthlyDuesCollected) while unresolved and not 'returned'. Reversal
-// events stamp a per-refund/dispute outcome on the orphan in ONE atomic
-// UPDATE whose WHERE encodes the precedence (terminal 'kept'/'won' beats
-// 'returned' whatever the delivery order) and the whole-amount guard.
-describe('autopay dues orphan reversal stamps', () => {
-  const { _stampAutopayDuesOrphanReversal: stamp } = require('../routes/stripe-webhook');
-
-  beforeEach(() => { jest.clearAllMocks(); });
-
-  test("'returned' (full refund / dispute): only whole-amount, and never over a terminal outcome for the same id", async () => {
-    db.raw = jest.fn(async () => ({ rowCount: 1 }));
-    await expect(stamp('pi_dues', 're_1', 'returned', { amountCents: 8970 })).resolves.toBe(1);
-    const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/UPDATE stripe_orphan_charges/);
-    expect(sql).toMatch(/metadata->>'type' = 'monthly_autopay'/);
-    expect(sql).toMatch(/NOT IN \('kept', 'won'\)/);
-    expect(sql).toMatch(/AND amount <= \?/);
-    expect(bindings).toEqual(['re_1', 'returned', 'pi_dues', 're_1', 89.7]);
-  });
-
-  test("'kept' / 'won' are terminal: no precedence or amount guard, and run on the caller's transaction", async () => {
-    const trx = { raw: jest.fn(async () => ({ rowCount: 1 })) };
-    await expect(stamp('pi_dues', 're_1', 'kept', { conn: trx })).resolves.toBe(1);
-    const [sql, bindings] = trx.raw.mock.calls[0];
-    expect(sql).not.toMatch(/NOT IN \('kept', 'won'\)/);
-    expect(sql).not.toMatch(/amount <=/);
-    expect(bindings).toEqual(['re_1', 'kept', 'pi_dues']);
-  });
-
-  test('DB errors propagate (webhook must not be acknowledged with stale coverage); missing PI/key is a no-op', async () => {
-    db.raw = jest.fn(async () => { throw new Error('db down'); });
-    await expect(stamp('pi_dues', 'dp_1', 'returned')).rejects.toThrow('db down');
-    db.raw.mockClear();
-    await expect(stamp(null, 'dp_1', 'returned')).resolves.toBe(0);
-    await expect(stamp('pi_dues', null, 'returned')).resolves.toBe(0);
-    expect(db.raw).not.toHaveBeenCalled();
   });
 });

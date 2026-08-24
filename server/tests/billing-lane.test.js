@@ -306,37 +306,25 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
   // monthlyDuesCollected against a fake knex: the visit-month key drives the
   // billed_month match, so the "dues payment present" scenario is exercised
   // end to end through the same helper the completion route now calls.
-  function fakeDb(paymentsRows, orphanRows = []) {
+  function fakeDb(paymentsRows) {
     return (table) => {
-      expect(['payments', 'stripe_orphan_charges']).toContain(table);
-      const state = { customerId: null, monthKey: null, resolvedFalse: false, reversalGuard: false };
+      expect(table).toBe('payments');
+      const state = { customerId: null, monthKey: null };
       const builder = {
         where(arg) {
           if (typeof arg === 'function') arg.call(builder);
-          else {
-            state.customerId = arg.customer_id;
-            if ('resolved' in arg) state.resolvedFalse = arg.resolved === false;
-          }
+          else state.customerId = arg.customer_id;
           return builder;
         },
         whereIn() { return builder; },
         whereRaw(sql, bindings) {
           if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
-          if (sql.includes("r.value = 'returned'")) state.reversalGuard = true;
           return builder;
         },
         orWhere(fn) { fn.call(builder); return builder; },
         andWhereRaw() { return builder; },
         andWhere() { return builder; },
         async first() {
-          if (table === 'stripe_orphan_charges') {
-            expect(state.resolvedFalse).toBe(true);
-            expect(state.reversalGuard).toBe(true);
-            return orphanRows.find((r) => r.customer_id === state.customerId
-              && r.metadata?.billed_month === state.monthKey
-              && r.resolved === false
-              && !Object.values(r.metadata?.reversals || {}).includes('returned')) || undefined;
-          }
           return paymentsRows.find((r) => r.customer_id === state.customerId
             && ['paid', 'processing'].includes(r.status)
             && r.metadata?.billed_month === state.monthKey) || undefined;
@@ -353,40 +341,5 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     await expect(monthlyDuesCollected(fakeDb([]), 42, visitMonth)).resolves.toBe(false);
     // A different month's dues do not cover this visit.
     await expect(monthlyDuesCollected(fakeDb(rows), 42, new Date('2026-09-03T12:00:00Z'))).resolves.toBe(false);
-  });
-
-  // Stripe took the dues but the payments insert failed (orphan ledger only):
-  // the customer WAS billed, so the month still counts as collected.
-  test('orphaned dues charge (no payments row) counts as collected for its billed month', async () => {
-    const visitMonth = new Date('2026-08-19T12:00:00Z');
-    const unresolved = [{ id: 'o1', customer_id: 42, resolved: false, metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb([], unresolved), 42, visitMonth)).resolves.toBe(true);
-    // A RECONCILED orphan leaves a payments row — that row's status governs
-    // (paid → collected via the payments check; refunded → not), so the
-    // resolved orphan itself never counts.
-    const reconciled = [{ id: 'o2', customer_id: 42, resolved: true, resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement', metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb([], reconciled), 42, visitMonth)).resolves.toBe(false);
-    const reconciledPaid = [{ id: 7, customer_id: 42, status: 'paid', metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb(reconciledPaid, reconciled), 42, visitMonth)).resolves.toBe(true);
-  });
-
-  test('orphan for a different month, resolved, or with a returned reversal does not count', async () => {
-    const visitMonth = new Date('2026-08-19T12:00:00Z');
-    const otherMonth = [{ id: 'o3', customer_id: 42, resolved: false, metadata: { billed_month: '2026-07' } }];
-    await expect(monthlyDuesCollected(fakeDb([], otherMonth), 42, visitMonth)).resolves.toBe(false);
-    const failed = [{ id: 'o4', customer_id: 42, resolved: true, resolution_notes: 'Stripe reported final payment failure; no funds collected', metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb([], failed), 42, visitMonth)).resolves.toBe(false);
-    const refunded = [{ id: 'o5', customer_id: 42, resolved: true, resolution_notes: 'Automatically resolved: the combined charge was fully refunded (re_x) — the unmatched cash was returned to the customer', metadata: { billed_month: '2026-08' } }];
-    await expect(monthlyDuesCollected(fakeDb([], refunded), 42, visitMonth)).resolves.toBe(false);
-    // Unresolved but the money went back (full refund / chargeback stamped
-    // by stripe-webhook): not collected.
-    const returned = [{ id: 'o7', customer_id: 42, resolved: false, metadata: { billed_month: '2026-08', reversals: { re_y: 'returned' } } }];
-    await expect(monthlyDuesCollected(fakeDb([], returned), 42, visitMonth)).resolves.toBe(false);
-    // A bounced refund / won dispute is terminal the other way: still collected.
-    const kept = [{ id: 'o8', customer_id: 42, resolved: false, metadata: { billed_month: '2026-08', reversals: { re_y: 'kept', dp_z: 'won' } } }];
-    await expect(monthlyDuesCollected(fakeDb([], kept), 42, visitMonth)).resolves.toBe(true);
-    // Unstamped legacy orphan: never matches a month.
-    const unstamped = [{ id: 'o6', customer_id: 42, resolved: false, metadata: null }];
-    await expect(monthlyDuesCollected(fakeDb([], unstamped), 42, visitMonth)).resolves.toBe(false);
   });
 });

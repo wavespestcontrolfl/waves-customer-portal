@@ -1696,11 +1696,6 @@ const StripeService = {
           amount: totalAmount,
           source: metadata?.type === 'monthly_autopay' ? 'autopay_charge' : 'manual_charge',
           original_db_error: String(dbErr.message).slice(0, 1000),
-          // Month-of-obligation stamp for a dues charge, so membership
-          // coverage (monthlyDuesCollected) can count the orphaned dues.
-          ...(metadata?.type === 'monthly_autopay' && metadata?.billed_month
-            ? { metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: metadata.billed_month }) }
-            : {}),
         });
       } catch (orphanErr) {
         // Belt-and-suspenders failure — even the orphan record write

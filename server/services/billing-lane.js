@@ -304,24 +304,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
         });
     })
     .first('id');
-  if (row) return true;
-  // Stripe collected the dues but the payments insert failed: the only
-  // ledger trail is a stripe_orphan_charges row stamped with the same
-  // billed_month (both orphan writers stamp monthly-autopay charges). The
-  // customer WAS billed, so the month counts as collected ONLY while the
-  // orphan is unresolved AND no reversal on its PI returned the money
-  // (stripe-webhook stampAutopayDuesOrphanReversal: a full refund /
-  // chargeback stamps metadata.reversals[id]='returned'; a failed refund
-  // or won dispute stamps a terminal 'kept'/'won' that 'returned' can
-  // never overwrite). A reconciled orphan leaves a payments row whose own
-  // status (paid / refunded / disputed) is what the check above honors.
-  // Any other resolution falls toward not-collected.
-  const orphan = await dbConn('stripe_orphan_charges')
-    .where({ customer_id: customerId, resolved: false })
-    .whereRaw("metadata->>'billed_month' = ?", [monthKey])
-    .whereRaw("NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE(metadata->'reversals', '{}'::jsonb)) r WHERE r.value = 'returned')")
-    .first('id');
-  return !!orphan;
+  return !!row;
 }
 
 module.exports = {
