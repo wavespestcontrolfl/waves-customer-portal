@@ -17,6 +17,7 @@ const path = require('path');
 const {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
+  splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
   shouldAutoInvoiceCompletion,
 } = require('../routes/admin-dispatch')._test;
@@ -205,6 +206,41 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     await expect(findFirstApplicationInvoiceForEstimateService(svc, knex)).resolves.toBe(refundedOwn);
   });
 
+  test('a terminal SIBLING first-application row is routed to the terminal path, never reused (splitTerminalCompletionInvoice)', () => {
+    const refundedSibling = { id: 'inv-sib', invoice_number: 'WPC-7', status: 'refunded', token: 'dead', scheduled_service_id: 'sibling-visit' };
+    expect(splitTerminalCompletionInvoice(refundedSibling)).toEqual({ existing: null, terminal: { id: 'inv-sib', invoice_number: 'WPC-7', status: 'refunded' } });
+    for (const status of ['canceled', 'cancelled']) {
+      expect(splitTerminalCompletionInvoice({ ...refundedSibling, status }).existing).toBeNull();
+    }
+    const live = { id: 'inv-live', status: 'sent', token: 't' };
+    expect(splitTerminalCompletionInvoice(live)).toEqual({ existing: live, terminal: null });
+    expect(splitTerminalCompletionInvoice(null)).toEqual({ existing: null, terminal: null });
+    // Wired right after the sibling lookup, before anything reads the row.
+    const at = src.indexOf('existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);');
+    expect(src.slice(at, at + 400)).toContain('const split = splitTerminalCompletionInvoice(existingCompletionInvoice);');
+    expect(src.slice(at, at + 400)).toContain('existingCompletionInvoice = split.existing;');
+    expect(src.slice(at, at + 400)).toContain('if (split.terminal) terminalCompletionInvoice = split.terminal;');
+  });
+
+  test('alert failure fails CLOSED: attempt released for resume + 503, after the record commit and before the attempt is marked succeeded', () => {
+    const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
+    const block = src.slice(at, at + 3200);
+    expect(block).toContain("if (!created) throw new Error('manual-billing notification insert failed');");
+    expect(block).toContain('if (!manualBillingAlerted) {');
+    expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
+    expect(block).toContain("code: 'terminal_invoice_manual_billing_alert_failed',");
+    expect(block).toMatch(/return res\.status\(503\)\.json\(\{/);
+    // No swallow: the only catch feeds the fail-closed branch.
+    expect(block).not.toMatch(/catch \(e\) \{ logger\.warn\(`\[dispatch\] terminal-invoice/);
+    // Position: the service_record is already durable, the attempt not yet finalized.
+    const committedAt = src.lastIndexOf('durableCompletionCommitted = true;', at);
+    const succeededAt = src.indexOf('markedSucceeded = true;', at);
+    expect(committedAt).toBeGreaterThan(-1);
+    expect(succeededAt).toBeGreaterThan(at);
+    // Same release + 503 shape as the typed-required mint failure.
+    expect(src).toContain("code: 'backfill_invoice_mint_failed',");
+  });
+
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
     expect(src).not.toMatch(/invoice = terminalCompletionInvoice/);
     expect(src).not.toMatch(/terminalCompletionInvoice\.token/);
@@ -227,7 +263,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 900, at + 1800);
+    const block = src.slice(at - 1600, at + 1800);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");

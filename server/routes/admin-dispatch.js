@@ -4272,6 +4272,21 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
     .first('id', 'invoice_number', 'status')) || null;
 }
 
+// The sibling first-application lookup (services/estimate-first-application-
+// invoice.js) deliberately keeps its void-only filter, so it can return a
+// refunded/canceled row — a SIBLING visit's, or (same customer/estimate/
+// date) this visit's own. Such a row must never become the completion
+// invoice / pay link (pre-push P0): route it to the terminal path (suppress
+// + manual-billing alert) exactly like an own-visit terminal invoice. A
+// live row stays the existing invoice, as before.
+function splitTerminalCompletionInvoice(row) {
+  if (!row) return { existing: null, terminal: null };
+  if (COMPLETION_TERMINAL_INVOICE_STATUSES.includes(row.status)) {
+    return { existing: null, terminal: { id: row.id, invoice_number: row.invoice_number, status: row.status } };
+  }
+  return { existing: row, terminal: null };
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -8565,6 +8580,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       if (!existingCompletionInvoice && !terminalCompletionInvoice) {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
+        if (!recapReviewOnly) {
+          const split = splitTerminalCompletionInvoice(existingCompletionInvoice);
+          existingCompletionInvoice = split.existing;
+          if (split.terminal) terminalCompletionInvoice = split.terminal;
+        }
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
@@ -8701,6 +8721,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
       && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice) {
       logger.warn(`[dispatch] visit ${svc.id}: prior invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status} — NO replacement invoice minted; manual billing alert parked`);
+      // This alert is the ONLY durable follow-up for the owed money, so it
+      // fails CLOSED (pre-push P0): notifyAdmin returns null on an insert
+      // failure and a transaction error must not be swallowed either. On
+      // failure exit through the same release-for-resume + 503 the
+      // typed-required mint failure uses — the service_record is already
+      // committed above, the attempt goes back to side_effects_pending, and
+      // the tech's retry re-enters here (the dedupe lock makes a second
+      // attempt idempotent).
+      let manualBillingAlerted = false;
+      let manualBillingAlertError = null;
       try {
         const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;
         await db.transaction(async (trx) => {
@@ -8709,15 +8739,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
             .first();
-          if (already) return;
-          await require('../services/notification-service').notifyAdmin(
+          if (already) { manualBillingAlerted = true; return; }
+          const created = await require('../services/notification-service').notifyAdmin(
             'billing',
             'Completed visit needs manual billing — prior invoice was refunded/canceled',
             `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link. Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).`,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
+          if (!created) throw new Error('manual-billing notification insert failed');
+          manualBillingAlerted = true;
         });
-      } catch (e) { logger.warn(`[dispatch] terminal-invoice manual-billing alert failed: ${e.message}`); }
+      } catch (e) {
+        manualBillingAlertError = e;
+      }
+      if (!manualBillingAlerted) {
+        const alertErr = manualBillingAlertError || new Error('manual-billing notification was not recorded');
+        logger.error(`[dispatch] terminal-invoice manual-billing alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'This visit needs manual billing (its prior invoice was refunded/canceled) and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `This visit needs manual billing (its prior invoice was refunded/canceled) and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'terminal_invoice_manual_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
     }
     // Membership dues suppressed a PRICED recurring visit: log + park a
     // one-bell-per-series review alert. Emitted only here — after the
@@ -14218,6 +14268,7 @@ module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
+  splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
   pastRescheduleDateError,
   ensureSmsContainsReportLink,
