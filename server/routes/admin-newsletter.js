@@ -868,8 +868,10 @@ router.post('/sends/:id/send', async (req, res) => {
     // instead of returning 202 + later landing as 'failed'.
     const force = !!req.body?.force;
     if (!force) {
-      const segCount = await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
-      if (Number(segCount?.c || 0) === 0) {
+      // Shared preflight (codex #3472 r3): counts through
+      // countSegmentRecipients, which relinks stale archived links first —
+      // never a bare subscriber-query count.
+      if (await NewsletterSender.countSegmentRecipients(send.segment_filter) === 0) {
         return res.status(400).json({
           error: 'segment matches 0 active subscribers; pass { force: true } to send anyway',
         });
@@ -888,7 +890,7 @@ router.post('/sends/:id/send', async (req, res) => {
         ? send
         : { ...send, newsletter_type: FLAGSHIP_TYPE_KEY };
       const recipientCount = force ? 1 : Number(
-        (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
+        await NewsletterSender.countSegmentRecipients(send.segment_filter)
       );
       const lockedPrices = await lockedPricesForSend(typedSend, db);
       const { errors } = validateNewsletterDraft(typedSend, { recipientCount, lockedPrices });
@@ -1166,8 +1168,10 @@ router.get('/sends/:id/quiz-results', async (req, res, next) => {
 router.post('/segment-preview', async (req, res, next) => {
   try {
     const seg = req.body.segmentFilter || null;
-    const count = await NewsletterSender.buildSubscriberQuery(seg, await NewsletterSender.resolveSegmentCustomerIds(seg)).count('* as c').first();
-    res.json({ count: Number(count?.c || 0) });
+    // Sweep-first shared counter — the composer's preview count must match
+    // what a send would actually select (codex #3472 r3).
+    const count = await NewsletterSender.countSegmentRecipients(seg);
+    res.json({ count });
   } catch (err) { next(err); }
 });
 
@@ -1993,8 +1997,7 @@ router.post('/sends/:id/validate', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     let recipientCount = null;
     try {
-      const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
-      recipientCount = Number(c?.c || 0);
+      recipientCount = await NewsletterSender.countSegmentRecipients(send.segment_filter);
     } catch (queryErr) {
       logger.error(`[newsletter] validate subscriber count failed: ${queryErr.message}`);
       return res.status(500).json({ error: 'Could not verify subscriber count — try again' });

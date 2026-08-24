@@ -218,9 +218,12 @@ describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archi
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'newsletter-sender.js'), 'utf8');
-    const relinkAt = src.indexOf('await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);');
-    expect(relinkAt).toBeGreaterThan(-1);
     const sendCampaignAt = src.indexOf('async function sendCampaign(');
+    // The helper countSegmentRecipients also sweeps (and sits before
+    // sendCampaign) — this pin is about sendCampaign's OWN unconditional
+    // sweep, so search from the function start.
+    const relinkAt = src.indexOf('await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);', sendCampaignAt);
+    expect(relinkAt).toBeGreaterThan(-1);
     const seedAt = src.indexOf('if (!opts.existingDeliveriesOnly) {', sendCampaignAt);
     expect(relinkAt).toBeGreaterThan(sendCampaignAt);
     expect(relinkAt).toBeLessThan(seedAt);
@@ -235,5 +238,30 @@ describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archi
     const between = src.slice(sendCampaignAt, relinkAt);
     expect(src.slice(relinkAt - 900, relinkAt)).not.toMatch(/if \(!opts\.existingDeliveriesOnly\) \{\s*$/);
     expect(between).toContain('validateFlagshipEventSelection'); // after the content gates, before the audience
+  });
+});
+
+describe('countSegmentRecipients is THE shared 0-recipient preflight', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+
+  test('every send-gating audience count routes through countSegmentRecipients (sweep-first), never a bare buildSubscriberQuery().count()', () => {
+    const sender = read('services/newsletter-sender.js');
+    // The helper itself sweeps before counting.
+    const helperAt = sender.indexOf('async function countSegmentRecipients(');
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = sender.slice(helperAt, sender.indexOf('}', sender.indexOf('return Number', helperAt)));
+    expect(helper).toContain('relinkArchivedLinkedSubscribers(db)');
+    // No other .count() over buildSubscriberQuery in the gating files.
+    const senderOutsideHelper = sender.slice(0, helperAt) + sender.slice(helperAt + helper.length);
+    expect(senderOutsideHelper).not.toMatch(/buildSubscriberQuery\([^\n]*\)\.count\(/);
+    expect(read('services/newsletter-proof.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,80}\.count\(/);
+    expect(read('routes/admin-newsletter.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,120}\.count\(/);
+    // Proof approval and the manual-send route both call the shared helper.
+    expect(read('services/newsletter-proof.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
+    expect(read('routes/admin-newsletter.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
+    // Scheduler claim-validation counts through it too.
+    expect(sender).toContain('const recipientCount = await countSegmentRecipients(row.segment_filter);');
   });
 });

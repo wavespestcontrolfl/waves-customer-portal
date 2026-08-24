@@ -241,6 +241,24 @@ async function loadPersonalizationContext(subscribers) {
 }
 
 /**
+ * Shared 0-recipient preflight — EVERY audience count that gates a send
+ * (manual-send route, proof approval, scheduler claim-validation,
+ * sendCampaign's own guard) must count through here, never through a bare
+ * subscriber-query count (codex #3472 r3). It runs the archived-link
+ * relink sweep FIRST: a service-line segment whose only recipients are
+ * re-booked households would otherwise count zero off stale archived links
+ * the send itself is about to repair — the preflight and the real audience
+ * query must observe the same links.
+ */
+async function countSegmentRecipients(segmentFilter) {
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+  const row = await buildSubscriberQuery(segmentFilter, await resolveSegmentCustomerIds(segmentFilter))
+    .count('* as c')
+    .first();
+  return Number(row?.c || 0);
+}
+
+/**
  * @param {object|null} segmentFilter
  * @param {string[]|null} [customerIds] pre-resolved set from
  *   resolveSegmentCustomerIds(); null = no service-line constraint.
@@ -534,8 +552,10 @@ async function sendCampaign(sendId, opts = {}) {
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
   if (!opts.force) {
-    const c = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
-    if (Number(c?.c || 0) === 0) {
+    // countSegmentRecipients re-runs the (idempotent) relink sweep — that
+    // redundancy with the sweep above is deliberate: this guard must stay
+    // correct even if the calls around it are ever reordered.
+    if (await countSegmentRecipients(send.segment_filter) === 0) {
       const err = new Error('segment matches 0 active subscribers');
       err.code = 'EMPTY_SEGMENT';
       throw err;
@@ -1246,9 +1266,7 @@ async function processScheduledSends() {
         const typedRow = requiresClaimValidation(row.newsletter_type)
           ? row
           : { ...row, newsletter_type: FLAGSHIP_TYPE_KEY };
-        const recipientCount = Number(
-          (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
-        );
+        const recipientCount = await countSegmentRecipients(row.segment_filter);
         const lockedPrices = await lockedPricesForSend(typedRow, db);
         const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
         if (errors.length > 0) {
@@ -1363,4 +1381,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
