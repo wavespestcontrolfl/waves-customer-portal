@@ -449,4 +449,41 @@ async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
   return { relinked: Number(res?.rowCount || 0) };
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+/**
+ * Sweep relink: repoint EVERY subscriber whose link is an archived customer
+ * at that email's live twin, when one exists. The archive/restore relinks
+ * repair links at archive/restore TIME — but a customer re-booked LATER gets
+ * a brand-new customers row and none of the ~12 creation entry points
+ * re-runs the picker, so the stale archived link survives until the next
+ * archive/restore touches that email (i.e. usually forever). Run before
+ * selecting a send audience: the sender's archived-link lift decides
+ * DELIVERY, but segment resolution, personalization, and touchpoint history
+ * all key on ns.customer_id and must read the live profile.
+ * Same picker scope (deleted_at IS NULL only) + ordering as
+ * liveTwinSubselect, keyed on the SUBSCRIBER's normalized email (the stored
+ * email is a signup-time snapshot — see relinkSubscribersFromArchivedCustomer).
+ * Set-based, idempotent, no-op when nothing is stale. Returns { relinked }.
+ */
+async function relinkArchivedLinkedSubscribers(conn = db) {
+  const res = await conn.raw(
+    `UPDATE newsletter_subscribers ns
+        SET customer_id = t.twin_id, updated_at = NOW()
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE c.deleted_at IS NULL
+            AND LOWER(TRIM(c.email)) IN (
+              SELECT LOWER(TRIM(x.email))
+                FROM newsletter_subscribers x
+                JOIN customers ax ON ax.id = x.customer_id
+               WHERE ax.deleted_at IS NOT NULL
+            )
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
+      WHERE LOWER(TRIM(ns.email)) = t.email_key
+        AND ns.customer_id IN (SELECT ac.id FROM customers ac WHERE ac.deleted_at IS NOT NULL)`,
+  );
+  return { relinked: Number(res?.rowCount || 0) };
+}
+
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

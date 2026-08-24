@@ -11,6 +11,7 @@ const db = require('../models/db');
 const {
   liveTwinSubselect, linkToCustomer, linkManyToCustomers,
   relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer,
+  relinkArchivedLinkedSubscribers,
 } = require('../services/newsletter-subscribers');
 
 const SCOPE = /AND c\.deleted_at IS NULL/;
@@ -180,5 +181,53 @@ describe('relinkSubscribersForEmail (archive AND restore) uses the same picker',
     expect(subs.update).not.toHaveBeenCalled();
     expect(await relinkSubscribersForEmail(trx, '')).toEqual({ winnerId: null, relinked: 0 });
     expect(trx.raw).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('relinkArchivedLinkedSubscribers (pre-send sweep) generalizes the archive-side relink', () => {
+  function fakeConn(rowCount) {
+    const conn = jest.fn();
+    conn.raw = jest.fn(async () => ({ rowCount }));
+    return conn;
+  }
+
+  test('every archived-linked subscriber with a live same-email twin moves — re-booked households relink before an audience is selected', async () => {
+    const conn = fakeConn(3);
+    expect(await relinkArchivedLinkedSubscribers(conn)).toEqual({ relinked: 3 });
+    const [sql] = conn.raw.mock.calls[0];
+    // Rows are found by their archived LINK (never the customer's current
+    // email), and each moves to the winner for ITS OWN normalized email —
+    // same shape as relinkSubscribersFromArchivedCustomer, without the
+    // single-customer anchor.
+    expect(sql).toMatch(/JOIN customers ax ON ax\.id = x\.customer_id/);
+    expect(sql).toMatch(/ax\.deleted_at IS NOT NULL/);
+    expect(sql).toMatch(/ns\.customer_id IN \(SELECT ac\.id FROM customers ac WHERE ac\.deleted_at IS NOT NULL\)/);
+    expect(sql).toMatch(/DISTINCT ON \(LOWER\(TRIM\(c\.email\)\)\)/);
+    expect(sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = t\.email_key/);
+    // Same picker scope + ordering; still link semantics, not lifecycle.
+    expect(sql).toMatch(/c\.deleted_at IS NULL/);
+    expect(sql).toMatch(/ORDER BY LOWER\(TRIM\(c\.email\)\), c\.is_primary_profile DESC NULLS LAST, c\.created_at ASC, c\.id ASC/);
+    NO_LIFECYCLE.forEach((re) => expect(sql).not.toMatch(re));
+  });
+
+  test('nothing stale → { relinked: 0 }', async () => {
+    expect(await relinkArchivedLinkedSubscribers(fakeConn(0))).toEqual({ relinked: 0 });
+  });
+
+  test('sendCampaign runs the sweep BEFORE seeding/refetching the audience, for fresh sends AND resumes (source contract)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'newsletter-sender.js'), 'utf8');
+    const relinkAt = src.indexOf('await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);');
+    expect(relinkAt).toBeGreaterThan(-1);
+    const sendCampaignAt = src.indexOf('async function sendCampaign(');
+    const seedAt = src.indexOf('if (!opts.existingDeliveriesOnly) {', sendCampaignAt);
+    expect(relinkAt).toBeGreaterThan(sendCampaignAt);
+    expect(relinkAt).toBeLessThan(seedAt);
+    // Unconditional within sendCampaign — resumes re-read customer_id at
+    // dispatch time, so the sweep must not be gated on fresh sends only.
+    const between = src.slice(sendCampaignAt, relinkAt);
+    expect(src.slice(relinkAt - 900, relinkAt)).not.toMatch(/if \(!opts\.existingDeliveriesOnly\) \{\s*$/);
+    expect(between).toContain('validateFlagshipEventSelection'); // after the content gates, before the audience
   });
 });

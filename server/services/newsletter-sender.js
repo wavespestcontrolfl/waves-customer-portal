@@ -33,6 +33,7 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
+const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -573,6 +574,21 @@ async function sendCampaign(sendId, opts = {}) {
   let skippedIneligible = 0;
   let skippedAtDispatch = 0;
   const useAb = !!send.subject_b;
+
+  // Repair stale archived links BEFORE selecting the audience (codex #3472
+  // P1): the archived-link lift in excludeArchivedCustomers decides
+  // DELIVERY for re-booked households, but segment resolution,
+  // personalization, and touchpoint history all key on ns.customer_id —
+  // left pointing at the archived profile, they would classify and record
+  // against the wrong row. Set-based, idempotent, same picker as the
+  // archive/restore relinks. Errors propagate (fail closed): sending with a
+  // stale link is exactly the bug this prevents, and the send needs this
+  // same DB anyway. Runs for fresh sends AND resumes — a resume's retryable
+  // recipients re-read customer_id at dispatch time too.
+  const { relinked: relinkedStaleLinks } = await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+  if (relinkedStaleLinks) {
+    logger.info(`[newsletter] send ${send.id}: relinked ${relinkedStaleLinks} subscriber(s) from archived profiles to their live twins`);
+  }
 
   // Pre-seed per-recipient deliveries with A/B assignment. The onConflict
   // is the idempotency keystone for new sends — existing rows survive the
