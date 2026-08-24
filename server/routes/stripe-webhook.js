@@ -4149,6 +4149,7 @@ async function handleRefundFailed(refund) {
   }
 
   let restoredInvoiceId = null;
+  let voidedReplacementsCommitted = [];
   await db.transaction(async (trx) => {
     if (feeUnwindLockKey) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feeUnwindLockKey]);
@@ -4261,24 +4262,15 @@ async function handleRefundFailed(refund) {
     // the very flip to 'refunded', and a stale pre-lock 'paid' would skip
     // the restore entirely.
     let invoiceRestored = null;
-    // Cutoff for the replacement scan: the ORIGINAL's updated_at as locked
-    // inside this trx while it is still 'refunded' — i.e. the moment
-    // charge.refunded terminalized it. The pre-trx linkedInvoice.updated_at
-    // is NOT usable (pre-push P0 round): this trx can wait on the payments
-    // lock while charge.refunded commits the flip, so the pre-lock value
-    // predates the refund and would let the scan void a legitimate older
-    // sibling invoice. Null cutoff = no scan (fail closed, alert only).
-    let replacementCutoff = null;
-    let originalTotalCents = null;
+    // Lock + re-read the ORIGINAL inside this trx (never the pre-trx
+    // linkedInvoice row: this trx can wait on the payments lock while
+    // charge.refunded commits the flip, so the pre-lock read is stale) —
+    // the visit-link backfill below keys off the locked row.
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const lockedOriginal = await trx('invoices')
         .where({ id: linkedInvoice.id })
         .forUpdate()
-        .first('id', 'status', 'updated_at', 'scheduled_service_id', 'total');
-      if (lockedOriginal?.status === 'refunded' && lockedOriginal.updated_at) {
-        replacementCutoff = lockedOriginal.updated_at;
-        originalTotalCents = Math.round((parseFloat(lockedOriginal.total) || 0) * 100);
-      }
+        .first('id', 'status', 'scheduled_service_id');
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
         // paid_at restored with the status (codex r11 P1, same reasoning
@@ -4306,38 +4298,55 @@ async function handleRefundFailed(refund) {
     // Replacement invoices (codex #3456 P1): a completion that landed
     // between charge.refunded (invoice → 'refunded') and this bounce no
     // longer reuses the refunded row (completionSuppressorInvoiceLookup)
-    // and minted a fresh invoice for the same visit. With the original
-    // restored above, that replacement is a second bill for money Stripe
-    // kept. Detection runs HERE, in the restore trx and under the shared
-    // mint lock, bounded by the in-trx cutoff, so the alert below names the
-    // exact rows. The void itself is deliberately NOT automated (pre-push
-    // P0 rounds): the repo has no durable completion-replacement marker on
-    // invoices (a same-visit, same-total row is not proof — one visit can
-    // carry unrelated add-on/adjustment invoices), and a safe void needs
-    // the canonical FOR UPDATE + PaymentIntent + payments-ledger + credit/
-    // statement restore chain in InvoiceService. Fail closed: the human
-    // voids through the invoice void action (ledgers restore) or refunds
-    // a collected one.
+    // and minted a fresh invoice stamped replaces_invoice_id = the
+    // original. With the original restored above, that replacement is a
+    // second bill for money Stripe kept — void it here, in the restore trx
+    // and under the mint lock, so no window exists where the visit carries
+    // a paid AND a collectible invoice. Identity is the durable marker
+    // ONLY (a same-visit row is not proof: one visit may carry unrelated
+    // add-on/adjustment invoices). The void is the canonical
+    // voidInvoiceInTransaction (status-conditional flip, PI re-check,
+    // payments-ledger re-check, deposit/account credit restore, statement
+    // rollup) inside a SAVEPOINT, so a refused void rolls back only itself
+    // and the restore still commits. Fail closed on money: paid/prepaid or
+    // payment_recorded_at = collected (a human refunds one); a live
+    // stripe_payment_intent_id needs the pre-lock Stripe triage the
+    // operator void does — a network call that does not belong in this
+    // transaction — so it is left for the operator too.
+    const voidedReplacements = [];
     const collectedReplacements = [];
-    const openReplacements = [];
-    if (restoredInvoiceId && replacementScopeSsId && replacementCutoff) {
+    const manualReplacements = [];
+    if (restoredInvoiceId) {
       const replacements = await trx('invoices')
-        .whereNot({ id: linkedInvoice.id })
-        .where((qb) => {
-          qb.orWhere({ scheduled_service_id: replacementScopeSsId });
-          if (linkedInvoice.service_record_id) qb.orWhere({ service_record_id: linkedInvoice.service_record_id });
-        })
-        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
-        // Only rows minted AFTER the refund flipped the original — an older
-        // sibling invoice on the same visit is not a replacement for this
-        // refund.
-        .where('created_at', '>', replacementCutoff)
-        .select('id', 'invoice_number', 'status', 'payment_recorded_at', 'stripe_payment_intent_id', 'total');
+        .where({ replaces_invoice_id: linkedInvoice.id })
+        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+        .forUpdate()
+        .select('*');
       for (const rep of replacements || []) {
-        const repLabel = `${rep.invoice_number || rep.id} ($${(parseFloat(rep.total) || 0).toFixed(2)}, ${rep.status})`;
-        const moneyApplied = ['paid', 'prepaid'].includes(rep.status) || !!rep.payment_recorded_at || !!rep.stripe_payment_intent_id;
-        (moneyApplied ? collectedReplacements : openReplacements).push(repLabel);
+        const repLabel = rep.invoice_number || rep.id;
+        if (rep.payment_recorded_at) {
+          collectedReplacements.push(repLabel);
+          continue;
+        }
+        if (rep.stripe_payment_intent_id) {
+          manualReplacements.push(`${repLabel} (open payment session ${rep.stripe_payment_intent_id})`);
+          continue;
+        }
+        try {
+          const voided = await trx.transaction((sp) => require('../services/invoice')
+            .voidInvoiceInTransaction(sp, rep, { triagedVoidPiId: null, createdBy: 'system:refund_bounce' }));
+          voidedReplacements.push(voided);
+        } catch (voidErr) {
+          manualReplacements.push(`${repLabel} (${voidErr.message})`);
+        }
       }
+      // Collected replacements are excluded from the FOR UPDATE scan above
+      // by status; name them from a plain read so the alert is complete.
+      const collected = await trx('invoices')
+        .where({ replaces_invoice_id: linkedInvoice.id })
+        .whereIn('status', ['paid', 'prepaid'])
+        .select('id', 'invoice_number');
+      for (const rep of collected || []) collectedReplacements.push(rep.invoice_number || rep.id);
     }
 
     // Operator signal: the reverts above are mechanical, but the remaining
@@ -4350,12 +4359,14 @@ async function handleRefundFailed(refund) {
     // specifics.
     let sideEffectHint = '';
     if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
-    if (openReplacements.length) sideEffectHint += ` Same-visit invoice${openReplacements.length > 1 ? 's' : ''} ${openReplacements.join(', ')} ${openReplacements.length > 1 ? 'were' : 'was'} minted AFTER the refund — likely the completion's re-bill of the restored invoice; if so, void it through the invoice void action (NOT auto-voided: a live invoice may be an unrelated add-on, and voiding must restore credit/statement ledgers).`;
-    if (collectedReplacements.length) sideEffectHint += ` Same-visit invoice${collectedReplacements.length > 1 ? 's' : ''} ${collectedReplacements.join(', ')} minted AFTER the refund ${collectedReplacements.length > 1 ? 'have' : 'has'} money collected or in flight — DOUBLE PAYMENT risk for this visit, refund one.`;
+    if (voidedReplacements.length) sideEffectHint += ` Replacement invoice${voidedReplacements.length > 1 ? 's' : ''} ${voidedReplacements.map((r) => r.invoice_number || r.id).join(', ')} (minted by the completion after the refund) ${voidedReplacements.length > 1 ? 'were' : 'was'} voided — superseded: refund bounced, original invoice restored.`;
+    if (manualReplacements.length) sideEffectHint += ` Replacement invoice${manualReplacements.length > 1 ? 's' : ''} ${manualReplacements.join('; ')} could NOT be auto-voided — void through the invoice void action once resolved.`;
+    if (collectedReplacements.length) sideEffectHint += ` Replacement invoice${collectedReplacements.length > 1 ? 's' : ''} ${collectedReplacements.join(', ')} for the same visit also collected — DOUBLE PAYMENT, needs a manual refund.`;
     else if (linkedInvoice) sideEffectHint += ` Check invoice ${linkedInvoice.invoice_number || linkedInvoice.id}: restored account credit may need to be re-applied/clawed back.`;
     if (cancelledPrepayTermId) sideEffectHint += ` Annual-prepay term ${cancelledPrepayTermId} was CANCELLED by the refund — the paid-sync is re-run, but refund-cancelled terms are not auto-revived (revival is dispute-marker-gated); if coverage stays cancelled, reactivate it manually.`;
     if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
     await insertBounceNotification(trx, `Payment row ${row.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`);
+    voidedReplacementsCommitted = voidedReplacements;
   });
 
   // Post-commit: re-run the annual-prepay paid sync for a restored invoice —
@@ -4368,6 +4379,17 @@ async function handleRefundFailed(refund) {
       await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredInvoiceId);
     } catch (err) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
+    }
+  }
+  // Post-commit side effects of a replacement void, matching voidInvoice:
+  // stop its payment follow-ups and re-sync any prepay coverage it carried.
+  for (const rep of voidedReplacementsCommitted) {
+    await require('../services/invoice-followups').stopSequence(rep.id, { reason: 'invoice_voided' })
+      .catch((e) => logger.error(`[invoice-followups] stopSequence failed for voided replacement ${rep.id}: ${e.message}`));
+    try {
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(rep);
+    } catch (e) {
+      logger.warn(`[stripe-webhook] annual prepay sync skipped after voiding replacement ${rep.invoice_number || rep.id}: ${e.message}`);
     }
   }
 

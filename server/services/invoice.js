@@ -855,6 +855,76 @@ async function loadAnnualPrepayTermForInvoice(invoiceId) {
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
+
+// The ONE transactional void: statement lock, status-conditional flip, PI
+// re-check under the row lock, payments-ledger re-check, deposit + account
+// credit restore, statement rollup. voidInvoice() (operator void) and the
+// refund-bounce replacement void (stripe-webhook handleRefundFailed) both
+// run THIS — the callers own the pre-lock Stripe PI triage (a network call
+// that must stay outside the transaction) and the post-commit side effects
+// (stopInvoiceFollowupSequence, annual-prepay sync). `triagedVoidPiId` is
+// the PaymentIntent id the caller verified/cancelled before locking (null =
+// the caller proved none was attached); a different id under the lock
+// means a customer started paying meanwhile, and the void is refused.
+// Throws = the caller's transaction (or SAVEPOINT) rolls the void back.
+async function voidInvoiceInTransaction(trx, current, { triagedVoidPiId = null, createdBy = "system:void" } = {}) {
+  const id = current.id;
+  assertInvoiceVoidable(current.status);
+  // Phase 2: lock + re-verify the parent statement is still OPEN inside the
+  // transaction (the pre-check above is a fast fail, but a concurrent close
+  // could finalize the statement between it and this write — that would let
+  // the void commit while rollupStatement no-ops against a frozen total).
+  if (current.payer_statement_id) {
+    const locked = await trx("payer_statements")
+      .where({ id: current.payer_statement_id })
+      .forUpdate()
+      .first("status");
+    if (locked && locked.status !== "open") {
+      throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
+    }
+  }
+  const [updated] = await trx("invoices")
+    .where({ id, status: current.status })
+    .update({ status: "void", updated_at: new Date() })
+    .returning("*");
+  if (!updated) {
+    throw new Error("Invoice status changed while voiding — re-check and retry");
+  }
+  // A customer could have opened /pay and minted a NEW PaymentIntent between
+  // the pre-lock triage above and this locked update. If the attached PI
+  // changed, refuse — rolling back so the operator retries and the new PI gets
+  // triaged, rather than returning credit while a fresh client secret can charge.
+  if ((updated.stripe_payment_intent_id || null) !== triagedVoidPiId) {
+    throw new Error("A new payment session started for this invoice — re-check and retry the void");
+  }
+  // Re-check the money guard under the row lock: a cash payment could have
+  // recorded between the pre-transaction check and this update (a webhook can
+  // set payment_recorded_at / insert a paid payment row without flipping the
+  // status the conditional update keys on). Rolling back beats voiding away
+  // freshly-collected money.
+  const voidAppliedPaymentLocked = await trx("payments")
+    .whereIn("status", ["paid", "processing"])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
+    .first("id");
+  if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
+    throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
+  }
+  const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+  await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
+  // Return any auto-applied/prepaid account credit to the customer's balance
+  // so voiding a credit-covered invoice never strands the credit.
+  const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
+  await restoreAccountCreditForVoidedInvoice({ invoice: updated, createdBy }, trx);
+  // Phase 2: drop a voided accrued invoice from its statement total in the
+  // SAME transaction (rollupStatement excludes status='void'), so the void
+  // and the statement total commit together. No-op once the statement is
+  // frozen.
+  if (updated.payer_statement_id) {
+    await require("./payer-statements").rollupStatement(updated.payer_statement_id, trx);
+  }
+  return updated;
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -895,6 +965,11 @@ const InvoiceService = {
       // (project send dry-run). Accruing those would double-bill (already paid) or
       // leave a phantom statement line (cancelled preview).
       skipAccrual = false,
+      // Provenance marker (codex #3456): the terminal (refunded/canceled)
+      // invoice this one re-bills. Stamped ONLY by the completion mint when
+      // its suppressor lookup skipped a terminal invoice for the visit; the
+      // refund-bounce handler keys its replacement void on it.
+      replacesInvoiceId = null,
     } = createArgs;
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -1437,6 +1512,7 @@ const InvoiceService = {
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
+          ...(replacesInvoiceId ? { replaces_invoice_id: replacesInvoiceId } : {}),
           ...serviceData,
         });
         break;
@@ -1670,6 +1746,8 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // See create(): completion-replacement provenance marker.
+      replacesInvoiceId = null,
     },
   ) {
     const sr = await db("service_records")
@@ -1754,6 +1832,7 @@ const InvoiceService = {
         discountIds: scheduledInvoice?.discountIds || undefined,
         taxRate,
         dueDate,
+        ...(replacesInvoiceId ? { replacesInvoiceId } : {}),
         trustedStoredDiscountSources: scheduledInvoice
           ? ["scheduled_service"]
           : [],
@@ -3988,59 +4067,10 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
-      // Phase 2: lock + re-verify the parent statement is still OPEN inside the
-      // transaction (the pre-check above is a fast fail, but a concurrent close
-      // could finalize the statement between it and this write — that would let
-      // the void commit while rollupStatement no-ops against a frozen total).
-      if (current.payer_statement_id) {
-        const locked = await trx("payer_statements")
-          .where({ id: current.payer_statement_id })
-          .forUpdate()
-          .first("status");
-        if (locked && locked.status !== "open") {
-          throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
-        }
-      }
-      const [updated] = await trx("invoices")
-        .where({ id, status: current.status })
-        .update({ status: "void", updated_at: new Date() })
-        .returning("*");
-      if (!updated) {
-        throw new Error("Invoice status changed while voiding — re-check and retry");
-      }
-      // A customer could have opened /pay and minted a NEW PaymentIntent between
-      // the pre-lock triage above and this locked update. If the attached PI
-      // changed, refuse — rolling back so the operator retries and the new PI gets
-      // triaged, rather than returning credit while a fresh client secret can charge.
-      if ((updated.stripe_payment_intent_id || null) !== triagedVoidPiId) {
-        throw new Error("A new payment session started for this invoice — re-check and retry the void");
-      }
-      // Re-check the money guard under the row lock: a cash payment could have
-      // recorded between the pre-transaction check and this update (a webhook can
-      // set payment_recorded_at / insert a paid payment row without flipping the
-      // status the conditional update keys on). Rolling back beats voiding away
-      // freshly-collected money.
-      const voidAppliedPaymentLocked = await trx("payments")
-        .whereIn("status", ["paid", "processing"])
-        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
-        .first("id");
-      if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
-        throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
-      }
-      const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
-      await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
-      // Return any auto-applied/prepaid account credit to the customer's balance
-      // so voiding a credit-covered invoice never strands the credit.
-      const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
-      await restoreAccountCreditForVoidedInvoice({ invoice: updated, createdBy: "system:void" }, trx);
-      // Phase 2: drop a voided accrued invoice from its statement total in the
-      // SAME transaction (rollupStatement excludes status='void'), so the void
-      // and the statement total commit together. No-op once the statement is
-      // frozen.
-      if (updated.payer_statement_id) {
-        await require("./payer-statements").rollupStatement(updated.payer_statement_id, trx);
-      }
-      invoice = updated;
+      invoice = await voidInvoiceInTransaction(trx, current, {
+        triagedVoidPiId,
+        createdBy: "system:void",
+      });
     });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
@@ -4843,5 +4873,6 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+module.exports.voidInvoiceInTransaction = voidInvoiceInTransaction;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;

@@ -14,18 +14,20 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { completionSuppressorInvoiceLookup } = require('../routes/admin-dispatch')._test;
+const { completionSuppressorInvoiceLookup, completionSupersededTerminalInvoiceLookup, COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES } = require('../routes/admin-dispatch')._test;
 const InvoiceService = require('../services/invoice');
 
 function makeKnex(rows) {
   const calls = [];
   let excluded = [];
+  let included = null;
   const chain = {
     where: jest.fn((...args) => { calls.push(['where', ...args]); return chain; }),
     whereNot: jest.fn((...args) => { calls.push(['whereNot', ...args]); return chain; }),
     whereNotIn: jest.fn((col, list) => { calls.push(['whereNotIn', col, list]); excluded = list; return chain; }),
+    whereIn: jest.fn((col, list) => { calls.push(['whereIn', col, list]); included = list; return chain; }),
     orderBy: jest.fn((...args) => { calls.push(['orderBy', ...args]); return chain; }),
-    first: jest.fn(async () => rows.find((r) => !excluded.includes(r.status)) || null),
+    first: jest.fn(async () => rows.find((r) => !excluded.includes(r.status) && (!included || included.includes(r.status))) || null),
   };
   const knex = jest.fn((table) => { calls.push(['table', table]); return chain; });
   knex.calls = calls;
@@ -58,6 +60,58 @@ describe('completionSuppressorInvoiceLookup', () => {
     expect(InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).toEqual(
       expect.arrayContaining(['void', 'refunded', 'canceled', 'cancelled'])
     );
+  });
+});
+
+describe('completionSupersededTerminalInvoiceLookup (replacement provenance, codex #3456)', () => {
+  test.each(['refunded', 'canceled', 'cancelled'])('returns the skipped %s invoice id so the mint can stamp replaces_invoice_id', async (status) => {
+    const knex = makeKnex([{ id: `inv-${status}`, status }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { scheduled_service_id: 'svc-1' })).resolves.toBe(`inv-${status}`);
+    expect(knex.calls).toContainEqual(['whereIn', 'status', COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES]);
+    expect(knex.calls).toContainEqual(['where', { scheduled_service_id: 'svc-1' }]);
+  });
+
+  test('a VOID invoice is never a superseded terminal (nothing restores a void — the mint is a plain new invoice)', async () => {
+    const knex = makeKnex([{ id: 'inv-void', status: 'void' }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { service_record_id: 'rec-1' })).resolves.toBeNull();
+    expect(COMPLETION_SUPERSEDABLE_TERMINAL_STATUSES).not.toContain('void');
+  });
+
+  test('a live invoice is not a terminal either (the suppressor would have reused it)', async () => {
+    const knex = makeKnex([{ id: 'inv-sent', status: 'sent' }]);
+    await expect(completionSupersededTerminalInvoiceLookup(knex, { service_record_id: 'rec-1' })).resolves.toBeNull();
+  });
+});
+
+describe('completion mint stamps replaces_invoice_id (source contract)', () => {
+  const dispatchSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+  const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('the superseded-terminal lookup runs only after the whole suppressor chain resolved null', () => {
+    const idx = dispatchSrc.indexOf('supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, { service_record_id: record.id })');
+    expect(idx).toBeGreaterThan(-1);
+    const before = dispatchSrc.slice(idx - 400, idx);
+    expect(before).toMatch(/findFirstApplicationInvoiceForEstimateService\(svc, db\);[\s\S]*if \(!existingCompletionInvoice\) \{\s*$/);
+    expect(dispatchSrc).toContain('|| await completionSupersededTerminalInvoiceLookup(db, { scheduled_service_id: svc.id });');
+  });
+
+  test('BOTH completion mint lanes carry the marker through the create options (no post-insert UPDATE)', () => {
+    const stamp = "...(supersededTerminalInvoiceId ? { replacesInvoiceId: supersededTerminalInvoiceId } : {}),";
+    expect(dispatchSrc.split(stamp).length - 1).toBe(2);
+    // typed-live serialized helper lane
+    const helperIdx = dispatchSrc.indexOf('buildCreateParams: () => ({');
+    expect(dispatchSrc.slice(helperIdx, helperIdx + 900)).toContain(stamp);
+    // createFromService lane
+    const optsIdx = dispatchSrc.indexOf('const mintOptions = {');
+    const optsEnd = dispatchSrc.indexOf('skipAccrual: isBackfillCompletion,', optsIdx);
+    expect(dispatchSrc.slice(optsIdx, optsEnd)).toContain(stamp);
+    expect(dispatchSrc).not.toMatch(/update\(\{\s*replaces_invoice_id/);
+  });
+
+  test('InvoiceService.create writes the column and createFromService threads the option', () => {
+    expect(invoiceSrc).toContain('replacesInvoiceId = null,');
+    expect(invoiceSrc).toContain('...(replacesInvoiceId ? { replaces_invoice_id: replacesInvoiceId } : {}),');
+    expect(invoiceSrc).toContain('...(replacesInvoiceId ? { replacesInvoiceId } : {}),');
   });
 });
 
