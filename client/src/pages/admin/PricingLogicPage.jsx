@@ -149,10 +149,21 @@ export function MarginCalculator() {
     borderRadius: 6,
     color: D.heading,
     fontSize: 14,
-    width: 90,
+    width: "100%",
+    maxWidth: "100%",
+    boxSizing: "border-box",
     textAlign: "right",
     fontFamily: ROBOTO,
     outline: "none",
+  };
+  // Label above its input (block stack) so narrow widths never collide.
+  const calcLabelStyle = {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    minWidth: 0,
+    fontSize: 12,
+    color: D.muted,
   };
 
   return (
@@ -171,6 +182,8 @@ export function MarginCalculator() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          flexWrap: "wrap",
+          gap: 8,
           marginBottom: 16,
         }}
       >
@@ -199,16 +212,23 @@ export function MarginCalculator() {
             fontWeight: 500,
             background: D.teal,
             color: D.white,
+            maxWidth: "100%",
+            whiteSpace: "normal",
           }}
         >
           {loading ? "Calculating..." : "Calculate"}
         </button>{" "}
       </div>{" "}
       <div
-        style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+          gap: 12,
+          marginBottom: 16,
+        }}
       >
         {" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
+        <label style={calcLabelStyle}>
           Lot SqFt
           <input
             type="number"
@@ -217,7 +237,7 @@ export function MarginCalculator() {
             style={inputStyle}
           />{" "}
         </label>{" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
+        <label style={calcLabelStyle}>
           Home SqFt
           <input
             type="number"
@@ -226,7 +246,7 @@ export function MarginCalculator() {
             style={inputStyle}
           />{" "}
         </label>{" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
+        <label style={calcLabelStyle}>
           Lawn SqFt
           <input
             type="number"
@@ -235,7 +255,7 @@ export function MarginCalculator() {
             style={inputStyle}
           />{" "}
         </label>{" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
+        <label style={calcLabelStyle}>
           Bed Area
           <input
             type="number"
@@ -244,12 +264,12 @@ export function MarginCalculator() {
             style={inputStyle}
           />{" "}
         </label>{" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
+        <label style={calcLabelStyle}>
           WaveGuard
           <select
             value={tier}
             onChange={(e) => setTier(e.target.value)}
-            style={{ ...inputStyle, width: 110, textAlign: "left" }}
+            style={{ ...inputStyle, textAlign: "left" }}
           >
             {" "}
             <option value="bronze">Bronze</option>{" "}

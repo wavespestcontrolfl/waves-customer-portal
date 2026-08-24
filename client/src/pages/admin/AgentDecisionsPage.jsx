@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, Save, ShieldAlert, UserRound, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useIsMobile from "../../hooks/useIsMobile";
 import { adminFetch } from "../../utils/admin-fetch";
 
 const D = {
@@ -118,6 +119,7 @@ function Panel({ icon: Icon, title, children }) {
 }
 
 export default function AgentDecisionsPage({ embedded = false } = {}) {
+  const isMobile = useIsMobile();
   const [status, setStatus] = useState("pending_review");
   const [data, setData] = useState({ decisions: [], metrics: null });
   const [selectedId, setSelectedId] = useState(null);
@@ -267,7 +269,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         />
       )}
 
-      <div style={{ padding: "0 24px 32px", display: "grid", gap: 16 }}>
+      <div style={{ padding: isMobile ? "0 0 32px" : "0 24px 32px", display: "grid", gap: 16, minWidth: 0 }}>
         {data.missingTable && (
           <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 12, display: "flex", gap: 8, alignItems: "center" }}>
             <ShieldAlert size={18} />
@@ -287,7 +289,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))", gap: 10 }}>
           {[
             ["Pending", metrics.pending || 0],
             ["Accepted", metrics.accepted || 0],
@@ -302,7 +304,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           ))}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1.2fr 1fr", gap: 12, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "1.1fr 1.2fr 1fr", gap: 12, alignItems: "start" }}>
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
             <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Reply Quality</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
@@ -406,7 +408,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </button>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 380px) minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(280px, 380px) minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
             {loading ? (
               <div style={{ padding: 18, color: D.muted }}>Loading decisions...</div>

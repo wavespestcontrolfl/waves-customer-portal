@@ -652,6 +652,11 @@ export default function ReferralsPageV2() {
               >
                 Top Promoters
               </div>
+              {promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
+                <div style={{ fontSize: 14, color: D.muted }}>
+                  No converted referrals yet
+                </div>
+              )}
               {promoters
                 .filter((p) => p.total_referrals_converted > 0)
                 .slice(0, 8)

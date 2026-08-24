@@ -357,6 +357,13 @@ function DashboardTab({ showToast }) {
     0,
   );
   const weekOT = Math.max(0, weekShiftMin - 2400);
+  // Only show techs with activity — hide inactive techs with 0 hours/jobs
+  const liveTechs = allTechs.filter((tech) => {
+    const active = activeShifts.find((s) => s.technician_id === tech.id);
+    const summary = todaySummaries.find((s) => s.technician_id === tech.id);
+    const hasWeekActivity = weekDailies.some((d) => d.technician_id === tech.id);
+    return active || summary || hasWeekActivity;
+  });
 
   return (
     <div>
@@ -381,21 +388,12 @@ function DashboardTab({ showToast }) {
           marginBottom: 24,
         }}
       >
-        {allTechs
-          .filter((tech) => {
-            // Only show techs with activity — hide inactive techs with 0 hours/jobs
-            const active = activeShifts.find(
-              (s) => s.technician_id === tech.id,
-            );
-            const summary = todaySummaries.find(
-              (s) => s.technician_id === tech.id,
-            );
-            const hasWeekActivity = weekDailies.some(
-              (d) => d.technician_id === tech.id,
-            );
-            return active || summary || hasWeekActivity;
-          })
-          .map((tech) => {
+        {liveTechs.length === 0 && (
+          <div style={{ fontSize: 14, color: D.muted, padding: "4px 0" }}>
+            No one clocked in
+          </div>
+        )}
+        {liveTechs.map((tech) => {
             const active = activeShifts.find(
               (s) => s.technician_id === tech.id,
             );

@@ -670,7 +670,7 @@ export default function EmailPage() {
               }}
             >
               {digest.total_received}
-            </span>
+            </span>{" "}
             received
           </div>
           {digest.leads_created > 0 && (
@@ -868,12 +868,16 @@ export default function EmailPage() {
         <>
           {/* Filter bar */}
           <div
+            className="tab-pill-scroll"
             style={{
               display: "flex",
               gap: 8,
-              marginBottom: 16,
+              marginBottom: 12,
               alignItems: "center",
-              flexWrap: "wrap",
+              flexWrap: "nowrap",
+              overflowX: "auto",
+              whiteSpace: "nowrap",
+              WebkitOverflowScrolling: "touch",
             }}
           >
             {filters.map((f) => (
@@ -890,6 +894,7 @@ export default function EmailPage() {
                   fontWeight: 500,
                   cursor: "pointer",
                   border: "none",
+                  flexShrink: 0,
                   background:
                     filter === f.key
                       ? (f.color || D.teal) + "22"
@@ -913,13 +918,15 @@ export default function EmailPage() {
                 fontWeight: 500,
                 cursor: "pointer",
                 border: "none",
+                flexShrink: 0,
                 background: showArchived ? D.amber + "22" : "transparent",
                 color: showArchived ? D.amber : D.muted,
               }}
             >
               Archived
             </button>{" "}
-            <div style={{ flex: 1 }} />{" "}
+          </div>
+          <div style={{ marginBottom: 16 }}>
             <input
               value={search}
               onChange={(e) => {
@@ -934,7 +941,9 @@ export default function EmailPage() {
                 borderRadius: 8,
                 color: D.text,
                 fontSize: 13,
-                width: 240,
+                width: "100%",
+                maxWidth: 360,
+                boxSizing: "border-box",
                 outline: "none",
               }}
             />{" "}

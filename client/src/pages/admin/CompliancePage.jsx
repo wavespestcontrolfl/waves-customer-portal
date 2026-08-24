@@ -9,10 +9,19 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminAuthToken, getAdminUser } from "../../lib/adminAuth";
+import { formatETDateOnly } from "../../lib/timezone";
 import CredentialsPage from "./CredentialsPage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API = "/api/admin/compliance-v2";
+// "manatee_county" → "Manatee County" (API jurisdictions are snake_case).
+const titleCaseCounty = (s) =>
+  String(s || "")
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+const fmtDay = (v) => formatETDateOnly(v) || v || "";
 const headers = (token) => ({
   Authorization: `Bearer ${token}`,
   "Content-Type": "application/json",
@@ -190,7 +199,7 @@ function DashboardTab({ token }) {
         </div>
         {nData?.blackoutPeriods?.map((b, i) => (
           <div key={i} style={{ color: D.text, fontSize: 13, marginBottom: 4 }}>
-            {b.jurisdiction?.replace("_", " ")}: {b.start} to {b.end}
+            {titleCaseCounty(b.jurisdiction)}: {fmtDay(b.start)} to {fmtDay(b.end)}
           </div>
         ))}
       </div>
@@ -220,7 +229,7 @@ function DashboardTab({ token }) {
           <tbody>
             {data.recentApplications?.map((a) => (
               <tr key={a.id}>
-                <td style={tdS}>{a.date}</td>
+                <td style={{ ...tdS, whiteSpace: "nowrap" }}>{fmtDay(a.date)}</td>
                 <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
                   {a.product || "—"}
                 </td>
@@ -656,7 +665,7 @@ function ProductLimitsTab({ token }) {
                   <td style={tdS}>{c.customerName}</td>
                   <td style={{ ...tdS, color: D.muted }}>{c.city}</td>
                   <td style={{ ...tdS, color: D.muted }}>
-                    {c.county?.replace("_", " ")}
+                    {titleCaseCounty(c.county)}
                   </td>
                   <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>
                   <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>

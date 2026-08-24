@@ -213,8 +213,12 @@ html.admin-app pre * {
 /* Horizontal-scroll affordance for wide admin tables. Overlay scrollbars on
    macOS/iOS give no hint that a table continues to the right (Inventory hides
    ~45% of its columns, Pricing Reality Check ~60%). Pure-CSS scroll shadows:
-   the local-attached white covers hide the shadow at the scroll ends. */
-html.admin-app .overflow-x-auto {
+   the local-attached white covers hide the shadow at the scroll ends.
+   Scoped to scrollers whose direct child is a <table> (ui/Table and the
+   hand-rolled wrappers) — NOT every overflow-x-auto: tab strips such as the
+   Content Review hero (AutonomousContentReviewPage) scroll horizontally on a
+   non-white background and must keep their own surface. */
+html.admin-app .overflow-x-auto:has(> table) {
   background:
     linear-gradient(to right, #fff 30%, rgba(255, 255, 255, 0)),
     linear-gradient(to right, rgba(255, 255, 255, 0), #fff 70%) 100% 0,
