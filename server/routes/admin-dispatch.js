@@ -100,6 +100,7 @@ const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|al
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
+  refundEventTime,
 } = require('../services/estimate-first-application-invoice');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
@@ -4269,11 +4270,14 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
       if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
     })
     .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
-    .orderBy('created_at', 'desc')
+    // Ordered by refund-EVENT time, the same clock reconcileLiveVsRefunded
+    // reads (refundEventTime = latest of created_at/updated_at; the
+    // webhook's refund flip stamps updated_at) — ordering by created_at
+    // alone could hand back a historically-refunded row while an
+    // older-created invoice carries the NEWEST refund (pg GREATEST ignores
+    // a NULL updated_at).
+    .orderByRaw('GREATEST(created_at, updated_at) DESC')
     .orderBy('id', 'desc')
-    // updated_at rides along as the refund-TRANSITION proxy: the webhook's
-    // refund flip stamps it (stripe-webhook.js), while created_at only says
-    // when the invoice was minted — see reconcileLiveVsRefunded.
     .first('id', 'invoice_number', 'status', 'created_at', 'updated_at')) || null;
 }
 
@@ -4318,16 +4322,14 @@ function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
   // The refund is an EVENT, not a row: invoice A minted first, invoice B
   // minted later, A refunded last — comparing created_at alone calls A
   // "history" and reuses B's pay link while a bounced refund could restore
-  // A to paid beside it (pre-push P1 round 4). The refund flip stamps
-  // updated_at (stripe-webhook refund handler), so the refunded row's
-  // LATEST of created_at/updated_at approximates the refund transition.
-  // updated_at also moves on unrelated edits — that error direction only
-  // makes suppression MORE likely (manual-billing alert instead of a
-  // possible double collection), which is this design's accepted posture.
-  const refundedAt = Math.max(
-    new Date(refunded.created_at || 0).getTime(),
-    new Date(refunded.updated_at || 0).getTime(),
-  );
+  // A to paid beside it (pre-push P1 round 4). refundEventTime (shared with
+  // the sibling first-application reconciliation and the terminal lookup's
+  // ordering) reads the refund transition: latest of created_at/updated_at
+  // (the webhook's refund flip stamps updated_at). updated_at also moves on
+  // unrelated edits — that error direction only makes suppression MORE
+  // likely (manual-billing alert instead of a possible double collection),
+  // which is this design's accepted posture.
+  const refundedAt = refundEventTime(refunded);
   // Ties go to the refunded row (pre-push P1): rows minted in one
   // transaction share created_at and JS Date truncates sub-millisecond
   // precision — never let a possibly-newer refund lose to a stale pay link.

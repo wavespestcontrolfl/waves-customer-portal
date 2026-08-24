@@ -74,6 +74,8 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
     let scopes = [];
     let included = null;
     const orders = [];
+    // Mirrors the SQL: GREATEST(created_at, updated_at) with NULLs ignored.
+    const eventTime = (r) => (r.updated_at && r.updated_at > r.created_at ? r.updated_at : r.created_at);
     const chain = {
       where: jest.fn((arg) => {
         if (typeof arg === 'function') {
@@ -84,11 +86,12 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
       }),
       whereIn: jest.fn((col, list) => { included = list; return chain; }),
       orderBy: jest.fn((col, dir) => { orders.push([col, dir]); return chain; }),
+      orderByRaw: jest.fn((expr) => { orders.push(['raw', expr]); return chain; }),
       first: jest.fn(async () => {
         const matches = rows.filter((r) => included.includes(r.status)
           && scopes.some((sc) => Object.entries(sc).every(([k, v]) => r[k] === v)));
-        matches.sort((a, b) => (b.created_at.localeCompare(a.created_at)) || String(b.id).localeCompare(String(a.id)));
-        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status, created_at: matches[0].created_at } : undefined;
+        matches.sort((a, b) => (eventTime(b).localeCompare(eventTime(a))) || String(b.id).localeCompare(String(a.id)));
+        return matches[0] ? { id: matches[0].id, invoice_number: matches[0].invoice_number, status: matches[0].status, created_at: matches[0].created_at, updated_at: matches[0].updated_at } : undefined;
       }),
     };
     const knex = jest.fn(() => chain);
@@ -124,8 +127,19 @@ describe('completionTerminalInvoiceLookup (refunded/canceled invoice on THIS vis
     const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
     expect(found.id).toBe('inv-new');
     expect(knex.scopes()).toEqual([{ service_record_id: 'rec-1' }, { scheduled_service_id: 'svc-1' }]);
-    expect(knex.orders).toEqual([['created_at', 'desc'], ['id', 'desc']]);
+    // Ordered by refund-EVENT time (the reconcile clock), not mint time.
+    expect(knex.orders).toEqual([['raw', 'GREATEST(created_at, updated_at) DESC'], ['id', 'desc']]);
     expect(knex).toHaveBeenCalledTimes(1);
+  });
+
+  test('multi-refund: an older-CREATED invoice refunded most recently wins the lookup (event time beats row age)', async () => {
+    const knex = makeOrderedKnex([
+      { id: 'inv-old-row-new-refund', status: 'refunded', service_record_id: 'rec-1', created_at: '2026-08-01', updated_at: '2026-08-28' },
+      { id: 'inv-new-row-old-refund', status: 'refunded', scheduled_service_id: 'svc-1', created_at: '2026-08-15', updated_at: '2026-08-16' },
+    ]);
+    const found = await completionTerminalInvoiceLookup(knex, { serviceRecordId: 'rec-1', scheduledServiceId: 'svc-1' });
+    expect(found.id).toBe('inv-old-row-new-refund');
+    expect(found.updated_at).toBe('2026-08-28');
   });
 
   test('a VOID invoice does not block (nothing restores a void); a live one is not terminal', async () => {
@@ -231,6 +245,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
       whereNotIn: jest.fn(() => chain),
       join: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
+      orderByRaw: jest.fn(() => chain),
       first: jest.fn(async () => undefined),
       select: jest.fn(async () => rows),
     };
@@ -441,9 +456,18 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toBe(liveOlder);
     // Only canceled matches → nothing suppresses, the mint proceeds.
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toBeNull();
-    // A refunded match keeps newest-row semantics (terminal path at the caller).
+    // A refunded match reconciles by refund-EVENT time like the own-visit path.
     const refundedNewer = { id: 'inv-refunded', status: 'refunded', created_at: '2026-08-25', ...matchFields };
     await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([refundedNewer, liveOlder]))).resolves.toBe(refundedNewer);
+    // An OLDER-created sibling refunded AFTER the live row (updated_at from
+    // the webhook's refund flip) is the newest financial event → terminal
+    // path, never masked by the newer live row's created_at.
+    const liveNewer = { id: 'inv-live-new', status: 'sent', token: 't2', created_at: '2026-08-20', ...matchFields };
+    const refundedOldRowNewEvent = { id: 'inv-ref-event', status: 'refunded', created_at: '2026-08-01', updated_at: '2026-08-30', ...matchFields };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedOldRowNewEvent]))).resolves.toBe(refundedOldRowNewEvent);
+    // …while a refund settled BEFORE the live mint stays history.
+    const refundedSettled = { id: 'inv-ref-hist', status: 'refunded', created_at: '2026-08-01', updated_at: '2026-08-10', ...matchFields };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([liveNewer, refundedSettled]))).resolves.toBe(liveNewer);
   });
 });
 
