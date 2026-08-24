@@ -4271,7 +4271,10 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
     .whereIn('status', COMPLETION_TERMINAL_INVOICE_STATUSES)
     .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
-    .first('id', 'invoice_number', 'status', 'created_at')) || null;
+    // updated_at rides along as the refund-TRANSITION proxy: the webhook's
+    // refund flip stamps it (stripe-webhook.js), while created_at only says
+    // when the invoice was minted — see reconcileLiveVsRefunded.
+    .first('id', 'invoice_number', 'status', 'created_at', 'updated_at')) || null;
 }
 
 // The newest LIVE (collectible-or-settled) invoice on THIS visit across
@@ -4312,7 +4315,19 @@ function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
   if (!existing) return { existing: null, terminal: refunded };
   const compareRow = newestLive || existing;
   const liveAt = new Date(compareRow.created_at || 0).getTime();
-  const refundedAt = new Date(refunded.created_at || 0).getTime();
+  // The refund is an EVENT, not a row: invoice A minted first, invoice B
+  // minted later, A refunded last — comparing created_at alone calls A
+  // "history" and reuses B's pay link while a bounced refund could restore
+  // A to paid beside it (pre-push P1 round 4). The refund flip stamps
+  // updated_at (stripe-webhook refund handler), so the refunded row's
+  // LATEST of created_at/updated_at approximates the refund transition.
+  // updated_at also moves on unrelated edits — that error direction only
+  // makes suppression MORE likely (manual-billing alert instead of a
+  // possible double collection), which is this design's accepted posture.
+  const refundedAt = Math.max(
+    new Date(refunded.created_at || 0).getTime(),
+    new Date(refunded.updated_at || 0).getTime(),
+  );
   // Ties go to the refunded row (pre-push P1): rows minted in one
   // transaction share created_at and JS Date truncates sub-millisecond
   // precision — never let a possibly-newer refund lose to a stale pay link.

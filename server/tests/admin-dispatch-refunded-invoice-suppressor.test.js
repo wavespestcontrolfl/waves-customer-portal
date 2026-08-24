@@ -321,6 +321,17 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(reconcileLiveVsRefunded(live, refundedNewer, newestLiveOlderThanRefund)).toEqual({ existing: null, terminal: refundedNewer });
     expect(reconcileLiveVsRefunded(live, null)).toEqual({ existing: live, terminal: null });
     expect(reconcileLiveVsRefunded(null, null)).toEqual({ existing: null, terminal: null });
+    // The refund is an EVENT: invoice A minted BEFORE the newest live row
+    // but refunded AFTER it (updated_at stamped by the webhook's refund
+    // flip) is the newest financial event and must win — created_at alone
+    // would call it history and reuse a pay link a bounced refund could
+    // turn into a double collection.
+    const refundedOldRowNewEvent = { id: 'inv-a', status: 'refunded', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-28T00:00:00Z' };
+    const newestLiveB = { id: 'inv-b', status: 'sent', token: 'tb', created_at: '2026-08-20T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedOldRowNewEvent, newestLiveB)).toEqual({ existing: null, terminal: refundedOldRowNewEvent });
+    // …while a refund transition OLDER than the replacement mint stays history.
+    const refundedSettledBeforeB = { id: 'inv-a2', status: 'refunded', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-10T00:00:00Z' };
+    expect(reconcileLiveVsRefunded(live, refundedSettledBeforeB, newestLiveB)).toEqual({ existing: newestLiveB, terminal: null });
   });
 
   test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
@@ -401,10 +412,38 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(src).toContain("let body = await renderTemplate('service_complete', {");
   });
 
-  test('the sibling first-application lookup keeps its pre-PR void-only filter (a refunded sibling still suppresses)', () => {
+  test('the sibling first-application lookup keeps its pre-PR void-only SQL filter (a refunded sibling still suppresses), but a canceled match cannot MASK an older live sibling', () => {
     const sibling = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-first-application-invoice.js'), 'utf8');
     expect(sibling).toContain(".whereNot('i.status', 'void')");
-    expect(sibling).not.toContain('CANCELLED_SERVICE_RESOLVED_STATUSES');
+    // The scan skips resolved non-refunded rows (canceled/cancelled) instead
+    // of returning them: the caller drops those from reuse, and ending the
+    // scan there would read as "no suppressor" while an older live
+    // first-application invoice stays collectible → double mint.
+    expect(sibling).toContain("CANCELLED_SERVICE_RESOLVED_STATUSES.filter((s) => s !== 'refunded')");
+  });
+
+  test('sibling lookup: a newer CANCELED match is skipped and the older LIVE first-application invoice is returned (no remint beside it); refunded still wins its position', async () => {
+    const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
+    const matchFields = {
+      title: 'WaveGuard Membership Setup + First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - $99 setup fee plus first application.',
+    };
+    const svc = { source_estimate_id: 'est-1', customer_id: 'customer-1', scheduled_date: '2026-06-08' };
+    function connOf(rows) {
+      const chain = {
+        join: jest.fn(() => chain), where: jest.fn(() => chain), whereNot: jest.fn(() => chain),
+        orderBy: jest.fn(() => chain), select: jest.fn(async () => rows),
+      };
+      return jest.fn(() => chain);
+    }
+    const canceledNewer = { id: 'inv-canceled', status: 'canceled', created_at: '2026-08-20', ...matchFields };
+    const liveOlder = { id: 'inv-live', status: 'sent', token: 't', created_at: '2026-08-01', ...matchFields };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer, liveOlder]))).resolves.toBe(liveOlder);
+    // Only canceled matches → nothing suppresses, the mint proceeds.
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([canceledNewer]))).resolves.toBeNull();
+    // A refunded match keeps newest-row semantics (terminal path at the caller).
+    const refundedNewer = { id: 'inv-refunded', status: 'refunded', created_at: '2026-08-25', ...matchFields };
+    await expect(findFirstApplicationInvoiceForEstimateService(svc, connOf([refundedNewer, liveOlder]))).resolves.toBe(refundedNewer);
   });
 });
 
