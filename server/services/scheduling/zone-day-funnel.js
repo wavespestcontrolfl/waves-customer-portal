@@ -96,14 +96,15 @@ function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
   return !!rowCity && zoneCities.has(rowCity);
 }
 
-// Statuses whose rows are NOT a planned truck-in-zone that day. Stricter
-// than filterCollidingSlots' cancelled-only exclusion on purpose: there,
-// over-inclusion only hides a window; here a 'rescheduled' phantom or
-// 'skipped' visit would invent a cluster day with no real stop and steer
-// new bookings onto it. completed/no_show/en_route/on_site stay included —
-// they only occur on today's date and mean the truck genuinely is (or was)
-// in the zone.
-const NON_STOP_STATUSES = ['cancelled', 'rescheduled', 'skipped'];
+// Statuses whose rows are NOT a planned truck-in-zone that day — the
+// repo's established route-stop classifier (stops-ahead.js): cancelled,
+// skipped, no_show, rescheduled. Stricter than filterCollidingSlots'
+// cancelled-only exclusion on purpose: there, over-inclusion only hides a
+// window; here a phantom row would invent a cluster day with no real stop
+// and steer new bookings onto it. completed/en_route/on_site stay
+// included — they only occur on today's date and mean the truck genuinely
+// is (or was) in the zone.
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
 // Distinct YYYY-MM-DD dates in [dateFrom, dateTo] with at least one live
 // scheduled service (assigned or unassigned — either means a truck is in the
@@ -113,7 +114,7 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', NON_STOP_STATUSES)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((q) => {
       q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     })

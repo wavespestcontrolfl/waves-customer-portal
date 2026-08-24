@@ -193,16 +193,20 @@ describe('isFunnelZone / zone matching', () => {
     }
   });
 
-  test('zoneStopDates excludes phantom statuses — rescheduled/skipped rows must not mint cluster days', async () => {
+  test('zoneStopDates excludes phantom statuses — the shared route-stop classifier, incl. no_show', async () => {
     const chain = scheduledServicesChain([zoneStopRow()]);
     const dbc = jest.fn(() => chain);
     const dates = await funnelInternals.zoneStopDates(dbc, VENICE_ZONE, '2027-05-18', '2027-05-22');
     expect(dates).toEqual(new Set(['2027-05-20']));
-    // The mock chain can't apply the filter, so pin the query arguments: a
-    // 'rescheduled' phantom or 'skipped' visit is not a truck in the zone.
+    // The mock chain can't apply the filter, so pin the query arguments to
+    // stops-ahead's NOT_A_ROUTE_STOP_STATUSES: a cancelled/rescheduled/
+    // skipped phantom or a no_show is not a truck in the zone, so a
+    // no-show-only day must not become a cluster day.
+    const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
+    expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(expect.arrayContaining(['cancelled', 'rescheduled', 'skipped', 'no_show']));
     expect(chain.whereNotIn).toHaveBeenCalledWith(
       'scheduled_services.status',
-      ['cancelled', 'rescheduled', 'skipped'],
+      NOT_A_ROUTE_STOP_STATUSES,
     );
   });
 
