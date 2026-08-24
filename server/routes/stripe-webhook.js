@@ -3697,11 +3697,11 @@ async function collectReplacementDescendants(conn, rootId) {
 // refuses under the lock if the row's PI no longer matches. Only marked,
 // still-open rows are triaged (nothing else is ever voided). Returns a
 // Map invoiceId → { triagedVoidPiId } | { skip: reason }. Fail closed: a
-// read failure returns an empty map (untriaged rows with a PI are never
-// voided blind — see neutralizeReplacementsForRestoredInvoice).
+// read or Stripe failure THROWS (the caller has not opened its transaction
+// yet, so nothing is restored and Stripe redelivers the event).
 async function triageReplacementsForInvoice(invoiceId) {
   const triage = new Map();
-  try {
+  {
     const openMarked = (await collectReplacementDescendants(db, invoiceId))
       .filter((rep) => !REPLACEMENT_OPEN_EXCLUDED.includes(rep.status));
     for (const rep of openMarked) {
@@ -3711,16 +3711,19 @@ async function triageReplacementsForInvoice(invoiceId) {
         continue;
       }
       const StripeService = require('../services/stripe');
+      // Transient Stripe failures THROW (pre-push P0): a skipped row would
+      // leave a live duplicate collectible after the original is restored
+      // and the event acknowledged. Throwing rolls nothing back here (pre-
+      // transaction) and makes Stripe redeliver the bounce; the manual path
+      // is reserved for CONFIRMED in-flight money.
       let pi;
       try {
         pi = await StripeService.retrievePaymentIntent(triagedPiId);
       } catch (e) {
-        triage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be verified (${e.message})` });
-        continue;
+        throw new Error(`[stripe-webhook] replacement ${rep.invoice_number || rep.id}: open payment session ${triagedPiId} could not be verified (${e.message}) — retrying the bounce`);
       }
       if (!pi) {
-        triage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be verified (payment service unavailable)` });
-        continue;
+        throw new Error(`[stripe-webhook] replacement ${rep.invoice_number || rep.id}: open payment session ${triagedPiId} could not be verified (payment service unavailable) — retrying the bounce`);
       }
       if (['processing', 'succeeded', 'requires_capture'].includes(pi.status)) {
         triage.set(String(rep.id), { skip: `payment in flight (${triagedPiId} is ${pi.status})` });
@@ -3730,8 +3733,7 @@ async function triageReplacementsForInvoice(invoiceId) {
         try {
           await StripeService.cancelPaymentIntent(triagedPiId, { cancellation_reason: 'abandoned' });
         } catch (e) {
-          triage.set(String(rep.id), { skip: `open payment session ${triagedPiId} could not be cancelled (${e.message})` });
-          continue;
+          throw new Error(`[stripe-webhook] replacement ${rep.invoice_number || rep.id}: open payment session ${triagedPiId} could not be cancelled (${e.message}) — retrying the bounce`);
         }
       }
       // Unbind combined siblings from the canceled PI (same as the operator
@@ -3739,8 +3741,6 @@ async function triageReplacementsForInvoice(invoiceId) {
       await require('../services/pay-combined').clearPaymentIntentStamps(db, triagedPiId, { keepInvoiceIds: [String(rep.id)] });
       triage.set(String(rep.id), { triagedVoidPiId: triagedPiId });
     }
-  } catch (err) {
-    logger.warn(`[stripe-webhook] replacement triage failed for invoice ${invoiceId}: ${err.message}`);
   }
   return triage;
 }
@@ -3907,9 +3907,8 @@ async function handleRefundFailed(refund) {
       // locks, taken below in ONE fixed order), and the pre-lock Stripe
       // triage of each invoice's marked replacements. Preflight: a replay
       // (refund id already fenced on this payment) mutates nothing, so no
-      // Stripe session is cancelled for it. Read failures fail closed
-      // (empty inputs → no lock, no void; the alert still names nothing
-      // voided).
+      // Stripe session is cancelled for it. Read failures fail closed by
+      // THROWING (see the catch) — never by proceeding without locks.
       const combinedPreFailed = !!refundId
         && Array.isArray(combinedRefundMeta.failed_refund_ids)
         && combinedRefundMeta.failed_refund_ids.includes(refundId);
@@ -3935,7 +3934,11 @@ async function handleRefundFailed(refund) {
           }
           combinedVisitIds.sort();
         } catch (preErr) {
-          logger.warn(`[stripe-webhook] combined refund bounce: replacement pre-read failed for ${rowChargeId || rowPiId}: ${preErr.message}`);
+          // Fail CLOSED (pre-push P0): without the visit ids the restore
+          // below would run without its mint locks. Nothing has been
+          // written yet — throw so Stripe redelivers the bounce.
+          logger.error(`[stripe-webhook] combined refund bounce: replacement pre-read failed for ${rowChargeId || rowPiId} — retrying: ${preErr.message}`);
+          throw preErr;
         }
       }
       let voidedCombinedReplacements = [];
@@ -4351,18 +4354,26 @@ async function handleRefundFailed(refund) {
       // service record still points at the scheduled visit, and the mint
       // lock keys on THAT id, so resolve it here or the restore/scan runs
       // unserialized against a completion mint.
-      replacementScopeSsId = linkedInvoice.scheduled_service_id || null;
-      if (!replacementScopeSsId && linkedInvoice.service_record_id) {
-        replacementScopeSsId = (await db('service_records')
-          .where({ id: linkedInvoice.service_record_id })
-          .first('scheduled_service_id'))?.scheduled_service_id || null;
-      }
       cancelledPrepayTermId = (await db('annual_prepay_terms')
         .where({ prepay_invoice_id: linkedInvoice.id, status: 'cancelled' })
         .first('id'))?.id || null;
     }
   } catch (err) {
     logger.warn(`[stripe-webhook] refund-failed invoice/term lookup failed: ${err.message}`);
+  }
+  // Visit scope for the mint lock + replacement cleanup — OUTSIDE the
+  // best-effort try above (pre-push P0): a swallowed service_records
+  // failure would leave replacementScopeSsId null and the restore would
+  // run unserialized against a completion mint. A lookup error propagates
+  // (Stripe redelivers); only a SUCCESSFUL lookup that finds no visit takes
+  // the orphan (no-lock) path.
+  if (linkedInvoice) {
+    replacementScopeSsId = linkedInvoice.scheduled_service_id || null;
+    if (!replacementScopeSsId && linkedInvoice.service_record_id) {
+      replacementScopeSsId = (await db('service_records')
+        .where({ id: linkedInvoice.service_record_id })
+        .first('scheduled_service_id'))?.scheduled_service_id || null;
+    }
   }
 
   // Fee-lane rows unwind UNDER the fee PI advisory lock (Codex #3153 r24

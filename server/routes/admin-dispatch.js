@@ -8557,12 +8557,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       if (!existingCompletionInvoice) {
         existingCompletionInvoice = await findFirstApplicationInvoiceForEstimateService(svc, db);
       }
-      if (!existingCompletionInvoice) {
-        supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {
-          serviceRecordId: record.id,
-          scheduledServiceId: svc.id,
-        });
-      }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
         if (!recapReviewOnly) {
@@ -8583,6 +8577,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
+    // Provenance lookup is NOT inside the non-blocking try above (pre-push
+    // P0, codex #3456): only the typed-required lane honours
+    // invoiceLookupFailed, so a swallowed failure here would let another
+    // lane mint an UNMARKED replacement that a later refund bounce could
+    // never find. A failure propagates — the completion request fails and
+    // is retried — rather than minting without provenance. Runs only when
+    // the whole suppressor chain resolved null (lookup succeeded, nothing
+    // reusable): a suppressor failure keeps existingCompletionInvoice null
+    // AND invoiceLookupFailed set, so this is skipped too.
+    if (!existingCompletionInvoice && !invoiceLookupFailed && !recapReviewOnly) {
+      supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {
+        serviceRecordId: record.id,
+        scheduledServiceId: svc.id,
+      });
+    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the

@@ -157,8 +157,17 @@ describe('completion mint stamps replaces_invoice_id (source contract)', () => {
   test('the superseded-terminal lookup runs only after the whole suppressor chain resolved null', () => {
     const idx = dispatchSrc.indexOf('supersededTerminalInvoiceId = await completionSupersededTerminalInvoiceLookup(db, {');
     expect(idx).toBeGreaterThan(-1);
-    const before = dispatchSrc.slice(idx - 400, idx);
-    expect(before).toMatch(/findFirstApplicationInvoiceForEstimateService\(svc, db\);[\s\S]*if \(!existingCompletionInvoice\) \{\s*$/);
+    const chainStart = dispatchSrc.indexOf('let existingCompletionInvoice = null;');
+    const chainEnd = dispatchSrc.indexOf('} catch (e) { invoiceLookupFailed = true; /* non-blocking */ }', chainStart);
+    // The whole suppressor chain (incl. the sibling lookup) runs and is
+    // swallowed non-blocking BEFORE the provenance lookup ...
+    expect(dispatchSrc.slice(chainStart, chainEnd)).toContain('findFirstApplicationInvoiceForEstimateService(svc, db);');
+    expect(chainEnd).toBeLessThan(idx);
+    // ... which sits OUTSIDE that try/catch (fail closed: a provenance
+    // failure propagates instead of minting an unmarked replacement) and
+    // is gated on the chain having succeeded with nothing reusable.
+    expect(dispatchSrc.slice(chainEnd, idx)).not.toMatch(/try \{/);
+    expect(dispatchSrc.slice(idx - 120, idx)).toContain('if (!existingCompletionInvoice && !invoiceLookupFailed && !recapReviewOnly) {');
   });
 
   test('BOTH completion mint lanes carry the marker through the create options (no post-insert UPDATE)', () => {
