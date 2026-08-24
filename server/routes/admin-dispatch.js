@@ -8892,11 +8892,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const terminalNow = await trx('invoices')
             .where({ id: terminalCompletionInvoice.id })
             .forUpdate()
-            .first('id', 'status');
-          if (terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)) {
-            logger.warn(`[dispatch] visit ${svc.id}: invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} left '${terminalCompletionInvoice.status}' (now '${terminalNow.status}') before the manual-billing alert — refund bounced back; alert skipped, visit is covered by the restored invoice`);
+            .first('id', 'invoice_number', 'status');
+          const terminalRestored = terminalNow && !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)
+            ? terminalNow : null;
+          if (terminalRestored && ['paid', 'prepaid'].includes(terminalRestored.status)) {
+            // Refund bounced and the invoice settled — the visit is covered;
+            // an alert saying "collect/bill" would instruct a duplicate.
+            logger.warn(`[dispatch] visit ${svc.id}: invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} left '${terminalCompletionInvoice.status}' (now '${terminalRestored.status}') before the manual-billing alert — visit is covered by the restored invoice; alert skipped`);
             return true;
           }
+          // Restored but NOT settled (codex r10): refund.failed can reopen a
+          // failed-ACH invoice to a COLLECTIBLE or in-flight status via
+          // nextInvoiceStatusAfterFailedPayment — money is still owed, so
+          // the durable alert STAYS, and the reinstated invoice itself is
+          // the row the office should act on (it beats any sibling row).
           // With a LIVE invoice beside the refunded one, the instruction
           // depends on that row's CURRENT status (re-read under lock — the
           // lookup snapshot may be stale, codex r9): a SETTLED row means the
@@ -8905,8 +8914,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // in-flight payment must be verified, not re-collected; only a
           // genuinely collectible row gets "collect THAT invoice" — never
           // "bill manually", which would invite a duplicate invoice.
-          let liveBesideNow = null;
-          if (completionLiveBesideInvoice) {
+          let liveBesideNow = terminalRestored || null;
+          if (!liveBesideNow && completionLiveBesideInvoice) {
             liveBesideNow = await trx('invoices')
               .where({ id: completionLiveBesideInvoice.id })
               .forUpdate()
@@ -8922,7 +8931,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const liveBesideNote = liveBesideNow
             ? (liveBesideNow.status === 'processing'
               ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
-              : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`)
+              : (terminalRestored
+                ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
+                : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
             : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
           const created = await require('../services/notification-service').notifyAdmin(
             'billing',

@@ -337,12 +337,18 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(recheckAt).toBeGreaterThan(block.indexOf('pg_advisory_xact_lock'));
     expect(recheckAt).toBeLessThan(notifyAt);
     expect(block).toContain('!COMPLETION_TERMINAL_INVOICE_STATUSES.includes(terminalNow.status)');
+    // ONLY a settled restoration skips the alert (codex r10) — a refund
+    // that bounces into a COLLECTIBLE/in-flight status keeps the durable
+    // alert and names the reinstated invoice as the row to act on.
+    expect(block).toContain("terminalRestored && ['paid', 'prepaid'].includes(terminalRestored.status)");
+    expect(block).toContain('let liveBesideNow = terminalRestored || null;');
+    expect(block).toContain("the invoice was reinstated to '");
     // Skip = success (nothing durable owed), not the fail-closed 503 leg.
     expect(block.slice(recheckAt, notifyAt)).toContain('return true;');
   });
 
   test('the manual-billing alert names the live-beside invoice instead of instructing a manual (duplicate) bill', () => {
-    const at = src.indexOf('let liveBesideNow = null;');
+    const at = src.indexOf('let liveBesideNow = terminalRestored || null;');
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, at + 2600);
     expect(block).toContain('collect THAT invoice; do NOT create another');
