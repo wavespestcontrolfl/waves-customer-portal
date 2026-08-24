@@ -255,3 +255,84 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });
   });
 });
+
+// Mid-month autopay lapse after the cron already collected the month's dues:
+// coverage must follow the COLLECTED dues, not the autopay flag, or every
+// remaining plan visit that month mints a full monthly_rate invoice on top
+// of the dues already paid (2-3x double-billing).
+describe('membershipDuesCoverVisit — dues already collected this month', () => {
+  const { monthlyDuesCollected } = require('../services/billing-lane');
+  const lapsedMember = {
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: false,
+    hasVisitPrice: false,
+    isRecurring: true,
+    waveguardTier: 'Bronze',
+    monthlyRate: 33.33,
+    billingMode: 'monthly_membership',
+  };
+
+  test('autopay inactive + dues collected for the month → covered (no invoice)', () => {
+    expect(membershipDuesCoverVisit({ ...lapsedMember, duesCollectedThisMonth: true })).toBe(true);
+    // A stamped per-visit price on a recurring plan row stays covered too.
+    expect(membershipDuesCoverVisit({ ...lapsedMember, duesCollectedThisMonth: true, hasVisitPrice: true })).toBe(true);
+  });
+
+  test('autopay inactive + no dues collected → NOT covered (existing behaviour)', () => {
+    expect(membershipDuesCoverVisit({ ...lapsedMember, duesCollectedThisMonth: false })).toBe(false);
+    expect(membershipDuesCoverVisit(lapsedMember)).toBe(false);
+  });
+
+  test('collected dues never widen coverage past the other exclusions', () => {
+    const paid = { ...lapsedMember, duesCollectedThisMonth: true };
+    expect(membershipDuesCoverVisit({ ...paid, visitIsPayerBilled: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, perApplicationBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, annualPrepayBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, billingMode: 'per_visit' })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, billingMode: 'one_time' })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, hasVisitPrice: true, isRecurring: false })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...paid, monthlyRate: 0 })).toBe(false);
+  });
+
+  // monthlyDuesCollected against a fake knex: the visit-month key drives the
+  // billed_month match, so the "dues payment present" scenario is exercised
+  // end to end through the same helper the completion route now calls.
+  function fakeDb(paymentsRows) {
+    return (table) => {
+      expect(table).toBe('payments');
+      const state = { customerId: null, monthKey: null };
+      const builder = {
+        where(arg) {
+          if (typeof arg === 'function') arg.call(builder);
+          else state.customerId = arg.customer_id;
+          return builder;
+        },
+        whereIn() { return builder; },
+        whereRaw(sql, bindings) {
+          if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
+          return builder;
+        },
+        orWhere(fn) { fn.call(builder); return builder; },
+        andWhereRaw() { return builder; },
+        andWhere() { return builder; },
+        async first() {
+          return paymentsRows.find((r) => r.customer_id === state.customerId
+            && ['paid', 'processing'].includes(r.status)
+            && r.metadata?.billed_month === state.monthKey) || undefined;
+        },
+      };
+      return builder;
+    };
+  }
+
+  test('dues payment stamped for the visit month → collected; none → not collected', async () => {
+    const rows = [{ id: 1, customer_id: 42, status: 'paid', metadata: { billed_month: '2026-08' } }];
+    const visitMonth = new Date('2026-08-19T12:00:00Z');
+    await expect(monthlyDuesCollected(fakeDb(rows), 42, visitMonth)).resolves.toBe(true);
+    await expect(monthlyDuesCollected(fakeDb([]), 42, visitMonth)).resolves.toBe(false);
+    // A different month's dues do not cover this visit.
+    await expect(monthlyDuesCollected(fakeDb(rows), 42, new Date('2026-09-03T12:00:00Z'))).resolves.toBe(false);
+  });
+});

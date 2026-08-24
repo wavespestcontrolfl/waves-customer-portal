@@ -30,7 +30,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -5334,11 +5334,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
+    // Dues already collected for the VISIT's month (ET, keyed on the row's
+    // scheduled_date; noon-Z anchor keeps the ET month stable) cover a
+    // membership visit even when autopay has since lapsed — the cron charged
+    // the dues on the 1st, so a mid-month card expiry / autopay pause must
+    // not mint a full monthly_rate invoice on every remaining plan visit.
+    // Only looked up where membership coverage is still reachable; a lookup
+    // error falls back to the autopay-only decision (never widens coverage).
+    let duesCollectedThisMonth = false;
+    if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
+      && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
+      try {
+        duesCollectedThisMonth = await monthlyDuesCollected(
+          db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+        );
+      } catch (e) {
+        logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
+      }
+    }
     const autopayCoversVisit = membershipDuesCoverVisit({
       visitIsPayerBilled,
       perApplicationBilling,
       annualPrepayBilling,
       customerAutopayActive,
+      duesCollectedThisMonth,
       hasVisitPrice,
       isRecurring: svc.is_recurring,
       waveguardTier: svc.cust_waveguard_tier,
