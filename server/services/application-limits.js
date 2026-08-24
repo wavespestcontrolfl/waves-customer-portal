@@ -73,7 +73,9 @@ class ApplicationLimitChecker {
         // Both operands are ET calendar days anchored at noon UTC so the
         // interval is whole days regardless of the proposed instant's clock.
         const lastApp = new Date(etCalendarDayOf(history[0].application_date) + 'T12:00:00Z');
-        const proposedDay = new Date(etDateString(proposedDate) + 'T12:00:00Z');
+        // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
+        // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
+        const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
         const daysSince = Math.floor((proposedDay - lastApp) / 86400000);
         const minDays = limit.limit_value;
         if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };

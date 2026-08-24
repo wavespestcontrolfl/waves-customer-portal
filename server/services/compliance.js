@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
+const applicationLimits = require('./application-limits');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -356,7 +357,9 @@ const ComplianceService = {
 
     const yearStart = `${etParts().year}-01-01`;
     const today = etDateString();
-    const customerCounty = inferCountyFromZipInternal(customer.zip);
+    // ZIP is nullable — fall back to the same city classification
+    // application-limits uses so the two surfaces never disagree.
+    const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
     // Get all applications this year for the customer
     const apps = await db('property_application_history')

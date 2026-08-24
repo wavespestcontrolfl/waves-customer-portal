@@ -157,6 +157,42 @@ describe('compliance service with pg date columns as JS Date objects', () => {
     }
   });
 
+  test('(b3) min_interval_days: proposedDate as a pg DATE object exactly minDays later is not a violation', async () => {
+    const product = { id: 'prod-h', name: 'Headway G', moa_group: null, category: 'fungicide' };
+    const limit = {
+      id: 'lim-int', product_id: 'prod-h', match_type: 'product', limit_type: 'min_interval_days',
+      limit_value: 14, severity: 'hard_block', description: 'Headway: 14-day minimum retreatment interval.',
+    };
+    db
+      .mockReturnValueOnce(chain({ first: product }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', city: 'Bradenton' } }))
+      .mockReturnValueOnce(chain({ rows: [{ id: 'pah-1', product_id: 'prod-h', application_date: pgDate('2026-07-05'), application_rate: '1' }] }))
+      .mockReturnValueOnce(chain({ rows: [limit] }));
+
+    // admin-dispatch passes svc.scheduled_date straight through — a UTC-midnight Date.
+    const result = await applicationLimits.checkLimits('cust-1', 'prod-h', pgDate('2026-07-19'));
+
+    expect(result.allowed).toBe(true);
+    expect(result.blocks).toHaveLength(0);
+    expect(result.warnings[0]).toMatchObject({ type: 'min_interval_days', current: 14, max: 14 });
+  });
+
+  test('getProductLimits: null zip falls back to city classification (Sarasota → blackout_active in July)', async () => {
+    jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
+    try {
+      db
+        .mockReturnValueOnce(chain({ first: { id: 'cust-3', first_name: 'E', last_name: 'F', zip: null, city: 'Sarasota' } }))
+        .mockReturnValueOnce(chain({ rows: [] }))
+        .mockReturnValueOnce(chain({ rows: [blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30'))] }));
+
+      const out = await ComplianceService.getProductLimits('cust-3');
+
+      expect(out.limits[0]).toMatchObject({ limitType: 'seasonal_blackout', status: 'blackout_active' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('getProductLimits: another county\'s blackout stays ok for a Charlotte customer', async () => {
     jest.useFakeTimers({ now: new Date('2026-07-15T16:00:00Z') });
     try {
