@@ -1,7 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
+const applicationLimits = require('./application-limits');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -356,6 +357,9 @@ const ComplianceService = {
 
     const yearStart = `${etParts().year}-01-01`;
     const today = etDateString();
+    // ZIP is nullable — fall back to the same city classification
+    // application-limits uses so the two surfaces never disagree.
+    const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
     // Get all applications this year for the customer
     const apps = await db('property_application_history')
@@ -387,17 +391,24 @@ const ComplianceService = {
       if (limit.limit_type === 'annual_max_apps') {
         if (current >= limit.limit_value) status = 'exceeded';
         else if (current >= limit.limit_value - 1) status = 'warning';
-      } else if (limit.limit_type === 'seasonal_blackout') {
+      } else if (limit.limit_type === 'seasonal_blackout' && limit.season_start && limit.season_end) {
+        // Incomplete windows (nullable endpoints) are skipped — same as
+        // application-limits.js seasonal_blackout.
         // Compare ET calendar MM-DD, not UTC Date objects — blackout windows
         // are legal dates, not absolute timestamps.
-        const mmdd = (s) => String(s).slice(5, 10);
+        // pg `date` columns deserialize as JS Date objects — normalize first.
+        const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
         const startMMDD = mmdd(limit.season_start);
         const endMMDD = mmdd(limit.season_end);
         const todayMMDD = today.slice(5, 10);
         const inRange = startMMDD <= endMMDD
           ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
           : todayMMDD >= startMMDD || todayMMDD <= endMMDD; // window wraps year boundary
-        if (inRange) status = 'blackout_active';
+        // County ordinances only apply to that county's customers (mirrors
+        // application-limits' jurisdiction scoping: county, 'all', or unset).
+        const j = limit.jurisdiction;
+        const applies = !j || j === 'all' || j === customerCounty;
+        if (inRange && applies) status = 'blackout_active';
       }
 
       results.push({
@@ -432,9 +443,11 @@ const ComplianceService = {
     const blackouts = await db('product_limits')
       .where({ match_type: 'nitrogen', limit_type: 'seasonal_blackout' });
 
-    const mmdd = (s) => String(s).slice(5, 10);
+    // pg `date` columns deserialize as JS Date objects — normalize first.
+    const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
     const todayMMDD = today.slice(5, 10);
     const activeBlackouts = blackouts.filter(b => {
+      if (!b.season_start || !b.season_end) return false; // incomplete window
       const startMMDD = mmdd(b.season_start);
       const endMMDD = mmdd(b.season_end);
       return startMMDD <= endMMDD
@@ -453,7 +466,8 @@ const ComplianceService = {
     const statuses = [];
 
     for (const c of lawnCustomers) {
-      const county = inferCountyFromZipInternal(c.zip);
+      // Same city fallback as getProductLimits — ZIP is nullable.
+      const county = inferCountyFromZipInternal(c.zip) || applicationLimits.getCounty(c);
       const isBlackout = activeBlackouts.some(b => b.jurisdiction === county);
 
       const nApps = await db('property_application_history')
@@ -483,8 +497,8 @@ const ComplianceService = {
     return {
       blackoutPeriods: blackouts.map(b => ({
         jurisdiction: b.jurisdiction,
-        start: b.season_start,
-        end: b.season_end,
+        start: b.season_start ? etCalendarDayOf(b.season_start) : null,
+        end: b.season_end ? etCalendarDayOf(b.season_end) : null,
         description: b.description,
       })),
       customers: statuses,
