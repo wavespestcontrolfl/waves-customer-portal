@@ -193,6 +193,21 @@ describe('findConfidentClickMatch', () => {
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
+  test('refuses when the only OTHER clicker in the window is an already-linked customer (raw-count ambiguity)', async () => {
+    // The suggestion list hides the linked clicker, leaving one visible
+    // candidate — but a linked customer can still review another location's
+    // profile, so the raw window holds two competing clicks. Never confident.
+    const conn = makeConn({
+      clickRows: [
+        clickRow(),
+        clickRow({ customer_id: 'cust-linked', redirected_at: '2026-08-07T17:00:00.000Z' }),
+      ],
+      linkedRows: [{ customer_id: 'cust-linked' }],
+    });
+    expect((await findLikelyReviewers(REVIEW, { conn })).map(r => r.customerId)).toEqual(['cust-1']);
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
   test('refuses a location-unstamped sole clicker (null is not a match)', async () => {
     const conn = makeConn({ clickRows: [clickRow({ google_location: null })] });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();

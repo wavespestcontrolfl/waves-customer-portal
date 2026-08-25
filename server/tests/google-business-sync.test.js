@@ -1422,7 +1422,7 @@ describe('Google Business review sync', () => {
     spy.mockRestore();
   });
 
-  test('a surname-initial display name ("Michael F.") matches the one customer with that initial', async () => {
+  test('a surname-initial display name ("Michael F.") matches the one recently-asked customer with that initial', async () => {
     db.__state.rows.customers.push({
       id: 'cust-mf',
       first_name: 'Michael',
@@ -1430,6 +1430,11 @@ describe('Google Business review sync', () => {
       has_left_google_review: false,
       review_marked_at: null,
     });
+    // Corroboration: the initial expansion only links a customer we recently
+    // asked for a review.
+    db.__state.rows.review_requests = [{
+      id: 'ask-1', customer_id: 'cust-mf', created_at: new Date().toISOString(),
+    }];
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('maps.googleapis.com')) {
         return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
@@ -1448,6 +1453,34 @@ describe('Google Business review sync', () => {
     const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-initial');
     expect(review.customer_id).toBe('cust-mf');
     expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
+  });
+
+  test('a surname-initial match with NO recent review ask stays unlinked (weak identity — manual queue)', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-mf',
+      first_name: 'Michael',
+      last_name: 'Fossier',
+      has_left_google_review: false,
+      review_marked_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-initial-noask',
+        reviewer: { displayName: 'Michael F.' },
+        starRating: 'FIVE',
+        comment: 'Great service',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-initial-noask');
+    expect(review.customer_id).toBeNull();
+    expect(db.__state.rows.customers[0].has_left_google_review).toBe(false);
   });
 
   test('a surname initial matching TWO customers stays unlinked (ambiguous — manual queue)', async () => {

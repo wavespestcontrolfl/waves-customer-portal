@@ -59,7 +59,7 @@ function describeClickOffset(offsetMs) {
  * }>>} nearest-click-first; [] on missing/invalid review timestamp or any
  * query error (suggestions are best-effort and must never break a caller).
  */
-async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } = {}) {
+async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _meta = null } = {}) {
   const reviewAtRaw = review?.review_created_at;
   const reviewAt = reviewAtRaw ? new Date(reviewAtRaw) : null;
   if (!reviewAt || Number.isNaN(reviewAt.getTime())) return [];
@@ -130,7 +130,6 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
     // mocked (test harnesses ignore where-clauses — #3235 r6 lesson).
     const byCustomer = new Map();
     for (const row of clicks) {
-      if (linked.has(row.customer_id)) continue;
       if (row.google_review_clicked !== true) continue;
       if (reviewLocationId && row.google_location && row.google_location !== reviewLocationId) continue;
       const clickedAt = new Date(row.redirected_at);
@@ -142,7 +141,17 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
       }
     }
 
+    // Distinct clickers BEFORE the linked-customer exclusion below. The
+    // confident auto-link's sole-clicker check must see every competing
+    // click in the window: a customer the suggestion list hides as
+    // already-attributed can still review a DIFFERENT location's profile,
+    // so their click is competing evidence, not noise (pre-push P1).
+    if (_meta) _meta.distinctClickers = byCustomer.size;
+
+    // A customer already linked to a synced review is attributed — excluded
+    // from the SUGGESTION list so it only holds open questions (codex #3264).
     return [...byCustomer.values()]
+      .filter(({ row }) => !linked.has(row.customer_id))
       .sort((a, b) => Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
       .slice(0, Math.max(1, limit))
       .map(({ row, clickedAt, clickOffsetMs }) => ({
@@ -202,8 +211,13 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
   try {
     // SCAN_LIMIT bounds the underlying query; a limit above it returns every
     // deduped candidate, which the sole-candidate check needs.
-    const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT });
+    const meta = {};
+    const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT, _meta: meta });
     if (candidates.length !== 1) return null;
+    // Sole clicker must hold over the RAW window — including clickers the
+    // suggestion list excludes as already-attributed (their click may aim at
+    // a different location's profile). Anything else is ambiguity.
+    if (meta.distinctClickers !== 1) return null;
     const only = candidates[0];
     if (only.locationMatch !== true) return null;
     if (!only.clickedBeforeReview) return null;

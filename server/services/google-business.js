@@ -450,7 +450,21 @@ class GoogleBusinessService {
         .whereRaw("TRIM(COALESCE(last_name, '')) != ''")
         .select('id')
         .limit(2);
-      if (initialMatches.length === 1) return initialMatches[0].id;
+      if (initialMatches.length === 1) {
+        // Corroboration (pre-push P1): an initial is weak identity — any
+        // "Michael F." on Google could be a non-customer stranger, and Tiers
+        // 1-2 at least demand the full surname. Only accept the expansion
+        // when we actually ASKED this customer for a review recently, so the
+        // truncated display name lands on someone with a live reason to have
+        // reviewed. No ask on file → manual queue with the suggestion list.
+        const asked = await db('review_requests')
+          .where({ customer_id: initialMatches[0].id })
+          .where('created_at', '>=', new Date(Date.now() - 180 * 24 * 3600 * 1000))
+          .first('id');
+        if (asked) return initialMatches[0].id;
+        logger.info('[gbp] Surname-initial match lacks a recent review ask — routing to manual match, no auto-mark');
+        return null;
+      }
       if (initialMatches.length > 1) {
         logger.info('[gbp] Reviewer surname initial matched multiple active customers — routing to manual match, no auto-mark');
       }
@@ -652,7 +666,11 @@ class GoogleBusinessService {
         .whereNot('google_review_id', 'like', 'places_stats_%')
         .where('review_created_at', '>=', new Date(Date.now() - 90 * 24 * 3600 * 1000))
         .orderBy('review_created_at', 'desc')
-        .limit(25)
+        // Runaway guard, not a work queue: 90d of real review volume is a
+        // few dozen rows, so every unlinked review in the window is examined
+        // each run — the cap only bites on pathological data (pre-push P1:
+        // a tight newest-first cap would permanently starve older rows).
+        .limit(200)
         .select('google_review_id', 'reviewer_name', 'location_id', 'review_created_at', 'star_rating');
       for (const row of rows) {
         await this._attemptClickAutoLink(row);
