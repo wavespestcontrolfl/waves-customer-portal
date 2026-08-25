@@ -30,10 +30,12 @@ function formatLeadAddress(lead) {
   return parts.join(", ");
 }
 
-// Extra properties the visitor asked to have covered (captured by the quote
-// funnel into extracted_data.additional_properties; capture-only, each one is
-// follow-up-quoted manually). extracted_data arrives as jsonb or a string
-// depending on the endpoint, so parse defensively.
+// Extra properties the visitor asked to have covered — the call-extraction
+// pipeline's extracted_data.additional_properties shape (address_line1/
+// address_line2/city/state/zip), which the quote-funnel web capture also
+// writes. Capture-only; each one is follow-up-quoted manually.
+// extracted_data arrives as jsonb or a string depending on the endpoint, so
+// parse defensively.
 function leadAdditionalProperties(lead) {
   let data = lead?.extracted_data;
   if (typeof data === "string") {
@@ -46,7 +48,18 @@ function leadAdditionalProperties(lead) {
   const list = data?.additional_properties;
   if (!Array.isArray(list)) return [];
   return list
-    .map((p) => (typeof p === "string" ? p : p?.formatted))
+    .map((p) => {
+      if (typeof p === "string") return p.trim();
+      if (!p || !String(p.address_line1 || "").trim()) return "";
+      const region = [p.state, p.zip]
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .join(" ");
+      return [p.address_line1, p.address_line2, p.city, region]
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    })
     .filter(Boolean);
 }
 

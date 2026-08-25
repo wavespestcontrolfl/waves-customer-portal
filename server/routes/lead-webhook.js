@@ -23,7 +23,7 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { normalizeLeadAddress, normalizeAdditionalProperties } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, normalizeAdditionalProperties, formatAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
@@ -207,7 +207,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // extra-property ask can never be silently swallowed again (the ask used
     // to arrive as free text in the unit box and vanish).
     const additionalPropertiesNote = additionalProperties.length
-      ? `Visitor also asked to cover ${additionalProperties.length > 1 ? 'additional properties' : 'an additional property'}: ${additionalProperties.map(p => p.formatted).join('; ')}`
+      ? `Visitor also asked to cover ${additionalProperties.length > 1 ? 'additional properties' : 'an additional property'}: ${additionalProperties.map(p => formatAddress({ line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip })).join('; ')}`
       : '';
 
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail

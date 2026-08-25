@@ -603,19 +603,26 @@ function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
       });
     }
     // A street line needs at least a digit and a letter to be a follow-up-able
-    // address — bare prose ("the one next door") is dropped, not stored.
-    if (!normalized?.fullAddress || !/\d/.test(normalized.line1) || !/[A-Za-z]/.test(normalized.line1)) continue;
+    // address — bare prose ("the one next door") is dropped, not stored. A
+    // unit conflict (inline unit disagrees with the dedicated field) is
+    // ambiguous — fail closed on the entry, same rule as the primary-address
+    // routes, rather than store a wrong door.
+    if (!normalized?.fullAddress || normalized.unitConflict || !/\d/.test(normalized.line1) || !/[A-Za-z]/.test(normalized.line1)) continue;
     const key = normalized.fullAddress.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
+    // Stored in the call-extraction pipeline's established
+    // additional_properties entry shape (address_line1/address_line2/city/
+    // state/zip — see call-recording-processor.js) so existing consumers like
+    // the estimate builder's additional-properties panel pick web entries up
+    // unchanged; place_id is additive and ignored by them.
     out.push({
-      formatted: normalized.fullAddress,
-      line1: normalized.line1,
-      line2: normalized.line2 || null,
+      address_line1: normalized.line1,
+      address_line2: normalized.line2 || null,
       city: normalized.city || null,
       state: normalized.state || null,
       zip: normalized.zip || null,
-      placeId: normalized.placeId || null,
+      place_id: normalized.placeId || null,
     });
     if (out.length >= MAX_ADDITIONAL_PROPERTIES) break;
   }

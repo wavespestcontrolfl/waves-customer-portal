@@ -507,15 +507,15 @@ describe('normalizeAdditionalProperties', () => {
       ],
     });
     expect(out).toHaveLength(2);
-    expect(out[0]).toMatchObject({
-      formatted: '4102 60th Ter E, Palmetto, FL 34221',
-      line1: '4102 60th Ter E',
+    expect(out[0]).toEqual({
+      address_line1: '4102 60th Ter E',
+      address_line2: null,
       city: 'Palmetto',
       state: 'FL',
       zip: '34221',
-      placeId: 'abc123',
+      place_id: 'abc123',
     });
-    expect(out[1]).toMatchObject({ line1: '5308 10th St', city: 'Bradenton', zip: '34203' });
+    expect(out[1]).toMatchObject({ address_line1: '5308 10th St', city: 'Bradenton', zip: '34203' });
   });
 
   test('folds a singular second_property into the list', () => {
@@ -523,7 +523,7 @@ describe('normalizeAdditionalProperties', () => {
       second_property: '4102 60th Terrace E, Palmetto, FL 34221',
     });
     expect(out).toHaveLength(1);
-    expect(out[0].formatted).toBe('4102 60th Ter E, Palmetto, FL 34221');
+    expect(out[0].address_line1).toBe('4102 60th Ter E');
   });
 
   test('drops entries that duplicate the primary address or each other', () => {
@@ -535,7 +535,7 @@ describe('normalizeAdditionalProperties', () => {
       ],
     }, '4100 60th Ter E, Palmetto, FL 34221');
     expect(out).toHaveLength(1);
-    expect(out[0].formatted).toBe('4102 60th Ter E, Palmetto, FL 34221');
+    expect(out[0].address_line1).toBe('4102 60th Ter E');
   });
 
   test('drops prose that is not an addressable street line', () => {
@@ -572,9 +572,18 @@ describe('normalizeAdditionalProperties input bounds', () => {
       additional_properties: [{ line1: huge, city: 'B'.repeat(5000), state: 'FL', zip: '34221', place_id: 'C'.repeat(5000) }],
     });
     expect(out).toHaveLength(1);
-    expect(out[0].line1.length).toBeLessThanOrEqual(300);
+    expect(out[0].address_line1.length).toBeLessThanOrEqual(300);
     expect(out[0].city.length).toBeLessThanOrEqual(300);
-    expect(out[0].placeId.length).toBeLessThanOrEqual(300);
-    expect(out[0].formatted.length).toBeLessThanOrEqual(1000);
+    expect(out[0].place_id.length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe('normalizeAdditionalProperties unit conflicts', () => {
+  const { normalizeAdditionalProperties } = require('../utils/address-normalizer');
+
+  test('fails closed on an entry whose inline and dedicated units disagree', () => {
+    expect(normalizeAdditionalProperties({
+      additional_properties: [{ line1: '123 Main St Apt 4', line2: 'Unit 5', city: 'Sarasota', state: 'FL', zip: '34236' }],
+    })).toEqual([]);
   });
 });
