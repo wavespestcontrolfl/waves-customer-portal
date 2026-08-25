@@ -98,7 +98,10 @@ function normalizeHeadTypes(value) {
 
 /**
  * @param {object} input
- * @param {number|string|null} input.runMinutes   minutes each zone runs per watering day
+ * @param {number|string|null} input.runMinutes   TOTAL minutes each zone runs
+ *   on a watering day — a cycle-and-soak controller's cycles are summed by
+ *   the customer (the portal field says so); the formula counts the figure
+ *   once per watering day
  * @param {Array|string|null} input.wateringDays  ['Mon','Wed',...] (jsonb array or JSON string)
  * @param {Array|string|null} input.systemType    ['spray'|'rotor'|'drip', ...]
  * @returns {{

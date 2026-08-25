@@ -2012,7 +2012,11 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
       .first();
-    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}`;
+    // updated_at rides the stamp for the same reason the assessment stamp
+    // carries it: an A→B→A edit sequence during a render would otherwise
+    // restore the original stamp while the render read B (TOCTOU) — the
+    // timestamp makes every edit sequence change the signature.
+    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
   }

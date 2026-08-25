@@ -7521,7 +7521,7 @@ function PropertyTab({ customer }) {
             updateField('irrigationRunMinutes', e.target.value === '' || !Number.isFinite(n) || n <= 0 ? null : Math.min(MAX_RUN_MINUTES, n));
           }}
           placeholder="20"
-          aria-label="Minutes each zone runs per watering day"
+          aria-label="Total minutes each zone runs on a watering day, adding up multiple cycles"
           className="waves-focus-ring"
           style={{ ...inputStyle, paddingRight: 52 }}
           onFocus={focusBorder}
@@ -7554,7 +7554,7 @@ function PropertyTab({ customer }) {
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
-        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. Enter Weekly Inches if you know your system's actual output.`;
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
     }
     // An explicit Weekly Inches entry is already authoritative — a decline
     // prompt asking for what's filled in above would never be satisfiable.
