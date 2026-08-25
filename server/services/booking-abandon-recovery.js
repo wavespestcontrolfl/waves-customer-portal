@@ -231,7 +231,7 @@ const SERVICE_LABELS = {
   tree_shrub: 'Tree & Shrub',
   termite: 'Termite Inspection',
   rodent: 'Rodent Control',
-  bora_care: 'Bora-Care Wood Treatment',
+  bora_care: 'Bora-Care Wood Treatment Service',
 };
 function serviceLabelOf(intent) {
   return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';

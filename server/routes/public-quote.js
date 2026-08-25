@@ -421,7 +421,7 @@ function normalizePublicQuotePestFrequency(value) {
 function publicQuoteRoachDisplayName(roachType) {
   const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
   if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment';
+  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment Service';
 }
 
 function publicQuotePestLabel(pest = {}) {
@@ -536,7 +536,7 @@ function compactRoachInterestPart(normalizedKey) {
   const candidates = [
     ...Object.entries(display).map(([scaleKey, cfg]) => [scaleKey, cfg?.name]),
     ['german', 'German Cockroach Treatment'],
-    ['regular', 'Cockroach Treatment'],
+    ['regular', 'Cockroach Treatment Service'],
   ];
   for (const [scaleKey, name] of candidates) {
     if (typeof name !== 'string') continue;
@@ -598,7 +598,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.plugging ? 'Lawn Plugging' : null,
     services.topDressing ? 'Lawn Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
-    services.bedBug ? 'Bed Bug Treatment' : null,
+    services.bedBug ? 'Bed Bug Treatment Service' : null,
   ].filter(Boolean).join(' + ');
 }
 

@@ -133,14 +133,21 @@ describe('20260808080000 estimate-gap catalog rows', () => {
   test('catalog names equal the engine line labels where the pricer emits one', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
+    // This harness runs only the 20260808080000 seed, whose rows carry the
+    // pre-rename names; the engine labels moved to the renamed forms with
+    // 20260825000010, so equality is asserted THROUGH that rename map (the
+    // live catalog carries the renamed name after both migrations run).
+    const { RENAMES } = require('../models/migrations/20260825000010_service_name_suffix_renames');
+    const renamed = new Map(RENAMES.map(([, from, to]) => [from, to]));
+    const currentName = (n) => renamed.get(n) || n;
 
-    expect(svcRow(db, 'plugging').name).toBe(sp.pricePlugging(1000, 12).name);
-    expect(svcRow(db, 'rodent_wire_mesh').name).toBe(sp.priceRodentWireMesh({}).name);
-    expect(svcRow(db, 'rodent_bird_box').name).toBe(sp.priceRodentBirdBoxes({ birdBoxQuantity: 1 }).name);
-    // Tier-suffixed engine line ('Rodent Guarantee (standard)') — the base
-    // name must prefix it; suffixed lines link by service_id like foam's
-    // cadence rows.
-    expect(sp.priceRodentGuarantee({}).name.startsWith(svcRow(db, 'rodent_guarantee').name)).toBe(true);
+    expect(currentName(svcRow(db, 'plugging').name)).toBe(sp.pricePlugging(1000, 12).name);
+    expect(currentName(svcRow(db, 'rodent_wire_mesh').name)).toBe(sp.priceRodentWireMesh({}).name);
+    expect(currentName(svcRow(db, 'rodent_bird_box').name)).toBe(sp.priceRodentBirdBoxes({ birdBoxQuantity: 1 }).name);
+    // Tier-suffixed engine line ('Rodent Guarantee Service (standard)') — the
+    // renamed base name must prefix it; suffixed lines link by service_id
+    // like foam's cadence rows.
+    expect(sp.priceRodentGuarantee({}).name.startsWith(currentName(svcRow(db, 'rodent_guarantee').name))).toBe(true);
     // Engine keys ARE the catalog keys.
     expect(sp.priceBoraCare(2000, {}).service).toBe('bora_care');
     expect(sp.pricePlugging(1000, 12).service).toBe('plugging');

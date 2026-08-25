@@ -272,9 +272,19 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
   // reminder registration render service_name verbatim). Parents are
   // row-locked so a concurrent completion serializes behind the relabel.
   if (await knex.schema.hasTable('scheduled_service_addons')) {
-    const addons = await knex('scheduled_service_addons')
+    // Linked rows plus legacy NAME-ONLY rows (service_id is nullable and
+    // name-only add-ons are first-class existing data) — their label is
+    // copied verbatim into recurring children and invoices/reminders, so
+    // skipping them leaves customers on the pre-rename name (codex #3484
+    // r1 P2). Same linked+legacy split as the visit relabel above.
+    const linkedAddons = await knex('scheduled_service_addons')
       .where({ service_id: row.id, service_name: fromName })
       .select('id', 'scheduled_service_id');
+    const legacyAddons = await knex('scheduled_service_addons')
+      .where({ service_name: fromName })
+      .whereNull('service_id')
+      .select('id', 'scheduled_service_id');
+    const addons = [...linkedAddons, ...legacyAddons];
     const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
     const openParentIds = new Set(
       parentIds.length && (await knex.schema.hasTable('scheduled_services'))
@@ -366,12 +376,56 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
   return rec;
 }
 
+// The roach line's DISPLAY name is DB-authoritative: db-bridge syncs
+// pricing_config over the in-code constants, so the constants.js label
+// updated in this PR is inert wherever pest_base carries a display block
+// (prod does — verified read-only 2026-08-25). Guarded read-modify-write,
+// same contract as everything else here: only a display name still carrying
+// the shipped value is touched, and an audit row records the change.
+const ROACH_DISPLAY_VARIANTS = ['regular', 'regular_standalone'];
+const ROACH_DISPLAY_FROM = 'Cockroach Treatment';
+const ROACH_DISPLAY_TO = 'Cockroach Treatment Service';
+
+async function renameRoachDisplayNames(knex, fromName, toName) {
+  if (!(await knex.schema.hasTable('pricing_config'))) return [];
+  const row = await knex('pricing_config').where({ config_key: 'pest_base' }).first();
+  if (!row) return [];
+  let data = row.data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return []; }
+  }
+  const display = data?.initial_roach?.display;
+  if (!display || typeof display !== 'object') return [];
+  const changed = [];
+  for (const variant of ROACH_DISPLAY_VARIANTS) {
+    if (display[variant] && display[variant].name === fromName) {
+      display[variant] = { ...display[variant], name: toName };
+      changed.push(variant);
+    }
+  }
+  if (!changed.length) return [];
+  await knex('pricing_config')
+    .where({ config_key: 'pest_base' })
+    .update({ data: JSON.stringify(data), updated_at: knex.fn.now() });
+  if (await knex.schema.hasTable('pricing_config_audit')) {
+    await knex('pricing_config_audit').insert({
+      config_key: 'pest_base',
+      old_value: JSON.stringify(row.data),
+      new_value: JSON.stringify(data),
+      changed_by: 'migration:20260825000010',
+      reason: `Roach display name(s) [${changed.join(', ')}] "${fromName}" → "${toName}" (catalog rename parity)`,
+    });
+  }
+  return changed;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   const state = { renames: {} };
   for (const [serviceKey, fromName, toName] of RENAMES) {
     state.renames[serviceKey] = await fanOutRename(knex, serviceKey, fromName, toName);
   }
+  state.roachDisplayChanged = await renameRoachDisplayNames(knex, ROACH_DISPLAY_FROM, ROACH_DISPLAY_TO);
   await saveState(knex, state);
 };
 
@@ -418,12 +472,18 @@ exports.down = async function down(knex) {
     // still being open — a visit completed since up() keeps its new
     // historical label everywhere (visit, invoice, AND these snapshots),
     // never a mixed story (codex pre-push r2 P1 #3).
+    // Row-lock the linked visits while deciding revertibility (codex #3484
+    // r2 P2): an unlocked read can see a parent as open while a concurrent
+    // completion is capturing the new label — the lock serializes down()
+    // behind that completion, mirroring up()'s forUpdate on open parents.
     const terminalVisitIdSet = async (visitIds) => new Set(
       visitIds.length && (await knex.schema.hasTable('scheduled_services'))
         ? (await knex('scheduled_services')
           .whereIn('id', visitIds)
-          .whereIn('status', TERMINAL_VISIT_STATUSES)
-          .select('id')).map((v) => v.id)
+          .forUpdate()
+          .select('id', 'status'))
+          .filter((v) => TERMINAL_VISIT_STATUSES.includes(v.status))
+          .map((v) => v.id)
         : []
     );
 
@@ -526,7 +586,46 @@ exports.down = async function down(knex) {
     }
   }
 
+  // Roach display reversal: only the variants up() recorded changing, and
+  // only while they still carry the written value.
+  if (Array.isArray(state.roachDisplayChanged) && state.roachDisplayChanged.length
+    && (await knex.schema.hasTable('pricing_config'))) {
+    const row = await knex('pricing_config').where({ config_key: 'pest_base' }).first();
+    let data = row ? row.data : null;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { data = null; }
+    }
+    const display = data?.initial_roach?.display;
+    if (display && typeof display === 'object') {
+      const reverted = [];
+      for (const variant of state.roachDisplayChanged) {
+        if (display[variant] && display[variant].name === ROACH_DISPLAY_TO) {
+          display[variant] = { ...display[variant], name: ROACH_DISPLAY_FROM };
+          reverted.push(variant);
+        }
+      }
+      if (reverted.length) {
+        await knex('pricing_config')
+          .where({ config_key: 'pest_base' })
+          .update({ data: JSON.stringify(data), updated_at: knex.fn.now() });
+        if (await knex.schema.hasTable('pricing_config_audit')) {
+          await knex('pricing_config_audit').insert({
+            config_key: 'pest_base',
+            old_value: JSON.stringify(row.data),
+            new_value: JSON.stringify(data),
+            changed_by: 'migration:20260825000010',
+            reason: `rollback: roach display name(s) [${reverted.join(', ')}] restored to "${ROACH_DISPLAY_FROM}"`,
+          });
+        }
+      }
+    }
+  }
+
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }
 };
+
+// Consumed by estimate-gap-catalog-rows-migration.test.js to compose the
+// shipped 20260808080000 names with this migration's renames.
+exports.RENAMES = RENAMES;

@@ -1624,7 +1624,7 @@ const SERVICE_INTEREST_LABELS = {
   mosquito_control: 'Mosquito Control',
   mosquito_lawn_care: 'Mosquito Control + Lawn Care',
   termite_treatment: 'Termite Treatment',
-  bed_bug_treatment: 'Bed Bug Treatment',
+  bed_bug_treatment: 'Bed Bug Treatment Service',
   ant_control: 'Ant Control',
   flea_tick_control: 'Flea & Tick Control',
   spider_wasp_control: 'Spider & Wasp Control',

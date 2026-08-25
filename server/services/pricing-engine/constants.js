@@ -173,9 +173,9 @@ const PEST = {
     // treatment visits the fee covers — it is display/scheduling metadata
     // only and does NOT multiply the price.
     display: {
-      regular: { name: 'Cockroach Treatment', treatments: 1 },
+      regular: { name: 'Cockroach Treatment Service', treatments: 1 },
       german: { name: 'German Cockroach Treatment', treatments: 1 },
-      regular_standalone: { name: 'Cockroach Treatment', treatments: 1 },
+      regular_standalone: { name: 'Cockroach Treatment Service', treatments: 1 },
     },
   },
   frequencyDiscounts: {

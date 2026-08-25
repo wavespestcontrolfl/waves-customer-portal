@@ -41,14 +41,14 @@ const PREP_CONFIG = Object.freeze({
     smsStandaloneKey: 'auto_flea_no_email',
   },
   bed_bug: {
-    label: 'Bed Bug Treatment',
+    label: 'Bed Bug Treatment Service',
     serviceKeyword: 'bed bug',
     emailTemplateKey: 'prep.bed_bug',
     smsCompanionKey: 'auto_bed_bug',
     smsStandaloneKey: 'auto_bed_bug_no_email',
   },
   cockroach: {
-    label: 'Cockroach Treatment',
+    label: 'Cockroach Treatment Service',
     serviceKeyword: 'roach',
     emailTemplateKey: 'prep.cockroach',
     smsCompanionKey: 'auto_cockroach',

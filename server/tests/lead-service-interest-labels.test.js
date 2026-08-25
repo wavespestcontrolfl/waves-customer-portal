@@ -72,7 +72,7 @@ describe('quote workflow service interest labels', () => {
     expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'german' } }))
       .toBe('Quarterly Pest Control + German Cockroach Treatment');
     expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'palmetto' } }))
-      .toBe('Quarterly Pest Control + Cockroach Treatment');
+      .toBe('Quarterly Pest Control + Cockroach Treatment Service');
     // Garbage roach values still normalize to none and label no treatment.
     expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'FALSE' } }))
       .toBe('Quarterly Pest Control');
@@ -108,7 +108,7 @@ describe('quote workflow service interest labels', () => {
 
     // A stored full label round-trips through the customer-field compactor
     // (the upsell path at public-quote.js:1680 feeds full labels back in).
-    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + Cockroach Treatment']))
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + Cockroach Treatment Service']))
       .toBe('Quarterly Pest + Roach');
   });
 

@@ -259,7 +259,7 @@ describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-
     expect(line).toBeTruthy();
     // Persistence compacts lines to service + name — without the distinct
     // name a lawn-pest row renders as generic one_time_lawn downstream.
-    expect(line.name).toBe('Lawn Pest Knockdown');
+    expect(line.name).toBe('Lawn Pest Knockdown Service');
     // ONE_TIME.lawn floor ($115) is the engine's owner-set minimum.
     expect(line.price).toBeGreaterThanOrEqual(115);
     expect(Number(estimate.summary?.oneTimeTotal || 0)).toBeGreaterThanOrEqual(line.price);
@@ -309,8 +309,8 @@ describe('cockroach chip path — roachType reaches the engine (2026-07-05)', ()
 
   test('label uses ENGINE normalization — raw truthy junk must not label an unpriced knockdown (codex rd2)', () => {
     const { publicQuotePestLabel } = _internals;
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Cockroach Treatment');
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Cockroach Treatment');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Cockroach Treatment Service');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Cockroach Treatment Service');
     // German resolves its own configured display name (codex #3078 r3 —
     // the generic suffix mislabeled German-roach quotes).
     expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + German Cockroach Treatment');

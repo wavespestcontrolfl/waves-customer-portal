@@ -55,7 +55,26 @@ function seedDb() {
     scheduled_service_addons: [
       { id: 'add-open', scheduled_service_id: 'v-parent', service_id: 'svc-roach', service_name: ROACH_OLD },
       { id: 'add-done', scheduled_service_id: 'v-done', service_id: 'svc-roach', service_name: ROACH_OLD },
+      // Legacy NAME-ONLY add-on (nullable service_id) on an open parent —
+      // first-class existing data the fanout must reach (codex r1 P2).
+      { id: 'add-legacy', scheduled_service_id: 'v-parent', service_id: null, service_name: ROACH_OLD },
     ],
+    pricing_config: [
+      {
+        config_key: 'pest_base',
+        data: JSON.stringify({
+          base: 112,
+          initial_roach: {
+            display: {
+              german: { name: 'German Cockroach Treatment', treatments: 1 },
+              regular: { name: ROACH_OLD, treatments: 1 },
+              regular_standalone: { name: ROACH_OLD, treatments: 1 },
+            },
+          },
+        }),
+      },
+    ],
+    pricing_config_audit: [],
     payer_statements: [
       { id: 'stmt-frozen', status: 'finalized' },
     ],
@@ -256,8 +275,28 @@ describe('20260825000010 service name suffix renames', () => {
     expect(db.self_booked_appointments[0].service_type).toBe(ROACH_NEW);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(ROACH_NEW);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-done').service_name).toBe(ROACH_OLD);
+    // Legacy name-only add-on (null service_id) on an open parent relabels.
+    expect(db.scheduled_service_addons.find((a) => a.id === 'add-legacy').service_name).toBe(ROACH_NEW);
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(ROACH_NEW);
     expect(db.service_completion_profiles[1].service_name_snapshot).toBe(FOAM_NEW);
+  });
+
+  test('up() renames the DB-authoritative roach display names, with an audit row; down() restores them', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    let data = JSON.parse(db.pricing_config[0].data);
+    expect(data.initial_roach.display.regular.name).toBe(ROACH_NEW);
+    expect(data.initial_roach.display.regular_standalone.name).toBe(ROACH_NEW);
+    expect(data.initial_roach.display.german.name).toBe('German Cockroach Treatment');
+    expect(db.pricing_config_audit).toHaveLength(1);
+    expect(JSON.parse(stateRow(db).value).roachDisplayChanged.sort())
+      .toEqual(['regular', 'regular_standalone']);
+
+    await migration.down(fakeKnex(db));
+    data = JSON.parse(db.pricing_config[0].data);
+    expect(data.initial_roach.display.regular.name).toBe(ROACH_OLD);
+    expect(data.initial_roach.display.regular_standalone.name).toBe(ROACH_OLD);
+    expect(db.pricing_config_audit).toHaveLength(2);
   });
 
   test('up() relabels draft invoice snapshots (labels only), skips sent and frozen-statement drafts', async () => {
