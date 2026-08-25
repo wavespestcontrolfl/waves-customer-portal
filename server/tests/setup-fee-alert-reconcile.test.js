@@ -55,6 +55,12 @@ function alertRow(metaOverrides = {}) {
   };
 }
 
+// notifications is read twice: call 1 = the estate alert (.first), call 2 =
+// the terminal-registration scan (.select — none in these tests).
+function notificationsInOrder(primary) {
+  return (n) => (n === 1 ? primary : []);
+}
+
 beforeEach(() => {
   mockUpdates = [];
   mockTables = {};
@@ -62,7 +68,7 @@ beforeEach(() => {
 
 test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — never rewritten to demand the fee again', async () => {
   mockTables = {
-    notifications: alertRow({ resolvedCovered: true }),
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: true })),
     // Call 1 = stamped scan, call 2 = on-visit scan.
     invoices: (n) => (n === 1
       ? [
@@ -78,7 +84,7 @@ test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — neve
 
 test('a VOID (not refunded) fee invoice beside a live application DOES rewrite to a fee-only instruction', async () => {
   mockTables = {
-    notifications: alertRow({ resolvedCovered: true }),
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: true })),
     invoices: (n) => (n === 1
       ? [
         { id: 'inv-fee', status: 'void', line_items: FEE_LINE, notes: `accepted estimate #${EST}` },
@@ -96,7 +102,7 @@ test('a VOID (not refunded) fee invoice beside a live application DOES rewrite t
 
 test('a PARTIAL fee amount ($9.90 vs expected $99) never resolves the fee — cents-exact against persisted expectation', async () => {
   mockTables = {
-    notifications: alertRow({ resolvedCovered: false, expectedSetupFeeCents: 9900 }),
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: false, expectedSetupFeeCents: 9900 })),
     invoices: (n) => (n === 1
       ? [
         { id: 'inv-fee', status: 'paid', line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 9.90 }]), notes: `accepted estimate #${EST}` },
@@ -114,7 +120,7 @@ test('a PARTIAL fee amount ($9.90 vs expected $99) never resolves the fee — ce
 
 test('a foreign re-linked visit never reconciles another customer\'s alert', async () => {
   mockTables = {
-    notifications: alertRow({ resolvedCovered: false }),
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: false })),
     invoices: () => [],
     scheduled_services: [],
   };

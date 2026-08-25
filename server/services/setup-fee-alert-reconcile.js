@@ -33,7 +33,79 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
             .first('id', 'metadata');
-          if (!staleAlert) return;
+          // Terminal-lane alerts that carry the fee note register under
+          // setupFeeDedupeKey (Codex PR r13 P1) — they are reconciled in
+          // the terminal pass below even when no estate alert exists.
+          const terminalFeeAlerts = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey])
+            .select('id', 'body', 'metadata');
+          const reconcileTerminalFeeAlerts = async (feeIsProven) => {
+            for (const row of terminalFeeAlerts) {
+              const meta = typeof row.metadata === 'string'
+                ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+                : row.metadata;
+              if (!feeIsProven || meta?.setupFeeResolved === true) continue;
+              const strippedBody = String(row.body || '')
+                .replace(/ ALSO: the one-time WaveGuard setup fee[\s\S]*$/, ' UPDATE: the one-time setup fee is now COVERED by a live invoice — do NOT bill it.');
+              await trx('notifications').where({ id: row.id }).update({
+                body: strippedBody,
+                read_at: null,
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true })]),
+              });
+              logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause retired — fee coverage proven`);
+            }
+          };
+          if (!staleAlert && !terminalFeeAlerts.length) return;
+          if (!staleAlert) {
+            // TERMINAL-ONLY pass: no estate alert stands — prove fee
+            // coverage compactly (stamped rows + each terminal visit's
+            // own rows, refunded doctrine included) and retire the fee
+            // clauses when it stands.
+            const {
+              invoiceHasPositiveSetupFeeLine: tFeeLine,
+              sumPositiveSetupFeeCents: tFeeCents,
+            } = require('./estimate-first-application-invoice');
+            const tDead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
+            const tMeta0 = typeof terminalFeeAlerts[0].metadata === 'string'
+              ? (() => { try { return JSON.parse(terminalFeeAlerts[0].metadata); } catch { return null; } })()
+              : terminalFeeAlerts[0].metadata;
+            const tCustomer = tMeta0?.customerId || customerId;
+            if (String(tCustomer) !== String(customerId)) return;
+            const tStamped = await trx('invoices')
+              .where({ customer_id: tCustomer })
+              .where('notes', 'like', `%accepted estimate #${sourceEstimateId}%`)
+              .forUpdate()
+              .select('id', 'status', 'line_items', 'notes');
+            const tVisitIds = [...new Set(terminalFeeAlerts.map((row) => {
+              const m = typeof row.metadata === 'string'
+                ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+                : row.metadata;
+              return m?.scheduledServiceId ? String(m.scheduledServiceId) : null;
+            }).filter(Boolean))];
+            const tOnVisit = tVisitIds.length
+              ? await trx('invoices')
+                .where({ customer_id: tCustomer })
+                .whereIn('scheduled_service_id', tVisitIds)
+                .forUpdate()
+                .select('id', 'status', 'line_items', 'notes')
+              : [];
+            const tRows = [...new Map([...tStamped, ...tOnVisit].map((r) => [String(r.id), r])).values()];
+            const tRefundedFee = tRows.some((r) => String(r.status || '').toLowerCase() === 'refunded' && tFeeLine(r));
+            const tLiveFeeCents = tRows
+              .filter((r) => !tDead.has(String(r.status || '').toLowerCase()))
+              .reduce((sum, r) => sum + tFeeCents(r), 0);
+            const tExpect = Math.max(0, ...terminalFeeAlerts.map((row) => {
+              const m = typeof row.metadata === 'string'
+                ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+                : row.metadata;
+              const v = Number(m?.expectedSetupFeeCents);
+              return Number.isFinite(v) ? v : 0;
+            }));
+            const tFeeProven = tRefundedFee || (tExpect > 0 && tLiveFeeCents >= tExpect);
+            await reconcileTerminalFeeAlerts(tFeeProven);
+            return;
+          }
           const {
             invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication,
           } = require('./estimate-first-application-invoice');
@@ -151,6 +223,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             || (expectedFeeCents !== null
               ? liveFeeCents >= expectedFeeCents
               : uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine));
+          await reconcileTerminalFeeAlerts(feeProven);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
             const v = map && Number(map[String(visitId)]);

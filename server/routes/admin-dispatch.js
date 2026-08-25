@@ -9272,13 +9272,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
             && !terminalResolvedAway.includes(r.status)) || null;
           // Fee coverage is classified INDEPENDENTLY from the visit
-          // charge (Codex PR r3 P1): a live fee-only invoice on the visit
-          // (staff billed the fee manually, unstamped) means the
-          // detector's note must NOT instruct billing the fee again.
-          const { invoiceHasPositiveSetupFeeLine: terminalFeeLine } = require('../services/estimate-first-application-invoice');
-          const liveFeeOnVisitNow = onVisitLockedRows.find((r) => !terminalResolvedAway.includes(r.status)
-            && r.status !== 'void' && terminalFeeLine(r)) || null;
-          const effectiveSetupFeeNote = liveFeeOnVisitNow ? '' : terminalSetupFeeNote;
+          // charge (Codex PR r3 P1) and CENTS-EXACT against the accepted
+          // amount (Codex PR r13 P1): a $9.90 partial fee line must not
+          // erase the note — the remainder is instructed instead.
+          const {
+            sumPositiveSetupFeeCents: terminalFeeCents,
+            sumBaseApplicationCents: terminalAppCents,
+            invoiceBillsBaseApplication: terminalBillsApp,
+          } = require('../services/estimate-first-application-invoice');
+          const termExpectedFeeCents = Math.round(Number(unmintedSetupFeeObligation?.setupFee || 0) * 100);
+          const liveFeeCentsOnVisit = onVisitLockedRows
+            .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+          const terminalFeeCovered = termExpectedFeeCents > 0 && liveFeeCentsOnVisit >= termExpectedFeeCents;
+          const termFeeEstimateRef = unmintedSetupFeeObligation
+            ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
+            : null;
+          const effectiveSetupFeeNote = (!terminalSetupFeeNote || terminalFeeCovered)
+            ? ''
+            : ` ALSO: the one-time WaveGuard setup fee ($${((termExpectedFeeCents - liveFeeCentsOnVisit) / 100).toFixed(2)}${liveFeeCentsOnVisit > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
           //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
@@ -9296,7 +9308,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
-          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status);
+          // Settled coverage requires the invoice to actually BILL the
+          // application (Codex PR r13 P1): a fee-only paid invoice on the
+          // visit must not resolve the refunded application's follow-up.
+          let liveBesideFull = liveBesideNow;
+          if (liveBesideNow && liveBesideNow.line_items === undefined) {
+            liveBesideFull = await trx('invoices')
+              .where({ id: liveBesideNow.id })
+              .first('id', 'invoice_number', 'status', 'line_items', 'notes') || liveBesideNow;
+          }
+          const termExpectedAppCents = Math.round(Number(svc.estimated_price || 0) * 100);
+          const besideAppCents = liveBesideFull ? terminalAppCents(liveBesideFull) : 0;
+          const besideCoversApplication = termExpectedAppCents > 0
+            ? besideAppCents >= termExpectedAppCents
+            : !!(liveBesideFull && terminalBillsApp(liveBesideFull));
+          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status)
+            && besideCoversApplication;
           // Settled visit coverage does NOT settle a still-owed setup fee
           // (Codex P0, pre-push round 15): when the detector reported the
           // fee unminted, the alert stays ACTIVE carrying the fee-only
@@ -9329,12 +9356,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
               : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
           const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}${effectiveSetupFeeNote}`;
+          // A terminal alert carrying the fee note REGISTERS with the
+          // setup-fee reconciler (Codex PR r13 P1): billing the requested
+          // fee later must retire the fee clause even though this alert
+          // is keyed per-visit, not per-estimate.
+          const terminalSetupFeeMeta = effectiveSetupFeeNote
+            ? {
+              setupFeeDedupeKey: `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`,
+              sourceEstimateId: svc.source_estimate_id,
+              expectedSetupFeeCents: termExpectedFeeCents,
+            }
+            : {};
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
             // situation may have changed since it was written (codex r11).
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {})]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}) })]),
             });
             return true;
           }
@@ -9342,7 +9380,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;
