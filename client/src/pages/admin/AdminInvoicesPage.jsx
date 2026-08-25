@@ -1032,6 +1032,11 @@ function InvoiceList({
     if (inv.status === "canceled" || inv.status === "cancelled")
       return { key: "canceled", label: "Canceled", color: D.muted };
     if (inv.status === "scheduled") {
+      // A recovered crashed-send claim is parked here with NO send date
+      // (delivery unverified — the cron must not retry it). Without its own
+      // signal it would read as an ordinary "Scheduled" invoice forever.
+      if (inv.scheduled_send_error && !inv.scheduled_send_at)
+        return { key: "send_review", label: "Needs review", color: D.red };
       // The send cron stops retrying after 5 attempts — without this the
       // invoice would sit as "Scheduled" forever with no visible signal.
       if (
@@ -1929,6 +1934,19 @@ function InvoiceList({
 // Newest event on top so the current state is the first thing you read.
 function buildInvoiceTimeline(inv) {
   const events = [];
+  if (inv.status === "scheduled" && !inv.scheduled_send_at && inv.scheduled_send_error) {
+    // Parked recovery state: a crashed send claim was released with its
+    // send date cleared (delivery unverified, no automatic retry) — the
+    // operator has to verify and resend/re-schedule by hand.
+    events.push({
+      kind: "send_review",
+      at: inv.updated_at || inv.created_at,
+      label: "Send interrupted — needs review",
+      detail: inv.scheduled_send_error,
+      color: D.red,
+      emphasis: true,
+    });
+  }
   if (inv.status === "scheduled" && inv.scheduled_send_at) {
     const attempts = Number(inv.scheduled_send_attempts) || 0;
     const exhausted = attempts >= 5 && inv.scheduled_send_error;
