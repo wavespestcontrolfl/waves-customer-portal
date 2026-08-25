@@ -162,8 +162,11 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
   const rec = {
     renamed: false,
     visitIds: [],
-    selfBookingIds: [],
-    addonIds: [],
+    // self-booking id → linked visit id; addon id → parent visit id. The
+    // linkage rides in the record so down() can guard each reversal on the
+    // linked visit still being open (codex pre-push r2 P1 #3).
+    selfBookings: {},
+    addons: {},
     addonParentVisitIds: [],
     invoices: {},
     reminders: {},
@@ -212,14 +215,21 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       .select('id', 'self_booking_id');
     const visits = [...linked, ...legacy];
     if (visits.length) {
+      // Updates are scoped to the ids the SELECT saw (plus the same value/
+      // status predicates so drift between read and write isn't claimed) —
+      // a visit inserted between the two statements under READ COMMITTED
+      // must not be renamed-but-unrecorded, or its linked self-booking
+      // would keep the old label (codex pre-push r2 P1 #1).
       const updatedLinked = linked.length
         ? await knex('scheduled_services')
+          .whereIn('id', linked.map((v) => v.id))
           .where({ service_type: fromName, service_id: row.id })
           .whereNotIn('status', TERMINAL_VISIT_STATUSES)
           .update({ service_type: toName }, ['id'])
         : [];
       const updatedLegacy = legacy.length
         ? await knex('scheduled_services')
+          .whereIn('id', legacy.map((v) => v.id))
           .where({ service_type: fromName })
           .whereNull('service_id')
           .whereNotIn('status', TERMINAL_VISIT_STATUSES)
@@ -239,11 +249,12 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       .whereIn('id', [...visitsByBooking.values()])
       .where({ service_type: fromName })
       .select('id');
+    const bookingToVisit = new Map([...visitsByBooking].map(([visitId, sbId]) => [sbId, visitId]));
     for (const sb of sbRows) {
       const count = await knex('self_booked_appointments')
         .where({ id: sb.id, service_type: fromName })
         .update({ service_type: toName });
-      if (count) rec.selfBookingIds.push(sb.id);
+      if (count) rec.selfBookings[sb.id] = bookingToVisit.get(sb.id) || null;
     }
   }
 
@@ -270,11 +281,11 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
         .whereIn('id', targets.map((a) => a.id))
         .where({ service_name: fromName })
         .update({ service_name: toName }, ['id']);
-      rec.addonIds = updatedIdList(ret);
-      const updatedAddonSet = new Set(rec.addonIds);
-      rec.addonParentVisitIds = [...new Set(
-        targets.filter((a) => updatedAddonSet.has(a.id)).map((a) => a.scheduled_service_id)
-      )];
+      const updatedAddonSet = new Set(updatedIdList(ret));
+      for (const a of targets) {
+        if (updatedAddonSet.has(a.id)) rec.addons[a.id] = a.scheduled_service_id;
+      }
+      rec.addonParentVisitIds = [...new Set(Object.values(rec.addons).filter(Boolean))];
     }
   }
 
@@ -361,7 +372,12 @@ exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (!state || !state.renames) return;
 
-  for (const [serviceKey, fromName, toName] of RENAMES) {
+  // Unwind in REVERSE rename order: a reminder label containing TWO renamed
+  // components was rewritten once per rename, and each recorded `written`
+  // value embeds every EARLIER rename's output — forward iteration would
+  // miss the first predicate and leave the label half-reverted (codex
+  // pre-push r2 P1 #2).
+  for (const [serviceKey, fromName, toName] of [...RENAMES].reverse()) {
     const rec = state.renames[serviceKey];
     if (!rec) continue;
 
@@ -388,20 +404,53 @@ exports.down = async function down(knex) {
         .update({ service_type: fromName });
     }
 
-    if (Array.isArray(rec.selfBookingIds) && rec.selfBookingIds.length
-      && (await knex.schema.hasTable('self_booked_appointments'))) {
-      await knex('self_booked_appointments')
-        .whereIn('id', rec.selfBookingIds)
-        .where({ service_type: toName })
-        .update({ service_type: fromName });
+    // Self-booking and add-on reversals gate on their LINKED visit/parent
+    // still being open — a visit completed since up() keeps its new
+    // historical label everywhere (visit, invoice, AND these snapshots),
+    // never a mixed story (codex pre-push r2 P1 #3).
+    const terminalVisitIdSet = async (visitIds) => new Set(
+      visitIds.length && (await knex.schema.hasTable('scheduled_services'))
+        ? (await knex('scheduled_services')
+          .whereIn('id', visitIds)
+          .whereIn('status', TERMINAL_VISIT_STATUSES)
+          .select('id')).map((v) => v.id)
+        : []
+    );
+
+    const selfBookings = rec.selfBookings && typeof rec.selfBookings === 'object' ? rec.selfBookings : {};
+    const sbIds = Object.keys(selfBookings);
+    if (sbIds.length && (await knex.schema.hasTable('self_booked_appointments'))) {
+      const sbTerminal = await terminalVisitIdSet(
+        [...new Set(Object.values(selfBookings).filter(Boolean))]
+      );
+      const revertible = sbIds.filter((id) => {
+        const visitId = selfBookings[id];
+        return !visitId || !sbTerminal.has(visitId);
+      });
+      if (revertible.length) {
+        await knex('self_booked_appointments')
+          .whereIn('id', revertible)
+          .where({ service_type: toName })
+          .update({ service_type: fromName });
+      }
     }
 
-    if (Array.isArray(rec.addonIds) && rec.addonIds.length
-      && (await knex.schema.hasTable('scheduled_service_addons'))) {
-      await knex('scheduled_service_addons')
-        .whereIn('id', rec.addonIds)
-        .where({ service_name: toName })
-        .update({ service_name: fromName });
+    const addons = rec.addons && typeof rec.addons === 'object' ? rec.addons : {};
+    const addonIds = Object.keys(addons);
+    if (addonIds.length && (await knex.schema.hasTable('scheduled_service_addons'))) {
+      const addonTerminal = await terminalVisitIdSet(
+        [...new Set(Object.values(addons).filter(Boolean))]
+      );
+      const revertible = addonIds.filter((id) => {
+        const parentId = addons[id];
+        return !parentId || !addonTerminal.has(parentId);
+      });
+      if (revertible.length) {
+        await knex('scheduled_service_addons')
+          .whereIn('id', revertible)
+          .where({ service_name: toName })
+          .update({ service_name: fromName });
+      }
     }
 
     const invoiceRecs = rec.invoices && typeof rec.invoices === 'object' ? rec.invoices : {};

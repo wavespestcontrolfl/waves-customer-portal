@@ -29,6 +29,7 @@ function seedDb() {
       // Admin-edited: shipped name gone — rename AND its fanout must skip.
       { id: 'svc-guar', service_key: 'rodent_guarantee', name: 'Rodent Guarantee Plan (Adam)', updated_at: 'orig' },
       { id: 'svc-general', service_key: 'general_pest', name: 'General Pest Control', updated_at: 'orig' },
+      { id: 'svc-bb', service_key: 'bed_bug_treatment', name: 'Bed Bug Treatment', updated_at: 'orig' },
     ],
     scheduled_services: [
       { id: 'v-open-1', service_type: ROACH_OLD, status: 'pending', service_id: 'svc-roach', self_booking_id: 'sb-1' },
@@ -40,6 +41,9 @@ function seedDb() {
       { id: 'v-guar', service_type: 'Rodent Guarantee', status: 'pending', service_id: 'svc-guar' },
       // Open non-roach parent carrying the roach ADD-ON.
       { id: 'v-parent', service_type: 'Quarterly Pest Control Service', status: 'confirmed', service_id: 'svc-general' },
+      // Open bed-bug visit sharing a reminder slot with the merged label
+      // below — reached in the LATER bed_bug rename pass.
+      { id: 'v-bb', service_type: 'Bed Bug Treatment', status: 'pending', service_id: 'svc-bb' },
     ],
     self_booked_appointments: [
       { id: 'sb-1', service_type: ROACH_OLD, status: 'confirmed' },
@@ -87,6 +91,11 @@ function seedDb() {
       // Merged label on the add-on parent's reminder.
       { id: 'rem-parent', scheduled_service_id: 'v-parent', service_type: `Quarterly Pest Control Service & ${ROACH_OLD}`, customer_id: 'c2', appointment_time: 'T2', updated_at: 'orig' },
       { id: 'rem-unrelated', scheduled_service_id: 'v-parent', service_type: 'Lawn Care Service', customer_id: 'c3', appointment_time: 'T3', updated_at: 'orig' },
+      // Merged label containing TWO renamed components: rewritten once per
+      // rename (cockroach pass via its own link, bed_bug pass via the
+      // sibling sweep from rem-bb's slot) — down() must unwind BOTH.
+      { id: 'rem-merged', scheduled_service_id: 'v-open-1', service_type: `${ROACH_OLD} & Bed Bug Treatment`, customer_id: 'c5', appointment_time: 'T5', updated_at: 'orig' },
+      { id: 'rem-bb', scheduled_service_id: 'v-bb', service_type: 'Bed Bug Treatment', customer_id: 'c5', appointment_time: 'T5', updated_at: 'orig' },
     ],
     service_completion_profiles: [
       { service_key: 'cockroach_control', service_name_snapshot: ROACH_OLD },
@@ -265,6 +274,9 @@ describe('20260825000010 service name suffix renames', () => {
     expect(reminder(db, 'rem-1').service_type).toBe(ROACH_NEW);
     expect(reminder(db, 'rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${ROACH_NEW}`);
     expect(reminder(db, 'rem-unrelated').service_type).toBe('Lawn Care Service');
+    // Both components of the doubly-renamed label rewritten, one per pass.
+    expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_NEW} & Bed Bug Treatment Service`);
+    expect(reminder(db, 'rem-bb').service_type).toBe('Bed Bug Treatment Service');
   });
 
   test('up() copies protocol aliases with the migration marker', async () => {
@@ -296,6 +308,9 @@ describe('20260825000010 service name suffix renames', () => {
     expect(invoiceById(db, 'inv-draft').title).toBe(ROACH_OLD);
     expect(items[0].description).toBe(ROACH_OLD);
     expect(reminder(db, 'rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${ROACH_OLD}`);
+    // Doubly-renamed label fully unwound (reverse-order rollback: the
+    // bed_bug revert must run BEFORE the cockroach revert can match).
+    expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_OLD} & Bed Bug Treatment`);
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(ROACH_OLD);
 
     // The marker-owned copy is gone; the admin's pre-existing new-name
@@ -314,14 +329,18 @@ describe('20260825000010 service name suffix renames', () => {
     expect(svc(db, 'cockroach_control').name).toBe(ROACH_NEW);
   });
 
-  test('down() leaves a visit completed since up() under its new label', async () => {
+  test('down() leaves every snapshot of a visit completed since up() under its new label', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     visit(db, 'v-open-1').status = 'completed';
+    visit(db, 'v-parent').status = 'completed';
     await migration.down(fakeKnex(db));
     expect(visit(db, 'v-open-1').service_type).toBe(ROACH_NEW);
-    // Its still-draft invoice agrees with the completed visit, not the past.
+    // Invoice, linked self-booking, and the add-on under the completed
+    // parent all agree with the completed visit, not the past.
     expect(invoiceById(db, 'inv-draft').title).toBe(ROACH_NEW);
+    expect(db.self_booked_appointments[0].service_type).toBe(ROACH_NEW);
+    expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(ROACH_NEW);
     // The other open visit reverted normally.
     expect(visit(db, 'v-open-2').service_type).toBe(ROACH_OLD);
   });
