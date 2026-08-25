@@ -8941,21 +8941,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
             .select('id', 'status', 'line_items', 'notes'))
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
-          // Alert-driven manual invoices may carry NO linkage at all (the
-          // manual-invoice endpoint's service link is optional — Codex PR
-          // r4 P1). The EXACT canonical line descriptions the alert
-          // instructs are the durable marker: scan the customer's live
-          // invoices for them so following the instructions retires the
-          // alert. Fee lines count everywhere; a canonical application
-          // line counts toward the PRIMARY visit only.
-          const canonicalLive = (await db('invoices')
-            .where({ customer_id: svc.customer_id })
-            .where((qb) => {
-              qb.whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
-                .orWhereRaw('line_items::text ILIKE ?', ['%first service application%']);
-            })
-            .select('id', 'status', 'line_items', 'notes'))
-            .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
+          // Alert-driven manual invoices may carry no service link (the
+          // manual-invoice endpoint's link is optional — Codex PR r4 P1),
+          // so the alert bodies instruct staff to stamp
+          // "accepted estimate #<id>" into the invoice NOTES — the SAME
+          // linkage convention every accept-time mint uses. The stamped
+          // scan above then owns those rows; a customer-wide description
+          // scan is deliberately NOT used (exact descriptions are
+          // classifiers, not ownership keys — another estimate's
+          // WaveGuard invoice must never settle this one's charges,
+          // Codex P0 round 19).
           // EVERY parked visit must have its application billed (Codex
           // P0, pre-push round 15): a cross-visit race parks additional
           // visits into parkedVisitIds, and resolving on the primary
@@ -8979,7 +8974,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // The stamped acceptance invoice can cover only the PRIMARY
           // visit's (first) application; every other parked visit needs
           // its own attached invoice.
-          const feeProven = [...stampedLive, ...onParkedLive, ...canonicalLive].some(invoiceHasPositiveSetupFeeLine);
+          const feeProven = [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
           const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
             String(r.scheduled_service_id || '') === String(visitId)
@@ -8994,8 +8989,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ) && invoiceBillsBaseApplication(r));
           const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
             visitApplicationBilled(visitId)
-            || (String(visitId) === primaryVisitId
-              && [...stampedLive, ...canonicalLive].some(invoiceBillsBaseApplication))
+            || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
           ));
           // All four coverage states rewrite the alert (Codex P0,
           // pre-push round 17): once staff bills ONE charge, the original
@@ -9016,24 +9010,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Coverage fully regressed after resolution — REOPEN with the
             // original both-charges instruction.
             await db('notifications').where({ id: staleAlert.id }).update({
-              body: `REOPENED: the invoices that covered this estimate's setup fee and parked application are no longer live. Bill BOTH charges manually: the one-time WaveGuard setup fee plus the parked visit application${parkedIds.length === 1 ? '' : 's'} (${parkedIds.join(', ')}). Use the EXACT line descriptions "WaveGuard Membership — one-time setup fee" and "First service application" so the system recognizes them as billed.`,
+              body: `REOPENED: the invoices that covered this estimate's setup fee and parked application are no longer live. Bill BOTH charges manually: the one-time WaveGuard setup fee plus the parked visit application${parkedIds.length === 1 ? '' : 's'} (${parkedIds.join(', ')}). Use the EXACT line descriptions "WaveGuard Membership — one-time setup fee" and "First service application", and include "accepted estimate #${svc.source_estimate_id}" in the invoice notes, so the system recognizes them as billed.`,
               read_at: null,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, feeCovered: false, applicationCovered: false })]),
             });
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} REOPENED — coverage regressed after resolution/partial coverage`);
           } else if (feeProven) {
             const uncoveredIds = parkedIds.filter((visitId) => !(visitApplicationBilled(visitId)
-              || (String(visitId) === primaryVisitId
-                && [...stampedLive, ...canonicalLive].some(invoiceBillsBaseApplication))));
+              || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))));
             await db('notifications').where({ id: staleAlert.id }).update({
-              body: `UPDATE: the one-time setup fee for this estimate is now COVERED by a live invoice — do NOT bill the setup fee again. Still owed: the application charge for parked visit${uncoveredIds.length === 1 ? '' : 's'} ${uncoveredIds.join(', ')} — bill only that, using the EXACT line description "First service application" so the system recognizes it as billed.`,
+              body: `UPDATE: the one-time setup fee for this estimate is now COVERED by a live invoice — do NOT bill the setup fee again. Still owed: the application charge for parked visit${uncoveredIds.length === 1 ? '' : 's'} ${uncoveredIds.join(', ')} — bill only that, using the EXACT line description "First service application" and "accepted estimate #${svc.source_estimate_id}" in the invoice notes so the system recognizes it as billed.`,
               read_at: null,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, feeCovered: true, applicationCovered: false })]),
             });
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} rewritten — fee covered, application(s) still owed`);
           } else if (applicationProven) {
             await db('notifications').where({ id: staleAlert.id }).update({
-              body: `UPDATE: every parked visit's application charge for this estimate is now COVERED by live invoices — do NOT bill an application again. Still owed: the one-time WaveGuard setup fee — bill only that, using the EXACT line description "WaveGuard Membership — one-time setup fee" so the system recognizes it as billed.`,
+              body: `UPDATE: every parked visit's application charge for this estimate is now COVERED by live invoices — do NOT bill an application again. Still owed: the one-time WaveGuard setup fee — bill only that, using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${svc.source_estimate_id}" in the invoice notes so the system recognizes it as billed.`,
+              read_at: null,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, applicationCovered: true, feeCovered: false })]),
             });
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} rewritten — application(s) covered, fee still owed`);
@@ -9612,17 +9606,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // the performed application is not — the hold suppressed the
             // completion mint.
             const feeInvLabel = feeCoveredBy.invoice_number || feeCoveredBy.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually using the EXACT line description "First service application" (so the system recognizes it as billed); do NOT re-bill the setup fee.`;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually using the EXACT line description "First service application" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT re-bill the setup fee.`;
           } else if (applicationCoveredBy) {
             // The application charge is billed (Charge Now invoice on the
             // visit, or an application-only acceptance invoice) but the
             // fee never was — collect that invoice, bill only the fee.
             const appInvLabel = applicationCoveredBy.invoice_number || applicationCoveredBy.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
           } else if (applicationCoveredOutOfBand) {
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" (so the system recognizes it as billed); do NOT bill the visit charge again.`;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT bill the visit charge again.`;
           } else {
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, so the system recognizes them as billed and can retire this alert.`;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
