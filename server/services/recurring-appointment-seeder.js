@@ -486,25 +486,40 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
 function notifySeedShortfall(parent, shortfall) {
   if (!shortfall) return;
   const parentId = parent?.id || null;
+  const dedupeKey = `recurring-seed-shortfall:${parentId || 'n/a'}:${shortfall.placed}/${shortfall.requested}`;
   const shortfallMsg = `Recurring plan for customer ${parent?.customer_id || 'n/a'} wanted ${shortfall.requested} follow-up visit(s) but only ${shortfall.placed} could be placed — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
   require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} ${shortfallMsg}`);
   Promise.resolve()
-    .then(() => require('./notification-service').notifyAdmin(
-      'alert',
-      'Recurring plan seeded short',
-      shortfallMsg,
-      {
-        link: parent?.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
-        bell: true,
-        metadata: {
-          dedupeKey: `recurring-seed-shortfall:${parentId || 'n/a'}:${shortfall.placed}/${shortfall.requested}`,
-          customer_id: parent?.customer_id || null,
-          recurring_parent_id: parentId,
-          requested: shortfall.requested,
-          placed: shortfall.placed,
+    .then(async () => {
+      // Real dedupe, not just a stamped key: the admin notifyAdmin path has
+      // no dedupe lookup of its own (only the customer path does), so check
+      // the notifications metadata directly before inserting. Best-effort —
+      // a concurrent double-fire can still race past this, but retried
+      // seeds (the common repeat) no longer stack identical bells.
+      const db = require('../models/db');
+      const existing = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+        .first('id')
+        .catch(() => null);
+      if (existing) return;
+      await require('./notification-service').notifyAdmin(
+        'alert',
+        'Recurring plan seeded short',
+        shortfallMsg,
+        {
+          link: parent?.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
+          bell: true,
+          metadata: {
+            dedupeKey,
+            customer_id: parent?.customer_id || null,
+            recurring_parent_id: parentId,
+            requested: shortfall.requested,
+            placed: shortfall.placed,
+          },
         },
-      },
-    ))
+      );
+    })
     .catch((err) => require('./logger').warn(`[recurring-seeder] shortfall notification failed (non-blocking): ${err.message}`));
 }
 
