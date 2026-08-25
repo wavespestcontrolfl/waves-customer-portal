@@ -583,6 +583,10 @@ function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
   if (primaryKey) seen.add(primaryKey);
 
   const out = [];
+  // Every accepted component is length-bounded, not just the raw string — a
+  // public payload must not smuggle unbounded values into JSONB, owner SMS
+  // alerts, or LLM prompts through the structured fields.
+  const clip = (value) => (value == null ? value : String(value).slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH));
   for (const entry of rawList) {
     let normalized = null;
     if (typeof entry === 'string') {
@@ -590,12 +594,12 @@ function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
     } else if (typeof entry === 'object' && !Array.isArray(entry)) {
       normalized = normalizeLeadAddress({
         raw: String(entry.formatted || entry.address || '').slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH),
-        line1: entry.line1 || entry.address_line1,
-        line2: entry.line2 || entry.address_line2 || entry.unit,
-        city: entry.city,
-        state: entry.state,
-        zip: entry.zip,
-        placeId: entry.place_id || entry.placeId || entry.google_place_id,
+        line1: clip(entry.line1 || entry.address_line1),
+        line2: clip(entry.line2 || entry.address_line2 || entry.unit),
+        city: clip(entry.city),
+        state: clip(entry.state),
+        zip: clip(entry.zip),
+        placeId: clip(entry.place_id || entry.placeId || entry.google_place_id),
       });
     }
     // A street line needs at least a digit and a letter to be a follow-up-able

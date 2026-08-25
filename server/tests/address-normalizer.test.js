@@ -562,3 +562,19 @@ describe('normalizeAdditionalProperties', () => {
     expect(normalizeAdditionalProperties()).toEqual([]);
   });
 });
+
+describe('normalizeAdditionalProperties input bounds', () => {
+  const { normalizeAdditionalProperties } = require('../utils/address-normalizer');
+
+  test('bounds structured component lengths, not just the raw string', () => {
+    const huge = `123 ${'A'.repeat(5000)} St`;
+    const out = normalizeAdditionalProperties({
+      additional_properties: [{ line1: huge, city: 'B'.repeat(5000), state: 'FL', zip: '34221', place_id: 'C'.repeat(5000) }],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].line1.length).toBeLessThanOrEqual(300);
+    expect(out[0].city.length).toBeLessThanOrEqual(300);
+    expect(out[0].placeId.length).toBeLessThanOrEqual(300);
+    expect(out[0].formatted.length).toBeLessThanOrEqual(1000);
+  });
+});
