@@ -1156,6 +1156,11 @@ export default function TimeGridDay({
           if (notifyCustomer && result?.notificationSent === false) {
             alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
           }
+          // Advisory schedule-overlap notes — the move committed (conflicts
+          // no longer block staff saves); say what now stacks.
+          if (Array.isArray(result?.warnings) && result.warnings.length) {
+            alert(`Moved.\n\n${result.warnings.join('\n\n')}`);
+          }
           return result;
         });
       }
@@ -1195,7 +1200,7 @@ export default function TimeGridDay({
     setOptimistic(optimisticNext);
     setBusy(true);
     try {
-      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+      const resizeResult = await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
         method: 'POST',
         body: JSON.stringify({
           newDate: date,
@@ -1205,6 +1210,10 @@ export default function TimeGridDay({
           notifyCustomer: false,
         }),
       });
+      // Advisory schedule-overlap notes — the widened block committed.
+      if (Array.isArray(resizeResult?.warnings) && resizeResult.warnings.length) {
+        alert(`Resized.\n\n${resizeResult.warnings.join('\n\n')}`);
+      }
       setOptimistic(null);
       onChange?.();
     } catch (err) {
@@ -1253,6 +1262,14 @@ export default function TimeGridDay({
             ? `Bulk reschedule failed for all ${results.length} appointments.`
             : `Bulk reschedule partially completed: ${results.length - failed.length} moved, ${failed.length} failed. The schedule has been refreshed.`,
         );
+      }
+      // Advisory schedule-overlap notes from the moves that committed —
+      // conflicts no longer block staff saves; say how many now stack.
+      const overlapCount = results.filter(
+        (result) => result.status === 'fulfilled' && Array.isArray(result.value?.warnings) && result.value.warnings.length,
+      ).length;
+      if (overlapCount > 0) {
+        alert(`${overlapCount} moved visit(s) now overlap another appointment on the schedule — all are kept on the calendar.`);
       }
       clearSelection();
     } catch (err) {

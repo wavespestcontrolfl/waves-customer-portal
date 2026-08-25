@@ -43,7 +43,6 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
- *   GATE_ADMIN_SLOT_OVERLAP_GUARD=true (admin schedule writes 409 SLOT_CONFLICT on a time overlap — occupancy.js probe)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -1008,6 +1007,18 @@ const gates = {
   // in-flight enrollments (the runner only picks enabled templates).
   treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
 
+  // Confident click-tracking auto-link for unlinked Google reviews: when a
+  // review syncs in with no name match and EXACTLY ONE customer's tracked
+  // review-link click sits shortly before it (location-matched, tight
+  // window — see review-click-correlation.js findConfidentClickMatch), link
+  // the review to that customer instead of parking it in the manual-match
+  // queue. Explicit opt-in: a wrong link suppresses that customer's future
+  // review asks AND (via reviewThankYouEnroll) can text them a thank-you.
+  // Kill: unset — reviews fall back to the unlinked-review notification and
+  // the office's manual match flow; already-made links keep their
+  // link_source='click_auto' stamp for audit.
+  reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
   // unset the var, or toggle the sequence off in the tab to hold in-flight):
@@ -1606,13 +1617,6 @@ const gates = {
   // nothing fills, parks, or renders. Kill switch: unset the var.
   callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
 
-  // Admin slot-overlap guard (2026-08-23): schedule create / edit / bulk
-  // move refuse (409 SLOT_CONFLICT) a window that overlaps a non-cancelled
-  // visit, via the shared occupancy.js probe under the date-wide lock.
-  // Fail-closed ==='true' in EVERY environment; read at call time by
-  // scheduling/window-rules.js so a flip needs no redeploy. The on-the-hour
-  // / 8am window rules are NOT gated. Kill switch: unset.
-  adminSlotOverlapGuard: process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -201,7 +201,12 @@ function paymentRows(payment) {
         tone: 'muted',
       });
     }
-    return rows;
+    // A dead/uncovered prepay hands billing back to the standard path —
+    // the setup-fee warning must render BESIDE the prepay history, not be
+    // swallowed by it (Codex PR r6 P2): the server signals that state by
+    // setting billingTerm 'standard' while annualPrepay still carries the
+    // term's history.
+    if (payment.billingTerm !== 'standard') return rows;
   }
 
   if (payment.billingTerm === 'prepay_annual') {
@@ -218,6 +223,23 @@ function paymentRows(payment) {
 
   if (payment.billingTerm === 'standard') {
     rows.push({ label: 'Billing', value: 'Per application', sub: null, tone: 'muted' });
+    // Setup fee owed but never invoiced (standard Mark Won accepts skip the
+    // acceptance invoice): warn BEFORE completion. The sub describes what
+    // completion will ACTUALLY do — parking only happens while the server
+    // gate is on; while off, completion mints the bare per-application
+    // invoice and the fee must be billed by hand.
+    if (payment.setupFeeMissing) {
+      rows.push({
+        label: 'Setup fee not invoiced',
+        value: money(payment.setupFeeMissing.setupFee),
+        sub: payment.setupFeeMissing.parkingEnabled
+          ? (payment.setupFeeMissing.applicationCovered
+            ? 'owed but never billed — completion will park a FEE-ONLY follow-up (the application is already invoiced; do not re-bill it)'
+            : 'owed but never billed — completion will park for manual billing (setup fee + first application)')
+          : 'owed but never billed — completion will NOT hold it; bill the setup fee manually',
+        tone: 'warn',
+      });
+    }
     const inv = payment.acceptanceInvoice;
     if (inv) {
       const paidSub = inv.paid
@@ -521,17 +543,23 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
 
         {rows.length > 0 && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
-            {rows.map((row, i) => (
-              <div key={`${row.label}-${i}`} style={lineStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK }}>{row.label}</div>
-                  {row.sub && <div style={{ fontSize: 11, color: row.tone === 'paid' ? GREEN : MUTED, marginTop: 1 }}>{row.sub}</div>}
+            {rows.map((row, i) => {
+              // 'warn' rows (e.g. setup fee owed but never invoiced) use the
+              // amber operational-heads-up ink, same as the payer banner.
+              const ink = row.tone === 'paid' ? GREEN : row.tone === 'warn' ? WARN.ink : INK;
+              const subInk = row.tone === 'paid' ? GREEN : row.tone === 'warn' ? WARN.ink : MUTED;
+              return (
+                <div key={`${row.label}-${i}`} style={lineStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>{row.label}</div>
+                    {row.sub && <div style={{ fontSize: 11, color: subInk, marginTop: 1 }}>{row.sub}</div>}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: ink, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                    {row.value}
+                  </div>
                 </div>
-                <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                  {row.value}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

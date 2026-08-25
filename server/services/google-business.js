@@ -434,6 +434,11 @@ class GoogleBusinessService {
         // the unlinked-review admin notification, not the plaintext log.
         logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
       }
+      // NO surname-initial expansion ("Michael F." → Michael Fossier): an
+      // initial is too weak an identity to auto-attribute (any stranger can
+      // share it — pre-push P1 ×3). Truncated display names are exactly what
+      // the click auto-link handles without needing the name at all; the
+      // rest stay in the manual queue with the likely-reviewer suggestions.
       return null;
     }
     return matches[0].id;
@@ -537,6 +542,202 @@ class GoogleBusinessService {
     }
   }
 
+  /**
+   * GATE_REVIEW_CLICK_AUTOLINK: link an unlinked review to the ONE customer
+   * whose tracked review-link click confidently explains it (sole clicker in
+   * the correlation window, location match, tight before-window — see
+   * findConfidentClickMatch). Runs from the deferred end-of-batch phase so
+   * the sole-clicker exclusion sees the whole batch's links, and re-reads
+   * the live row so a manual match landed mid-sync always wins.
+   *
+   * @param {{google_review_id?: string, reviewer_name?: string, location_id?: string, review_created_at?: string}} row
+   * @returns {Promise<boolean>} true when linked (caller skips the
+   *   unlinked-review notification); false on gate-off, ambiguity, a lost
+   *   race, or any error — failure routes to the manual queue, never a guess.
+   */
+  async _attemptClickAutoLink(row) {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('reviewClickAutoLink')) return false;
+      if (!row?.google_review_id || !row?.location_id) return false;
+      // Everything — correlation, liveness read, write, side effects — runs
+      // under the SAME per-location advisory lock manual attribution holds
+      // (review-incentives.js, pre-push P1 r3/r4): the sole-clicker check
+      // must not go stale before the write, and a manual match must never
+      // interleave between the link and its flag-flip/thank-you. Lock
+      // contention (another mutator active) = fall to the manual queue.
+      const outcome = await runExclusive(`gbp-review-sync:${row.location_id}`, async () => {
+        const { findConfidentClickMatch, AUTO_LINK_MAX_BEFORE_MS } = require('./review-click-correlation');
+        // Evidence checks + guarded write in ONE transaction: the
+        // correlation runs against the same snapshot the write commits
+        // against, so a click committed since the flush was queued is seen
+        // here (pre-push P1 r5), and the correlation must run BEFORE the
+        // update — after it, the just-linked customer would vanish from its
+        // own candidate set and the recheck would reject every link
+        // (pre-push P1 r7; the mocked-correlation tests couldn't catch
+        // that — MOCK ≠ prod).
+        // ACCEPTED RESIDUAL: a click that commits between this transaction's
+        // snapshot and its commit is invisible — the window is milliseconds,
+        // the link is undoable in Reviews, and serializing the
+        // customer-facing /go redirect behind sync locks would trade a
+        // paper-thin race for real latency.
+        let result;
+        try {
+          result = await db.transaction(async (trx) => {
+          const match = await findConfidentClickMatch(row, { conn: trx });
+          if (!match) return { nomatch: true };
+          // The collector entry is a detached payload — re-read the live row.
+          const live = await trx('google_reviews')
+            .where({ google_review_id: row.google_review_id })
+            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+          // Vanished or removal-stamped since the collector queued it: the
+          // review is no longer live, so the match-this bell would point at
+          // an unusable flow (the removal alert already rang) — handled,
+          // not ambiguous (GH codex #3483 r4).
+          if (!live || live.missing_since) return { handled: true };
+          // Linked since insert (manual match mid-sync): nothing to do, and
+          // a "come match this" bell for an already-matched review is pure
+          // noise — handled, so the caller skips the unlinked notification.
+          if (live.customer_id) return { handled: true };
+          // One click must correspond to ONE eligible review (pre-push P1
+          // r6): if another unlinked review at this location also sits
+          // inside the click's forward window, the click can't say which of
+          // them the customer wrote — whichever processed first would steal
+          // it. JS-side id filter so mocked whereNot can't drop the guard.
+          const clickedAtMs = new Date(match.clickedAt).getTime();
+          const windowRows = await trx('google_reviews')
+            .whereNull('customer_id')
+            .whereNull('missing_since')
+            .where('location_id', row.location_id)
+            .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
+            .where('review_created_at', '>=', new Date(clickedAtMs))
+            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
+            .limit(10)
+            .select('id');
+          if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
+          // Conditional-write guards (pre-push P1 r2): a manual match or a
+          // removal-reconcile stamp that committed before the lock was free
+          // must win at the atomic write. Zero rows = a manual link stands
+          // or the review is gone; either way the unlinked bell is noise.
+          // One Date for the link stamp AND the flag mark below: the
+          // reversal ownership check compares them for equality — a LATER
+          // human mark bumps review_marked_at past auto_linked_at and wins.
+          const markTime = new Date();
+          const updated = await trx('google_reviews')
+            .where({ id: live.id })
+            .whereNull('customer_id')
+            .whereNull('missing_since')
+            .update({ customer_id: match.customerId, link_source: 'click_auto', auto_linked_at: markTime });
+          if (!updated) return { handled: true };
+          // Suppression flip in the SAME transaction (pre-push P1): a
+          // linked review with a still-false flag would keep asking the
+          // customer forever — the retry sweep only scans UNLINKED rows —
+          // so a failed flip must roll the link back for the next sweep.
+          // Zero rows = the flag was claimed by a HUMAN between the
+          // correlation read and this write (correlation refuses
+          // already-flagged candidates), so ownership would be ambiguous —
+          // abort the link toward the manual queue (GH codex #3483 r7).
+          const flipped = await trx('customers')
+            .where({ id: match.customerId })
+            .whereNull('deleted_at')
+            .where(function alreadyFlagged() {
+              this.where('has_left_google_review', false).orWhereNull('has_left_google_review');
+            })
+            .update({ has_left_google_review: true, review_marked_at: markTime });
+          if (!flipped) {
+            const raceErr = new Error('suppression flag claimed concurrently');
+            raceErr.code = 'FLAG_CLAIM_RACE';
+            throw raceErr;
+          }
+          return { linked: true, match, live };
+          });
+        } catch (err) {
+          if (err?.code === 'FLAG_CLAIM_RACE') return { nomatch: true };
+          throw err;
+        }
+        if (!result?.linked) return result;
+        // The flag flip committed atomically with the link above. NO
+        // thank-you enrollment here — like the payout (pre-push P0),
+        // customer-facing copy waits for the human confirm: a wrong
+        // probabilistic link must never text "thanks for your review" to
+        // someone who didn't write it, and a re-match can't reliably claw
+        // back an already-active enrollment (GH codex r2 P1).
+        // manualAttributeGoogleReview enrolls on confirm.
+        // Best-effort audit trail, mirroring _markCustomerLeftReview.
+        try {
+          await db('activity_log').insert({
+            customer_id: result.match.customerId,
+            action: 'review_auto_marked',
+            description: 'Click auto-link — marked "already left a Google review"; review asks stop pending human confirm in Reviews.',
+          });
+        } catch { /* audit only */ }
+        return result;
+      }, { recordHealth: false });
+      if (outcome?.skipped || outcome?.nomatch) return false;
+      if (!outcome?.linked) return true;
+      const match = outcome.match;
+      // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
+      // match is one glance + one manual re-match away, not silent.
+      try {
+        const stars = Number(row.star_rating) || 0;
+        await NotificationService.notifyAdmin(
+          'review',
+          `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
+          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (only click in the window, same location). Wrong match? Re-match it in Reviews.`,
+          {
+            link: '/admin/reviews',
+            metadata: {
+              googleReviewId: row.google_review_id,
+              customerId: match.customerId,
+              clickedAt: match.clickedAt,
+              clickOffsetLabel: match.clickOffsetLabel,
+              reason: 'click_auto_link',
+            },
+          },
+        );
+      } catch { /* best-effort — the link itself already stands */ }
+      // ID-only logging (AGENTS.md) — reviewer display names are PII.
+      logger.info(`[gbp] Click auto-link: review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
+      return true;
+    } catch (err) {
+      logger.warn(`[gbp] Click auto-link failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Retry the confident click auto-link over reviews that synced in unlinked
+   * on EARLIER runs — a click stamped after a review's first sync (rate-page
+   * fallback, delayed tap) can turn a parked review decidable later. Runs at
+   * the end of each batch sync; idempotent (linked rows drop out of the
+   * unlinked set), capped, and per-row failures never break the sync.
+   */
+  async _retryUnlinkedReviewAutoLink() {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('reviewClickAutoLink')) return;
+      const rows = await db('google_reviews')
+        .whereNull('customer_id')
+        .whereNull('missing_since')
+        .whereNotNull('google_review_id')
+        .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
+        .whereNot('google_review_id', 'like', 'places_stats_%')
+        .where('review_created_at', '>=', new Date(Date.now() - 90 * 24 * 3600 * 1000))
+        .orderBy('review_created_at', 'desc')
+        // Runaway guard, not a work queue: 90d of real review volume is a
+        // few dozen rows, so every unlinked review in the window is examined
+        // each run — the cap only bites on pathological data (pre-push P1:
+        // a tight newest-first cap would permanently starve older rows).
+        .limit(200)
+        .select('google_review_id', 'reviewer_name', 'location_id', 'review_created_at', 'star_rating');
+      for (const row of rows) {
+        await this._attemptClickAutoLink(row);
+      }
+    } catch (err) {
+      logger.warn(`[gbp] Unlinked-review auto-link retry failed: ${err.message}`);
+    }
+  }
+
   async _findExistingReview(normalized) {
     let existing = await db('google_reviews').where({ gbp_review_name: normalized.gbp_review_name }).first();
     if (existing) return existing;
@@ -575,7 +776,12 @@ class GoogleBusinessService {
       star_rating: normalized.star_rating,
       review_text: normalized.review_text,
       review_created_at: normalized.review_created_at,
-      customer_id: customerId || existing?.customer_id || null,
+      // Existing link FIRST: once a review is attributed (manual, click
+      // auto-link, or an earlier name match) a later sync's name match must
+      // never silently reassign it — that would strand the original
+      // customer's suppression flag with no provenance-aware reversal (GH
+      // codex #3483 r1 P2). Corrections go through manual attribution only.
+      customer_id: existing?.customer_id || customerId || null,
       // One clock authority for the reconcile ordering tokens: synced_at is
       // compared against runner fetch-start timestamps (Node clock), so it
       // must come from the same clock — db.fn.now() (Postgres) behind the
@@ -627,7 +833,8 @@ class GoogleBusinessService {
         await db('google_reviews').where({ id: winner.id }).update({
           ...providerRow,
           synced_at: monotonicSyncedAt,
-          customer_id: customerId || winner.customer_id || null,
+          // Same existing-link-first rule as the row build above.
+          customer_id: winner.customer_id || customerId || null,
           ...winnerReplyFields,
         });
         result = { id: winner.id, inserted: false };
@@ -687,7 +894,7 @@ class GoogleBusinessService {
       // (codex #3264 r2).
       if (Array.isArray(pendingUnlinkedNotifications)) {
         pendingUnlinkedNotifications.push(row);
-      } else {
+      } else if (!(await this._attemptClickAutoLink(row))) {
         await this._notifyUnlinkedReview(row);
       }
     }
@@ -809,7 +1016,8 @@ class GoogleBusinessService {
           star_rating: review.rating || 0,
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
-          customer_id: customerId || existing.customer_id,
+          // Existing link first — mirror of _upsertGbpReview (GH codex r1).
+          customer_id: existing.customer_id || customerId,
         };
         // synced_at participates in the authoritative reconcile's claim
         // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
@@ -868,7 +1076,10 @@ class GoogleBusinessService {
         }).returning('id');
         newCount++;
       }
-      const effectiveCustomerId = customerId || existing?.customer_id || null;
+      // Existing-link-first, matching the persisted field above: a late name
+      // match must not suppress customer B's asks while the row stays linked
+      // to customer A (GH codex #3483 r3).
+      const effectiveCustomerId = existing?.customer_id || customerId || null;
       if (effectiveCustomerId) {
         // Matched to a customer → they left a review; auto-exclude from outreach.
         await this._markCustomerLeftReview(effectiveCustomerId);
@@ -898,7 +1109,7 @@ class GoogleBusinessService {
         };
         if (Array.isArray(pendingUnlinkedNotifications)) {
           pendingUnlinkedNotifications.push(notifyRow);
-        } else {
+        } else if (!(await this._attemptClickAutoLink(notifyRow))) {
           await this._notifyUnlinkedReview(notifyRow);
         }
       }
@@ -1036,11 +1247,16 @@ class GoogleBusinessService {
     }
 
     // Whole batch is now inserted/linked — safe to run the likely-reviewer
-    // lookup inside each deferred notification. _notifyUnlinkedReview
-    // self-catches, so one failure can't drop the rest.
+    // lookup inside each deferred notification. Confident click evidence
+    // links the review outright (gated) instead of parking it in the manual
+    // queue; both helpers self-catch, so one failure can't drop the rest.
     for (const row of pendingUnlinked) {
-      await this._notifyUnlinkedReview(row);
+      const autoLinked = await this._attemptClickAutoLink(row);
+      if (!autoLinked) await this._notifyUnlinkedReview(row);
     }
+    // Clicks stamped after a review's first sync can turn an already-parked
+    // review decidable — sweep the recent unlinked set each run (gated).
+    await this._retryUnlinkedReviewAutoLink();
 
     await this._resolveGbpResourceNames();
     try {
@@ -1275,6 +1491,7 @@ class GoogleBusinessService {
       // next sync then re-claims and re-notifies. Intentional suppression
       // returns a truthy sentinel and commits (stamp kept).
       let gone = [];
+      const reversedCustomerIds = [];
       try {
         await db.transaction(async (trx) => {
           const claimedRows = await trx('google_reviews')
@@ -1299,6 +1516,73 @@ class GoogleBusinessService {
           gone = candidates.filter(r => claimedIds.has(r.id));
           if (gone.length === 0) return;
 
+          // Unconfirmed click auto-links whose review just vanished (GH
+          // codex #3483 r5): every correction surface excludes missing_since
+          // rows, so the auto-owned suppression flag would strand forever.
+          // Reverse it in the SAME transaction as the stamp — sole-basis
+          // only (another linked review still proves they reviewed); a
+          // 'manual'/'manual_no_visit' link was human-confirmed and keeps
+          // its flag like any other removed attributed review.
+          const autoLinked = await trx('google_reviews')
+            .whereIn('id', gone.map(r => r.id))
+            .where({ link_source: 'click_auto' })
+            .whereNotNull('customer_id')
+            .select('id', 'customer_id', 'auto_linked_at');
+          for (const alRow of autoLinked) {
+            const otherLink = await trx('google_reviews')
+              .where({ customer_id: alRow.customer_id })
+              .whereNot('id', alRow.id)
+              .first('id');
+            // Unlink the unconfirmed probabilistic match itself (GH codex
+            // #3483 r7): the review is gone from Google, yet a retained
+            // customer_id still reads as "has a linked review" in every
+            // suppression check (sequence runner, correlation's linked
+            // exclusion). The retained row keeps the review text as
+            // evidence; only the never-confirmed attribution is dropped.
+            await trx('google_reviews')
+              .where({ id: alRow.id, link_source: 'click_auto' })
+              .update({ customer_id: null, link_source: null, auto_linked_at: null });
+            // Ownership check (GH codex r6): a review_marked_at LATER than
+            // this auto-link's own stamp means a human independently
+            // confirmed the customer reviewed — that flag is not ours to
+            // clear.
+            const cust = await trx('customers')
+              .where({ id: alRow.customer_id })
+              .first('review_marked_at');
+            const ownedByAutoLink = alRow.auto_linked_at && cust?.review_marked_at
+              && new Date(cust.review_marked_at) <= new Date(alRow.auto_linked_at);
+            if (!otherLink && ownedByAutoLink) {
+              // Ownership predicate IN the write (GH codex r8): a
+              // concurrent human mark bumps review_marked_at, the
+              // conditional no-ops, and the human's confirmation survives.
+              // Sole-basis check ALSO in the write (GH codex r10): this
+              // location's lock doesn't serialize an attribution linking
+              // another review to the same customer elsewhere, so the
+              // otherLink pre-read can miss a link committing in the gap —
+              // the subquery re-evaluates at write time and refuses the
+              // clear once any other linked review proves the customer
+              // reviewed. Audit entry only when the clear actually happened
+              // (GH codex r9) — a no-op race must not log "review asks
+              // resume".
+              const cleared = await trx('customers')
+                .where({ id: alRow.customer_id })
+                .where({ review_marked_at: cust.review_marked_at })
+                .whereNotExists(function soleBasis() {
+                  this.select(1)
+                    .from('google_reviews')
+                    .where('google_reviews.customer_id', alRow.customer_id)
+                    .whereNot('google_reviews.id', alRow.id);
+                })
+                .update({ has_left_google_review: false, review_marked_at: null });
+              // Audit rows are inserted AFTER the transaction commits
+              // (pre-push P1): a caught statement error still marks the
+              // whole PostgreSQL transaction aborted, so an in-trx
+              // "best-effort" insert would fail the later notification
+              // query and roll back the entire stamp/unlink/reversal.
+              if (cleared) reversedCustomerIds.push(alRow.customer_id);
+            }
+          }
+
           const names = gone.slice(0, 15)
             .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
             .join(', ');
@@ -1321,6 +1605,18 @@ class GoogleBusinessService {
         return { ok: false, error: `removal-alert transaction rolled back: ${err.message}` };
       }
       if (gone.length === 0) return { ok: true };
+      // Genuinely best-effort audit trail, outside the transaction (matching
+      // the manual-attribution path): the reversal itself is committed, so a
+      // lost audit row costs nothing durable and must never fail the sync.
+      for (const reversedId of reversedCustomerIds) {
+        try {
+          await db('activity_log').insert({
+            customer_id: reversedId,
+            action: 'review_automark_reversed',
+            description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
+          });
+        } catch { /* audit only — the reversal is already committed */ }
+      }
       // Count only — reviewer display names are PII and ride in the admin
       // notification, not the plaintext log.
       logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);

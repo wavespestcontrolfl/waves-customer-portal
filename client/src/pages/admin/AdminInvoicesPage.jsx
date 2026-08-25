@@ -737,6 +737,11 @@ function InvoiceList({
   const [sort, setSort] = useState("newest");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(null);
+  // A deep-linked invoice fetched ahead of its page lives OUTSIDE the
+  // paginated collection (Codex PR r9 P2): merging it into `invoices`
+  // inflated the length and hid Load More before the real pages were
+  // exhausted. Rendered rows merge it; pagination math never sees it.
+  const [deepLinkedInvoice, setDeepLinkedInvoice] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
   const [sendModalInvoice, setSendModalInvoice] = useState(null);
@@ -773,7 +778,12 @@ function InvoiceList({
         return;
       }
       const rows = data.invoices || [];
-      setInvoices((prev) => (append ? [...prev, ...rows] : rows));
+      // Dedupe by id: a deep-linked invoice fetched ahead of its page
+      // (?invoice=) must not appear twice once pagination reaches it
+      // (Codex PR r6 P2 — duplicate keys, doubled expanded rows).
+      setInvoices((prev) => (append
+        ? [...prev, ...rows.filter((r) => !prev.some((p) => String(p.id) === String(r.id)))]
+        : rows));
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
       if (!append) {
@@ -787,17 +797,49 @@ function InvoiceList({
   }, [load]);
 
   // Keep expanded invoice detail in the URL so notification links, mobile
-  // back navigation, and refresh all restore the same row.
+  // back navigation, and refresh all restore the same row. A deep-linked
+  // invoice outside the loaded page (an old stale draft the dashboard
+  // alert targets) is fetched by id and prepended, so the link always
+  // lands ON the row instead of a generic list (Codex PR r5 P2).
   useEffect(() => {
     const invoiceId = searchParams.get("invoice");
     if (!invoiceId) {
       setExpanded(null);
+      setDeepLinkedInvoice(null);
       return;
     }
     const match = invoices.find(
       (inv) => String(inv.id) === String(invoiceId),
     );
-    setExpanded(match?.id || null);
+    if (match) {
+      setExpanded(match.id);
+      // The separately fetched row is only for OUT-OF-PAGE targets —
+      // clear a stale one so it stops rendering outside the active
+      // filters (Codex PR r10 P2).
+      setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
+      return;
+    }
+    setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
+    let cancelled = false;
+    adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
+      .then((row) => {
+        if (cancelled || !row?.id) return;
+        // getById nests customer fields — flatten to the list-row shape
+        // so the deep-linked row renders name/contact like every other
+        // row (Codex PR r11 P2).
+        const flat = {
+          ...row,
+          first_name: row.first_name ?? row.customer?.first_name ?? null,
+          last_name: row.last_name ?? row.customer?.last_name ?? null,
+          phone: row.phone ?? row.customer?.phone ?? null,
+          email: row.email ?? row.customer?.email ?? null,
+          card_on_file: row.card_on_file ?? row.customer?.card_on_file ?? null,
+        };
+        setDeepLinkedInvoice(flat);
+        setExpanded(row.id);
+      })
+      .catch(() => setExpanded(null));
+    return () => { cancelled = true; };
   }, [invoices, searchParams]);
 
   const toggleExpanded = (invoiceId) => {
@@ -1094,7 +1136,10 @@ function InvoiceList({
     return { key: "sent", label: "Sent", color: D.text };
   };
 
-  const rows = invoices;
+  const rows = deepLinkedInvoice
+    && !invoices.some((inv) => String(inv.id) === String(deepLinkedInvoice.id))
+    ? [deepLinkedInvoice, ...invoices]
+    : invoices;
 
   // Group by day — date header matches "Saturday, April 18, 2026"
   const groups = [];

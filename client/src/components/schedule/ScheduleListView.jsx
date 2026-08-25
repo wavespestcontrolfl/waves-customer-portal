@@ -197,6 +197,14 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
           `${bulkAction === 'cancel' ? 'Cancelled' : 'Rescheduled'}, but ${res.notificationFailures.length} customer(s) were not texted:\n${lines.join('\n')}`,
         );
       }
+      // Advisory schedule-overlap notes — the moves committed (conflicts no
+      // longer block staff saves); say which rows now stack before the
+      // selection is cleared.
+      if (Array.isArray(res?.overlapWarnings) && res.overlapWarnings.length > 0) {
+        window.alert(
+          `Moved. ${res.overlapWarnings.length} visit(s) now overlap another appointment on the schedule — all are kept on the calendar.`,
+        );
+      }
       setSelected(new Set());
       setBulkAction('');
       // One decision per bulk cancel: never let a checked waive leak into

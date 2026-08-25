@@ -8862,6 +8862,182 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
+    // Never-minted setup fee (owner ruling 2026-08-24, gate
+    // GATE_UNMINTED_SETUP_FEE_PARK): the standard verbal Mark Won accept
+    // skips the acceptance invoice by design (estimate-manual-acceptance),
+    // so a solo-plan first visit reaches completion with NO setup-fee
+    // invoice anywhere — an ordinary completion mint would bill only the
+    // per-application price and the one-time setup fee silently
+    // evaporates. Detect it and PARK the mint for manual billing (alert
+    // block below), the same shape as the canceled-setup-fee parking
+    // (#3474). FAIL CLOSED like the refunded-invoice check above: this
+    // hold is the only thing standing between the completion and the
+    // fee-dropping mint, so a swallowed read failure would re-open the
+    // leak for exactly the visits the gate exists to protect.
+    // Runs even when a pre-completion Charge Now invoice already exists on
+    // the visit (Codex PR r2 P1): that invoice carries only the application
+    // charge, so the setup fee is STILL unbilled — the completion reuses
+    // the invoice unheld (see unmintedSetupFeeHold below) and the alert
+    // block parks a bill-the-fee-beside-it instruction instead of a mint
+    // hold. Terminal (refunded) invoices keep their own alert lane.
+    // Terminal invoices no longer skip the detector (Codex P0, pre-push
+    // round 11): a refunded Charge Now application invoice reaches only
+    // the terminal alert, whose default instruction says to bill the
+    // visit — with a Mark Won accept the setup fee is STILL unbilled, so
+    // the detector runs and the terminal alert appends the missing-fee
+    // instruction (terminalSetupFeeNote below) instead of a second park.
+    // The detector's own fee-carrying-refund suppression is retained: a
+    // refunded invoice that BILLED the fee reads not-owed.
+    let unmintedSetupFeeObligation = null;
+    let terminalSetupFeeNote = '';
+    let setupFeeReconcileAfterCommit = false;
+    if (!recapReviewOnly
+      && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
+      try {
+        const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
+        const obligation = await findUnmintedSetupFeeObligation({
+          sourceEstimateId: svc.source_estimate_id,
+          customerId: svc.customer_id,
+          excludeScheduledServiceId: svc.id,
+          // A one-time add-on sourced from the same estimate never owns the
+          // obligation — holding ITS mint would drop the add-on's own
+          // charge. Plan membership is judged on durable recurrence
+          // identity, never service-type text.
+          visitPlanRow: {
+            is_recurring: svc.is_recurring,
+            recurring_parent_id: svc.recurring_parent_id || null,
+          },
+        }, db);
+        const setupFeeDedupeKey = `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`;
+        // Stale-alert reconciliation (Codex P0, pre-push rounds 8–10):
+        // runs on EVERY completion that does not itself park, whatever
+        // the detector said — the manual invoice the alert requests is
+        // normally attached to the parked visit WITHOUT the estimate
+        // stamp, so the detector can stay "owed" (or flip
+        // firstVisitAlreadyCompleted) while the alert's charges are in
+        // fact covered. Resolution requires per-charge proof from live
+        // invoices: one billing the fee AND one billing the parked
+        // visit's application — never the detector's estimate-level
+        // verdict alone.
+        const reconcileParkedSetupFeeAlert = () => require('../services/setup-fee-alert-reconcile')
+          .reconcileSetupFeeAlert({
+            customerId: svc.customer_id,
+            sourceEstimateId: svc.source_estimate_id,
+            actorLabel: ` visit ${svc.id}:`,
+          });
+        if (obligation.owed && !obligation.firstVisitAlreadyCompleted && terminalCompletionInvoice) {
+          // The terminal (refunded-invoice) alert lane owns this visit —
+          // append the missing-fee instruction to ITS alert rather than
+          // parking a second one (Codex P0, pre-push round 11).
+          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
+        } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+          // One parked visit per estimate (Codex P0, pre-push round 8):
+          // the fee obligation stays owed while a parked visit sits
+          // unbilled, so a LATER plan visit would also qualify — but
+          // parking it too would collapse two unbilled applications into
+          // one singular estimate-wide instruction. The FIRST parked
+          // visit's alert owns the setup fee + its own application; every
+          // later visit mints its application charge normally.
+          // Resolved alerts do not own the parking (Codex P0, pre-push
+          // round 9): if coverage was later voided and the obligation
+          // reopened, a resolved alert must not swallow the new park —
+          // the in-transaction rewrite below reactivates it
+          // (resolvedCovered flips back to false).
+          const priorParkedAlert = await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+            .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
+            .first('id', 'metadata');
+          const parkedVisitId = priorParkedAlert && (typeof priorParkedAlert.metadata === 'string'
+            ? (() => { try { return JSON.parse(priorParkedAlert.metadata)?.scheduledServiceId; } catch { return null; } })()
+            : priorParkedAlert.metadata?.scheduledServiceId);
+          if (priorParkedAlert && String(parkedVisitId || '') !== String(svc.id)) {
+            logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} already has a parked setup-fee alert on visit ${parkedVisitId || '?'} — this application mints normally, the parked alert keeps the fee`);
+            await reconcileParkedSetupFeeAlert();
+          } else {
+            unmintedSetupFeeObligation = obligation;
+          }
+        } else {
+          if (obligation.owed && obligation.firstVisitAlreadyCompleted) {
+            // Historic leak (an earlier plan visit completed AND billed
+            // bare): never park THIS routine visit — its own application
+            // invoices normally — but the fee still needs a DURABLE
+            // follow-up (Codex PR r8 P1): a log line alone left it
+            // permanently uncollected. Park a FEE-ONLY alert under the
+            // same dedupe key (skipped when any alert already stands);
+            // best-effort — the next series completion retries.
+            logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — parking a fee-only alert, this visit invoices normally`);
+            try {
+              await db.transaction(async (trx) => {
+                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [setupFeeDedupeKey]);
+                const existing = await trx('notifications')
+                  .where({ recipient_type: 'admin' })
+                  .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+                  .first('id');
+                if (existing) return; // reconcile owns the standing alert
+                const histRef = obligation.estimateSlug || obligation.estimateId;
+                const histFee = `$${Number(obligation.setupFee || 0).toFixed(2)}`;
+                const created = await require('../services/notification-service').notifyAdmin(
+                  'billing',
+                  'Setup fee never invoiced — historic first visit billed without it',
+                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.`,
+                  {
+                    link: `/admin/customers/${svc.customer_id}`,
+                    bell: true,
+                    metadata: {
+                      dedupeKey: setupFeeDedupeKey,
+                      customerId: svc.customer_id,
+                      sourceEstimateId: obligation.estimateId,
+                      feeOnly: true,
+                      expectedSetupFeeCents: Math.round(Number(obligation.setupFee || 0) * 100),
+                      // The EXACT billed visits that justified this alert
+                      // (Codex P0): reconciliation revalidates only these.
+                      historicVisitIds: obligation.billedPriorPlanVisitIds || [],
+                    },
+                    connection: trx,
+                  },
+                );
+                if (!created) throw new Error('historic fee-only notification insert failed');
+              });
+            } catch (histErr) {
+              // FAIL CLOSED (Codex PR r15 P1): this alert is the fee's
+              // only durable follow-up — a customer's LAST completion (or
+              // a cancellation before another) would otherwise carry the
+              // leak forward with nothing standing. Same
+              // release-for-resume + 503 shape as the parking alert.
+              logger.error(`[dispatch] historic setup-fee alert FAILED for ${svc.id} — closeout NOT finalized: ${histErr.message}`);
+              const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, histErr);
+              if (!released) {
+                logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+              }
+              return res.status(503).json({
+                error: released
+                  ? 'A historic setup-fee alert for this estimate could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+                  : `A historic setup-fee alert for this estimate could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+                code: 'historic_setup_fee_alert_failed',
+                ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+                serviceRecordId: record.id,
+              });
+            }
+          }
+          await reconcileParkedSetupFeeAlert();
+        }
+      } catch (lookupErr) {
+        logger.error(`[dispatch] unminted-setup-fee check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The setup-fee check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The setup-fee check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'unminted_setup_fee_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
+    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -8956,6 +9132,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Refunded invoice on this visit → never mint a replacement (codex
       // #3456); the manual-billing alert below owns the follow-up.
       terminalInvoiceOnVisit: !!terminalCompletionInvoice,
+      // Setup fee owed but never invoiced (Mark Won accept) → never mint
+      // the bare per-application invoice; the parking alert below owns
+      // the follow-up (bill setup + first application by hand). NOT held
+      // when a Charge Now invoice already exists on the visit — the
+      // completion must keep reusing that invoice exactly as before; the
+      // alert then requests only the still-unbilled fee (Codex PR r2 P1).
+      // Both lookups are consulted (Codex P0, pre-push round 7): an
+      // invoice minted between the two reads appears only in
+      // preMintedInvoice, and the hold and beside-branch must agree.
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -9056,6 +9242,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           for (const lockId of alertMintLockIds) {
             await acquireScheduledInvoiceMintLock(trx, lockId);
           }
+          // Canonical order: mint locks → setup-fee dedupe lock →
+          // terminal dedupe lock (Codex P0): when this alert registers a
+          // fee clause, a stamped manual invoice serialized on the
+          // setup-fee key must not commit between the fee scan and this
+          // insert.
+          if (unmintedSetupFeeObligation && svc.source_estimate_id) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${svc.source_estimate_id}`]);
+          }
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
@@ -9102,9 +9296,56 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .forUpdate()
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc')
-            .select('id', 'invoice_number', 'status');
-          const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
-            && !terminalResolvedAway.includes(r.status)) || null;
+            .select('id', 'invoice_number', 'status', 'line_items', 'notes');
+          // Fee coverage is classified INDEPENDENTLY from the visit
+          // charge (Codex PR r3 P1) and CENTS-EXACT against the accepted
+          // amount (Codex PR r13 P1): a $9.90 partial fee line must not
+          // erase the note — the remainder is instructed instead.
+          const {
+            sumPositiveSetupFeeCents: terminalFeeCents,
+            sumBaseApplicationCents: terminalAppCents,
+            invoiceBillsBaseApplication: terminalBillsApp,
+          } = require('../services/estimate-first-application-invoice');
+          // The replacement pick PREFERS a row that actually bills the
+          // application (Codex PR r24 P1): with a newer fee-only invoice
+          // beside an older paid application invoice, newest-first chose
+          // the wrong row and the alert directed staff at it.
+          const freshLiveRows = onVisitLockedRows.filter((r) => String(r.id) !== String(terminalCompletionInvoice.id)
+            && !terminalResolvedAway.includes(r.status));
+          const freshLiveOnVisit = freshLiveRows.find((r) => terminalBillsApp(r)) || freshLiveRows[0] || null;
+          const termExpectedFeeCents = Math.round(Number(unmintedSetupFeeObligation?.setupFee || 0) * 100);
+          // Stamped fee invoices are RE-SCANNED inside this transaction
+          // (Codex PR r18 P1): a stamped unattached fee invoice that
+          // committed after the obligation lookup — the exact write the
+          // setup-fee lock serializes — must count, or the alert
+          // instructs an already-covered fee.
+          const stampedFeeRowsNow = unmintedSetupFeeObligation && svc.source_estimate_id
+            ? await trx('invoices')
+              .where({ customer_id: svc.customer_id })
+              .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
+              .forUpdate()
+              .select('id', 'status', 'line_items', 'notes')
+            : [];
+          const termFeeRows = [...new Map(
+            [...onVisitLockedRows, ...stampedFeeRowsNow].map((r) => [String(r.id), r]),
+          ).values()];
+          const liveFeeCentsOnVisit = termFeeRows
+            .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+          const refundedFeeCentsTerm = termFeeRows
+            .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+          const terminalFeeCovered = termExpectedFeeCents > 0
+            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents;
+          const termFeeEstimateRef = unmintedSetupFeeObligation
+            ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
+            : null;
+          // The remainder subtracts BOTH live and refunded coverage
+          // (Codex PR r20 P1) — refunded cents are never re-billed.
+          const termFeeRemainder = Math.max(0, termExpectedFeeCents - liveFeeCentsOnVisit - refundedFeeCentsTerm);
+          const effectiveSetupFeeNote = (!terminalSetupFeeNote || terminalFeeCovered)
+            ? ''
+            : ` ALSO: the one-time WaveGuard setup fee ($${(termFeeRemainder / 100).toFixed(2)}${(liveFeeCentsOnVisit + refundedFeeCentsTerm) > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
           //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
@@ -9122,8 +9363,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
-          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status);
-          if (covered) {
+          // Settled coverage requires the invoice to actually BILL the
+          // application (Codex PR r13 P1): a fee-only paid invoice on the
+          // visit must not resolve the refunded application's follow-up.
+          let liveBesideFull = liveBesideNow;
+          if (liveBesideNow && liveBesideNow.line_items === undefined) {
+            liveBesideFull = await trx('invoices')
+              .where({ id: liveBesideNow.id })
+              .first('id', 'invoice_number', 'status', 'line_items', 'notes') || liveBesideNow;
+          }
+          const termExpectedAppCents = Math.round(Number(svc.estimated_price || 0) * 100);
+          // Application coverage sums across EVERY live on-visit row plus
+          // the chosen beside row (deduped) — one qualifying older paid
+          // invoice settles the application even with unrelated newer
+          // rows present (Codex PR r24 P1).
+          const appCoverageRows = [...new Map(
+            [...freshLiveRows, ...(liveBesideFull ? [liveBesideFull] : [])].map((r) => [String(r.id), r]),
+          ).values()];
+          const besideAppCents = appCoverageRows.reduce((sum, r) => sum + terminalAppCents(r), 0);
+          const besideCoversApplication = termExpectedAppCents > 0
+            ? besideAppCents >= termExpectedAppCents
+            : appCoverageRows.some(terminalBillsApp);
+          const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status)
+            && besideCoversApplication;
+          // Settled visit coverage does NOT settle a still-owed setup fee
+          // (Codex P0, pre-push round 15): when the detector reported the
+          // fee unminted, the alert stays ACTIVE carrying the fee-only
+          // instruction — fall through to the body build below instead of
+          // resolving away the fee's only follow-up.
+          if (covered && !effectiveSetupFeeNote) {
             // Settled coverage: no NEW alert — and an already-parked one is
             // rewritten so its "bill/collect" instruction cannot cause a
             // duplicate collection (codex r11).
@@ -9136,7 +9404,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
             return true;
           }
-          const liveBesideNote = liveBesideNow
+          const liveBesideNote = covered
+            // Only reachable with effectiveSetupFeeNote set: the visit
+            // charge is settled — never instruct another collection.
+            ? ` Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status} — the visit charge is SETTLED; do NOT bill or collect it again.`
+            : liveBesideNow
             ? (liveBesideNow.status === 'processing'
               ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
               : (terminalRestored
@@ -9145,13 +9417,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             : (completionTerminalIncludedSetupFee
               ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
               : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
-          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
+          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}${effectiveSetupFeeNote}`;
+          // A terminal alert carrying the fee note REGISTERS with the
+          // setup-fee reconciler (Codex PR r13 P1): billing the requested
+          // fee later must retire the fee clause even though this alert
+          // is keyed per-visit, not per-estimate.
+          const terminalSetupFeeMeta = effectiveSetupFeeNote
+            ? {
+              setupFeeDedupeKey: `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`,
+              sourceEstimateId: svc.source_estimate_id,
+              expectedSetupFeeCents: termExpectedFeeCents,
+            }
+            : {};
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
             // situation may have changed since it was written (codex r11).
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {})]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}) })]),
             });
             return true;
           }
@@ -9159,7 +9442,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;
@@ -9182,6 +9465,326 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         });
+      }
+    }
+    // Unminted setup fee blocked the mint (owner ruling 2026-08-24): the
+    // first visit ran and is owed money, but no acceptance invoice was
+    // ever created (Mark Won accepts skip it by design) — minting the bare
+    // per-application invoice here would silently drop the one-time setup
+    // fee, so nothing was minted and this alert is the ONLY durable
+    // follow-up for BOTH charges. Same fail-closed release/503 shape as
+    // the terminal-invoice alert above; deciding-reason check ensures the
+    // hold is the ONE reason invoicing was skipped (a visit the gate would
+    // decline anyway owes no alert).
+    // Two ways in (Codex PR r2 P1): the mint-hold path (nothing minted —
+    // deciding-reason check keeps a visit the gate would decline anyway
+    // from alerting), and the Charge Now path (a pre-completion invoice
+    // already exists on the visit carrying only the application charge —
+    // the completion reused it unheld above, and the alert's liveOnVisit
+    // branch directs staff to collect it and bill the fee BESIDE it).
+    // The Charge Now invoice appears as existingCompletionInvoice AND/OR
+    // preMintedInvoice (same row, two lookups — Codex P0 rounds 4 and 7:
+    // an invoice minted between the two reads shows only in the second),
+    // so the beside-branch keys on EITHER; excluding preMintedInvoice
+    // would suppress this branch for exactly the case it exists for.
+    const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation
+      && (existingCompletionInvoice || preMintedInvoice)
+      && !terminalCompletionInvoice && !recapReviewOnly);
+    // Out-of-band prepayment (cash/Zelle marked prepaid) covers the
+    // APPLICATION amount only — the fee still needs its durable follow-up
+    // (Codex PR r4 P1): without this branch, prepaidCovered suppressed
+    // both the mint AND the alert and the $99 simply vanished.
+    // Only the OUT-OF-BAND leg counts (Codex PR r10 P1): an annual
+    // prepay that settled between the obligation read and here WAIVES the
+    // fee — it must extinguish the alert, never become "application
+    // covered, bill the fee".
+    const setupFeePrepaidBeside = !!(unmintedSetupFeeObligation && prepaidCovered
+      && !annualPrepayCovered
+      && !terminalCompletionInvoice && !recapReviewOnly);
+    if (setupFeeChargeNowBeside || setupFeePrepaidBeside
+      || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
+        && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
+        && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false }))) {
+      const feeEstimateRef = unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId;
+      logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} was never invoiced — ${setupFeeChargeNowBeside ? 'a pre-completion invoice covers only the application charge' : 'NO invoice minted'}; manual billing alert parked`);
+      let setupFeeAlerted = false;
+      let setupFeeAlertError = null;
+      try {
+        const dedupeKey = `unminted_setup_fee_manual_billing:${unmintedSetupFeeObligation.estimateId}`;
+        setupFeeAlerted = true === await db.transaction(async (trx) => {
+          // Same lock discipline as the terminal-invoice alert above: the
+          // shared schedule.invoice.mint advisory locks (own visit + its
+          // estimate/date siblings, globally sorted) serialize this
+          // revalidation against every concurrent invoice writer, then the
+          // dedupe lock makes retries idempotent.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          const { dateOnly } = require('../services/estimate-first-application-invoice');
+          const alertSiblingServiceIds = await trx('scheduled_services')
+            .where({ source_estimate_id: svc.source_estimate_id, customer_id: svc.customer_id })
+            .where('scheduled_date', dateOnly(svc.scheduled_date))
+            .pluck('id');
+          const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
+          for (const lockId of alertMintLockIds) {
+            await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id', 'metadata');
+          // Pre-lock check missed a concurrent park (narrow race): when
+          // the standing alert belongs to a DIFFERENT visit, this visit's
+          // application is also unbilled — never rewrite the body to a
+          // singular instruction without saying so (Codex P0, round 8).
+          const alreadyMeta = already && (typeof already.metadata === 'string'
+            ? (() => { try { return JSON.parse(already.metadata); } catch { return null; } })()
+            : already.metadata);
+          const crossVisitNote = already && alreadyMeta?.scheduledServiceId
+            && String(alreadyMeta.scheduledServiceId) !== String(svc.id)
+            ? ' NOTE: MORE THAN ONE completed visit for this estimate is unbilled — verify EACH completed visit has its application charge billed, and bill the setup fee only ONCE.'
+            : '';
+          // ATOMIC revalidation on THIS transaction, under the mint locks:
+          // 1. An acceptance invoice stamped for the estimate appeared
+          //    (concurrent re-accept / manual mint). It resolves the alert
+          //    ONLY if the application charge is also covered — a
+          //    setup-ONLY acceptance invoice ("$99.00 setup fee only", a
+          //    real converter output) carries no first-application line,
+          //    and the hold above already suppressed the completion mint,
+          //    so skipping the alert here would leave the performed
+          //    application uninvoiced with no follow-up (Codex P0, round
+          //    1). Coverage = a first-application line/notes marker on the
+          //    stamped invoice, or a live invoice on the visit itself.
+          // Annual-prepay race recheck under the locks (Codex PR r10
+          // P1): a term whose payment settled after the obligation read
+          // waives the fee — resolve/skip instead of instructing it.
+          const AnnualPrepayReval = require('../services/annual-prepay-renewals');
+          const coveredTermNow = await AnnualPrepayReval.coveredTermsAsOf(trx, null)
+            .where('t.source_estimate_id', svc.source_estimate_id)
+            .first('t.id');
+          if (coveredTermNow) {
+            logger.warn(`[dispatch] visit ${svc.id}: annual-prepay term now covers estimate ${feeEstimateRef} — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'} (fee waived by prepay)`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`,
+                read_at: trx.fn.now(),
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
+              });
+            }
+            return true;
+          }
+          const stampedNowRows = await trx('invoices')
+            .where({ customer_id: svc.customer_id })
+            .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .select('id', 'invoice_number', 'status', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
+          const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+          // ALL live rows are retained (Codex P0, pre-push round 10):
+          // split coverage — one invoice billing the fee, another the
+          // application — must be seen across every live row, or the
+          // alert instructs staff to re-bill a covered charge.
+          const liveStampedRows = stampedNowRows.filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void');
+          // 2. A live invoice minted onto the visit itself (Charge Now
+          //    racing this alert) covers the VISIT charge only — the alert
+          //    then directs the office to collect it and bill the setup fee
+          //    beside it instead of duplicating the visit charge.
+          const onVisitLockedRows = await trx('invoices')
+            .where((qb) => {
+              qb.orWhere({ service_record_id: record.id });
+              qb.orWhere({ scheduled_service_id: svc.id });
+            })
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc')
+            .select('id', 'invoice_number', 'status', 'line_items', 'notes');
+          const liveOnVisitRows = onVisitLockedRows.filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void');
+          const liveOnVisit = liveOnVisitRows[0] || null;
+          // Coverage is judged per CHARGE, from the invoices' actual line
+          // items (Codex P0, pre-push rounds 5–6 and 12): a stamped or
+          // on-visit invoice counts toward the setup fee only when it
+          // billed the fee, and toward the application only when a
+          // POSITIVE parseable base line proves it
+          // (invoiceBillsBaseApplication) — a "first application" phrase
+          // in notes or on a zero/credited/unreadable line is provenance,
+          // never charge coverage. Presence of some invoice proves
+          // neither — a setup-only invoice must not resolve the
+          // application, and a fee-carrying one must never be instructed
+          // to bill the fee again.
+          const {
+            invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication,
+            sumPositiveSetupFeeCents, sumBaseApplicationCents,
+          } = require('../services/estimate-first-application-invoice');
+          // Expected FROZEN cents FIRST, coverage compared cents-exact
+          // (Codex P0): a nominal partial line ($9.90 on a $99 fee) must
+          // never suppress the only follow-up. Rows deduped by id — a
+          // stamped invoice attached to this visit appears in both scans.
+          const expectedSetupFeeCents = Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100);
+          const expectedAppCentsThisVisit = Math.round(Number(
+            (Number(mintInvoiceAmount) > 0 ? mintInvoiceAmount : svc.estimated_price) || 0,
+          ) * 100);
+          const currentVisitIsPrimary = !already || !alreadyMeta?.scheduledServiceId
+            || String(alreadyMeta.scheduledServiceId) === String(svc.id);
+          const uniqueLiveNow = [...new Map(
+            [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
+          ).values()];
+          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
+          const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
+          const feeCoveredBy = feeCovered
+            ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
+              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || uniqueLiveNow[0] || null)
+            : null;
+          // Only the durable base-application identity counts on every
+          // row (Codex P0, round 18), and stamped first-application
+          // coverage belongs to the alert's PRIMARY visit only (Codex PR
+          // r3 P1) — an additional parked visit needs its own attached
+          // invoice.
+          const onVisitIdSet = new Set(liveOnVisitRows.map((r) => String(r.id)));
+          // A stamped row ATTACHED to another visit counts THERE, never
+          // toward this (primary) visit (Codex PR r19 P1) — only
+          // unattached acceptance invoices provide the primary fallback.
+          const appEligibleRows = uniqueLiveNow.filter((r) => onVisitIdSet.has(String(r.id))
+            || (currentVisitIsPrimary && !r.scheduled_service_id && !r.service_record_id));
+          const appCentsNow = appEligibleRows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
+          const applicationCovered = expectedAppCentsThisVisit > 0
+            ? appCentsNow >= expectedAppCentsThisVisit
+            : appEligibleRows.some(invoiceBillsBaseApplication);
+          const applicationCoveredBy = applicationCovered
+            ? (liveOnVisitRows.find(invoiceBillsBaseApplication)
+              || (currentVisitIsPrimary ? liveStampedRows.find(invoiceBillsBaseApplication) : null)
+              || appEligibleRows[0] || null)
+            : null;
+          // Out-of-band prepayment proves the APPLICATION collected (the
+          // amount was compared against the visit charge), never the fee.
+          const applicationCoveredOutOfBand = setupFeePrepaidBeside;
+          // Resolution may only speak for the WHOLE estate of parked
+          // visits (Codex P0): with other visits persisted on the alert,
+          // this transaction can prove only the CURRENT one — leave the
+          // alert untouched and hand the full per-visit picture to the
+          // shared reconciler after commit.
+          const otherParkedIds = [...new Set([
+            ...(Array.isArray(alreadyMeta?.parkedVisitIds) ? alreadyMeta.parkedVisitIds.map(String) : []),
+            ...(alreadyMeta?.scheduledServiceId ? [String(alreadyMeta.scheduledServiceId)] : []),
+          ])].filter((id) => id !== String(svc.id));
+          if (feeCoveredBy && (applicationCoveredBy || applicationCoveredOutOfBand) && otherParkedIds.length) {
+            setupFeeReconcileAfterCommit = true;
+            return true;
+          }
+          if (feeCoveredBy && (applicationCoveredBy || applicationCoveredOutOfBand)) {
+            const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
+            logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                // No action left — never a false unread badge (Codex PR r9 P2).
+                read_at: trx.fn.now(),
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
+              });
+            }
+            return true;
+          }
+          // REMAINDERS, not the full charge (Codex PR r9 P1): with a
+          // partial line already live ($9.90 of $99), instructing the
+          // full amount would over-collect — the labels carry exactly
+          // what is still owed.
+          const feeRemainderCents = Math.max(0, expectedSetupFeeCents - liveFeeCentsNow);
+          const appRemainderCents = expectedAppCentsThisVisit > 0
+            ? Math.max(0, expectedAppCentsThisVisit - appCentsNow)
+            : null;
+          const setupFeeLabel = `$${(feeRemainderCents / 100).toFixed(2)}${liveFeeCentsNow > 0 ? ' remaining' : ''}`;
+          const firstAppLabel = appRemainderCents !== null && appRemainderCents > 0
+            ? ` ($${(appRemainderCents / 100).toFixed(2)}${appCentsNow > 0 ? ' remaining' : ''})`
+            : (Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '');
+          // A dead acceptance invoice no suppressor can surface
+          // (detector-reported) means "voided without replacement", not
+          // "never minted" — say so.
+          const deadInv = unmintedSetupFeeObligation.deadInvoice || null;
+          const feeHistoryClause = deadInv
+            ? `its WaveGuard setup-fee invoice (${deadInv.invoiceNumber || deadInv.id}, ${deadInv.status}) was voided/canceled and never replaced`
+            : 'its WaveGuard setup fee was never invoiced (the accept skipped the acceptance invoice)';
+          let alertBody;
+          if (feeCoveredBy) {
+            // The setup fee is billed (setup-only acceptance invoice) but
+            // the performed application is not — the hold suppressed the
+            // completion mint.
+            const feeInvLabel = feeCoveredBy.invoice_number || feeCoveredBy.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually using the EXACT line description "First service application" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT re-bill the setup fee.`;
+          } else if (applicationCoveredBy) {
+            // The application charge is billed (Charge Now invoice on the
+            // visit, or an application-only acceptance invoice) but the
+            // fee never was — collect that invoice, bill only the fee.
+            const appInvLabel = applicationCoveredBy.invoice_number || applicationCoveredBy.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
+          } else if (applicationCoveredOutOfBand) {
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT bill the visit charge again.`;
+          } else {
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
+          }
+          if (already) {
+            // resolvedCovered flips back to false: a re-park after a
+            // resolved round means the obligation REOPENED (coverage
+            // voided) — the alert must read active again or every later
+            // lookup treats it as settled (Codex P0, pre-push round 9).
+            // Every parked visit is PERSISTED in parkedVisitIds (Codex
+            // P0, pre-push round 15): a cross-visit race suppressed this
+            // visit's mint too, so reconciliation must require its
+            // application billed before resolving — a note alone loses
+            // ownership of the second unbilled application.
+            const parkedVisitIds = [...new Set([
+              ...(Array.isArray(alreadyMeta?.parkedVisitIds) ? alreadyMeta.parkedVisitIds.map(String) : []),
+              ...(alreadyMeta?.scheduledServiceId ? [String(alreadyMeta.scheduledServiceId)] : []),
+              String(svc.id),
+            ])];
+            const expectedApplicationCentsByVisit = {
+              ...(alreadyMeta?.expectedApplicationCentsByVisit || {}),
+              ...(expectedAppCentsThisVisit > 0 ? { [String(svc.id)]: expectedAppCentsThisVisit } : {}),
+            };
+            await trx('notifications').where({ id: already.id }).update({
+              body: alertBody + crossVisitNote,
+              // Newly actionable again — surface in the unread badge.
+              read_at: null,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
+            });
+            return true;
+          }
+          const created = await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Completed first visit needs manual billing — setup fee was never invoiced',
+            alertBody,
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+          );
+          if (!created) throw new Error('unminted-setup-fee notification insert failed');
+          return true;
+        });
+      } catch (e) {
+        setupFeeAlertError = e;
+      }
+      if (!setupFeeAlerted) {
+        const alertErr = setupFeeAlertError || new Error('unminted-setup-fee notification was not recorded');
+        logger.error(`[dispatch] unminted-setup-fee manual-billing alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'This visit needs manual billing (its setup fee was never invoiced) and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `This visit needs manual billing (its setup fee was never invoiced) and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'unminted_setup_fee_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
+      if (setupFeeReconcileAfterCommit) {
+        // Multi-visit resolution deferred from the alert transaction
+        // (Codex P0): the shared reconciler proves EVERY parked visit
+        // under its own locks. Best-effort — the daily sweep is the net.
+        await require('../services/setup-fee-alert-reconcile')
+          .reconcileSetupFeeAlert({
+            customerId: svc.customer_id,
+            sourceEstimateId: svc.source_estimate_id,
+            actorLabel: ` visit ${svc.id} post-commit:`,
+          })
+          .catch((err) => logger.error(`[dispatch] post-commit setup-fee reconcile failed for ${svc.id}: ${err.message}`));
       }
     }
     // Membership dues suppressed a PRICED recurring visit: log + park a
@@ -13355,6 +13958,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
+        // Staff surface: occupancy clashes commit with a warning instead of
+        // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
+        overlapAdvisory: true,
         // Same staleness fence via the series writer's own expectAnchor
         // mechanism: the anchor whose window this route just validated must
         // still be the anchor the trx moves.
@@ -13537,6 +14143,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
+    // Staff surface: occupancy clashes commit with a warning instead of
+    // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
+    rescheduleOptions.overlapAdvisory = true;
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
@@ -14449,6 +15058,11 @@ function shouldAutoInvoiceCompletion({
   // still bounce — but the route parks a manual-billing alert instead of
   // reusing it. Canceled invoices do not block (nothing can restore them).
   terminalInvoiceOnVisit = false,
+  // Setup fee owed but never invoiced (Mark Won standard accept skipped
+  // the acceptance invoice): suppresses the bare per-application mint —
+  // the route parks a manual-billing alert instructing the office to bill
+  // setup + first application together.
+  unmintedSetupFeeHold = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -14500,6 +15114,11 @@ function shouldAutoInvoiceCompletion({
   // frozen REQUIRED mint must not cut a replacement beside an invoice whose
   // refund can still bounce; the route parks the manual-billing alert.
   if (terminalInvoiceOnVisit) return false;
+  // Unminted setup fee: same altitude as the refunded suppressor — even a
+  // governed REQUIRED mint must not cut the bare per-application invoice
+  // when the one-time setup fee would ride along un-billed; the route
+  // parks the manual-billing alert instead.
+  if (unmintedSetupFeeHold) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every

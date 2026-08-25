@@ -1019,6 +1019,7 @@ router.post('/incentives/attribute', requireAdmin, async (req, res, next) => {
       customerId: req.body?.customerId,
       technicianId: req.body?.technicianId,
       serviceRecordId: req.body?.serviceRecordId,
+      noVisit: req.body?.noVisit === true,
       adminId: req.technicianId,
     });
     res.json({ success: true, ...result });

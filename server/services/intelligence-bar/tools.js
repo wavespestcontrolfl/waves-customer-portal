@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
-const { assertAdminAppointmentWindow, assertNoSlotOverlap } = require('../scheduling/window-rules');
+const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1667,41 +1667,38 @@ async function createAppointment(input) {
   // any open offer. The marker runs in a savepoint, so an evidence hiccup
   // still never blocks the booking.
   let appointment;
-  try {
-    await db.transaction(async (trx) => {
-      // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
-      // occupancy lock + tech-blind probe FIRST, before the comms key (rung
-      // 6) and the insert's row locks; mirrors the lead-booking route. Gated
-      // (GATE_ADMIN_SLOT_OVERLAP_GUARD): a no-op while the gate is off.
-      if (win.start && windowEnd) {
-        await assertNoSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
-      }
-      // Rung 6 — the same comms fence withCustomerCommsLock provided.
-      await lockCustomerComms(trx, customer_id);
-      const [created] = await trx('scheduled_services').insert({
-        customer_id,
-        scheduled_date: dateStr,
-        service_type,
-        technician_id,
-        status: 'pending',
-        window_start: win.start,
-        window_end: windowEnd,
-        notes: notes || null,
-        created_at: new Date(),
-        updated_at: new Date(),
-      }).returning('*');
-      appointment = created;
-      await require('../inspection-credit').markBookingForInspectionCredit(trx, {
-        customerId: customer_id,
-        scheduledServiceId: created.id,
-        source: 'intelligence_bar',
-      });
+  let overlapAdvisory = null;
+  await db.transaction(async (trx) => {
+    // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
+    // occupancy lock + tech-blind probe FIRST, before the comms key (rung
+    // 6) and the insert's row locks; mirrors the lead-booking route. A hit
+    // is advisory (owner ruling 2026-08-25 — staff-side saves never block
+    // on schedule conflicts): the booking commits with a warning.
+    if (win.start && windowEnd) {
+      const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
+    }
+    // Rung 6 — the same comms fence withCustomerCommsLock provided.
+    await lockCustomerComms(trx, customer_id);
+    const [created] = await trx('scheduled_services').insert({
+      customer_id,
+      scheduled_date: dateStr,
+      service_type,
+      technician_id,
+      status: 'pending',
+      window_start: win.start,
+      window_end: windowEnd,
+      notes: notes || null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }).returning('*');
+    appointment = created;
+    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+      customerId: customer_id,
+      scheduledServiceId: created.id,
+      source: 'intelligence_bar',
     });
-  } catch (err) {
-    // Gated overlap refusal → the tool's error shape (no throw to the IB).
-    if (err?.code === 'SLOT_CONFLICT') return { error: err.message };
-    throw err;
-  }
+  });
 
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
@@ -1759,6 +1756,8 @@ async function createAppointment(input) {
     date: dateStr,
     service_type,
     technician: technician_name || 'Unassigned',
+    // Advisory occupancy-overlap note (gated probe) — the booking stands.
+    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
 }
 
@@ -1882,25 +1881,26 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  // The move runs in a transaction so the gated occupancy guard can fence it
+  // The move runs in a transaction so the occupancy probe can fence it
   // (a bare advisory xact lock outside a trx fences nothing). Rung 1 of
   // scheduling/occupancy.js's ORDERING CONTRACT — the date-wide lock + the
   // tech-blind probe — is taken FIRST, before the row write, exactly as the
-  // create path above does; the moving visit excludes itself. The gate
-  // (GATE_ADMIN_SLOT_OVERLAP_GUARD) makes it a no-op while off, so the CAS
-  // semantics are unchanged there. A conflict is surfaced as the tool's
-  // { error } result, never thrown at the Intelligence Bar.
+  // create path above does; the moving visit excludes itself. A conflict is
+  // advisory (owner ruling 2026-08-25 — staff-side saves never block on
+  // schedule conflicts): the move commits and the tool result carries a
+  // warning.
   let updatedRows = 0;
-  try {
-    await db.transaction(async (trx) => {
+  let overlapAdvisory = null;
+  await db.transaction(async (trx) => {
       if (probeWindowStart && probeWindowEnd) {
-        await assertNoSlotOverlap({
+        const overlap = await probeSlotOverlap({
           trx,
           date: dateStr,
           windowStart: probeWindowStart,
           windowEnd: probeWindowEnd,
           excludeServiceIds: [appointment_id],
         });
+        if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
       }
       updatedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
@@ -1955,13 +1955,7 @@ async function rescheduleAppointment(input) {
           ...liveReset,
           updated_at: new Date(),
         });
-    });
-  } catch (err) {
-    // Gated overlap refusal → the tool's { error } result (no throw to the
-    // Intelligence Bar); the trx rolled back, so nothing moved.
-    if (err && err.code === 'SLOT_CONFLICT') return { error: err.message };
-    throw err;
-  }
+  });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
@@ -2018,6 +2012,8 @@ async function rescheduleAppointment(input) {
     old_date: oldDate,
     new_date: dateStr,
     service_type: appt.service_type,
+    // Advisory occupancy-overlap note (gated probe) — the move stands.
+    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
 }
 

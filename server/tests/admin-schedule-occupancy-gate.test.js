@@ -4,21 +4,24 @@
  *
  *   - PUT /:id/update-details date/window move takes the rung-1 date lock
  *     as the trx's first lock and runs the tech-blind global probe on the
- *     LOCKED row; a hit is the rebooker's SLOT_TAKEN 409 (same shape).
+ *     LOCKED row.
  *   - POST / (admin create) takes rung 1 before the comms lock and probes
- *     before the parent insert; a hit is the same SLOT_TAKEN 409.
+ *     before the parent insert.
  *   - A recurring POST locks the parent AND every generated child/booster
  *     date (sorted, first statements of the trx) and probes each timed
- *     generated row before inserting it; any hit 409s the whole request.
+ *     generated row before inserting it.
  *   - PUT /:id/update-details recurrence paths (cadence rewrite moves,
  *     make-recurring spawn, visit-count top-up) lock the parent's date AND
  *     every destination date up front (sorted) and probe each timed row
- *     before its write; a hit 409s SLOT_TAKEN naming the date.
+ *     before its write.
  *   - Terminal rows (record corrections) are not occupancy and skip the probe.
  *   - The moving row excludes itself; cancelled + completed don't occupy.
  *
- * The admin UI's SlotConflictNotice is advisory only and carries no
- * overbook/force flag, so the gate is a hard block like every other writer.
+ * A probe HIT is ADVISORY (owner ruling 2026-08-25 — conflicts must not
+ * block an admin save): the save COMMITS and the response carries a
+ * `warnings` entry naming the clashing date. Locks + probes still run —
+ * only the abort is gone; the customer self-booking / rebooker / public
+ * reschedule writers keep their hard blocks.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -150,13 +153,17 @@ async function post(body) {
 }
 
 describe('PUT /:id/update-details — date/window move', () => {
-  test('takes the rung-1 date lock on the TARGET date first, probes globally, and 409s SLOT_TAKEN on a hit', async () => {
+  test('takes the rung-1 date lock on the TARGET date first, probes globally, and on a hit does NOT refuse the save', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other', window_start: '10:00:00', window_end: '11:00:00' }]);
 
-    const { status, body } = await put('svc-1', { scheduledDate: '2099-07-03', windowStart: '10:00' });
+    const { status } = await put('svc-1', { scheduledDate: '2099-07-03', windowStart: '10:00' });
 
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.any(String), code: 'SLOT_TAKEN' });
+    // The overlap no longer refuses the save. (A full date move can't reach
+    // 200 under this file's permissive mocks — the tech-day fence
+    // revalidation trips first — so "not 409" is the strongest status
+    // assertion here; the committed-with-warning shape is asserted on the
+    // window-only move below.)
+    expect(status).not.toBe(409);
     // Rung 1 keyed off the requested date, BEFORE the comms lock (rung 6).
     expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, '2099-07-03');
     expect(callOrder.indexOf('occupancy:2099-07-03')).toBeLessThan(callOrder.indexOf('comms'));
@@ -170,6 +177,21 @@ describe('PUT /:id/update-details — date/window move', () => {
       excludeServiceIds: ['svc-1'],
       excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
     }));
+  });
+
+  test('a window-only move onto an occupied slot COMMITS and returns a warning naming the date', async () => {
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
+
+    const { status, body } = await put('svc-1', { windowStart: '13:00' });
+
+    expect(status).toBe(200);
+    expect(body.warnings).toEqual([expect.stringContaining('2099-07-01')]);
+  });
+
+  test('a clean window-only move carries no warnings key', async () => {
+    const { status, body } = await put('svc-1', { windowStart: '13:00' });
+    expect(status).toBe(200);
+    expect(body.warnings).toBeUndefined();
   });
 
   test('window-only edit keys rung 1 off the row\'s own date, derives the end from the duration, and persists that end', async () => {
@@ -271,13 +293,13 @@ describe('POST / — admin create', () => {
     sendConfirmationSms: false,
   };
 
-  test('takes rung 1 before the comms lock and 409s SLOT_TAKEN when the parent window is occupied', async () => {
+  test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
 
     const { status, body } = await post(createBody);
 
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.any(String), code: 'SLOT_TAKEN' });
+    expect(status).toBe(201);
+    expect(body.warnings).toEqual([expect.stringContaining('2099-07-03')]);
     expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, '2099-07-03');
     expect(callOrder.indexOf('occupancy:2099-07-03')).toBeLessThan(callOrder.indexOf('comms'));
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
@@ -334,7 +356,7 @@ describe('POST / — admin create', () => {
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
   });
 
-  test('a conflicting generated child date 409s SLOT_TAKEN (naming the date) and inserts nothing', async () => {
+  test('a conflicting generated child date BOOKS the full series and warns naming the date', async () => {
     const inserts = [];
     trx.mockImplementation((table) => {
       const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
@@ -350,13 +372,12 @@ describe('POST / — admin create', () => {
 
     const { status, body } = await post(recurringBody);
 
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.stringContaining('2099-09-04'), code: 'SLOT_TAKEN' });
-    // The trx threw, so the parent + 08-07 child inserts that ran before the
-    // 09-04 probe roll back; nothing after the conflict was attempted.
-    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07']);
-    expect(trx.commit).not.toHaveBeenCalled();
+    expect(status).toBe(201);
+    expect(body.warnings).toEqual([expect.stringContaining('2099-09-04')]);
+    // Nothing rolled back: the clashing child landed with the rest.
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
   });
+
 });
 
 describe('PUT /:id/update-details — recurrence paths lock + probe every destination date', () => {
@@ -397,14 +418,15 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     expect(inserts.map((d) => d.scheduled_date)).toEqual(spawnDates);
   });
 
-  test('a cadence change that moves a child onto an occupied date 409s SLOT_TAKEN and writes nothing', async () => {
+  // Stateful series mock shared by the cadence-change tests: the parent
+  // update lands (so the in-trx re-read sees the new cadence),
+  // children/boosters resolve by their where shape.
+  function setupCadenceSeriesMocks() {
     const parentRow = { ...SVC, is_recurring: true, recurring_pattern: 'monthly', recurring_parent_id: null };
     const childRow = {
       ...SVC, id: 'child-1', scheduled_date: '2099-08-05', status: 'pending', is_recurring: true, recurring_parent_id: 'svc-1',
     };
     const childWrites = [];
-    // Stateful series mock: the parent update lands (so the in-trx re-read
-    // sees the new cadence), children/boosters resolve by their where shape.
     const seriesChain = (table) => {
       if (table !== 'scheduled_services') return chain(table === 'customers' ? { id: 'cust-1' } : undefined);
       const c = chain({ ...parentRow });
@@ -428,13 +450,20 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     trx.mockImplementation(seriesChain);
     // monthly → every 14 days from 07-01: the child is re-dated to 07-15.
     findConflictingVisits.mockImplementation(async ({ date }) => (date === '2099-07-15' ? [{ id: 'svc-other' }] : []));
+    return { childWrites };
+  }
 
-    const { status, body } = await put('svc-1', {
-      isRecurring: true, spawnRecurringChildren: false, recurringPattern: 'custom', recurringIntervalDays: 14,
-    });
+  const cadenceChangeBody = {
+    isRecurring: true, spawnRecurringChildren: false, recurringPattern: 'custom', recurringIntervalDays: 14,
+  };
 
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.stringContaining('2099-07-15'), code: 'SLOT_TAKEN' });
+  test('a cadence change that moves a child onto an occupied date SAVES the move and warns naming the date', async () => {
+    const { childWrites } = setupCadenceSeriesMocks();
+
+    const { status, body } = await put('svc-1', cadenceChangeBody);
+
+    expect(status).toBe(200);
+    expect(body.warnings).toEqual([expect.stringContaining('2099-07-15')]);
     // The destination date was in the up-front lock set, with the parent's own date.
     expect(acquireOccupancyLocks).toHaveBeenCalledTimes(1);
     expect(acquireOccupancyLocks.mock.calls[0][1]).toEqual(expect.arrayContaining(['2099-07-01', '2099-07-15']));
@@ -445,9 +474,10 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
       excludeServiceIds: expect.arrayContaining(['svc-1', 'child-1']),
       excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
     }));
-    expect(childWrites).toEqual([]);
-    expect(trx.commit).not.toHaveBeenCalled();
+    // The move itself committed despite the clash.
+    expect(childWrites.map((d) => d.scheduled_date)).toEqual(['2099-07-15']);
   });
+
 });
 
 describe('PUT /:id/update-details — presence is not change (legacy off-hour rows stay editable)', () => {

@@ -929,9 +929,37 @@ function RepairCandidateCard({ review, candidate, matching, onAttribute, badge }
         }}
       >
         {(candidate.services || []).length === 0 ? (
-          <span style={{ color: D.muted, fontSize: 12 }}>
-            No recent technician visits.
-          </span>
+          review.reason === "click_auto_confirm" ? (
+            // Click-auto rows must stay correctable even with no recent
+            // technician visit: the payout stays unminted server-side, so a
+            // technician-less confirm is allowed for exactly these rows
+            // (GH codex #3483 r2 P1).
+            <button
+              onClick={() => onAttribute(review, candidate, null)}
+              disabled={Boolean(matching[`${review.id}:${candidate.id}:none`])}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.bg,
+                color: D.text,
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                opacity: matching[`${review.id}:${candidate.id}:none`] ? 0.55 : 1,
+              }}
+            >
+              <UserCheck size={14} />
+              {matching[`${review.id}:${candidate.id}:none`] ? "Matching..." : "Confirm match (no visit on file)"}
+            </button>
+          ) : (
+            <span style={{ color: D.muted, fontSize: 12 }}>
+              No recent technician visits.
+            </span>
+          )
         ) : (
           candidate.services.map((service) => {
             const matchKey = `${review.id}:${candidate.id}:${service.id}`;
@@ -1111,7 +1139,9 @@ function ReviewIncentivesPanel() {
   };
 
   const attributeCandidate = async (review, candidate, service) => {
-    const matchKey = `${review.id}:${candidate.id}:${service.id}`;
+    // service = null → technician-less click_auto confirm (payout stays
+    // unminted server-side; only allowed for click_auto rows there).
+    const matchKey = `${review.id}:${candidate.id}:${service ? service.id : "none"}`;
     setMatching((prev) => ({ ...prev, [matchKey]: true }));
     setError(null);
     try {
@@ -1120,8 +1150,11 @@ function ReviewIncentivesPanel() {
         body: JSON.stringify({
           reviewId: review.id,
           customerId: candidate.id,
-          technicianId: service.technicianId,
-          serviceRecordId: service.serviceRecordId,
+          technicianId: service ? service.technicianId : null,
+          serviceRecordId: service ? service.serviceRecordId : null,
+          // Explicit no-visit intent: without it the server's technician
+          // resolver could turn this confirm into a paid 'manual' link.
+          noVisit: !service,
         }),
       });
       setActiveRepairId(null);
@@ -1397,7 +1430,17 @@ function ReviewIncentivesPanel() {
               </div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
-                {queue.slice(0, 25).map((review) => {
+                {/* Every click_auto_confirm row must render — the render cap
+                    must never hide a probabilistic link from its only
+                    correction surface (GH codex #3483 r4) — and auto rows
+                    render IN ADDITION to the 25-row allowance for ordinary
+                    repairs, never consuming it: a full confirm backlog must
+                    not hide missing_customer/missing_technician rows the
+                    backend returned (GH codex #3483 r10). */}
+                {queue
+                  .filter((r) => r.reason === "click_auto_confirm")
+                  .concat(queue.filter((r) => r.reason !== "click_auto_confirm").slice(0, 25))
+                  .map((review) => {
                   const isOpen = activeRepairId === review.id;
                   return (
                     <div

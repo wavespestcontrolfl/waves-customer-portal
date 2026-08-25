@@ -595,6 +595,15 @@ const BillingCron = {
       logger.warn(`[billing-cron] prepay-switch restore sweep failed: ${err.message} — next run retries`);
     }
 
+    // Setup-fee alert daily reconcile (PR #3476): webhook refund paths flip
+    // invoices at many sites — this sweep guarantees a coverage regression
+    // reopens its parked alert within a day even where no tap fired.
+    try {
+      await require('./setup-fee-alert-reconcile').sweepSetupFeeAlerts();
+    } catch (err) {
+      logger.warn(`[billing-cron] setup-fee alert sweep failed: ${err.message} — next run retries`);
+    }
+
     const failedPayments = await db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')

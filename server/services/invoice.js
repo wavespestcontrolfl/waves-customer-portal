@@ -136,6 +136,19 @@ function invoiceHasNonBaseCharges(invoice) {
   );
 }
 
+// Line-level base-application identity — THE shared predicate (PR #3476):
+// the base visit charge is tagged client_id `scheduled_<id>_primary`
+// (createFromService below) and the converter's acceptance line reads
+// "First service application". Every consumer — switch-supersede restore,
+// prepay-switch undo, the setup-fee obligation detector and its alerts —
+// shares this identity so line-identity changes land in ONE place.
+// Whether a matching line must ALSO carry a positive amount is a
+// caller-level billing-evidence requirement, not part of the identity.
+function lineIsBaseApplication(li) {
+  return /_primary$/.test(String(li?.client_id || ""))
+    || /^first (service )?application$/i.test(String(li?.description || "").trim());
+}
+
 // Ledger-backed estimate deposit credit rides as a `deposit_credit` line; voidInvoice
 // restores it (restoreDepositCreditForVoidedInvoice). Settling 'prepaid' would strand
 // it, so these defer to the caller's void.
@@ -945,6 +958,43 @@ const InvoiceService = {
       }
     }
 
+    // CHOKE-POINT serialization (Codex P0, PR #3476): EVERY create that
+    // links a scheduled visit or carries the accepted-estimate stamp
+    // holds the shared advisory locks — route-level wrapping alone left
+    // direct writers (converter accept mints, public acceptance) able to
+    // commit between an alert transaction's coverage scans and its
+    // instruction write. Canonical order: mint lock → setup-fee lock.
+    // Re-acquisition inside an already-locked caller transaction is a
+    // no-op; unwrapped linked/stamped creates get their own transaction
+    // (the best-effort tax/discount catches then abort with it — accepted
+    // for linked money writes; plain unlinked creates keep the
+    // untransacted path).
+    if (!createArgs._setupFeeLocksHandled) {
+      const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+      if (scheduledServiceId || stampedEstimateIdInNotes) {
+        const takeLocks = async (conn) => {
+          if (scheduledServiceId) {
+            const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+            await acquireScheduledInvoiceMintLock(conn, scheduledServiceId);
+          }
+          if (stampedEstimateIdInNotes) {
+            await conn.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
+          }
+        };
+        if (database && database.isTransaction) {
+          await takeLocks(database);
+        } else if (typeof (database || db).transaction === 'function') {
+          const baseDb = database || db;
+          return baseDb.transaction(async (trx) => {
+            await takeLocks(trx);
+            return InvoiceService.create({ ...createArgs, _setupFeeLocksHandled: true, database: trx });
+          });
+        }
+        // else: a harness db without transaction support — locks are
+        // unavailable there by construction; production knex always
+        // provides transaction().
+      }
+    }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
@@ -1950,6 +2000,17 @@ const InvoiceService = {
         if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
+            // EVERY linked mint holds the shared advisory lock (Codex PR
+            // r9 P1): the deposit-credit path returns before the
+            // explicit-amount lock branch below, and adoptUnderMintLock
+            // is a no-op for non-replay mints — without this, a linked
+            // deposit-credit invoice can commit between a completion
+            // alert's scans and its instruction write. Re-acquire is a
+            // same-transaction no-op on the replay path.
+            if (sr.scheduled_service_id) {
+              const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+              await acquireScheduledInvoiceMintLock(trx, sr.scheduled_service_id);
+            }
             // An adopted invoice already ran its own deposit/credit flow —
             // return it untouched; the roll-forward belongs to the mint
             // that actually created the invoice.
@@ -2008,6 +2069,20 @@ const InvoiceService = {
       return runMintTransaction(async (trx) => {
         const adopted = await adoptUnderMintLock(trx);
         if (adopted) return adopted;
+        return this.create({ ...(await buildParams(trx)), database: trx });
+      });
+    }
+    // LINKED explicit-amount mints serialize under the same advisory mint
+    // lock (owner ruling 2026-08-25, Codex #3476): every writer that
+    // attaches an invoice to a scheduled visit must hold the
+    // schedule.invoice.mint lock, or a manual invoice can commit between a
+    // completion-alert transaction's coverage scans and its instruction
+    // write — the alert then records a bill-again instruction for a charge
+    // that just got billed. Unlinked creates keep the untransacted path.
+    if (sr.scheduled_service_id) {
+      return runMintTransaction(async (trx) => {
+        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+        await acquireScheduledInvoiceMintLock(trx, sr.scheduled_service_id);
         return this.create({ ...(await buildParams(trx)), database: trx });
       });
     }
@@ -3311,6 +3386,9 @@ const InvoiceService = {
         "phone",
         "email",
         "waveguard_tier",
+        // Saved-card state rides along so a deep-linked invoice row keeps
+        // its card badge and Charge-card action (Codex PR #3476 r20 P2).
+        "card_on_file",
         "address_line1",
         "city",
         "state",
@@ -4255,6 +4333,9 @@ const InvoiceService = {
       );
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
+    // Coverage-changing transition (PR #3476): a voided stamped/linked
+    // invoice may have been the setup-fee alert's coverage — reopen it.
+    await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
     return invoice;
   },
 
@@ -4503,10 +4584,14 @@ const InvoiceService = {
           .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
           .select("id", "invoice_number", "line_items");
         if (liveOnVisit.length > 0) {
-          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => (
-            /_primary$/.test(String(li?.client_id || ""))
-            || /^First service application$/i.test(String(li?.description || "").trim())
-          ));
+          // Identity + the positive-amount billing-evidence layer (Codex
+          // PR r11 P1): a zero/credited legacy "First application" line
+          // must not read as billed and strip the restore.
+          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => {
+            const qty = li?.quantity != null ? Number(li.quantity) : 1;
+            const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+            return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li);
+          });
           const unreadable = liveOnVisit.some((inv) => parseInvoiceLineItems(inv.line_items).length === 0);
           if (unreadable) {
             logger.warn(`[invoice] switch-supersede restore deferred for ${row.invoice_number || row.id}: live invoice on the visit has unreadable lines — manual review`);
@@ -5037,6 +5122,7 @@ InvoiceService._internals = {
 // in-flight money ('paid' / 'processing') that now needs a refund/credit
 // decision because the service won't happen.
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
+InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;

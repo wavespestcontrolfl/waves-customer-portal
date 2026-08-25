@@ -878,6 +878,13 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       }
       const preLockedDate = dateOnly(holdDateRow.scheduled_date) || null;
       if (preLockedDate) await acquireOccupancyLock(trx, preLockedDate);
+      // Shared invoice mint lock BEFORE any row lock (PR #3476 r22 P1) —
+      // same ordering contract as the estimate-accept txn; downstream
+      // re-acquisition is a no-op.
+      {
+        const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, purchase.scheduled_service_id);
+      }
       // Rung 6 — comms lock before this txn's first row lock (the converter
       // inserts scheduled_services rows on this trx).
       await lockCustomerComms(trx, customerId);

@@ -1156,6 +1156,17 @@ async function commitReservation({
     // unconditional so the standalone path still takes rung 1 first.
     if (lockedDate) await acquireOccupancyLock(client, lockedDate);
 
+    // Canonical order with the scheduled-invoice writers (PR #3476 r21
+    // P1): the shared advisory mint lock comes BEFORE this row FOR
+    // UPDATE — a public accept graduates this row and then mints its
+    // acceptance invoice in the same transaction, where create() takes
+    // the advisory lock; row-first here would ABBA-deadlock against
+    // advisory-first invoice writers. Re-acquisition later is a no-op.
+    {
+      const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+      await acquireScheduledInvoiceMintLock(client, scheduledServiceId);
+    }
+
     const row = await client('scheduled_services')
       .where({ id: scheduledServiceId })
       .select('*', client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW()) AS _expired'))
