@@ -59,18 +59,19 @@ describe('slot reservation helpers', () => {
 
   test('one-time pest accepts are not stamped with a recurring cadence prefix', () => {
     // One-time profile carries empty services → visits unknown → would default
-    // to "Quarterly Pest Control". serviceMode one_time must collapse to bare
-    // "Pest Control" instead.
+    // to the quarterly label. serviceMode one_time must collapse to the
+    // one-time catalog row's name instead (exact catalog names since the
+    // 2026-08-25 bridge fix — the bare forms matched no catalog row).
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
       'Pest Control',
-    )).toBe('Pest Control');
+    )).toBe('One-Time Pest Control Service');
     // Already-mislabeled fallback ("Quarterly Pest Control") must NOT survive a
     // one-time canonicalization.
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
       'Quarterly Pest Control',
-    )).toBe('Pest Control');
+    )).toBe('One-Time Pest Control Service');
     // Re-mislabel guard: a null profile at commit must still honor an explicit
     // one-time serviceMode rather than re-deriving the cadence from the
     // (possibly stale) fallback.
@@ -78,7 +79,7 @@ describe('slot reservation helpers', () => {
       null,
       'Quarterly Pest Control',
       { serviceMode: 'one_time' },
-    )).toBe('Pest Control');
+    )).toBe('One-Time Pest Control Service');
   });
 
   // Shared builder factories for the reserveSlot transaction mocks. The txn
@@ -251,7 +252,7 @@ describe('slot reservation helpers', () => {
       expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
         .toBeLessThan(estimateBuilder.forUpdate.mock.invocationCallOrder[0]);
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-        service_type: 'Quarterly Pest Control',
+        service_type: 'Quarterly Pest Control Service',
         notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
         scheduled_date: '2027-05-20',
         window_start: '09:00:00',
@@ -296,7 +297,7 @@ describe('slot reservation helpers', () => {
       });
 
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-        service_type: 'Pest Control',
+        service_type: 'One-Time Pest Control Service',
         is_recurring: false,
       }));
     } finally {
@@ -408,26 +409,39 @@ describe('slot reservation helpers', () => {
       estimated_price: 219.6,
       window_end: '10:30:00',
       estimated_duration_minutes: 90,
-      service_type: 'Quarterly Pest Control',
+      service_type: 'Quarterly Pest Control Service',
       notes: 'Gate code in customer profile.\nAccepted service mix: 4x Pest Control + 9x Lawn Care.',
       reservation_expires_at: null,
     }));
   });
 
-  test('canonical service type keeps protocol/default lookups stable', () => {
+  test('canonical service type emits exact catalog names per cadence', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'pest_control', visitsPerYear: 12 }],
-    }, 'Pest Control')).toBe('Monthly Pest Control');
+    }, 'Pest Control')).toBe('Monthly Pest Control Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'pest_control', visitsPerYear: 6 }],
-    }, 'Pest Control')).toBe('Bi-Monthly Pest Control');
+    }, 'Pest Control')).toBe('Bi-Monthly Pest Control Service');
+    // Semiannual (2/yr) previously had NO branch and mislabeled quarterly.
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'pest_control', visitsPerYear: 2 }],
+    }, 'Pest Control')).toBe('Semiannual Pest Control Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'lawn_care', visitsPerYear: 9 }],
+    }, 'Lawn Care')).toBe('Every 6 Weeks Lawn Care Service');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'lawn_care' }],
     }, 'Lawn Care')).toBe('Lawn Care');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'mosquito', visitsPerYear: 9 }],
+    }, 'Mosquito')).toBe('Seasonal Mosquito Control Service');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'tree_shrub', visitsPerYear: 4 }],
+    }, 'Tree & Shrub')).toBe('Quarterly Tree & Shrub Care Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       null,
       'Pest Control + Lawn Care',
-    )).toBe('Quarterly Pest Control');
+    )).toBe('Quarterly Pest Control Service');
   });
 
   test('service profile labels are capped to scheduled_services service_type length', () => {

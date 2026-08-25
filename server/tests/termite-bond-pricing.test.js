@@ -156,7 +156,7 @@ describe('accept scheduling: bait + bond combine to ONE visit (converter routes)
       { acceptFrequency: 'quarterly' },
     );
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
     expect(remaining.map((r) => r.service)).toEqual(['termite_bond_10yr']);
   });
 });
@@ -601,5 +601,52 @@ describe('codex #2915 r6 hardening', () => {
     const bond = parsed.result.lineItems.find((li) => String(li.service).startsWith('termite_bond'));
     expect(bond).toMatchObject({ bondTerm: '1yr', perApp: 60 });
     expect(parsed.result.summary.recurringAnnualAfterDiscount).toBe(before + 60);
+  });
+});
+
+// 2026-08-25 bridge audit: bond identity must not depend on lucky strings.
+describe('bond term identity (2026-08-25 bridge fixes)', () => {
+  const { recurringServicesFromEstimateData } = require('../services/estimate-converter');
+
+  test('a raw termite_bond line with NO bondTerm derives the term key from its name', () => {
+    // Older snapshots/agent drafts drop bondTerm; the bare 'termite_bond'
+    // key matches no catalog row, so the visit scheduled name-only and the
+    // warranty minted at the 1-year default regardless of the term sold.
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [
+          { name: 'Termite Bait', service: 'termite_bait', annual: 420, visitsPerYear: 4 },
+          { name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 },
+        ],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_5yr');
+  });
+
+  test('a term-less, name-less bond line stays unrewritten (no guessed term)', () => {
+    const rows = recurringServicesFromEstimateData({
+      result: { lineItems: [{ name: 'Termite Bond', service: 'termite_bond', annual: 240, visitsPerYear: 4 }] },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond');
+  });
+
+  test('termYearsForVisit prefers durable identity over the label regex', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // Snapshot key wins even against a contradicting label.
+    expect(termYearsForVisit({
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (1-Year Term)',
+    })).toBe(10);
+    // Linked catalog row second.
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bond_5yr',
+      service_type: 'Termite Bond',
+    })).toBe(5);
+    // Label regex stays the legacy fallback…
+    expect(termYearsForVisit({ service_type: 'Termite Bond (10-Year Term)' })).toBe(10);
+    // …and the historical 1-year default only applies when NOTHING names a term.
+    expect(termYearsForVisit({ service_type: 'Termite Bond' })).toBe(1);
   });
 });

@@ -19,9 +19,24 @@ const path = require('path');
 const { _internals } = require('../services/slot-reservation');
 const { ENGINE_KEY_SEEDS } = require('../models/migrations/20260810000002_services_engine_key');
 
+const {
+  ENGINE_KEY_SEEDS: EXPANSION_SEEDS,
+  WASP_ALIAS_TARGET,
+} = require('../models/migrations/20260825000011_engine_key_coverage_expansion');
+
 const { catalogServiceIdForProfile } = _internals;
 
-const ALL_SEEDED_KEYS = ENGINE_KEY_SEEDS.flatMap((s) => s.engine_keys);
+// The 2026-08-25 coverage expansion seeds ride on top of the original four
+// rows; the wasp append joins bee_wasp_removal's alias array. The combined
+// view is what the LIVE catalog carries after both migrations.
+const COMBINED_SEEDS = [
+  ...ENGINE_KEY_SEEDS.map((s) => (s.service_key === WASP_ALIAS_TARGET.service_key
+    ? { ...s, engine_keys: [...s.engine_keys, WASP_ALIAS_TARGET.append] }
+    : s)),
+  ...EXPANSION_SEEDS,
+];
+
+const ALL_SEEDED_KEYS = COMBINED_SEEDS.flatMap((s) => s.engine_keys);
 
 // Every engine key that can reach a one-time accept for a service observed on
 // accepted estimates in prod (audit 2026-08-10), INCLUDING the engine's current
@@ -43,13 +58,15 @@ const ENGINE_KEYS_REACHING_ACCEPT = [
 // that later gets seeded will fail the "no key is both mapped and declared
 // unmapped" test below, forcing this list to stay honest.
 const KNOWN_UNMAPPED_ENGINE_KEYS = [
-  'bora_care', 'dethatching', 'exclusion', 'exclusion_v2', 'flea_knockdown_single',
-  'flea_package', 'foam_drill', 'one_time_lawn', 'one_time_mosquito', 'one_time_pest',
-  'palm_injection', 'pest_initial_roach', 'plugging', 'rodent_bait_setup',
-  'rodent_bird_box', 'rodent_exclusion', 'rodent_guarantee', 'rodent_guarantee_combo',
-  'rodent_inspection', 'rodent_plugging', 'rodent_sanitation', 'rodent_trapping',
-  'rodent_trapping_followup', 'rodent_wire_mesh', 'termite_foam', 'trap_only_retainer',
-  'trap_only_setup', 'trenching', 'wasp', 'wdo_inspection',
+  // ONE key for four sanitation tier rows — no tier discriminator on the line.
+  'rodent_sanitation',
+  // Retainers are billing plans with no schedulable catalog rows by design
+  // (estimate-converter.js: deliberately NO branch), and their surcharge/
+  // callback riders bill on the parent line.
+  'trap_only_retainer', 'trap_only_setup', 'trap_only_extra_callback',
+  'rodent_trapping_emergency_surcharge', 'rodent_trapping_extra_callback',
+  // Priced rider with no catalog row of its own.
+  'rodent_plugging',
 ];
 
 // Load the knexfile BEFORE deciding to skip — it resolves the Railway
@@ -68,7 +85,7 @@ describe('accept-path engine-key mapping (static)', () => {
 
   test('no engine key is claimed by two catalog rows', () => {
     const seen = new Map();
-    for (const seed of ENGINE_KEY_SEEDS) {
+    for (const seed of COMBINED_SEEDS) {
       for (const key of seed.engine_keys) {
         expect(seen.has(key)
           ? `${key} claimed by both ${seen.get(key)} and ${seed.service_key}`
@@ -91,10 +108,13 @@ describe('accept-path engine-key mapping (static)', () => {
     expect(owner('german_roach_initial')).toBe('german_roach_initial');
   });
 
-  test('both stinging-insect engine versions resolve to ONE catalog row', () => {
-    const owner = (key) => ENGINE_KEY_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
+  test('all three stinging-insect engine versions resolve to ONE catalog row', () => {
+    const owner = (key) => COMBINED_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
     expect(owner('stinging_insect')).toBe('bee_wasp_removal');
     expect(owner('stinging_insect_v2')).toBe('bee_wasp_removal');
+    // The legacy v1 'wasp' key (service-pricing.js:7842) is the third alias —
+    // missed by the original seed, appended by 20260825000011.
+    expect(owner('wasp')).toBe('bee_wasp_removal');
   });
 });
 

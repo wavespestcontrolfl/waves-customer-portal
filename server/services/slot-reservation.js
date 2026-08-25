@@ -135,11 +135,44 @@ function serviceKeyForLabel(value = '') {
   return '';
 }
 
+// Cadence labels are EXACT catalog `services.name` values — the completion
+// resolver's name fallback and the protocol-button alias table both match by
+// string, and the old bare forms ("Quarterly Pest Control") matched nothing:
+// 152 estimate-born visits in 90 days booked with no catalog identity at all
+// (2026-08-25 audit). Every literal here must stay equal to its catalog row.
 function pestServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Pest Control';
-  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Pest Control';
-  return 'Quarterly Pest Control';
+  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Pest Control Service';
+  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Pest Control Service';
+  // Semiannual (2/yr) had NO branch and mislabeled as quarterly — the one
+  // cadence where the wrong prefix misstates the plan the customer bought.
+  if (Number.isFinite(visits) && visits === 2) return 'Semiannual Pest Control Service';
+  return 'Quarterly Pest Control Service';
+}
+
+function lawnServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Lawn Care Service';
+  if (Number.isFinite(visits) && visits >= 9) return 'Every 6 Weeks Lawn Care Service';
+  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Lawn Care Service';
+  // Unknown cadence: keep the legacy abbreviation — deliberately ambiguous,
+  // so resolution fails closed instead of guessing a plan row.
+  return 'Lawn Care';
+}
+
+function mosquitoServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Mosquito Control Service';
+  if (Number.isFinite(visits) && visits >= 9) return 'Seasonal Mosquito Control Service';
+  return 'Mosquito Treatment';
+}
+
+function treeShrubServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (Number.isFinite(visits) && visits >= 9) return 'Every 6 Weeks Tree & Shrub Care Service';
+  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Tree & Shrub Care Service';
+  if (Number.isFinite(visits) && visits >= 4) return 'Quarterly Tree & Shrub Care Service';
+  return 'Tree & Shrub';
 }
 
 function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service', opts = {}) {
@@ -154,12 +187,13 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   // profile at commit can't re-derive the cadence prefix from a stale fallback.
   const isOneTime = opts.serviceMode === 'one_time' || serviceProfile?.serviceMode === 'one_time';
 
-  if (key === 'pest_control') return isOneTime ? 'Pest Control' : pestServiceTypeFromVisits(primary?.visitsPerYear);
-  if (key === 'lawn_care') return 'Lawn Care';
-  if (key === 'mosquito') return 'Mosquito Treatment';
-  if (key === 'tree_shrub') return 'Tree & Shrub';
-  if (key === 'termite_bait') return 'Termite Bait';
+  if (key === 'pest_control') return isOneTime ? 'One-Time Pest Control Service' : pestServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'lawn_care') return isOneTime ? 'One-Time Lawn Care Service' : lawnServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'mosquito') return isOneTime ? 'One-Time Mosquito Control Service' : mosquitoServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'tree_shrub') return treeShrubServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'termite_bait') return 'Termite Bait Station Service';
   if (key === 'foam_recurring') return 'Recurring Termite Foam Service';
+  if (key === 'foam_drill') return 'Termite Foam Service';
   if (key === 'palm_injection') return 'Palm Injection';
   if (key === 'rodent_trapping') return 'Rodent Trapping Service';
   if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
@@ -200,7 +234,7 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // transaction is aborted" and take down estimate acceptance itself: the exact
 // opposite of the fail-open contract this helper promises. The savepoint
 // confines any failure to this read.
-async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
@@ -234,9 +268,9 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select('id');
+        .select('id', 'name', 'service_key');
       if (rows.length === 1) {
-        resolved = rows[0].id;
+        resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
       }
@@ -250,6 +284,13 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
     return null;
   }
   return resolved;
+}
+
+// Back-compat id-only view of catalogLinkForProfile (external callers —
+// estimate-public's adopted-appointment stamp — key off the id alone).
+async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
+  const link = await catalogLinkForProfile(conn, serviceProfile);
+  return link ? link.id : null;
 }
 
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
@@ -609,13 +650,21 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
-      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
-      // Catalog link — see catalogServiceIdForProfile. Stamped on the HOLD so
-      // the graduated visit carries it even if the profile can't be re-resolved
+      // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
+      // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
-      const catalogServiceId = await catalogServiceIdForProfile(trx, serviceProfile);
+      // When the engine key resolves a unique catalog row, THAT row's name is
+      // the visit label — one source of truth instead of a parallel
+      // whitelist; the whitelist handles cadence families whose shared engine
+      // key can't resolve a single row, and unmapped keys keep the legacy
+      // service_interest fallback.
+      const catalogLink = await catalogLinkForProfile(trx, serviceProfile);
+      const catalogServiceId = catalogLink ? catalogLink.id : null;
+      const serviceType = catalogLink?.name
+        ? cappedServiceType(catalogLink.name)
+        : canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
 
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
@@ -876,6 +925,10 @@ async function reserveSlot({
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
         ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
+        // Durable identity evidence: the completion resolver checks
+        // service_key_snapshot right after service_id, so the stamp
+        // survives even a later admin repoint of the catalog row.
+        ...(catalogLink?.service_key ? { service_key_snapshot: catalogLink.service_key } : {}),
         // Geo stamp (best-effort): coords make the hold a real route anchor
         // for find-time's detour math; the zone slug lets the zone-capacity
         // conflict check see holds directly instead of via the (absent)
@@ -1142,7 +1195,6 @@ async function commitReservation({
     if (windowEnd) {
       updates.window_end = windowEnd;
       updates.estimated_duration_minutes = effectiveDurationMinutes;
-      updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
       // The catalog link is RESTAMPED from the accepted profile, in the same
       // block that recomputes the label — id and label must describe the same
@@ -1163,7 +1215,14 @@ async function commitReservation({
       //
       // Assigned unconditionally, including null: if the accepted profile
       // resolves to nothing, a stale specialty id must be CLEARED, not kept.
-      updates.service_id = await catalogServiceIdForProfile(client, serviceProfile);
+      // Same rule for the snapshot and the label: id, key, and label must
+      // describe the same accepted service.
+      const commitLink = await catalogLinkForProfile(client, serviceProfile);
+      updates.service_id = commitLink ? commitLink.id : null;
+      updates.service_key_snapshot = commitLink?.service_key || null;
+      updates.service_type = commitLink?.name
+        ? cappedServiceType(commitLink.name)
+        : canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
     }
 
     const [updated] = await client('scheduled_services')
@@ -1263,6 +1322,7 @@ module.exports = {
   // it so identity has exactly one resolver — never re-implement the
   // engine-key containment lookup.
   catalogServiceIdForProfile,
+  catalogLinkForProfile,
   _internals: {
     parseSlotId,
     addMinutesToTime,
@@ -1270,5 +1330,6 @@ module.exports = {
     canonicalServiceTypeForProfile,
     notesWithServiceMix,
     catalogServiceIdForProfile,
+    catalogLinkForProfile,
   },
 };

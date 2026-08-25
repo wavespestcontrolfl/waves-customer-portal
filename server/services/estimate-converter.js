@@ -252,7 +252,9 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'pest_control',
     companionKey: 'termite_bait',
     catalogServiceKey: 'pest_termite_bait_quarterly',
-    name: 'Quarterly Pest + Termite Bait Station',
+    // Exact catalog name (renamed 20260825000010) — the visit label and the
+    // catalog row must agree for name-fallback resolution and invoice parity.
+    name: 'Quarterly Pest + Termite Bait Station Service',
     // Termite bait station checks are quarterly (termite_active_bait_*);
     // the v1 mapper persists "Termite Bait" with no frequency/visits.
     companionDefaultPattern: 'quarterly',
@@ -298,7 +300,8 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'lawn_care',
     companionKey: 'tree_shrub',
     catalogServiceKey: 'lawn_tree_shrub_combo',
-    name: 'Lawn + Tree & Shrub',
+    // Exact catalog name (renamed 20260825000010).
+    name: 'Lawn + Tree & Shrub Service',
     // Pattern equality is NOT enough here: the bimonthly bucket spans 6–11
     // visits/year, so a 9-app lawn and a 6-visit T&S program would pattern
     // as equal. Lawn tiers (6/9/12 apps) and the T&S visit mandate (4x/6x)
@@ -1932,8 +1935,19 @@ function recurringLinesFromEngineResult(data = {}) {
       // Raw engine bond lines carry service 'termite_bond' + bondTerm —
       // normalize to the term-keyed service so the combined bait+bond
       // scheduling routes match exactly like mapped saves (codex #2915 r2).
-      const base = li.service === 'termite_bond' && li.bondTerm
-        ? { ...li, service: `termite_bond_${li.bondTerm}` }
+      // When bondTerm is absent (older snapshots, agent drafts), derive it
+      // from the engine name ("Termite Bond (5-Year Term)") — a bare
+      // 'termite_bond' key matches NO catalog row, so the visit scheduled
+      // name-only and the warranty defaulted to a 1-year term (2026-08-25
+      // audit). A line with neither term source stays unrewritten and keeps
+      // today's name-only behavior rather than guessing a term.
+      const bondTerm = li.service === 'termite_bond'
+        ? (li.bondTerm
+          || (String(li.name || li.label || li.displayName || '').match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
+          || null)
+        : null;
+      const base = bondTerm
+        ? { ...li, service: `termite_bond_${bondTerm}` }
         : li;
       if (base.name || base.label || base.displayName || base.serviceName || base.service_name) return base;
       const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(base)];

@@ -44,6 +44,20 @@ function termYearsFrom(serviceType) {
   return m ? Number(m[1]) : 1;
 }
 
+// Identity-first term derivation (2026-08-25 audit): the label regex above
+// DEFAULTS TO 1 YEAR on any parse miss, so a renamed or merged label would
+// silently mint every bond as 1-year. The visit's durable catalog evidence
+// (service_key_snapshot, then the linked catalog row's service_key) names
+// the term outright; the label regex stays as the legacy fallback for
+// name-only history.
+function termYearsForVisit(v) {
+  for (const key of [v.service_key_snapshot, v.catalog_service_key]) {
+    const m = String(key || '').match(/^termite_bond_(\d+)yr$/);
+    if (m) return Number(m[1]);
+  }
+  return termYearsFrom(v.service_type);
+}
+
 function displayDate(d) {
   // DATE columns arrive as 'YYYY-MM-DD' (or Date at UTC midnight); parsing
   // those through a TZ-aware formatter shifts them back a day in ET — the
@@ -60,17 +74,26 @@ async function syncTermiteBonds() {
   if (!(await db.schema.hasTable('termite_bonds'))) return { inserted: 0 };
   const visits = await db('scheduled_services')
     .where('scheduled_services.status', 'completed')
-    .where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+    // Candidates by durable identity OR label: a bond visit whose label
+    // drifted from the "%Termite Bond%" shape (rename, merged label) is
+    // still a bond when its snapshot/catalog key says so (2026-08-25 audit).
+    .where(function bondCandidate() {
+      this.where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+        .orWhereIn('scheduled_services.service_key_snapshot', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr']);
+    })
     // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
     // seeder) — only the establishing anchor visit starts a bond term, or a
     // 1-year bond would get a renewal notice per quarterly child.
     .whereNull('scheduled_services.recurring_parent_id')
     .leftJoin('termite_bonds', 'termite_bonds.scheduled_service_id', 'scheduled_services.id')
     .whereNull('termite_bonds.id')
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
     .select(
       'scheduled_services.id',
       'scheduled_services.customer_id',
       'scheduled_services.service_type',
+      'scheduled_services.service_key_snapshot',
+      'services.service_key as catalog_service_key',
       'scheduled_services.completed_at',
       'scheduled_services.actual_end_time',
       'scheduled_services.check_out_time',
@@ -97,7 +120,7 @@ async function syncTermiteBonds() {
         : new Date(v.scheduled_date).toISOString().slice(0, 10);
     }
     if (!startedEt) continue;
-    const years = termYearsFrom(v.service_type);
+    const years = termYearsForVisit(v);
     // Add the term years with UTC-safe date math (Feb 29 normalizes to Mar 1).
     const [sy, sm, sd] = startedEt.split('-').map(Number);
     const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
@@ -245,4 +268,4 @@ async function runDailySweeps() {
   return { bondRenewalsSent: bond.sent };
 }
 
-module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, displayDate } };
+module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };
