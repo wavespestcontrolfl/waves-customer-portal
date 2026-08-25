@@ -96,6 +96,10 @@ describe('noteDaysConsistent', () => {
     expect(noteDaysConsistent('Every zone runs 20 minutes every day', ['Mon', 'Wed', 'Fri'])).toBe(false);
     expect(noteDaysConsistent('Every zone runs 20 minutes every day', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])).toBe(true);
     expect(noteDaysConsistent('Each zone runs 20 min, all days', ['Mon', 'Wed'])).toBe(false);
+    // "per day"/"a day" are the same seven-day claim (GH codex P1 r20).
+    expect(noteDaysConsistent('20 min per zone per day', ['Mon', 'Wed', 'Fri'])).toBe(false);
+    expect(noteDaysConsistent('Each zone runs 20 min a day', ['Mon', 'Wed', 'Fri'])).toBe(false);
+    expect(noteDaysConsistent('20 min per zone per day', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])).toBe(true);
     // JSONB-as-string rows and no-claim notes both behave.
     expect(noteDaysConsistent('Each zone runs 20 min Mon/Wed', '["Mon","Wed"]')).toBe(true);
     expect(noteDaysConsistent('Each zone runs 20 min', ['Mon', 'Wed', 'Fri'])).toBe(true);

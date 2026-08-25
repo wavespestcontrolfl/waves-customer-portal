@@ -132,7 +132,7 @@ function noteDaysConsistent(notes, wateringDays) {
     .filter(Boolean));
   // A daily-cadence phrase is a claim of ALL seven days — "every day" beside
   // structured Mon/Wed/Fri would multiply by 3 while the note says 7.
-  if (/\b(?:every|each|all)\s+(?:day|days|night|nights|morning|mornings)\b/i.test(text)) {
+  if (/\b(?:every|each|all|per|a|an)\s+(?:day|days|night|nights|morning|mornings)\b/i.test(text) || /\b(?:daily|nightly)\b/i.test(text)) {
     for (const d of ALL_DAYS) noteDays.add(d);
   }
   if (!noteDays.size) return true; // no day claims — nothing to contradict
