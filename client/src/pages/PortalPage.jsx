@@ -7954,12 +7954,22 @@ function PropertyTab({ customer }) {
               <label style={labelStyle}>Watering Days</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
-                  const days = Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [];
+                  // Legacy rows can hold full day names ("Monday") the server
+                  // now rejects — every edit restates the field in canonical
+                  // keys (aliases mapped, unknowns dropped) so a stale value
+                  // can never 400 the customer's correction.
+                  const CANONICAL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                  const toCanonicalDay = (d) => {
+                    const k = String(d || '').slice(0, 3);
+                    const m = k.charAt(0).toUpperCase() + k.slice(1).toLowerCase();
+                    return CANONICAL_DAYS.includes(m) ? m : null;
+                  };
+                  const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : []).map(toCanonicalDay).filter(Boolean);
                   const active = days.includes(day);
                   return (
                     <button key={day} type="button" aria-pressed={active} onClick={() => {
                       const next = active ? days.filter(d => d !== day) : [...days, day];
-                      updateField('wateringDays', next);
+                      updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                     }} style={{
                       ...PORTAL_BUTTON_BASE,
                       minWidth: 44,
@@ -7984,7 +7994,11 @@ function PropertyTab({ customer }) {
                   value={Array.isArray(prefs.irrigationSystemType)
                     ? prefs.irrigationSystemType
                     : (prefs.irrigationSystemType ? [prefs.irrigationSystemType] : [])}
-                  onChange={v => updateField('irrigationSystemType', v)}
+                  // Legacy rows can hold off-vocabulary types ("bubbler") the
+                  // server now rejects; PillSelector carries prior values
+                  // through, so every edit drops unknowns — the customer's
+                  // selection replaces the stale value instead of 400ing.
+                  onChange={v => updateField('irrigationSystemType', v.map(t => String(t).toLowerCase()).filter(t => ['spray', 'drip', 'rotor'].includes(t)))}
                   options={[
                     { value: 'spray', label: 'In-ground Spray' },
                     { value: 'drip', label: 'Drip' },
