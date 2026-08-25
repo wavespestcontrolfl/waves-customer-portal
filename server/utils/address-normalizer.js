@@ -557,78 +557,6 @@ function normalizeLeadAddress(input = {}) {
   };
 }
 
-// Extra properties the visitor asked to have covered ("also my rental next
-// door"). Capture-only: these NEVER enter the pricing pipeline — each one is
-// follow-up-quoted manually as its own estimate. Accepts an array of
-// structured entries or bare strings (a singular second_property is folded
-// in), normalizes each through normalizeLeadAddress, drops entries that
-// duplicate each other or the primary service address, and hard-caps the
-// list so an abusive payload can't bloat extracted_data.
-const MAX_ADDITIONAL_PROPERTIES = 3;
-const MAX_ADDITIONAL_PROPERTY_INPUTS = 20;
-const MAX_ADDITIONAL_PROPERTY_RAW_LENGTH = 300;
-
-function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
-  const rawList = [];
-  const push = (value) => {
-    if (value != null && value !== '' && rawList.length < MAX_ADDITIONAL_PROPERTY_INPUTS) rawList.push(value);
-  };
-  const listInput = body.additional_properties ?? body.additionalProperties;
-  if (Array.isArray(listInput)) listInput.forEach(push);
-  else push(listInput);
-  push(body.second_property ?? body.secondProperty);
-
-  const seen = new Set();
-  const primaryKey = cleanString(primaryFullAddress).toLowerCase();
-  if (primaryKey) seen.add(primaryKey);
-
-  const out = [];
-  // Every accepted component is length-bounded, not just the raw string — a
-  // public payload must not smuggle unbounded values into JSONB, owner SMS
-  // alerts, or LLM prompts through the structured fields.
-  const clip = (value) => (value == null ? value : String(value).slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH));
-  for (const entry of rawList) {
-    let normalized = null;
-    if (typeof entry === 'string') {
-      normalized = normalizeLeadAddress({ raw: entry.slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH) });
-    } else if (typeof entry === 'object' && !Array.isArray(entry)) {
-      normalized = normalizeLeadAddress({
-        raw: String(entry.formatted || entry.address || '').slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH),
-        line1: clip(entry.line1 || entry.address_line1 || entry.addressLine1),
-        line2: clip(entry.line2 || entry.address_line2 || entry.addressLine2 || entry.unit),
-        city: clip(entry.city),
-        state: clip(entry.state),
-        zip: clip(entry.zip),
-        placeId: clip(entry.place_id || entry.placeId || entry.google_place_id),
-      });
-    }
-    // A street line needs at least a digit and a letter to be a follow-up-able
-    // address — bare prose ("the one next door") is dropped, not stored. A
-    // unit conflict (inline unit disagrees with the dedicated field) is
-    // ambiguous — fail closed on the entry, same rule as the primary-address
-    // routes, rather than store a wrong door.
-    if (!normalized?.fullAddress || normalized.unitConflict || !/\d/.test(normalized.line1) || !/[A-Za-z]/.test(normalized.line1)) continue;
-    const key = normalized.fullAddress.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    // Stored in the call-extraction pipeline's established
-    // additional_properties entry shape (address_line1/address_line2/city/
-    // state/zip — see call-recording-processor.js) so existing consumers like
-    // the estimate builder's additional-properties panel pick web entries up
-    // unchanged; place_id is additive and ignored by them.
-    out.push({
-      address_line1: normalized.line1,
-      address_line2: normalized.line2 || null,
-      city: normalized.city || null,
-      state: normalized.state || null,
-      zip: normalized.zip || null,
-      place_id: normalized.placeId || null,
-    });
-    if (out.length >= MAX_ADDITIONAL_PROPERTIES) break;
-  }
-  return out;
-}
-
 // Build a single-line display address from already-parsed parts, dropping any
 // empty piece so a missing zip never renders as "Sarasota, FL null" and a
 // missing city never leaves a dangling comma ("123 Main St, , FL 34231").
@@ -643,7 +571,6 @@ function formatAddress(parts = {}) {
 
 module.exports = {
   normalizeLeadAddress,
-  normalizeAdditionalProperties,
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,

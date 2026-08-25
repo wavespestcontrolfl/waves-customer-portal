@@ -23,7 +23,8 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { normalizeLeadAddress, normalizeAdditionalProperties, formatAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
+const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
@@ -1562,7 +1563,7 @@ function buildLeadWebhookIntake(body = {}) {
   const fullAddress = normalizedAddress.fullAddress || rawAddress;
   // Optional extra properties the visitor wants covered ("also my rental next
   // door"). Capture-only — never priced; each becomes a manual follow-up quote.
-  const additionalProperties = normalizeAdditionalProperties(body, fullAddress);
+  const additionalProperties = normalizeWebAdditionalProperties(body, fullAddress);
   const attribution = getLeadWebhookAttribution(body);
   const normalizedName = normalizeLeadName(body);
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');

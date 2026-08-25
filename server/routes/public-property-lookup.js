@@ -5,7 +5,8 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { normalizeLeadAddress, normalizeAdditionalProperties, formatAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
+const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { verifyTurnstileToken } = require('../utils/turnstile');
@@ -241,7 +242,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     });
     // Optional extra properties the visitor wants covered. Capture-only —
     // never priced here; each becomes a manual follow-up quote.
-    const additionalProperties = normalizeAdditionalProperties(req.body, normalizedAddress.fullAddress);
+    const additionalProperties = normalizeWebAdditionalProperties(req.body, normalizedAddress.fullAddress);
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail
     // closed BEFORE the lead insert/update below (same guard as
     // /public/quote/calculate) so no lead is captured on the wrong unit.

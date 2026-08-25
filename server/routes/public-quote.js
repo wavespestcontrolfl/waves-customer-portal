@@ -19,7 +19,8 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
-const { normalizeLeadAddress, normalizeAdditionalProperties, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const { isHoneypotTripped } = require('../utils/lead-abuse');
@@ -758,7 +759,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     // Optional extra properties the visitor wants covered. Capture-only —
     // never priced by this route; each becomes a manual follow-up quote.
-    const additionalProperties = normalizeAdditionalProperties(req.body, normalizedAddress.fullAddress);
+    const additionalProperties = normalizeWebAdditionalProperties(req.body, normalizedAddress.fullAddress);
     const quoteAddress = normalizedAddress.line1 || address;
     // Fall back to a ZIP lookup when neither the parsed address nor the client
     // supplied a city (free-text address with no Places pick). Feeds the lead,
