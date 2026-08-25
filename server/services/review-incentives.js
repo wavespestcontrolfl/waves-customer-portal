@@ -981,9 +981,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         updated_at: new Date(),
       };
       // technician_id only when the correction carries one — a no-visit
-      // confirm must not null a column an earlier attribution filled.
-      if (technicianId) payoutPatch.technician_id = technicianId;
-      if (serviceRecordId) payoutPatch.service_record_id = serviceRecordId;
+      // confirm must not null a column an earlier attribution filled. A
+      // technician-backed reassignment moves service_record_id WITH it,
+      // including to null (GH codex r9): leaving the old customer's service
+      // on the row would commit an internally inconsistent payout that a
+      // concurrent markPaid could freeze after this lock releases.
+      if (technicianId) {
+        payoutPatch.technician_id = technicianId;
+        payoutPatch.service_record_id = serviceRecordId || null;
+      }
       await trx('review_incentive_payouts')
         .where({ id: existingPayout.id })
         .whereNot('status', 'paid')
@@ -1007,12 +1013,13 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         // Ownership predicate IN the write (GH codex r8): a human mark
         // landing between the read above and this update bumps
         // review_marked_at — the conditional then no-ops and the human's
-        // confirmation survives.
-        await trx('customers')
+        // confirmation survives. The audit entry follows the actual
+        // outcome (GH codex r9): reversedCustomerId only on a real clear.
+        const cleared = await trx('customers')
           .where({ id: prior.customer_id })
           .where({ review_marked_at: priorCust.review_marked_at })
           .update({ has_left_google_review: false, review_marked_at: null });
-        reversedCustomerId = prior.customer_id;
+        if (cleared) reversedCustomerId = prior.customer_id;
       }
     }
     return count;

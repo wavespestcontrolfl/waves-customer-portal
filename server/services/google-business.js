@@ -1554,17 +1554,21 @@ class GoogleBusinessService {
               // Ownership predicate IN the write (GH codex r8): a
               // concurrent human mark bumps review_marked_at, the
               // conditional no-ops, and the human's confirmation survives.
-              await trx('customers')
+              // Audit entry only when the clear actually happened (GH codex
+              // r9) — a no-op race must not log "review asks resume".
+              const cleared = await trx('customers')
                 .where({ id: alRow.customer_id })
                 .where({ review_marked_at: cust.review_marked_at })
                 .update({ has_left_google_review: false, review_marked_at: null });
-              try {
-                await trx('activity_log').insert({
-                  customer_id: alRow.customer_id,
-                  action: 'review_automark_reversed',
-                  description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
-                });
-              } catch { /* audit only — reversal itself must commit */ }
+              if (cleared) {
+                try {
+                  await trx('activity_log').insert({
+                    customer_id: alRow.customer_id,
+                    action: 'review_automark_reversed',
+                    description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
+                  });
+                } catch { /* audit only — reversal itself must commit */ }
+              }
             }
           }
 
