@@ -133,23 +133,39 @@ function buildScheduleAsk({ derived, inputs }) {
   const haveClause = have.length ? ` — ${joinList(have)} — ` : ' for you, ';
   const reason = derived?.reason || 'missing_minutes';
 
-  switch (reason) {
-    case 'missing_days':
-      return `We have your sprinkler system on file${haveClause}but not which days it runs. Pick your watering days ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
-    case 'missing_head_type':
-    case 'unknown_head_type':
-      return `We have your sprinkler system on file${haveClause}but not what kind of heads it uses. Spray and rotor heads put down water at very different rates, so pick your system type ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
-    case 'mixed_head_types':
-      return `Your sprinkler system is on file as ${joinList(inputs.headTypes.map((t) => HEAD_LABELS[t] || t))}, which put down water at very different rates, so we can't turn run time into inches on our own. If you know roughly how many inches your lawn gets each week, enter that ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
-    case 'drip_only':
-      return `Your system is on file as drip, which waters beds rather than turf. If the lawn does get sprinkler water, add the head type and minutes per zone (or your weekly inches) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
-    case 'missing_minutes':
-    default:
-      if (!have.length) {
-        return `We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
-      }
-      return `We have your sprinkler system on file${haveClause}but not how many minutes each zone runs. Add that ${PORTAL_IRRIGATION_ASK} (or your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  // Inputs complete but unconvertible — the two declines that are not about
+  // a missing field keep their own copy.
+  if (reason === 'mixed_head_types') {
+    return `Your sprinkler system is on file as ${joinList(inputs.headTypes.map((t) => HEAD_LABELS[t] || t))}, which put down water at very different rates, so we can't turn run time into inches on our own. If you know roughly how many inches your lawn gets each week, enter that ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
   }
+  if (reason === 'drip_only') {
+    return `Your system is on file as drip, which waters beds rather than turf. If the lawn does get sprinkler water, add the head type and minutes per zone (or your weekly inches) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+  }
+
+  // Enumerate EVERY missing input, not the derivation's first failure reason
+  // — its checks are sequential, and naming only the first blocker sends the
+  // customer through a second setup email after they comply (GH codex P1 on
+  // #3478 r2). Single-blocker copy stays tailored; multiple blockers are
+  // asked for together.
+  const missing = [];
+  const missingActions = [];
+  if (!inputs.wateringDays.length) { missing.push('which days it runs'); missingActions.push('your watering days'); }
+  if (inputs.runMinutes == null) { missing.push('how many minutes each zone runs'); missingActions.push('minutes per zone'); }
+  if (!inputs.headTypes.length) { missing.push('what kind of heads it uses'); missingActions.push('your system type'); }
+
+  if (missing.length === 1) {
+    if (inputs.runMinutes == null) {
+      return `We have your sprinkler system on file${haveClause}but not how many minutes each zone runs. Add that ${PORTAL_IRRIGATION_ASK} (or your weekly inches, if you know them) ${SETUP_CLOSER}`;
+    }
+    if (!inputs.wateringDays.length) {
+      return `We have your sprinkler system on file${haveClause}but not which days it runs. Pick your watering days ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+    }
+    return `We have your sprinkler system on file${haveClause}but not what kind of heads it uses. Spray and rotor heads put down water at very different rates, so pick your system type ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  }
+  if (missing.length > 1 && have.length) {
+    return `We have your sprinkler system on file${haveClause}but not ${joinList(missing)}. Add ${joinList(missingActions)} ${PORTAL_IRRIGATION_ASK} (or your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  }
+  return `We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
 }
 
 // Seeded confirm_schedule callout — still exactly right for a technician-

@@ -122,6 +122,24 @@ describe('non-convertible entries → setup_schedule with a specific schedule_as
     expect(text).toContain('but not which days it runs');
   });
 
+  test('two inputs missing → BOTH are asked for, never just the first blocker', () => {
+    // Heads only on file: the derivation fails on minutes first, but asking
+    // only for minutes sends the customer through a second setup email once
+    // they comply (GH codex P1 on #3478 r2).
+    const text = ask({ irrigationSystemType: ['spray'] });
+    expect(text).toContain('spray heads');
+    expect(text).toContain('which days it runs');
+    expect(text).toContain('how many minutes each zone runs');
+    expect(text).toContain('Add your watering days and minutes per zone under Irrigation in your portal');
+  });
+
+  test('minutes only on file → asks for days AND head type together', () => {
+    const text = ask({ irrigationRunMinutes: 20 });
+    expect(text).toContain('20 minutes per zone');
+    expect(text).toContain('which days it runs');
+    expect(text).toContain('what kind of heads it uses');
+  });
+
   test('mixed head types → explains why we cannot convert and asks for inches', () => {
     const text = ask({ irrigationRunMinutes: 45, wateringDays: ['Mon'], irrigationSystemType: ['rotor', 'spray', 'drip'] });
     expect(text).toContain('on file as rotor heads, spray heads and drip');
