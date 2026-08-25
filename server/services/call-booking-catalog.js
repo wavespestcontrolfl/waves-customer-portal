@@ -310,11 +310,26 @@ function normalizeServiceText(value) {
 function findServiceByName(services, value) {
   const text = normalizeServiceText(value);
   if (!text) return null;
-  return services.find((s) => (
-    normalizeServiceText(s.name) === text
-    || normalizeServiceText(s.short_name) === text
-    || normalizeServiceText(s.service_key) === text
+  const match = (candidate) => services.find((s) => (
+    normalizeServiceText(s.name) === candidate
+    || normalizeServiceText(s.short_name) === candidate
+    || normalizeServiceText(s.service_key) === candidate
   )) || null;
+  const exact = match(text);
+  if (exact) return exact;
+  // Suffix bridge, both directions (2026-08-25 catalog renames): legacy
+  // extraction labels ("Bed Bug Treatment" from extraction-compat's stable
+  // legacy map) must keep anchoring the renamed "… Service" rows, and a
+  // renamed label must resolve a restored old-name row after a migration
+  // rollback — mirror of serviceNameCandidates' append/strip pair.
+  const suffixText = normalizeServiceText(`${value} Service`);
+  if (suffixText && suffixText !== text) {
+    const suffixed = match(suffixText);
+    if (suffixed) return suffixed;
+  }
+  const stripped = text.replace(/\s+service$/, '');
+  if (stripped && stripped !== text) return match(stripped);
+  return null;
 }
 
 /**

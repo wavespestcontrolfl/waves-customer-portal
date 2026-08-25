@@ -34,7 +34,7 @@ describe('top dressing adapter tiers', () => {
     );
 
     expect(topDressingItem).toMatchObject({
-      name: 'Top Dressing',
+      name: 'Lawn Top Dressing Service',
       price: 271,
     });
     expect(mapped.results.tdTiers).toEqual([
@@ -75,7 +75,7 @@ describe('top dressing adapter tiers', () => {
 
     expect(mapped.isRecurringCustomer).toBe(true);
     expect(topDressingItem).toMatchObject({
-      name: 'Top Dressing',
+      name: 'Lawn Top Dressing Service',
       price: 230.35,
     });
     expect(mapped.oneTime.total).toBe(230.35);
