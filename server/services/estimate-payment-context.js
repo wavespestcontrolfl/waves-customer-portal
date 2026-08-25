@@ -364,7 +364,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         if (scheduledServiceId) {
           visitPlanRow = await db('scheduled_services')
             .where({ id: scheduledServiceId })
-            .first('is_recurring', 'recurring_parent_id') || null;
+            .first('is_recurring', 'recurring_parent_id', 'estimated_price') || null;
         }
         const obligation = await findUnmintedSetupFeeObligation({
           sourceEstimateId: estimate.id,
@@ -378,9 +378,17 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
             // live application-only acceptance invoice standing, only the
             // FEE is parked — never "setup fee + first application"
             // (Codex PR r11 P2).
-            applicationCovered: !!(acceptanceInvoice
-              && Number(acceptanceInvoice.firstApplicationAmount) > 0
-              && !INVOICE_DEAD_STATUSES.includes(String(acceptanceInvoice.status || '').toLowerCase())),
+            // CENTS-EXACT against the visit's own price when one is in
+            // scope (Codex PR r12 P1 — completion compares summed
+            // coverage to the full expected application cents; a partial
+            // line must not promise a fee-only park).
+            applicationCovered: (() => {
+              if (!acceptanceInvoice
+                || INVOICE_DEAD_STATUSES.includes(String(acceptanceInvoice.status || '').toLowerCase())) return false;
+              const appCents = Math.round((Number(acceptanceInvoice.firstApplicationAmount) || 0) * 100);
+              const expectCents = Math.round((Number(visitPlanRow?.estimated_price) || 0) * 100);
+              return expectCents > 0 ? appCents >= expectCents : appCents > 0;
+            })(),
             // The card's copy must describe what completion will ACTUALLY
             // do (Codex PR r2 P2): parking only happens while the gate is
             // on; while off, completion mints the bare per-application

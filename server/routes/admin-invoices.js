@@ -918,12 +918,24 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
 // PUT /:id — update invoice
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
+    // Pre-edit provenance FIRST (Codex PR r12 P2): an edit can strip the
+    // "accepted estimate #" note along with a tracked line — the post-edit
+    // row then carries no linkage and the regression would hide until the
+    // daily sweep. Reconcile under BOTH provenances (idempotent by key).
+    const preEditRow = await db('invoices')
+      .where({ id: req.params.id })
+      .first('id', 'notes', 'scheduled_service_id', 'customer_id')
+      .catch(() => null);
     const invoice = await InvoiceService.update(req.params.id, req.body);
     // Coverage-changing transition (PR #3476): a line-item edit can add or
     // remove the charge the setup-fee alert tracks — reconcile post-commit.
-    await require('../services/setup-fee-alert-reconcile')
-      .reconcileSetupFeeAlertForInvoice(invoice)
+    const reconcile = require('../services/setup-fee-alert-reconcile');
+    await reconcile.reconcileSetupFeeAlertForInvoice(invoice)
       .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after edit ${req.params.id}: ${err.message}`));
+    if (preEditRow) {
+      await reconcile.reconcileSetupFeeAlertForInvoice(preEditRow)
+        .catch((err) => logger.error(`[admin-invoices] pre-edit setup-fee alert reconcile failed for ${req.params.id}: ${err.message}`));
+    }
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
   } catch (err) {
