@@ -74,8 +74,14 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             ...(staleMeta?.scheduledServiceId ? [String(staleMeta.scheduledServiceId)] : []),
             ...(Array.isArray(staleMeta?.parkedVisitIds) ? staleMeta.parkedVisitIds.map(String) : []),
           ])];
+          // Every coverage scan is scoped to the ALERT's customer (Codex
+          // PR r7 P1): a parked visit later re-linked to another customer
+          // carries that customer's invoices, and the daily sweep (which
+          // runs AS the persisted customer) must never let them resolve
+          // this customer's charges.
           const onParkedAll = parkedIds.length
             ? await trx('invoices')
+              .where({ customer_id: scanCustomerId })
               .where((qb) => {
                 qb.whereIn('scheduled_service_id', parkedIds);
                 if (staleMeta?.serviceRecordId) qb.orWhere({ service_record_id: staleMeta.serviceRecordId });
@@ -98,7 +104,10 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // bills the fee.
           const AnnualPrepayRenewalsReconcile = require('./annual-prepay-renewals');
           const prepaidParkedRows = parkedIds.length
-            ? await trx('scheduled_services').whereIn('id', parkedIds).select('id', 'prepaid_amount', 'prepaid_method', 'estimated_price')
+            ? await trx('scheduled_services')
+              .whereIn('id', parkedIds)
+              .where({ customer_id: scanCustomerId })
+              .select('id', 'prepaid_amount', 'prepaid_method', 'estimated_price')
             : [];
           // FULL coverage only (Codex P0): the completion guard requires
           // prepaid_amount >= the visit charge — a partial prepayment must
@@ -122,25 +131,42 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // collection. Application coverage stays live-rows-only.
           const refundedFee = [...stampedAll, ...onParkedAll].some((r) => (
             String(r.status || '').toLowerCase() === 'refunded' && invoiceHasPositiveSetupFeeLine(r)));
+          // CENTS-EXACT coverage against the FROZEN expected amounts the
+          // alert persisted at parking time (Codex PR r7 P1): a $9.90
+          // typo must not retire a $99 obligation. Alerts without the
+          // persisted amounts (none exist pre-gate) keep the boolean
+          // positive-line behavior.
+          const { sumPositiveSetupFeeCents, sumBaseApplicationCents } = require('./estimate-first-application-invoice');
+          const expectedFeeCents = Number.isFinite(Number(staleMeta?.expectedSetupFeeCents))
+            ? Number(staleMeta.expectedSetupFeeCents) : null;
+          const liveFeeCents = [...stampedLive, ...onParkedLive]
+            .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
           const feeProven = refundedFee
-            || [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
+            || (expectedFeeCents !== null
+              ? liveFeeCents >= expectedFeeCents
+              : [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine));
+          const expectedAppCents = (visitId) => {
+            const map = staleMeta?.expectedApplicationCentsByVisit;
+            const v = map && Number(map[String(visitId)]);
+            return Number.isFinite(v) && v > 0 ? v : null;
+          };
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
-          const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
+          // Only the durable base-application identity counts (Codex P0,
+          // round 18 — visit linkage alone is insufficient money
+          // evidence), and coverage is CENTS-EXACT against the persisted
+          // expected amount when one exists (Codex PR r7 P1).
+          const rowsForVisit = (visitId) => onParkedLive.filter((r) => (
             String(r.scheduled_service_id || '') === String(visitId)
             || (String(visitId) === primaryVisitId
               && staleMeta?.serviceRecordId
               && String(r.service_record_id || '') === String(staleMeta.serviceRecordId))
-            // Only the durable base-application identity counts (Codex
-            // P0, round 18 — visit linkage alone is insufficient money
-            // evidence: an add-on/product invoice on the visit must not
-            // read as the application billed). The alert bodies instruct
-            // staff to use the exact recognizable line description.
-          ) && invoiceBillsBaseApplication(r));
-          const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
-            visitApplicationBilled(visitId)
-            || prepaidCoveredIds.has(String(visitId))
-            || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
           ));
+          const visitApplicationBilled = (visitId) => {
+            const rows = rowsForVisit(visitId);
+            const expect = expectedAppCents(visitId);
+            if (expect === null) return rows.some(invoiceBillsBaseApplication);
+            return rows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0) >= expect;
+          };
           // All four coverage states rewrite the alert (Codex P0,
           // pre-push round 17): once staff bills ONE charge, the original
           // "bill BOTH" instruction must shrink to only what is still
@@ -152,10 +178,19 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // cross-visit race can park several visits, and staff may bill
           // them one at a time — every rewritten instruction lists ONLY
           // the still-uncovered visits, never a covered one.
+          const stampedAppCents = stampedLive.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
+          const stampedCoversPrimary = (visitId) => {
+            if (String(visitId) !== primaryVisitId) return false;
+            const expect = expectedAppCents(visitId);
+            return expect === null
+              ? stampedLive.some(invoiceBillsBaseApplication)
+              : stampedAppCents >= expect;
+          };
           const visitCovered = (visitId) => (visitApplicationBilled(visitId)
             || prepaidCoveredIds.has(String(visitId))
-            || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication)));
+            || stampedCoversPrimary(visitId));
           const uncoveredIds = parkedIds.filter((visitId) => !visitCovered(visitId));
+          const applicationProven = parkedIds.length > 0 && uncoveredIds.length === 0;
           const priorUncovered = Array.isArray(staleMeta?.uncoveredVisitIds)
             ? staleMeta.uncoveredVisitIds.map(String).sort().join(',')
             : null;

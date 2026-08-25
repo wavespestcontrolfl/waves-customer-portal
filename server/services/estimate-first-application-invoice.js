@@ -157,6 +157,39 @@ function invoiceHasPositiveSetupFeeLine(row) {
   });
 }
 
+// Cents totals for coverage comparison (Codex PR r7 P1): boolean
+// any-positive-line evidence lets a $9.90 typo retire a $99 obligation —
+// resolution compares SUMMED live coverage against the frozen expected
+// amounts persisted on the alert.
+function sumPositiveSetupFeeCents(row) {
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items)) return 0;
+  return items.reduce((sum, li) => {
+    const desc = String(li?.description || '');
+    if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return sum;
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0 ? sum + Math.round(amt * 100) : sum;
+  }, 0);
+}
+
+function sumBaseApplicationCents(row) {
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items)) return 0;
+  const { lineIsBaseApplication } = require('./invoice');
+  return items.reduce((sum, li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li) ? sum + Math.round(amt * 100) : sum;
+  }, 0);
+}
+
 module.exports = {
   dateOnly,
   findFirstApplicationInvoiceForEstimateService,
@@ -164,4 +197,6 @@ module.exports = {
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   invoiceBillsBaseApplication,
+  sumPositiveSetupFeeCents,
+  sumBaseApplicationCents,
 };

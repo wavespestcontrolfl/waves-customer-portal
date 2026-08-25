@@ -94,6 +94,24 @@ test('a VOID (not refunded) fee invoice beside a live application DOES rewrite t
   expect(mockUpdates[0].payload.read_at).toBe(null); // newly actionable — rings
 });
 
+test('a PARTIAL fee amount ($9.90 vs expected $99) never resolves the fee — cents-exact against persisted expectation', async () => {
+  mockTables = {
+    notifications: alertRow({ resolvedCovered: false, expectedSetupFeeCents: 9900 }),
+    invoices: (n) => (n === 1
+      ? [
+        { id: 'inv-fee', status: 'paid', line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 9.90 }]), notes: `accepted estimate #${EST}` },
+        { id: 'inv-app', status: 'paid', line_items: APP_LINE, notes: `accepted estimate #${EST}` },
+      ]
+      : []),
+    scheduled_services: [],
+  };
+  await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+  // Application covered, fee NOT (partial) → fee-only instruction, never resolved.
+  expect(mockUpdates).toHaveLength(1);
+  expect(mockUpdates[0].payload.body).toContain('one-time setup fee');
+  expect(mockUpdates[0].payload.body).not.toContain('RESOLVED');
+});
+
 test('a foreign re-linked visit never reconciles another customer\'s alert', async () => {
   mockTables = {
     notifications: alertRow({ resolvedCovered: false }),

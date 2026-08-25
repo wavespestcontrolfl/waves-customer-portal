@@ -9482,6 +9482,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
             return true;
           }
+          // Frozen expected amounts, persisted for cents-exact
+          // reconciliation (Codex PR r7 P1): coverage is later compared
+          // against THESE, never re-derived or boolean-matched.
+          const expectedSetupFeeCents = Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100);
+          const expectedAppCentsThisVisit = Math.round(Number(
+            (Number(mintInvoiceAmount) > 0 ? mintInvoiceAmount : svc.estimated_price) || 0,
+          ) * 100);
           const setupFeeLabel = `$${Number(unmintedSetupFeeObligation.setupFee || 0).toFixed(2)}`;
           const firstAppLabel = Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '';
           // A dead acceptance invoice no suppressor can surface
@@ -9524,11 +9531,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               ...(alreadyMeta?.scheduledServiceId ? [String(alreadyMeta.scheduledServiceId)] : []),
               String(svc.id),
             ])];
+            const expectedApplicationCentsByVisit = {
+              ...(alreadyMeta?.expectedApplicationCentsByVisit || {}),
+              ...(expectedAppCentsThisVisit > 0 ? { [String(svc.id)]: expectedAppCentsThisVisit } : {}),
+            };
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody + crossVisitNote,
               // Newly actionable again — surface in the unread badge.
               read_at: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
           }
@@ -9536,7 +9547,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             'Completed first visit needs manual billing — setup fee was never invoiced',
             alertBody,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('unminted-setup-fee notification insert failed');
           return true;
