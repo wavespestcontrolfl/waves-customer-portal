@@ -98,10 +98,15 @@ function parseLineItems(raw) {
 // null when nothing matches; otherwise { patch, changed } naming each field /
 // item-index touched, so rollback owns EXACTLY those.
 function relabelInvoiceSnapshot(inv, fromName, toName) {
+  // Exact label OR its cadence-qualified form, qualifier preserved — same
+  // matching contract as the visit/reminder relabels (codex pre-push P1).
+  const swap = (v) => swapRenamedPrefix(v, fromName, toName);
   const patch = {};
   const changed = { title: false, service_type: false, items: [] };
-  if (inv.title === fromName) { patch.title = toName; changed.title = true; }
-  if (inv.service_type === fromName) { patch.service_type = toName; changed.service_type = true; }
+  const nextTitle = swap(inv.title);
+  if (nextTitle) { patch.title = nextTitle; changed.title = true; }
+  const nextServiceType = swap(inv.service_type);
+  if (nextServiceType) { patch.service_type = nextServiceType; changed.service_type = true; }
   const items = parseLineItems(inv.line_items);
   if (items) {
     let itemsChanged = false;
@@ -109,8 +114,10 @@ function relabelInvoiceSnapshot(inv, fromName, toName) {
       if (!item || typeof item !== 'object') return item;
       const out = { ...item };
       const rec = { i, description: false, category: false };
-      if (out.description === fromName) { out.description = toName; rec.description = true; itemsChanged = true; }
-      if (out.category === fromName) { out.category = toName; rec.category = true; itemsChanged = true; }
+      const nd = swap(out.description);
+      if (nd) { out.description = nd; rec.description = true; itemsChanged = true; }
+      const nc = swap(out.category);
+      if (nc) { out.category = nc; rec.category = true; itemsChanged = true; }
       if (rec.description || rec.category) changed.items.push(rec);
       return out;
     });
@@ -119,11 +126,19 @@ function relabelInvoiceSnapshot(inv, fromName, toName) {
   return Object.keys(patch).length ? { patch, changed } : null;
 }
 
-// Inverse restricted to a recorded `changed` map (see exemplar).
+// Inverse restricted to a recorded `changed` map (see exemplar), with the
+// same qualified-label handling as the forward swap.
 function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
+  const swap = (v) => swapRenamedPrefix(v, fromName, toName);
   const patch = {};
-  if (changed.title && inv.title === fromName) patch.title = toName;
-  if (changed.service_type && inv.service_type === fromName) patch.service_type = toName;
+  if (changed.title) {
+    const t = swap(inv.title);
+    if (t) patch.title = t;
+  }
+  if (changed.service_type) {
+    const st = swap(inv.service_type);
+    if (st) patch.service_type = st;
+  }
   const items = parseLineItems(inv.line_items);
   if (items && Array.isArray(changed.items) && changed.items.length) {
     let itemsChanged = false;
@@ -131,8 +146,14 @@ function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
       const rec = changed.items.find((r) => r && r.i === i);
       if (!rec || !item || typeof item !== 'object') return item;
       const out = { ...item };
-      if (rec.description && out.description === fromName) { out.description = toName; itemsChanged = true; }
-      if (rec.category && out.category === fromName) { out.category = toName; itemsChanged = true; }
+      if (rec.description) {
+        const nd = swap(out.description);
+        if (nd) { out.description = nd; itemsChanged = true; }
+      }
+      if (rec.category) {
+        const nc = swap(out.category);
+        if (nc) { out.category = nc; itemsChanged = true; }
+      }
       return out;
     });
     if (itemsChanged) patch.line_items = JSON.stringify(next);
@@ -264,17 +285,19 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
     }
   }
 
-  // Self-booking snapshots (booking status API renders its own copy).
+  // Self-booking snapshots (booking status API renders its own copy) —
+  // same exact-or-qualified matching as the visit relabel.
   if (visitsByBooking.size && (await knex.schema.hasTable('self_booked_appointments'))) {
     const sbRows = await knex('self_booked_appointments')
       .whereIn('id', [...visitsByBooking.values()])
-      .where({ service_type: fromName })
-      .select('id');
+      .select('id', 'service_type');
     const bookingToVisit = new Map([...visitsByBooking].map(([visitId, sbId]) => [sbId, visitId]));
     for (const sb of sbRows) {
+      const next = swapRenamedPrefix(sb.service_type, fromName, toName);
+      if (!next) continue;
       const count = await knex('self_booked_appointments')
-        .where({ id: sb.id, service_type: fromName })
-        .update({ service_type: toName });
+        .where({ id: sb.id, service_type: sb.service_type })
+        .update({ service_type: next });
       if (count) rec.selfBookings[sb.id] = bookingToVisit.get(sb.id) || null;
     }
   }
@@ -288,13 +311,15 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
     // copied verbatim into recurring children and invoices/reminders, so
     // skipping them leaves customers on the pre-rename name (codex #3484
     // r1 P2). Same linked+legacy split as the visit relabel above.
+    const addonQualified = `${fromName} (%`;
     const linkedAddons = await knex('scheduled_service_addons')
-      .where({ service_id: row.id, service_name: fromName })
-      .select('id', 'scheduled_service_id');
+      .where({ service_id: row.id })
+      .whereRaw('(service_name = ? OR service_name LIKE ?)', [fromName, addonQualified])
+      .select('id', 'scheduled_service_id', 'service_name');
     const legacyAddons = await knex('scheduled_service_addons')
-      .where({ service_name: fromName })
       .whereNull('service_id')
-      .select('id', 'scheduled_service_id');
+      .whereRaw('(service_name = ? OR service_name LIKE ?)', [fromName, addonQualified])
+      .select('id', 'scheduled_service_id', 'service_name');
     const addons = [...linkedAddons, ...legacyAddons];
     const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
     const openParentIds = new Set(
@@ -307,17 +332,15 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
         : []
     );
     const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
-    if (targets.length) {
-      const ret = await knex('scheduled_service_addons')
-        .whereIn('id', targets.map((a) => a.id))
-        .where({ service_name: fromName })
-        .update({ service_name: toName }, ['id']);
-      const updatedAddonSet = new Set(updatedIdList(ret));
-      for (const a of targets) {
-        if (updatedAddonSet.has(a.id)) rec.addons[a.id] = a.scheduled_service_id;
-      }
-      rec.addonParentVisitIds = [...new Set(Object.values(rec.addons).filter(Boolean))];
+    for (const a of targets) {
+      const next = swapRenamedPrefix(a.service_name, fromName, toName);
+      if (!next) continue;
+      const count = await knex('scheduled_service_addons')
+        .where({ id: a.id, service_name: a.service_name })
+        .update({ service_name: next });
+      if (count) rec.addons[a.id] = a.scheduled_service_id;
     }
+    rec.addonParentVisitIds = [...new Set(Object.values(rec.addons).filter(Boolean))];
   }
 
   const snapshotVisitIds = [...new Set([...rec.visitIds, ...rec.addonParentVisitIds])];

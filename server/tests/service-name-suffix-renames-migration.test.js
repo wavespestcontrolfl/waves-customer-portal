@@ -158,7 +158,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       && notInClauses.every((c) => !c.vals.includes(r[c.col]))
       && filters.every((cond) => Object.entries(cond).every(([k, v]) => {
         if (k === 'label_or_qualified') {
-          const s = String(r.service_type || '');
+          const s = String(r[v.col || 'service_type'] || '');
           return s === v.exact || s.startsWith(v.prefix);
         }
         return r[k] === v;
@@ -171,10 +171,11 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
       whereRaw(sql, bindings) {
-        if (/service_type = \? OR service_type LIKE \?/.test(sql)) {
+        if (/(?:service_type|service_name) = \? OR (?:service_type|service_name) LIKE \?/.test(sql)) {
+          const col = sql.includes('service_name') ? 'service_name' : 'service_type';
           const [exact, like] = bindings;
           const prefix = String(like).replace(/%$/, '');
-          filters.push({ label_or_qualified: { exact, prefix } });
+          filters.push({ label_or_qualified: { col, exact, prefix } });
           return q;
         }
         if (!/updated_at::text\s*=\s*\?/.test(sql)) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
