@@ -9265,8 +9265,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // already exists on the visit carrying only the application charge —
     // the completion reused it unheld above, and the alert's liveOnVisit
     // branch directs staff to collect it and bill the fee BESIDE it).
+    // No !preMintedInvoice here (Codex P0, pre-push round 4): the Charge
+    // Now invoice IS preMintedInvoice — completionSuppressorInvoiceLookup
+    // finds the same row by scheduled_service_id — so excluding it would
+    // suppress this branch for exactly the case it exists for.
     const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation && existingCompletionInvoice
-      && !terminalCompletionInvoice && !recapReviewOnly && !preMintedInvoice);
+      && !terminalCompletionInvoice && !recapReviewOnly);
     if (setupFeeChargeNowBeside
       || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
         && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice

@@ -16,9 +16,10 @@
 //
 // "Owed" here means ALL of:
 //   - the estimate exists, is accepted, and the customer actually agreed
-//     to the fee: the persisted send-snapshot shows it, or — with no
-//     snapshot — the accept postdates the end of the rule's go-live day
-//     (older accepts never promised the fee);
+//     to the fee: the persisted send-snapshot shows it, or — absent
+//     affirmative snapshot evidence (fee-less bundles are stale shapes
+//     repaired at view time, never proof) — the accept postdates the end
+//     of the rule's go-live day (older accepts never promised the fee);
 //   - the accepted recurring mix actually carries the fee per the ONE
 //     authority (estimate-converter.shouldIncludeWaveGuardSetupFeeForRecurring
 //     — existing-customer waiver, operator waiver, bundle rule, solo
@@ -56,10 +57,15 @@ const db = require('../models/db');
 const SETUP_FEE_RULE_SAFE_CUTOFF = '2026-07-11T04:00:00Z'; // 2026-07-11 00:00 ET
 
 // Did the estimate the customer accepted actually SHOW the setup fee?
-// Reads the persisted send-snapshot pricing bundle (the exact payload the
-// estimate page rendered from) using the same service-key recognizers as
-// pricingBundleMissingRequiredSetupFee. Returns true/false on evidence,
-// null when no snapshot bundle exists (verbal/manual estimates).
+// Reads the persisted send-snapshot pricing bundle using the same
+// service-key recognizers as pricingBundleMissingRequiredSetupFee.
+// Returns true on affirmative evidence, else null — NEVER false: a
+// fee-less bundle on a fee-due mix is exactly the STALE shape
+// estimate-public deliberately invalidates and recomputes WITH the fee
+// at view time (pricingBundleMissingRequiredSetupFee), so the persisted
+// fee-less snapshot is not proof of what the customer ultimately saw
+// (Codex P0, pre-push round 4). Absent affirmative evidence, the date
+// cutoff decides.
 function snapshotShowsSetupFee(estimateData) {
   const bundle = estimateData?.sendSnapshot?.pricingBundle;
   if (!bundle || typeof bundle !== 'object') return null;
@@ -68,7 +74,7 @@ function snapshotShowsSetupFee(estimateData) {
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
     && bundle.oneTimeBreakdown.items.some((row) => row?.service === 'waveguard_setup')) return true;
   if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return true;
-  return false;
+  return null;
 }
 
 function parseEstimateData(raw) {
@@ -132,12 +138,12 @@ async function findUnmintedSetupFeeObligation({
   const EstimateConverter = require('./estimate-converter');
   const estimateData = parseEstimateData(estimate.estimate_data);
   // Display evidence first, date proxy second: a snapshot that shows the
-  // fee puts the accept in scope regardless of date; one that shows NO fee
-  // means the customer never agreed to it — out of scope, period. Without
-  // a snapshot, only accepts after the rule day fully ended qualify.
-  const feeShown = snapshotShowsSetupFee(estimateData);
-  if (feeShown === false) return { owed: false };
-  if (feeShown === null && acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) {
+  // fee puts the accept in scope regardless of date. A fee-less or
+  // missing snapshot is NOT evidence either way (stale bundles are
+  // repaired with the fee at view time) — then only accepts after the
+  // rule day fully ended qualify.
+  if (snapshotShowsSetupFee(estimateData) !== true
+    && acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) {
     return { owed: false };
   }
   const recurringServices = EstimateConverter.recurringServicesFromEstimateData(estimateData);

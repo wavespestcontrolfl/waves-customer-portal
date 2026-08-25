@@ -76,6 +76,23 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
   });
 });
 
+describe('unminted setup-fee parking — Charge Now beside-branch wiring', () => {
+  test('the beside-branch never excludes preMintedInvoice — the Charge Now invoice IS preMintedInvoice', () => {
+    // completionSuppressorInvoiceLookup finds the same row by
+    // scheduled_service_id that populates existingCompletionInvoice, so a
+    // !preMintedInvoice term would suppress the branch for exactly the
+    // case it exists for (Codex P0, pre-push round 4).
+    expect(dispatchSource).toMatch(/const setupFeeChargeNowBeside = !!\(unmintedSetupFeeObligation && existingCompletionInvoice\s*\n\s*&& !terminalCompletionInvoice && !recapReviewOnly\);/);
+    const besideDecl = dispatchSource.match(/const setupFeeChargeNowBeside =[^;]*;/);
+    expect(besideDecl).toBeTruthy();
+    expect(besideDecl[0]).not.toMatch(/preMintedInvoice/);
+  });
+
+  test('the mint hold releases when a Charge Now invoice already exists — the completion keeps reusing it', () => {
+    expect(dispatchSource).toMatch(/unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice,/);
+  });
+});
+
 describe('createFromService extraLineItems (services/invoice.js)', () => {
   test('extra lines append AFTER the service lines in both line-item branches', () => {
     expect(invoiceSource).toMatch(/extraLineItems = \[\],/);
