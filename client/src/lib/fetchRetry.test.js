@@ -67,4 +67,13 @@ describe('fetchWithNetworkRetry', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/pay/t/update-amount', options);
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/pay/t/update-amount', options);
   });
+
+  it('rethrows an AbortError immediately without retrying — caller cancellation is not a network failure', async () => {
+    const abortErr = new DOMException('The user aborted a request.', 'AbortError');
+    const fetchMock = vi.fn().mockRejectedValue(abortErr);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchWithNetworkRetry('/api/pay/t')).rejects.toBe(abortErr);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
