@@ -600,14 +600,17 @@ async function getAttributionQueue(options = {}) {
     .where('review_created_at', '>=', since.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
-  // Correction rows fetched INDEPENDENTLY of the scan cap: a busy period can
-  // push an older click_auto row past `limit` before eligibility filtering,
-  // dropping it from its only correction surface (GH codex #3483 r2 P2).
+  // Correction rows fetched INDEPENDENTLY of the scan cap AND the reporting
+  // period: a busy period can push an older click_auto row past `limit`
+  // before eligibility filtering (GH codex #3483 r2 P2), and the UI's 90-day
+  // max period would age an unconfirmed link out of its only correction
+  // surface while the suppression flag persists forever (pre-push P1).
+  // Unresolved click_auto rows are by definition awaiting action — the set
+  // stays small because every confirm/re-match restamps them 'manual'.
   const clickAutoRows = await conn('google_reviews')
     .where({ link_source: 'click_auto' })
     .whereNotNull('customer_id')
     .whereNull('missing_since')
-    .where('review_created_at', '>=', since.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
   const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
