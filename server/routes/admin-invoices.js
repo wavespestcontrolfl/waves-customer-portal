@@ -922,10 +922,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // "accepted estimate #" note along with a tracked line — the post-edit
     // row then carries no linkage and the regression would hide until the
     // daily sweep. Reconcile under BOTH provenances (idempotent by key).
-    const preEditRow = await db('invoices')
-      .where({ id: req.params.id })
-      .first('id', 'notes', 'scheduled_service_id', 'customer_id')
-      .catch(() => null);
+    let preEditRow = null;
+    try {
+      preEditRow = await db('invoices')
+        .where({ id: req.params.id })
+        .first('id', 'notes', 'scheduled_service_id', 'customer_id');
+    } catch { preEditRow = null; /* provenance capture is best-effort */ }
     const invoice = await InvoiceService.update(req.params.id, req.body);
     // Coverage-changing transition (PR #3476): a line-item edit can add or
     // remove the charge the setup-fee alert tracks — reconcile post-commit.
