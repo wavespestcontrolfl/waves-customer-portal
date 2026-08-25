@@ -9565,6 +9565,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             .first('scheduled_date');
           acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+          // The shared invoice MINT lock joins the pre-row-lock rung too
+          // (PR #3476 r22 P1): scheduled-invoice writers lock advisory →
+          // customer KEY SHARE → visit row, while this txn locks customer
+          // and estimate rows below — taking the advisory key only inside
+          // commitReservation (after those row locks) ABBA-deadlocks
+          // against a concurrent writer holding the advisory key and
+          // waiting on the customer row. Reentrant no-op downstream.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, acceptHoldRow.id);
         }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
