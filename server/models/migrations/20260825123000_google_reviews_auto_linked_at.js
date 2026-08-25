@@ -11,7 +11,10 @@ exports.up = async function (knex) {
   const has = await knex.schema.hasColumn('google_reviews', 'auto_linked_at');
   if (!has) {
     await knex.schema.alterTable('google_reviews', (t) => {
-      t.timestamp('auto_linked_at');
+      // Explicit useTz — compared for equality against customers.
+      // review_marked_at (timestamptz); knex on pg already defaults to
+      // timestamptz, this just pins it.
+      t.timestamp('auto_linked_at', { useTz: true });
     });
   }
 };
