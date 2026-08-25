@@ -17,13 +17,11 @@
  *   - Terminal rows (record corrections) are not occupancy and skip the probe.
  *   - The moving row excludes itself; cancelled + completed don't occupy.
  *
- * What a probe HIT does is gated (owner ruling 2026-08-25 — conflicts must
- * not block an admin save):
- *   - Default (GATE_ADMIN_OCCUPANCY_BLOCKING off): the save COMMITS and the
- *     response carries a `warnings` entry naming the clashing date.
- *   - GATE_ADMIN_OCCUPANCY_BLOCKING='true': the pre-ruling hard SLOT_TAKEN
- *     409s (same shape as the rebooker/self-booking writers).
- * Locks + probes run identically at either setting.
+ * A probe HIT is ADVISORY (owner ruling 2026-08-25 — conflicts must not
+ * block an admin save): the save COMMITS and the response carries a
+ * `warnings` entry naming the clashing date. Locks + probes still run —
+ * only the abort is gone; the customer self-booking / rebooker / public
+ * reschedule writers keep their hard blocks.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -114,15 +112,13 @@ beforeAll((done) => {
     done();
   });
 });
-afterAll((done) => { delete process.env.GATE_ADMIN_OCCUPANCY_BLOCKING; server.close(done); });
+afterAll((done) => { server.close(done); });
 
 const callOrder = [];
 let trx;
 beforeEach(() => {
   jest.clearAllMocks();
   callOrder.length = 0;
-  // Advisory default — the blocking describe below opts back in per test.
-  delete process.env.GATE_ADMIN_OCCUPANCY_BLOCKING;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async (_t, date) => { callOrder.push(`occupancy:${date}`); });
   lockCustomerComms.mockImplementation(async () => { callOrder.push('comms'); });
@@ -157,7 +153,7 @@ async function post(body) {
 }
 
 describe('PUT /:id/update-details — date/window move', () => {
-  test('takes the rung-1 date lock on the TARGET date first, probes globally, and on a hit does NOT refuse the save (advisory default)', async () => {
+  test('takes the rung-1 date lock on the TARGET date first, probes globally, and on a hit does NOT refuse the save', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other', window_start: '10:00:00', window_end: '11:00:00' }]);
 
     const { status } = await put('svc-1', { scheduledDate: '2099-07-03', windowStart: '10:00' });
@@ -183,7 +179,7 @@ describe('PUT /:id/update-details — date/window move', () => {
     }));
   });
 
-  test('a window-only move onto an occupied slot COMMITS and returns a warning naming the date (advisory default)', async () => {
+  test('a window-only move onto an occupied slot COMMITS and returns a warning naming the date', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
 
     const { status, body } = await put('svc-1', { windowStart: '13:00' });
@@ -297,7 +293,7 @@ describe('POST / — admin create', () => {
     sendConfirmationSms: false,
   };
 
-  test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied (advisory default)', async () => {
+  test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
 
     const { status, body } = await post(createBody);
@@ -360,7 +356,7 @@ describe('POST / — admin create', () => {
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
   });
 
-  test('a conflicting generated child date BOOKS the full series and warns naming the date (advisory default)', async () => {
+  test('a conflicting generated child date BOOKS the full series and warns naming the date', async () => {
     const inserts = [];
     trx.mockImplementation((table) => {
       const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
@@ -382,40 +378,6 @@ describe('POST / — admin create', () => {
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
   });
 
-  test("GATE_ADMIN_OCCUPANCY_BLOCKING='true': a conflicting generated child date 409s SLOT_TAKEN (naming the date) and inserts nothing after it", async () => {
-    process.env.GATE_ADMIN_OCCUPANCY_BLOCKING = 'true';
-    const inserts = [];
-    trx.mockImplementation((table) => {
-      const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
-      if (table === 'scheduled_services') {
-        c.insert = jest.fn((data) => {
-          inserts.push(data);
-          return { returning: jest.fn().mockResolvedValue([{ ...SVC, ...data, id: `new-${inserts.length}` }]) };
-        });
-      }
-      return c;
-    });
-    findConflictingVisits.mockImplementation(async ({ date }) => (date === '2099-09-04' ? [{ id: 'svc-other' }] : []));
-
-    const { status, body } = await post(recurringBody);
-
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.stringContaining('2099-09-04'), code: 'SLOT_TAKEN' });
-    // The trx threw, so the parent + 08-07 child inserts that ran before the
-    // 09-04 probe roll back; nothing after the conflict was attempted.
-    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07']);
-    expect(trx.commit).not.toHaveBeenCalled();
-  });
-
-  test("GATE_ADMIN_OCCUPANCY_BLOCKING='true': an occupied parent window 409s SLOT_TAKEN", async () => {
-    process.env.GATE_ADMIN_OCCUPANCY_BLOCKING = 'true';
-    findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
-
-    const { status, body } = await post(createBody);
-
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.any(String), code: 'SLOT_TAKEN' });
-  });
 });
 
 describe('PUT /:id/update-details — recurrence paths lock + probe every destination date', () => {
@@ -495,7 +457,7 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     isRecurring: true, spawnRecurringChildren: false, recurringPattern: 'custom', recurringIntervalDays: 14,
   };
 
-  test('a cadence change that moves a child onto an occupied date SAVES the move and warns naming the date (advisory default)', async () => {
+  test('a cadence change that moves a child onto an occupied date SAVES the move and warns naming the date', async () => {
     const { childWrites } = setupCadenceSeriesMocks();
 
     const { status, body } = await put('svc-1', cadenceChangeBody);
@@ -516,29 +478,6 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     expect(childWrites.map((d) => d.scheduled_date)).toEqual(['2099-07-15']);
   });
 
-  test("GATE_ADMIN_OCCUPANCY_BLOCKING='true': the same cadence change 409s SLOT_TAKEN and writes nothing", async () => {
-    process.env.GATE_ADMIN_OCCUPANCY_BLOCKING = 'true';
-    const { childWrites } = setupCadenceSeriesMocks();
-
-    const { status, body } = await put('svc-1', cadenceChangeBody);
-
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.stringContaining('2099-07-15'), code: 'SLOT_TAKEN' });
-    expect(childWrites).toEqual([]);
-    expect(trx.commit).not.toHaveBeenCalled();
-  });
-});
-
-describe("GATE_ADMIN_OCCUPANCY_BLOCKING='true' — the update-details move probe hard-blocks again", () => {
-  test('a date/window move onto an occupied slot 409s SLOT_TAKEN', async () => {
-    process.env.GATE_ADMIN_OCCUPANCY_BLOCKING = 'true';
-    findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other', window_start: '10:00:00', window_end: '11:00:00' }]);
-
-    const { status, body } = await put('svc-1', { scheduledDate: '2099-07-03', windowStart: '10:00' });
-
-    expect(status).toBe(409);
-    expect(body).toEqual({ error: expect.any(String), code: 'SLOT_TAKEN' });
-  });
 });
 
 describe('PUT /:id/update-details — presence is not change (legacy off-hour rows stay editable)', () => {
