@@ -152,11 +152,16 @@ async function findUnmintedSetupFeeObligation({
   const feeEvidence = snapshotShowsSetupFee(estimateData);
   if (feeEvidence !== 'shown') {
     if (acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) return { owed: false };
-    if (feeEvidence === 'feeless') {
-      const manualAccept = await conn('activity_log')
-        .where({ estimate_id: estimate.id, action: 'estimate_manual_accept' })
-        .first('id');
-      if (manualAccept) return { owed: false };
+    if (feeEvidence === 'feeless'
+      && String(estimate.price_locked_by || '') !== 'customer_accept') {
+      // Consent needs POSITIVE proof (Codex P0, pre-push round 16): the
+      // activity-log row a manual accept writes is best-effort (its
+      // insert failure is swallowed), so its absence proves nothing. The
+      // DURABLE atomic marker is estimates.price_locked_by — only
+      // 'customer_accept' proves the customer rendered the repaired page
+      // with the fee; 'manual_accept', 'backfill', or null leave the
+      // fee-less snapshot as the last pricing the customer saw.
+      return { owed: false };
     }
   }
   const recurringServices = EstimateConverter.recurringServicesFromEstimateData(estimateData);
@@ -311,7 +316,11 @@ async function findUnmintedSetupFeeObligation({
     // invoice that happens to hang off the visit (Codex P0, pre-push
     // round 6) — a setup-only or otherwise fee-marked attached invoice
     // proves nothing about the application and must not clear the guard.
-    priorCompleted = (priorBilledRows || []).find(invoiceBillsBaseApplication) || null;
+    // These rows are visit-LINKED, so the manual-invoice shape (li_* ids,
+    // service-type description) also counts (round 16).
+    const { linkedInvoiceHasPositiveNonSetupCharge } = require('./estimate-first-application-invoice');
+    priorCompleted = (priorBilledRows || []).find((r) => invoiceBillsBaseApplication(r)
+      || linkedInvoiceHasPositiveNonSetupCharge(r)) || null;
   }
 
   return {

@@ -8926,7 +8926,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .first('id', 'metadata');
           if (!staleAlert) return;
           const {
-            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication,
+            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication, linkedInvoiceHasPositiveNonSetupCharge,
           } = require('../services/estimate-first-application-invoice');
           const staleMeta = typeof staleAlert.metadata === 'string'
             ? (() => { try { return JSON.parse(staleAlert.metadata); } catch { return null; } })()
@@ -8967,7 +8967,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             || (String(visitId) === primaryVisitId
               && staleMeta?.serviceRecordId
               && String(r.service_record_id || '') === String(staleMeta.serviceRecordId))
-          ) && invoiceBillsBaseApplication(r));
+            // Linked rows also accept the manual-invoice shape (li_* ids,
+            // service-type description) — the exact invoice this alert
+            // asks staff to create (Codex P0, pre-push round 16).
+          ) && (invoiceBillsBaseApplication(r) || linkedInvoiceHasPositiveNonSetupCharge(r)));
           const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
             visitApplicationBilled(visitId)
             || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
@@ -9492,11 +9495,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // application, and a fee-carrying one must never be instructed
           // to bill the fee again.
           const {
-            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication,
+            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication, linkedInvoiceHasPositiveNonSetupCharge,
           } = require('../services/estimate-first-application-invoice');
           const feeCoveredBy = liveStampedRows.find(invoiceContainsSetupFeeLine)
             || liveOnVisitRows.find(invoiceContainsSetupFeeLine) || null;
-          const applicationCoveredBy = liveOnVisitRows.find(invoiceBillsBaseApplication)
+          // On-visit rows are trusted by linkage, so the manual-invoice
+          // shape (li_* ids, service-type description) also counts
+          // (Codex P0, pre-push round 16); unattached stamped rows keep
+          // the strict base identity.
+          const applicationCoveredBy = liveOnVisitRows.find((r) => invoiceBillsBaseApplication(r) || linkedInvoiceHasPositiveNonSetupCharge(r))
             || liveStampedRows.find(invoiceBillsBaseApplication) || null;
           if (feeCoveredBy && applicationCoveredBy) {
             const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
