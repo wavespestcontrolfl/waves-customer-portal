@@ -170,13 +170,10 @@ async function syncTermiteBonds() {
         : new Date(v.scheduled_date).toISOString().slice(0, 10);
     }
     if (!startedEt) continue;
-    const years = termYearsForVisit(v);
     // Belt-and-braces with the query's linkedRowAuthority filter: a null
-    // term means the linked row disproved the bond — never insert.
-    if (!years) continue;
-    // Add the term years with UTC-safe date math (Feb 29 normalizes to Mar 1).
-    const [sy, sm, sd] = startedEt.split('-').map(Number);
-    const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
+    // term means the durable identity disproved the bond — never insert.
+    // (Cheap pre-lock skip; the authoritative check reruns under the lock.)
+    if (!termYearsForVisit(v)) continue;
     try {
       // Owner from the LOCKED visit row (Codex #3109 r27): a merge-undo
       // can reverse-repoint the visit between the sweep's unlocked read
@@ -184,15 +181,32 @@ async function syncTermiteBonds() {
       // the bond always binds the visit's CURRENT customer.
       const bondInserted = await db.transaction(async (trx) => {
         const lockedVisit = await trx('scheduled_services')
-          .where({ id: v.id }).forUpdate().first('customer_id');
+          .where({ id: v.id }).forUpdate()
+          .first('customer_id', 'service_id', 'service_type', 'service_key_snapshot');
         if (!lockedVisit || !lockedVisit.customer_id) return false;
+        // Re-derive the bond identity from the LOCKED row (pre-push P1):
+        // a repoint landing between the unlocked candidate read and this
+        // lock would otherwise mint from the stale identity — the exact
+        // hole the non-bond veto closes on the read side.
+        const lockedCatalogKey = lockedVisit.service_id
+          ? (await trx('services').where({ id: lockedVisit.service_id }).first('service_key'))?.service_key || null
+          : null;
+        const lockedYears = termYearsForVisit({
+          catalog_service_key: lockedCatalogKey,
+          service_key_snapshot: lockedVisit.service_key_snapshot,
+          service_type: lockedVisit.service_type,
+        });
+        if (!lockedYears) return false;
+        // Add the term years with UTC-safe date math (Feb 29 → Mar 1).
+        const [ly, lm, ld] = startedEt.split('-').map(Number);
+        const lockedRenewsEt = new Date(Date.UTC(ly + lockedYears, lm - 1, ld)).toISOString().slice(0, 10);
         await trx('termite_bonds').insert({
         customer_id: lockedVisit.customer_id,
         scheduled_service_id: v.id,
-        service_type: v.service_type,
-        term_years: years,
+        service_type: lockedVisit.service_type,
+        term_years: lockedYears,
         started_at: startedEt,
-        renews_at: renewsEt,
+        renews_at: lockedRenewsEt,
         status: 'active',
         });
         return true;
