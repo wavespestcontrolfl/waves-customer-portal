@@ -664,20 +664,151 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
 // Body: { customerIds: string[], title, lineItems, notes?, dueDate?, taxRate?, sendImmediately?: boolean }
 router.post('/batch', requireAdmin, async (req, res, next) => {
   try {
-    const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately } = req.body || {};
+    const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately, batchKey } = req.body || {};
     if (!Array.isArray(customerIds) || customerIds.length === 0) {
       return res.status(400).json({ error: 'customerIds[] required' });
     }
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
+    if (batchKey !== undefined
+      && (typeof batchKey !== 'string' || !batchKey.trim() || batchKey.length > 100)) {
+      return res.status(400).json({ error: 'batchKey must be a non-empty string (max 100 chars)' });
+    }
 
     const domain = publicPortalUrl();
     const created = [];
     const failed = [];
+    const skipped = [];
+    // A 'sending' claim older than this is treated as a crashed worker's
+    // stale claim (claimInvoiceForSend stamps updated_at when it takes the
+    // claim); a live send finishes in seconds, not minutes.
+    const STALE_SEND_CLAIM_MS = 15 * 60 * 1000;
+    // Canonical fingerprint of this batch's payload, persisted beside the
+    // key on every created row: a keyed duplicate whose fingerprint differs
+    // is the SAME key reused with CHANGED terms — a misuse, not a retry.
+    // Without this, a changed re-submit silently kept the old invoices for
+    // existing customers while minting the new terms for the rest.
+    const batchFingerprint = batchKey
+      ? require('crypto').createHash('sha256').update(JSON.stringify({
+        // The customer set is part of the request's identity: without it,
+        // reusing a key with an expanded/changed list would bill (and text)
+        // the new customers under the old key. Sorted-unique so ordering
+        // never breaks a legitimate retry.
+        customerIds: [...new Set(customerIds.map(String))].sort(),
+        title, lineItems, notes: notes || null, dueDate: dueDate || null,
+        taxRate: taxRate ?? null, sendImmediately: !!sendImmediately,
+      })).digest('hex')
+      : null;
+    // Claim the key ATOMICALLY for the whole batch BEFORE creating anything:
+    // the registry PK makes the first request bind the key to its payload,
+    // and every later (or concurrent) request with a different payload is
+    // refused up front — a per-row check alone lets one key mint invoices
+    // with conflicting terms across the customer loop. Same key + same
+    // fingerprint proceeds (that IS the retry the key exists for).
+    if (batchKey) {
+      await db('invoice_batch_keys')
+        .insert({ batch_key: batchKey, fingerprint: batchFingerprint })
+        .onConflict('batch_key')
+        .ignore();
+      const registered = await db('invoice_batch_keys')
+        .where({ batch_key: batchKey })
+        .first('fingerprint');
+      if (registered && registered.fingerprint !== batchFingerprint) {
+        return res.status(409).json({
+          error: 'This batch key was already used with a DIFFERENT payload (title/line items/terms changed). Use a fresh batch key for a new billing run.',
+          code: 'BATCH_KEY_PAYLOAD_MISMATCH',
+        });
+      }
+    }
 
     for (const customerId of customerIds) {
+      // Shared disposition for a keyed duplicate, whether it surfaced on the
+      // pre-check SELECT (retry) or the 23505 unique-index loss (concurrent
+      // race): recover stale 'sending' claims, and complete an UNFINISHED
+      // immediate send instead of reporting a skipped "success" while the
+      // winning row sits as an unsent draft. Runs the same for both entry
+      // points so the concurrent loser can't strand delivery. Declared
+      // OUTSIDE the try — the 23505 handler in the catch calls it too.
+      const settleKeyedDuplicate = async (existing, reason) => {
+        const entry = {
+          customerId,
+          invoiceId: existing.id,
+          invoiceNumber: existing.invoice_number,
+          reason,
+        };
+        // Same key, different payload = a MISUSED key, not a retry: refuse
+        // it loudly instead of silently keeping the old invoice's terms for
+        // this customer while other customers get the changed terms. A
+        // fingerprint-less row (pre-column) can't be compared — treated as
+        // a retry, matching the pre-fingerprint behavior.
+        if (batchFingerprint && existing.batch_fingerprint
+          && existing.batch_fingerprint !== batchFingerprint) {
+          failed.push({
+            customerId,
+            invoiceId: existing.id,
+            invoiceNumber: existing.invoice_number,
+            error: 'This batch key was already used with a DIFFERENT payload (title/line items/terms changed). Use a fresh batch key for a new billing run.',
+          });
+          return;
+        }
+        // A row stuck in 'sending' is either a live concurrent send or a
+        // crashed worker's stale claim. Either way this route does NOT touch
+        // it: the crashed worker may have delivered before dying, the claim
+        // can originate from sent/viewed/overdue resends (so no status here
+        // is safe to restore blindly), and stale-claim recovery already has
+        // one central owner — processScheduledSends flips >10-min 'sending'
+        // rows to 'scheduled' with a recovery note on every cron pass.
+        // Report it and let that mechanism run; the operator verifies
+        // delivery before any manual resend.
+        if (existing.status === 'sending') {
+          const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
+          entry.reason = claimAgeMs > STALE_SEND_CLAIM_MS
+            ? 'This invoice has a crashed send claim — automatic recovery will park it for review within minutes; verify whether the customer was texted before resending'
+            : 'A send for this invoice is in progress right now — not re-sent';
+          skipped.push(entry);
+          return;
+        }
+        // Finish an UNFINISHED immediate send: the first attempt may have
+        // crashed between insert and delivery (or delivery failed),
+        // leaving the row draft — a keyed retry must complete it, not
+        // strand it. claimInvoiceForSend inside the send path is the
+        // concurrency guard (a send already in flight throws and is
+        // reported, never doubled). Non-draft rows were delivered or
+        // deliberately moved on — never re-text those.
+        if (sendImmediately && existing.status === 'draft') {
+          try {
+            entry.sent = existing.payer_id
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true })
+              : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true });
+          } catch (sendErr) {
+            logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
+            entry.sent = { sent: false, error: sendErr.message };
+          }
+        }
+        skipped.push(entry);
+      };
       try {
+        // Idempotent retry: this loop has no transaction across customers, so
+        // retrying a keyed request after a partial-failure response must not
+        // re-create rows that already landed (and re-text them when
+        // sendImmediately is set). The key is persisted on invoices.batch_key
+        // — this SELECT is the fast path, and the partial unique index
+        // (customer_id, batch_key) settles the concurrent case atomically in
+        // the 23505 handler below. Unkeyed requests keep the old behavior —
+        // deliberate repeat billing stays possible.
+        if (batchKey) {
+          const existing = await db('invoices')
+            .where({ customer_id: customerId, batch_key: batchKey })
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
+          if (existing) {
+            await settleKeyedDuplicate(existing,
+              'This batch key already created an invoice for this customer (retry detected)');
+            continue;
+          }
+        }
         const invoice = await InvoiceService.create({
           customerId, title, lineItems, notes, dueDate, taxRate,
+          batchKey: batchKey || null,
+          batchFingerprint,
         });
         let sendResult = null;
         if (sendImmediately) {
@@ -707,6 +838,34 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           sent: sendResult,
         });
       } catch (err) {
+        // Concurrent keyed retries can both pass the pre-check SELECT; the
+        // partial unique index (customer_id, batch_key) makes the second
+        // insert lose — the invoice exists, so report it skipped, not failed.
+        if (batchKey && err?.code === '23505'
+          && `${err.constraint || ''} ${err.detail || ''}`.includes('batch_key')) {
+          // The winner of the concurrent race may have committed its insert
+          // and then died BEFORE delivering (crash between insert and send)
+          // — a skipped result with failed_count 0 would then read as
+          // "batch complete" while the invoice sits as an unsent draft.
+          // Load the winning row's status and run the same recovery as the
+          // pre-check branch: finish a draft immediate-send, release a
+          // stale claim, leave live sends alone.
+          const winner = await db('invoices')
+            .where({ customer_id: customerId, batch_key: batchKey })
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
+          if (winner) {
+            await settleKeyedDuplicate(winner,
+              'This batch key already created an invoice for this customer (concurrent retry)');
+          } else {
+            skipped.push({
+              customerId,
+              invoiceId: null,
+              invoiceNumber: null,
+              reason: 'This batch key already created an invoice for this customer (concurrent retry)',
+            });
+          }
+          continue;
+        }
         logger.error(`[admin-invoices:batch] create failed for ${customerId}: ${err.message}`);
         failed.push({ customerId, error: err.message });
       }
@@ -716,8 +875,10 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
       total: customerIds.length,
       created_count: created.length,
       failed_count: failed.length,
+      skipped_count: skipped.length,
       created,
       failed,
+      skipped,
     });
   } catch (err) { next(err); }
 });
@@ -938,7 +1099,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       operatorInitiated: true,
     });
     if (!result.ok) {
-      return res.status(400).json(result);
+      // Both channels failed. adminFetch toasts `body.error` — without a
+      // top-level error the operator sees a bare "HTTP 400" instead of the
+      // per-channel reason (no phone on file, bounced email, ...).
+      return res.status(400).json({
+        ...result,
+        error: result.error || result.sms?.error || result.email?.error
+          || 'Invoice send failed on both channels',
+      });
     }
     res.json(result);
   } catch (err) {
@@ -1063,7 +1231,20 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (/Invoice not found/i.test(err.message)) {
+      return res.status(404).json({ error: err.message });
+    }
+    // Business refusals from voidInvoice / assertInvoiceVoidable (paid or
+    // in-flight payment, finalized payer statement, unverifiable/live
+    // PaymentIntent, concurrent status change) are operator-actionable
+    // conflicts, not server faults — surface them as 409 so the UI can
+    // toast the reason instead of an opaque 500 (mirrors the PUT mapper).
+    if (/^Cannot void|finalized payer statement|resolve it before voiding|already in flight|while voiding|re-check and retry the void/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.

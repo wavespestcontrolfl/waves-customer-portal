@@ -167,6 +167,27 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // receipt and the pay page route to the same AP contact even if the payer row
   // is later edited/deactivated. Only runs on a successful send.
   const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email);
+  // Provider ACCEPTED the message — stamp durable delivery evidence FIRST
+  // (idempotent; the ambiguous-send UI reads it: a draft row carrying the
+  // stamp is never offered an automatic resend), then run post-provider
+  // bookkeeping best-effort. A bookkeeping failure after acceptance must
+  // never flip a delivered email into a reported send failure (the caller
+  // restores the claim to draft on failure, and a later automatic resend
+  // would duplicate the delivered email).
+  const markEmailDelivered = async () => {
+    try {
+      await db('invoices')
+        .where({ id: invoice.id })
+        .update({ email_sent_at: new Date(), updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+    try {
+      await persistPayerApIfNeeded();
+    } catch (err) {
+      logger.warn(`[invoice-email] payer AP freeze failed post-delivery (non-blocking) for ${invoice.invoice_number}: ${err.message}`);
+    }
+  };
 
   const domain = publicPortalUrl();
   const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);
@@ -331,7 +352,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${result.reason || 'blocked/suppressed'})`);
         return { ok: false, blocked: !!result.blocked, error: result.reason || 'Email suppressed', recipient: recipientPayload };
       }
-      await persistPayerApIfNeeded();
+      await markEmailDelivered();
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
     } catch (err) {
@@ -364,7 +385,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     });
-    await persistPayerApIfNeeded();
+    await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };
   } catch (err) {

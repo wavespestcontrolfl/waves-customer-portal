@@ -411,6 +411,81 @@ export function invoiceDepositCreditTotal(lineItems) {
     .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
 }
 
+// Create-path send toast. /admin/invoices/:id/send returns per-channel
+// results ({ sms: { ok }, email: { ok, recipient } }) and 200 when EITHER
+// channel succeeded — a flat "created & sent" toast hides a half-failed
+// send (SendInvoiceModal already reads the channels; the create path must
+// too). Exported for tests.
+export function invoiceCreatedSendToast(invoiceNumber, res) {
+  // Account credit fully covered the invoice at send time: sendViaSMSAndEmail
+  // returns ok:true with covered_by_credit and BOTH channels not-ok — that is
+  // a success (the invoice is prepaid, nothing to deliver), not a failed send.
+  if (res?.covered_by_credit) {
+    return `Invoice created: ${invoiceNumber} — fully covered by account credit, nothing to send`;
+  }
+  const sent = [
+    res?.sms?.ok && "SMS",
+    res?.email?.ok &&
+      (res.email.recipient?.email
+        ? `email to ${res.email.recipient.email}`
+        : "email"),
+  ].filter(Boolean);
+  const failed = [
+    res?.sms && !res.sms.ok && "SMS",
+    res?.email && !res.email.ok && "email",
+  ].filter(Boolean);
+  if (!sent.length) {
+    return `Invoice created but not sent: ${invoiceNumber} — use Resend on the invoice`;
+  }
+  return failed.length
+    ? `Invoice created: ${invoiceNumber} — sent via ${sent.join(" + ")}; ${failed.join(" + ")} failed`
+    : `Invoice created & sent: ${invoiceNumber} (${sent.join(" + ")})`;
+}
+
+// After an AMBIGUOUS send/schedule failure (the request threw, but the
+// server may have committed and delivered before the response was lost),
+// classify the re-fetched persisted row: only a still-draft row is provably
+// unsent — anything else must NOT be offered an automatic resend (duplicate
+// customer comms). null/unfetchable → "unknown" (fail closed). Exported for
+// tests.
+export function persistedSendDisposition(persisted) {
+  const status = String(persisted?.status || "").toLowerCase();
+  if (!status) return "unknown";
+  // Draft alone is NOT proof of non-delivery: a provider-success /
+  // bookkeeping-failure send (SMS or email leg) can leave the row draft
+  // after the message was accepted. Delivery stamps (sent_at, sms_sent_at,
+  // email_sent_at) are only ever written after provider success, so a draft
+  // row carrying any of them must not be offered Resend.
+  if (
+    status === "draft" &&
+    (persisted?.sent_at || persisted?.sms_sent_at || persisted?.email_sent_at)
+  ) {
+    return "unknown";
+  }
+  if (status === "draft") return "unsent";
+  // Only states that MEAN delivered count as committed. Everything else —
+  // 'sending' (live claim that can still fail back to draft), 'scheduled'
+  // (a failed Send-now can restore the prior schedule), 'void',
+  // 'processing' — is not delivery evidence: block the automatic resend
+  // without claiming the send went through.
+  const DELIVERED_STATUSES = ["sent", "viewed", "overdue", "paid", "prepaid"];
+  return DELIVERED_STATUSES.includes(status) ? "committed" : "unknown";
+}
+
+// Toast for a send/schedule request that failed AFTER the invoice row was
+// persisted. The builder must still close (onCreated) — leaving the form
+// intact invites a second Create click that duplicates the invoice.
+// Exported for tests.
+export function invoiceCreatedSendFailedToast(
+  invoiceNumber,
+  action,
+  err,
+  recovery = "Use Resend on the invoice.",
+) {
+  const label = invoiceNumber ? `Invoice ${invoiceNumber}` : "Invoice";
+  return `${label} created but not ${action} — ${err?.message || "send failed"}. ${recovery}`;
+}
+
 export function buildInvoiceListParams({
   limit = 100,
   pageNo = 1,
@@ -782,12 +857,24 @@ function InvoiceList({
     };
   }, [promptResendId, onPromptResendHandled, invoices, showToast]);
 
+  // Per-row busy id for void/archive/unarchive: without it a failed request
+  // was an unhandled rejection (no toast, no refresh) and the button stayed
+  // clickable mid-flight (double-fire).
+  const [rowActionBusy, setRowActionBusy] = useState(null);
+
   const handleVoid = async (id) => {
     if (!confirm("Void this invoice?")) return;
-    await adminFetch(`/admin/invoices/${id}/void`, { method: "POST" });
-    showToast("Invoice voided");
-    load();
-    onRefresh();
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/void`, { method: "POST" });
+      showToast("Invoice voided");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Void failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
+    }
   };
 
   const handleReversePrepaid = async (id) => {
@@ -818,23 +905,33 @@ function InvoiceList({
       )
     )
       return;
-    const res = await adminFetch(`/admin/invoices/${id}/archive`, {
-      method: "POST",
-    });
-    if (res?.error) {
-      showToast(res.error);
-      return;
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/archive`, {
+        method: "POST",
+      });
+      showToast("Invoice archived");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Archive failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
     }
-    showToast("Invoice archived");
-    load();
-    onRefresh();
   };
 
   const handleUnarchive = async (id) => {
-    await adminFetch(`/admin/invoices/${id}/unarchive`, { method: "POST" });
-    showToast("Invoice restored");
-    load();
-    onRefresh();
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/unarchive`, { method: "POST" });
+      showToast("Invoice restored");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Restore failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
+    }
   };
 
   const toggleSelect = (id) => {
@@ -935,6 +1032,11 @@ function InvoiceList({
     if (inv.status === "canceled" || inv.status === "cancelled")
       return { key: "canceled", label: "Canceled", color: D.muted };
     if (inv.status === "scheduled") {
+      // A recovered crashed-send claim is parked here with NO send date
+      // (delivery unverified — the cron must not retry it). Without its own
+      // signal it would read as an ordinary "Scheduled" invoice forever.
+      if (inv.scheduled_send_error && !inv.scheduled_send_at)
+        return { key: "send_review", label: "Needs review", color: D.red };
       // The send cron stops retrying after 5 attempts — without this the
       // invoice would sit as "Scheduled" forever with no visible signal.
       if (
@@ -1529,7 +1631,11 @@ function InvoiceList({
                           {canCollect && (
                             <button
                               onClick={() => handleVoid(inv.id)}
-                              style={sBtn("transparent", D.red, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn("transparent", D.red, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                             >
                               Void
                             </button>
@@ -1546,7 +1652,11 @@ function InvoiceList({
                           {inv.status === "void" && !inv.archived_at && (
                             <button
                               onClick={() => handleArchive(inv.id)}
-                              style={sBtn(D.heading, D.white, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn(D.heading, D.white, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                               title="Tuck this voided invoice out of the default list"
                             >
                               Archive
@@ -1555,7 +1665,11 @@ function InvoiceList({
                           {inv.archived_at && (
                             <button
                               onClick={() => handleUnarchive(inv.id)}
-                              style={sBtn("transparent", D.text, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn("transparent", D.text, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                               title="Restore to the default list"
                             >
                               Unarchive
@@ -1820,6 +1934,19 @@ function InvoiceList({
 // Newest event on top so the current state is the first thing you read.
 function buildInvoiceTimeline(inv) {
   const events = [];
+  if (inv.status === "scheduled" && !inv.scheduled_send_at && inv.scheduled_send_error) {
+    // Parked recovery state: a crashed send claim was released with its
+    // send date cleared (delivery unverified, no automatic retry) — the
+    // operator has to verify and resend/re-schedule by hand.
+    events.push({
+      kind: "send_review",
+      at: inv.updated_at || inv.created_at,
+      label: "Send interrupted — needs review",
+      detail: inv.scheduled_send_error,
+      color: D.red,
+      emphasis: true,
+    });
+  }
   if (inv.status === "scheduled" && inv.scheduled_send_at) {
     const attempts = Number(inv.scheduled_send_attempts) || 0;
     const exhausted = attempts >= 5 && inv.scheduled_send_error;
@@ -4295,6 +4422,14 @@ function PaymentPlanModal({
 
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
+  // Set ({ invoice, reason }) when POST /admin/invoices succeeded but
+  // /schedule-send failed: the invoice row EXISTS, so the editable builder
+  // must not render for it again — every editable-retry variant leaked
+  // (duplicate create on customer reselect, un-synced fields/attachments).
+  // A recovery panel replaces the form and operates only on the persisted
+  // row: adjust time + retry schedule, send now, or keep as draft.
+  const [pendingScheduleInvoice, setPendingScheduleInvoice] = useState(null);
+  const [retryScheduleAt, setRetryScheduleAt] = useState("");
   const editMode = !!editInvoice;
   // Editing an invoice the customer already received: the copy in their inbox
   // is stale until Adam resends, so the form shows a reminder and the save
@@ -4910,29 +5045,94 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       }
 
       if (sendTiming === "now" && invoice.id) {
-        await adminFetch(`/admin/invoices/${invoice.id}/send`, {
-          method: "POST",
-          body: JSON.stringify({
-            requestReview,
-            reviewDelayMinutes: reviewDelay,
-            reviewTiming,
-            reviewScheduledFor:
-              reviewTiming === "custom" ? reviewCustomAt : null,
-          }),
-        });
-        showToast(`Invoice created & sent: ${invoice.invoice_number}`);
+        let sendRes;
+        try {
+          sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
+            method: "POST",
+            body: JSON.stringify({
+              requestReview,
+              reviewDelayMinutes: reviewDelay,
+              reviewTiming,
+              reviewScheduledFor:
+                reviewTiming === "custom" ? reviewCustomAt : null,
+            }),
+          });
+        } catch (sendErr) {
+          // The POST /admin/invoices above already persisted the row — a
+          // failed send is a POST-create problem. Never leave the builder
+          // open with the same form (the outer catch used to, and the next
+          // Create click duplicated the invoice + the send).
+          // A rejected request also does not prove the send FAILED: the
+          // server may have delivered and committed 'sent' before the
+          // response was lost. Re-read the persisted row and offer Resend
+          // only when it is provably still unsent — anything else (or an
+          // unverifiable state) gets no automatic resend prompt, because a
+          // resend on a delivered row duplicates customer comms.
+          let persisted = null;
+          try {
+            persisted = await adminFetch(`/admin/invoices/${invoice.id}`);
+          } catch {
+            persisted = null;
+          }
+          const disposition = persistedSendDisposition(persisted);
+          if (disposition === "unsent") {
+            showToast(
+              invoiceCreatedSendFailedToast(
+                invoice.invoice_number,
+                "sent",
+                sendErr,
+              ),
+            );
+            onCreated({ promptResendId: invoice.id });
+          } else if (disposition === "committed") {
+            showToast(
+              `Invoice created: ${invoice.invoice_number} — the send went through (status: ${persisted.status}) despite a network error`,
+            );
+            onCreated();
+          } else {
+            showToast(
+              `Invoice created: ${invoice.invoice_number} — send state unknown (${sendErr.message}). Check it in the list before resending.`,
+            );
+            onCreated();
+          }
+          setSaving(false);
+          return;
+        }
+        showToast(invoiceCreatedSendToast(invoice.invoice_number, sendRes));
       } else if (sendTiming !== "draft" && invoice.id) {
-        await adminFetch(`/admin/invoices/${invoice.id}/schedule-send`, {
-          method: "POST",
-          body: JSON.stringify({
-            scheduledFor,
-            requestReview,
-            reviewDelayMinutes: reviewDelay,
-            reviewTiming,
-            reviewScheduledFor:
-              reviewTiming === "custom" ? reviewCustomAt : null,
-          }),
-        });
+        try {
+          await adminFetch(`/admin/invoices/${invoice.id}/schedule-send`, {
+            method: "POST",
+            body: JSON.stringify({
+              scheduledFor,
+              requestReview,
+              reviewDelayMinutes: reviewDelay,
+              reviewTiming,
+              reviewScheduledFor:
+                reviewTiming === "custom" ? reviewCustomAt : null,
+            }),
+          });
+        } catch (schedErr) {
+          // Post-create failure: the row exists, so the editable builder
+          // must never render for it again (a second Create would duplicate
+          // it, and stale form edits would drift from the persisted row).
+          // Swap to the recovery panel below.
+          setRetryScheduleAt(invoiceScheduledFor() || "");
+          setPendingScheduleInvoice({
+            invoice,
+            reason: schedErr.message || "Scheduling failed",
+          });
+          showToast(
+            invoiceCreatedSendFailedToast(
+              invoice.invoice_number,
+              "scheduled",
+              schedErr,
+              "Pick a new time to retry, send now, or keep it as a draft.",
+            ),
+          );
+          setSaving(false);
+          return;
+        }
         showToast(`Invoice scheduled: ${invoice.invoice_number}`);
       } else {
         showToast(`Invoice created: ${invoice.invoice_number} (draft)`);
@@ -5077,6 +5277,113 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     borderRadius: 10,
     ...style,
   });
+  // Recovery-panel actions: each one targets ONLY the already-persisted row.
+  const retryReviewBody = () => ({
+    requestReview,
+    reviewDelayMinutes: reviewDelayMinutes(),
+    reviewTiming,
+    reviewScheduledFor: reviewTiming === "custom" ? reviewCustomAt : null,
+  });
+
+  const retrySchedule = async () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    if (!pInv || !retryScheduleAt || saving) return;
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/invoices/${pInv.id}/schedule-send`, {
+        method: "POST",
+        body: JSON.stringify({
+          scheduledFor: retryScheduleAt,
+          ...retryReviewBody(),
+        }),
+      });
+      showToast(`Invoice scheduled: ${pInv.invoice_number}`);
+      onCreated();
+    } catch (err) {
+      setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+      showToast(`Still not scheduled: ${err.message}`);
+    }
+    setSaving(false);
+  };
+
+  const retrySendNow = async () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    if (!pInv || saving) return;
+    setSaving(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${pInv.id}/send`, {
+        method: "POST",
+        body: JSON.stringify(retryReviewBody()),
+      });
+      showToast(invoiceCreatedSendToast(pInv.invoice_number, res));
+      onCreated();
+    } catch (err) {
+      // A rejected request does not prove the send FAILED: the server may
+      // have delivered and committed 'sent' before the response was lost.
+      // Same ambiguous-send check as the initial create path — keep the
+      // panel (and its Send now button) only when the row is provably
+      // still unsent; anything else re-offers a resend on a delivered row.
+      let persisted = null;
+      try {
+        persisted = await adminFetch(`/admin/invoices/${pInv.id}`);
+      } catch {
+        persisted = null;
+      }
+      const disposition = persistedSendDisposition(persisted);
+      if (disposition === "unsent") {
+        setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+        showToast(`Send failed: ${err.message}`);
+      } else if (disposition === "committed") {
+        showToast(
+          `The send went through for ${pInv.invoice_number} (status: ${persisted.status}) despite a network error`,
+        );
+        onCreated();
+      } else {
+        showToast(
+          `Send state unknown for ${pInv.invoice_number} (${err.message}). Check it in the list before resending.`,
+        );
+        onCreated();
+      }
+    }
+    setSaving(false);
+  };
+
+  const keepAsDraft = async () => {
+    const pInv = pendingScheduleInvoice?.invoice;
+    if (!pInv || saving) return;
+    setSaving(true);
+    // The schedule request may have COMMITTED even though its response was
+    // lost (that's how this panel can appear over an actually-scheduled
+    // row). Verify before promising a draft — a false "draft" toast would
+    // hide a live scheduled send that will text the customer.
+    let persisted = null;
+    try {
+      persisted = await adminFetch(`/admin/invoices/${pInv.id}`);
+    } catch {
+      persisted = null;
+    }
+    setSaving(false);
+    const status = String(persisted?.status || "").toLowerCase();
+    if (status === "scheduled") {
+      showToast(
+        `Scheduling actually went through — ${pInv.invoice_number} will send as scheduled. Use Send (now) or Void from the list if you don't want that.`,
+      );
+    } else if (status && status !== "draft") {
+      showToast(
+        `Invoice ${pInv.invoice_number} is ${persisted.status} — review it in the list`,
+      );
+    } else if (status === "draft") {
+      showToast(
+        `Invoice created: ${pInv.invoice_number} (draft) — edit or send it from the list`,
+      );
+    } else {
+      showToast(
+        `Invoice created: ${pInv.invoice_number} — state could not be verified, review it in the list before sending`,
+      );
+    }
+    onCreated();
+  };
+
   const primaryActionLabel = editMode
     ? saving
       ? "Saving..."
@@ -5108,6 +5415,64 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     textAlign: "right",
     whiteSpace: "nowrap",
   };
+
+  if (pendingScheduleInvoice && !editMode) {
+    const pInv = pendingScheduleInvoice.invoice;
+    return (
+      <div style={panelStyle({ padding: isMobile ? 14 : 16, maxWidth: 560 })}>
+        <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
+          Invoice {pInv.invoice_number} created — scheduling failed
+        </div>
+        <div style={{ color: D.muted, marginTop: 6, marginBottom: 12 }}>
+          {pendingScheduleInvoice.reason}
+        </div>
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4 }}>
+            New send time
+          </span>
+          <input
+            type="datetime-local"
+            value={retryScheduleAt}
+            onChange={(e) => setRetryScheduleAt(e.target.value)}
+            style={{ padding: 8 }}
+          />
+        </label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={retrySchedule}
+            disabled={saving || !retryScheduleAt}
+            style={{
+              ...sBtn(D.heading, D.white, isMobile),
+              opacity: saving || !retryScheduleAt ? 0.5 : 1,
+            }}
+          >
+            {saving ? "Working..." : "Retry schedule"}
+          </button>
+          <button
+            onClick={retrySendNow}
+            disabled={saving}
+            style={{
+              ...sBtn("#111", D.white, isMobile),
+              opacity: saving ? 0.5 : 1,
+            }}
+          >
+            Send now
+          </button>
+          <button
+            onClick={keepAsDraft}
+            disabled={saving}
+            style={sBtn("transparent", D.text, isMobile)}
+          >
+            Keep as draft
+          </button>
+        </div>
+        <div style={{ color: D.muted, fontSize: 13, marginTop: 10 }}>
+          Need to change the invoice itself? Keep it as a draft, then edit it
+          from the list.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

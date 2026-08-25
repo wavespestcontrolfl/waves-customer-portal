@@ -889,6 +889,15 @@ const InvoiceService = {
       // on the invoice as `applied_deposit_credit`; consume exactly that from
       // the ledger, never the requested amount.
       depositCredit = null,
+      // Batch idempotency key (POST /admin/invoices/batch): persisted on the
+      // row so a batch retry can detect invoices the earlier attempt already
+      // created; the partial unique index (customer_id, batch_key) makes the
+      // concurrent-retry case lose atomically at the DB.
+      batchKey = null,
+      // Canonical hash of the batch payload the key rode in with — a later
+      // keyed duplicate with a DIFFERENT fingerprint is a misused key, not a
+      // retry (the batch route refuses it).
+      batchFingerprint = null,
       // skipAccrual: this invoice must NOT accrue to a payer statement even for a
       // NET-terms payer — set by callers that immediately settle the invoice
       // (annual-prepay, paid in the same flow) or create a throwaway preview
@@ -1533,6 +1542,8 @@ const InvoiceService = {
             : {}),
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
+          ...(batchKey ? { batch_key: batchKey } : {}),
+          ...(batchKey && batchFingerprint ? { batch_fingerprint: batchFingerprint } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
@@ -2295,6 +2306,28 @@ const InvoiceService = {
       };
     }
 
+    // Post-delivery finalize, extracted so the delivered-SMS recovery in the
+    // catch below can retry it once after a transient DB failure.
+    const finalizeInvoiceAfterSms = () => db("invoices")
+      .where({ id: invoiceId })
+      .whereIn("status", SEND_FINALIZABLE_STATUSES)
+      .update({
+        status: db.raw(
+          "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+        ),
+        sent_at: new Date(),
+        sms_sent_at: new Date(),
+        scheduled_send_at: null,
+        scheduled_send_error: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+        updated_at: new Date(),
+      });
+    // Flips the moment the provider accepts the message. Everything after
+    // that point is bookkeeping — its failure must never be reported as a
+    // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
+    // offers Resend, duplicating a text the customer already received).
+    let smsDelivered = false;
     try {
       // Routed through customer-message middleware. payment_link is a
       // sensitive purpose: policy.requireIds includes customerId +
@@ -2351,21 +2384,8 @@ const InvoiceService = {
         throw err;
       }
 
-      await db("invoices")
-        .where({ id: invoiceId })
-        .whereIn("status", SEND_FINALIZABLE_STATUSES)
-        .update({
-          status: db.raw(
-            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-          ),
-          sent_at: new Date(),
-          sms_sent_at: new Date(),
-          scheduled_send_at: null,
-          scheduled_send_error: null,
-          scheduled_request_review: false,
-          scheduled_review_delay_minutes: null,
-          updated_at: new Date(),
-        });
+      smsDelivered = true;
+      await finalizeInvoiceAfterSms();
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -2400,10 +2420,58 @@ const InvoiceService = {
 
       return { sent: true, payUrl };
     } catch (err) {
+      if (smsDelivered) {
+        // The customer HAS the pay-link text — this is a post-delivery
+        // bookkeeping failure (invoice finalize, follow-up scheduling, lead
+        // conversion), NOT a failed send. Restoring the claim to draft here
+        // would make the UI's "still draft ⇒ provably unsent ⇒ offer
+        // Resend" check duplicate a delivered SMS, and reversing the credit
+        // would refund a message that went out. Retry the finalize once;
+        // if it still fails, leave the 'sending' claim in place — the
+        // stale-claim recovery in processScheduledSends PARKS such rows for
+        // operator review (delivery unverified, no automatic resend) — and
+        // report the send as delivered.
+        logger.error(
+          `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
+        );
+        try {
+          await finalizeInvoiceAfterSms();
+        } catch (retryErr) {
+          logger.error(
+            `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
+          );
+          return { sent: true, payUrl, finalizeError: err.message };
+        }
+        // Finalize is durable — run the normal post-delivery bookkeeping
+        // (each leg best-effort/idempotent, mirroring the happy path) so a
+        // recovered send still gets its collection follow-ups, audit line,
+        // and lead conversion instead of silently losing them.
+        try {
+          await require("./invoice-followups").scheduleForInvoice(invoiceId);
+        } catch (e) {
+          logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
+        }
+        await db("activity_log")
+          .insert({
+            customer_id: invoice.customer_id,
+            action: "invoice_sent",
+            description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
+            metadata: JSON.stringify({ invoiceId, payUrl }),
+          })
+          .catch(() => {});
+        if (!allowClaimed) {
+          try {
+            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+          } catch (e) {
+            logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
+          }
+        }
+        return { sent: true, payUrl, finalizeError: err.message };
+      }
       await restoreSendClaim(invoiceId, previousStatus, claimed);
-      // Provider/Twilio error (or invoice-update failure) after we auto-applied
-      // credit above — the pay link was never delivered, so return the credit
-      // rather than leave it consumed + the invoice edit-locked.
+      // Provider/Twilio error after we auto-applied credit above — the pay
+      // link was never delivered, so return the credit rather than leave it
+      // consumed + the invoice edit-locked.
       await reverseSmsCreditOnFailure();
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
@@ -2804,12 +2872,22 @@ const InvoiceService = {
   },
 
   async processScheduledSends({ limit = 25 } = {}) {
+    // Stale-claim recovery PARKS the row instead of re-arming it: a claim
+    // that died mid-send may have died AFTER the provider accepted the SMS
+    // (a delivered send whose finalize failed is deliberately left under its
+    // claim — see sendViaSMS's post-delivery recovery), and DB state cannot
+    // distinguish that from a crash before delivery. Clearing
+    // scheduled_send_at keeps the row out of the due query below, so an
+    // ambiguous claim is surfaced for operator review (fail closed) rather
+    // than automatically re-texting a message the customer may already have.
     await db("invoices")
       .where({ status: "sending" })
       .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
       .update({
         status: "scheduled",
-        scheduled_send_error: "Recovered from stale sending claim",
+        scheduled_send_at: null,
+        scheduled_send_error:
+          "Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually",
         updated_at: new Date(),
       });
 
