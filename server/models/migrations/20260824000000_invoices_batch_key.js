@@ -33,6 +33,15 @@ exports.up = async function up(knex) {
       t.string('batch_fingerprint', 64);
     });
   }
+  // email_sent_at — durable email-delivery evidence, stamped the moment the
+  // provider accepts the message (before any post-provider bookkeeping).
+  // The ambiguous-send UI reads it: a draft row carrying a delivery stamp is
+  // never offered an automatic resend.
+  if (!(await knex.schema.hasColumn('invoices', 'email_sent_at'))) {
+    await knex.schema.alterTable('invoices', (t) => {
+      t.timestamp('email_sent_at');
+    });
+  }
   // Batch-key registry: the key→fingerprint binding enforced ATOMICALLY for
   // the whole batch (unique PK; first request claims the key, every later
   // request with a different payload is refused up front) — per-row
@@ -65,6 +74,11 @@ exports.down = async function down(knex) {
   if (hasFingerprint) {
     await knex.schema.alterTable('invoices', (t) => {
       t.dropColumn('batch_fingerprint');
+    });
+  }
+  if (await knex.schema.hasColumn('invoices', 'email_sent_at')) {
+    await knex.schema.alterTable('invoices', (t) => {
+      t.dropColumn('email_sent_at');
     });
   }
   await knex.schema.dropTableIfExists('invoice_batch_keys');

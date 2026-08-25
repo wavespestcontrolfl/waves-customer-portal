@@ -226,10 +226,22 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(persistedSendDisposition({ status: "draft" })).toBe("unsent");
   });
 
-  it("any committed state blocks the auto-resend prompt (duplicate comms hazard)", () => {
-    for (const status of ["scheduled", "sent", "viewed", "overdue", "paid", "prepaid"]) {
+  it("only DELIVERED states classify as committed", () => {
+    for (const status of ["sent", "viewed", "overdue", "paid", "prepaid"]) {
       expect(persistedSendDisposition({ status })).toBe("committed");
     }
+  });
+
+  it("non-delivered non-draft states block resend WITHOUT claiming delivery (scheduled/void/processing)", () => {
+    for (const status of ["scheduled", "void", "processing"]) {
+      expect(persistedSendDisposition({ status })).toBe("unknown");
+    }
+  });
+
+  it("a draft with an email delivery stamp is NOT provably unsent (email-leg provider success)", () => {
+    expect(
+      persistedSendDisposition({ status: "draft", email_sent_at: "2026-08-24T10:00:00Z" }),
+    ).toBe("unknown");
   });
 
   it("an unverifiable row fails closed as unknown", () => {

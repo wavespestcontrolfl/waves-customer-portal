@@ -452,17 +452,24 @@ export function persistedSendDisposition(persisted) {
   const status = String(persisted?.status || "").toLowerCase();
   if (!status) return "unknown";
   // Draft alone is NOT proof of non-delivery: a provider-success /
-  // database-failure send can leave the row draft after the SMS was
-  // accepted. Delivery stamps are only ever written after provider
-  // success, so a draft row carrying one must not be offered Resend.
-  if (status === "draft" && (persisted?.sent_at || persisted?.sms_sent_at)) {
+  // bookkeeping-failure send (SMS or email leg) can leave the row draft
+  // after the message was accepted. Delivery stamps (sent_at, sms_sent_at,
+  // email_sent_at) are only ever written after provider success, so a draft
+  // row carrying any of them must not be offered Resend.
+  if (
+    status === "draft" &&
+    (persisted?.sent_at || persisted?.sms_sent_at || persisted?.email_sent_at)
+  ) {
     return "unknown";
   }
-  // 'sending' is a live claim, not delivery evidence — the server may still
-  // fail and restore the row to draft after this read. Reporting it as
-  // committed would close recovery on a send that never happened.
-  if (status === "sending") return "unknown";
-  return status === "draft" ? "unsent" : "committed";
+  if (status === "draft") return "unsent";
+  // Only states that MEAN delivered count as committed. Everything else —
+  // 'sending' (live claim that can still fail back to draft), 'scheduled'
+  // (a failed Send-now can restore the prior schedule), 'void',
+  // 'processing' — is not delivery evidence: block the automatic resend
+  // without claiming the send went through.
+  const DELIVERED_STATUSES = ["sent", "viewed", "overdue", "paid", "prepaid"];
+  return DELIVERED_STATUSES.includes(status) ? "committed" : "unknown";
 }
 
 // Toast for a send/schedule request that failed AFTER the invoice row was
