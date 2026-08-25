@@ -2697,7 +2697,7 @@ export function calculateEstimate(inputs) {
     const tp = Math.ceil(plugArea * ppsf), tr = Math.ceil(tp / 18);
     const fp = otP(Math.max(250, Math.round((tp * cpp + (tp / ir) * LABOR) / (1 - 0.45))));
     const ps = Math.round(fp / plugArea * 100) / 100;
-    otItems.push({ name: 'Plugging', price: fp, detail: plugArea.toLocaleString() + ' sf | ' + tp.toLocaleString() + ' plugs | $' + ps + '/sf', spacing: sl, plugArea, plugSpacing, warn6: plugSpacing == 6 });
+    otItems.push({ name: 'Lawn Plugging Service', price: fp, detail: plugArea.toLocaleString() + ' sf | ' + tp.toLocaleString() + ' plugs | $' + ps + '/sf', spacing: sl, plugArea, plugSpacing, warn6: plugSpacing == 6 });
   }
 
   /* ── Top Dressing ────────────────────────────────────────── */
@@ -2720,7 +2720,7 @@ export function calculateEstimate(inputs) {
     const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
     const e4 = otP(Math.max(450, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.35)));
     R.td = e8;
-    otItems.push({ name: 'Top Dressing', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
+    otItems.push({ name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
     R.tdTiers = [
       { name: '1/8" Depth', price: e8, detail: 'St. Augustine standard' },
       { name: '1/4" Depth', price: e4, detail: 'Bermuda / leveling — 2x material' },
@@ -2752,7 +2752,7 @@ export function calculateEstimate(inputs) {
     (dth.warnings || []).forEach(addRoutingWarning);
     otItems.push({
       ...dth,
-      name: 'Dethatching',
+      name: 'Lawn Dethatching Service',
       price: sp,
       baseEstimatePrice: dth.estimatedPrice ?? dth.price,
       detail: dth.detail || 'One-time service',
@@ -2893,9 +2893,9 @@ export function calculateEstimate(inputs) {
     const fp = otP(bcSurfaceOnly ? Math.max(BC_MIN_JOB, rawPrice) : rawPrice);
     const surfaceNote = bcSurfaceSqft > 0 ? ' (incl. ' + bcSurfaceSqft.toLocaleString() + ' sf surface)' : '';
     const detail = '~' + bcTotalSqft.toLocaleString() + ' sf' + surfaceNote + ' | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
-    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft: bcTotalSqft, gal, lhr, isMultiDay });
+    otItems.push({ name: 'Bora-Care Wood Treatment Service', price: fp, detail, atticIsEstimated, bcSqft: bcTotalSqft, gal, lhr, isMultiDay });
   } else if (svcBoracare && !isCommercial) {
-    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft or surface linear ft required', quoteRequired: true });
+    otItems.push({ name: 'Bora-Care Wood Treatment Service', price: null, detail: 'Attic/raw wood sqft or surface linear ft required', quoteRequired: true });
   }
 
   /* ── Pre-Slab Termiticide ────────────────────────────────── */
@@ -3030,7 +3030,7 @@ export function calculateEstimate(inputs) {
     const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
     // Floor removed (owner directive 2026-06-25): true tiered cost / margin.
     const fp = otP(Math.round(cost / 0.45));
-    otItems.push({ name: 'Foam Drill', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });
+    otItems.push({ name: 'Termite Foam Service', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });
   }
 
   /* ── Recurring Foam Treatment (standalone, no WaveGuard) ──── */
@@ -3054,7 +3054,7 @@ export function calculateEstimate(inputs) {
     const foamDurationMin = Math.round(t.l * 60);
     R.foamRec = { perVisit, ann, mo, visits, cadence: cad, points: frPts, tierName: t.n, oneTimePerVisit, off, estimatedDurationMinutes: foamDurationMin };
     wgServices.push({
-      name: 'Recurring Foam (' + FOAM_REC_LABEL[cad] + ')',
+      name: 'Recurring Termite Foam Service (' + FOAM_REC_LABEL[cad] + ')',
       service: 'foam_recurring',
       mo,
       // Exact engine annual (perVisit × visits, integer) so the server frequency/
@@ -3103,7 +3103,7 @@ export function calculateEstimate(inputs) {
       // Static mirror of the server default (pest_base.initial_roach.display).
       // Saved estimates always use the server engine's config-driven label —
       // this local preview does not read pricing_config.
-      name: roachMod === 'GERMAN' ? 'German Cockroach Treatment' : 'Cockroach Treatment',
+      name: roachMod === 'GERMAN' ? 'German Cockroach Treatment' : 'Cockroach Treatment Service',
       price: fp,
       detail: roachMod === 'GERMAN' ? 'First-visit gel bait + IGR' : 'First-visit knockdown',
       requestedRoachType: roachMod,
@@ -3174,7 +3174,7 @@ export function calculateEstimate(inputs) {
         const fpEff = footprint > 0 ? footprint : 2500;
         specItems.push({
           service: 'pest_initial_roach',
-          name: 'Cockroach Treatment',
+          name: 'Cockroach Treatment Service',
           price: initialRoachPrice(rt, fpEff, true),
           det: 'Standalone knockdown',
           source: 'standalone_native_cockroach_treatment',
@@ -3214,7 +3214,7 @@ export function calculateEstimate(inputs) {
       }
       specItems.push({
         service: 'german_roach',
-        name: `German Roach Cleanout — ${visits} Visit Program`,
+        name: `German Roach Cleanout Service — ${visits} Visit Program`,
         price,
         det: 'Gel+IGR+monitoring',
         source: 'german_roach_cleanout_selected',

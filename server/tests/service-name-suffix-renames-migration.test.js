@@ -464,6 +464,8 @@ describe('20260825000010 service name suffix renames', () => {
       '../routes/public-quote.js',
       '../services/estimate-converter.js',
       '../services/booking-abandon-recovery.js',
+      '../services/pricing-engine/v1-legacy-mapper.js',
+      '../../client/src/lib/estimateEngine.js',
     ];
     // rodent_guarantee_combo keeps its own bundle label by design (it must
     // NOT resolve the payment-only guarantee row — see #3485).
