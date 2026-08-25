@@ -4675,6 +4675,12 @@ const EstimateConverter = {
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               update.service_id = catalogRow.id;
+              // The reserve path stamps the STANDALONE cadence snapshot;
+              // promoting the row to the combined route must move the
+              // durable snapshot with the id and label, or a later id
+              // outage resolves the visit standalone and drops the
+              // companion completion section (codex #3485 r6 P2).
+              update.service_key_snapshot = combo.route.catalogServiceKey;
               if (catalogRow.default_duration_minutes) {
                 update.estimated_duration_minutes = catalogRow.default_duration_minutes;
                 combo.service.estimatedDurationMinutes = catalogRow.default_duration_minutes;
