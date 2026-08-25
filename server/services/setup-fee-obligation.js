@@ -85,13 +85,26 @@ function snapshotShowsSetupFee(estimateData) {
   // fee-shown, or a post-cutoff manual accept of a legacy snapshot would
   // read 'feeless' and disable the guard (Codex PR r3 P1).
   let isLegacySetupItem = () => false;
+  let legacyAmount = null;
   try {
-    ({ isWaveGuardSetupOneTimeItem: isLegacySetupItem } = require('../routes/estimate-public'));
+    ({
+      isWaveGuardSetupOneTimeItem: isLegacySetupItem,
+      oneTimeItemAmount: legacyAmount,
+    } = require('../routes/estimate-public'));
   } catch { /* route unavailable in some harnesses — service-key check stands */ }
   const isSetupRow = (row) => row?.service === 'waveguard_setup' || isLegacySetupItem(row || {});
+  // Amount precedence mirrors the authoritative row parser
+  // (oneTimeItemAmount): DISCOUNTED fields outrank the original price —
+  // the obligation must demand what the customer actually saw, never the
+  // pre-discount figure (Codex PR r5 P1).
+  // Zero is AUTHORITATIVE (Codex P0): a fully discounted/legacy $0 fee
+  // row means the customer agreed to zero — never fall back to the
+  // current constant for a row that exists. null = amount unreadable.
   const rowAmount = (row) => {
-    const n = Number(row?.amount ?? row?.price ?? row?.total ?? row?.unit_price);
-    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+    const n = typeof legacyAmount === 'function'
+      ? legacyAmount(row || {})
+      : Number(row?.priceAfterDiscount ?? row?.totalAfterDiscount ?? row?.amount ?? row?.price ?? row?.total ?? row?.unit_price);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n * 100) / 100) : null;
   };
   const hit = (Array.isArray(bundle.firstVisitFees) ? bundle.firstVisitFees : []).find(isSetupRow)
     || (Array.isArray(bundle.oneTimeBreakdown?.items) ? bundle.oneTimeBreakdown.items : []).find(isSetupRow)
@@ -170,6 +183,11 @@ async function findUnmintedSetupFeeObligation({
   // page view — the fee-less snapshot is the last pricing the customer
   // saw, and billing an unagreed $99 is never fail-safe.
   const { evidence: feeEvidence, amount: snapshotFeeAmount } = snapshotShowsSetupFee(estimateData);
+  // A shown fee row whose accepted amount is zero (fully discounted) or
+  // unreadable proves no POSITIVE agreed fee — nothing to park (Codex
+  // P0): the current constant substitutes only when NO fee row exists
+  // (date-rule path below).
+  if (feeEvidence === 'shown' && !(snapshotFeeAmount > 0)) return { owed: false };
   if (feeEvidence !== 'shown') {
     if (acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) return { owed: false };
     if (feeEvidence === 'feeless'

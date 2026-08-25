@@ -291,6 +291,34 @@ test('persisted snapshot SHOWING the fee puts the accept in scope regardless of 
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
+test('the obligation carries the FROZEN snapshot amount — discounted fields outrank the original price', async () => {
+  mockTables = baseTables({
+    estimates: acceptedEstimate({
+      estimate_data: JSON.stringify(soloPestEstimateData({
+        sendSnapshot: {
+          pricingBundle: {
+            firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 49 }],
+          },
+        },
+      })),
+    }),
+  });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
+  expect(result.setupFee).toBe(49);
+});
+
+test('a shown fee row with ZERO accepted amount (fully discounted) proves no positive fee — not owed', async () => {
+  mockTables = baseTables({
+    estimates: acceptedEstimate({
+      estimate_data: JSON.stringify(soloPestEstimateData({
+        sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 0 }] } },
+      })),
+    }),
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
 test('a fee-less snapshot with a PROVEN public accept (price_locked_by=customer_accept) stays in scope post-cutoff', async () => {
   mockTables = baseTables({
     estimates: acceptedEstimate({

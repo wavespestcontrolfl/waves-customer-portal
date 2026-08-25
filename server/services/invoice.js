@@ -2013,6 +2013,20 @@ const InvoiceService = {
         return this.create({ ...(await buildParams(trx)), database: trx });
       });
     }
+    // LINKED explicit-amount mints serialize under the same advisory mint
+    // lock (owner ruling 2026-08-25, Codex #3476): every writer that
+    // attaches an invoice to a scheduled visit must hold the
+    // schedule.invoice.mint lock, or a manual invoice can commit between a
+    // completion-alert transaction's coverage scans and its instruction
+    // write — the alert then records a bill-again instruction for a charge
+    // that just got billed. Unlinked creates keep the untransacted path.
+    if (sr.scheduled_service_id) {
+      return runMintTransaction(async (trx) => {
+        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+        await acquireScheduledInvoiceMintLock(trx, sr.scheduled_service_id);
+        return this.create({ ...(await buildParams(trx)), database: trx });
+      });
+    }
     return this.create({
       ...(await buildParams(null)),
       ...(database ? { database } : {}),

@@ -27,7 +27,7 @@ const {
 // different db('leads') generators (waiting vs unattributed) get distinct rows.
 const CHAIN_METHODS = [
   'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'whereNotIn',
-  'orWhereRaw', 'orWhereNull', 'leftJoin', 'join', 'select', 'count',
+  'orWhereRaw', 'orWhereNull', 'orWhere', 'leftJoin', 'join', 'select', 'count',
   'countDistinct', 'orderBy', 'modify',
 ];
 
@@ -291,7 +291,7 @@ describe('Action Inbox generators', () => {
 
   test('stale_draft_invoices: warns on billable drafts unsent 3+ days, deep-links the oldest, names the rows', async () => {
     const capture = primeDb({
-      invoices: [
+      'invoices as i': [
         { id: 'inv-old', invoice_number: 'WPC-2026-0100' },
         { id: 'inv-new', invoice_number: 'WPC-2026-0200' },
       ],
@@ -304,11 +304,16 @@ describe('Action Inbox generators', () => {
     expect(item.label).toContain('WPC-2026-0100');
     // Statement-accrued NET-terms drafts stay unsent BY DESIGN — the
     // predicate must exclude them.
-    expect(capture.some((c) => c.table === 'invoices' && c.method === 'whereNull' && c.args[0] === 'payer_statement_id')).toBe(true);
+    expect(capture.some((c) => c.table === 'invoices as i' && c.method === 'whereNull' && c.args[0] === 'i.payer_statement_id')).toBe(true);
+    // Members ride along so dismissals re-surface on queue change (r5 P2).
+    const item2 = alerts.find((a) => a.id === 'stale_draft_invoices');
+    expect(item2.members).toEqual(['inv-new', 'inv-old']);
+    // Card-lane anchors (drafts on not-yet-completed visits) are excluded.
+    expect(capture.some((c) => c.table === 'invoices as i' && c.method === 'leftJoin' && c.args[0] === 'scheduled_services as ss')).toBe(true);
   });
 
   test('stale_draft_invoices: absent when no stale drafts exist', async () => {
-    primeDb({ invoices: [] });
+    primeDb({ 'invoices as i': [] });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'stale_draft_invoices')).toBeUndefined();
   });

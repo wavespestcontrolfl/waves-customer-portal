@@ -269,16 +269,25 @@ async function computeDashboardAlertsUncached() {
   //     NET-terms drafts (payer_statement_id) stay unsent BY DESIGN.
   try {
     const staleDraftCutoff = new Date(Date.now() - 3 * 86400000);
-    const staleDraftRows = await db('invoices')
-      .whereNull('archived_at')
-      .where('status', 'draft')
-      .whereNull('sent_at')
-      .whereNull('sms_sent_at')
-      .whereNull('payer_statement_id')
-      .where('total', '>', 0)
-      .where('created_at', '<', staleDraftCutoff)
-      .orderBy('created_at', 'asc')
-      .select('id', 'invoice_number');
+    const staleDraftRows = await db('invoices as i')
+      .leftJoin('scheduled_services as ss', 'i.scheduled_service_id', 'ss.id')
+      .whereNull('i.archived_at')
+      .where('i.status', 'draft')
+      .whereNull('i.sent_at')
+      .whereNull('i.sms_sent_at')
+      .whereNull('i.payer_statement_id')
+      // Card-lane ANCHOR invoices are deliberately draft/unsent until
+      // their visit completes (recurring card-on-file accepts attach the
+      // acceptance invoice to a FUTURE visit; completion auto-charges it)
+      // — a draft attached to a not-yet-completed visit is held BY
+      // DESIGN, not forgotten (Codex PR r5 P2).
+      .where(function anchorHoldExcluded() {
+        this.whereNull('i.scheduled_service_id').orWhere('ss.status', 'completed');
+      })
+      .where('i.total', '>', 0)
+      .where('i.created_at', '<', staleDraftCutoff)
+      .orderBy('i.created_at', 'asc')
+      .select('i.id', 'i.invoice_number');
     const staleDraftCount = staleDraftRows.length;
     if (staleDraftCount > 0) {
       // The link must land the operator ON the offending row (Codex PR r4
@@ -292,6 +301,9 @@ async function computeDashboardAlertsUncached() {
         id: 'stale_draft_invoices',
         severity: 'warn',
         count: staleDraftCount,
+        // Sorted membership so a dismissal re-surfaces when the QUEUE
+        // changes even at the same count (Codex PR r5 P2).
+        members: queueMembers(staleDraftRows.map((r) => r.id)),
         label: `${staleDraftCount} draft invoice${staleDraftCount === 1 ? '' : 's'} unsent 3+ days — invisible to dunning (${named}${staleDraftCount > 3 ? ', …' : ''})`,
         href: `/admin/invoices?invoice=${encodeURIComponent(staleDraftRows[0].id)}`,
       });

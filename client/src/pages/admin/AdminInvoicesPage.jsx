@@ -711,7 +711,10 @@ function InvoiceList({
   }, [load]);
 
   // Keep expanded invoice detail in the URL so notification links, mobile
-  // back navigation, and refresh all restore the same row.
+  // back navigation, and refresh all restore the same row. A deep-linked
+  // invoice outside the loaded page (an old stale draft the dashboard
+  // alert targets) is fetched by id and prepended, so the link always
+  // lands ON the row instead of a generic list (Codex PR r5 P2).
   useEffect(() => {
     const invoiceId = searchParams.get("invoice");
     if (!invoiceId) {
@@ -721,7 +724,21 @@ function InvoiceList({
     const match = invoices.find(
       (inv) => String(inv.id) === String(invoiceId),
     );
-    setExpanded(match?.id || null);
+    if (match) {
+      setExpanded(match.id);
+      return;
+    }
+    let cancelled = false;
+    adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
+      .then((row) => {
+        if (cancelled || !row?.id) return;
+        setInvoices((prev) => (prev.some((inv) => String(inv.id) === String(row.id))
+          ? prev
+          : [row, ...prev]));
+        setExpanded(row.id);
+      })
+      .catch(() => setExpanded(null));
+    return () => { cancelled = true; };
   }, [invoices, searchParams]);
 
   const toggleExpanded = (invoiceId) => {

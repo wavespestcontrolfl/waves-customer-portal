@@ -8935,9 +8935,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const staleMeta = typeof staleAlert.metadata === 'string'
             ? (() => { try { return JSON.parse(staleAlert.metadata); } catch { return null; } })()
             : staleAlert.metadata;
+          // The alert's PERSISTED customer owns this reconciliation (Codex
+          // PR r5 P1): a visit re-linked to another customer keeps its
+          // source_estimate_id, and scanning under the NEW customer would
+          // miss the original customer's fee invoice and reopen a settled
+          // alert. A foreign visit never reconciles someone else's alert.
+          const alertCustomerId = staleMeta?.customerId ? String(staleMeta.customerId) : null;
+          if (alertCustomerId && alertCustomerId !== String(svc.customer_id)) return;
+          const scanCustomerId = alertCustomerId || svc.customer_id;
           const deadAway = new Set([...require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
           const stampedLive = (await db('invoices')
-            .where({ customer_id: svc.customer_id })
+            .where({ customer_id: scanCustomerId })
             .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
             .select('id', 'status', 'line_items', 'notes'))
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
@@ -8974,6 +8982,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // The stamped acceptance invoice can cover only the PRIMARY
           // visit's (first) application; every other parked visit needs
           // its own attached invoice.
+          // Out-of-band prepayment revalidated from the DURABLE rows
+          // (Codex PR r5 P1): a visit marked prepaid (cash/Zelle — never
+          // the annual-prepay stamp) has its application collected, and
+          // reconciliation must not instruct re-billing it after staff
+          // bills the fee.
+          const AnnualPrepayRenewalsReconcile = require('../services/annual-prepay-renewals');
+          const prepaidParkedRows = parkedIds.length
+            ? await db('scheduled_services').whereIn('id', parkedIds).select('id', 'prepaid_amount', 'prepaid_method')
+            : [];
+          const prepaidCoveredIds = new Set(prepaidParkedRows
+            .filter((r) => Number(r.prepaid_amount) > 0
+              && r.prepaid_method !== AnnualPrepayRenewalsReconcile.ANNUAL_PREPAY_PREPAID_METHOD)
+            .map((r) => String(r.id)));
           const feeProven = [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
           const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
@@ -8989,6 +9010,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ) && invoiceBillsBaseApplication(r));
           const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
             visitApplicationBilled(visitId)
+            || prepaidCoveredIds.has(String(visitId))
             || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
           ));
           // All four coverage states rewrite the alert (Codex P0,
@@ -9017,6 +9039,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} REOPENED — coverage regressed after resolution/partial coverage`);
           } else if (feeProven) {
             const uncoveredIds = parkedIds.filter((visitId) => !(visitApplicationBilled(visitId)
+              || prepaidCoveredIds.has(String(visitId))
               || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))));
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `UPDATE: the one-time setup fee for this estimate is now COVERED by a live invoice — do NOT bill the setup fee again. Still owed: the application charge for parked visit${uncoveredIds.length === 1 ? '' : 's'} ${uncoveredIds.join(', ')} — bill only that, using the EXACT line description "First service application" and "accepted estimate #${svc.source_estimate_id}" in the invoice notes so the system recognizes it as billed.`,

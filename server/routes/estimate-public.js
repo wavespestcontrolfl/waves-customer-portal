@@ -22099,6 +22099,7 @@ module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
 // counts as fee-shown (PR #3476).
 module.exports.isWaveGuardSetupOneTimeItem = isWaveGuardSetupOneTimeItem;
+module.exports.oneTimeItemAmount = oneTimeItemAmount;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;

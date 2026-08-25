@@ -616,9 +616,35 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'serviceDate must be YYYY-MM-DD' });
     }
 
-    const invoice = await InvoiceService.create({
-      customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
-    });
+    // Serialize LINKED manual creates under the shared mint lock (owner
+    // ruling 2026-08-25, Codex #3476): an invoice attached to a scheduled
+    // visit must not commit between a completion-alert transaction's
+    // coverage scans and its instruction write. Unlinked creates keep the
+    // untransacted best-effort path (see InvoiceService.create's accrual
+    // comment for why every create is not blanket-wrapped).
+    let linkedScheduledServiceId = null;
+    if (serviceRecordId) {
+      const srLink = await db('service_records')
+        .where({ id: serviceRecordId })
+        .first('scheduled_service_id')
+        .catch(() => null);
+      linkedScheduledServiceId = srLink?.scheduled_service_id || null;
+    }
+    const createArgs = {
+      customerId,
+      serviceRecordId,
+      // Persist the visit link too (Codex P0): reconciliation credits an
+      // invoice to a SECONDARY parked visit only via scheduled_service_id.
+      ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
+      title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
+    };
+    const invoice = linkedScheduledServiceId
+      ? await db.transaction(async (trx) => {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
+        return InvoiceService.create({ ...createArgs, database: trx });
+      })
+      : await InvoiceService.create(createArgs);
 
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
