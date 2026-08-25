@@ -45,7 +45,10 @@ const prefsSchema = Joi.object({
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   // Minutes each zone runs on a watering day — the natural-unit schedule
   // @waves/irrigation-runtime converts to inches (× days × head type).
-  irrigationRunMinutes: Joi.number().integer().min(0).max(240).allow(null),
+  // 1–240 with null-to-clear: the runtime treats <= 0 as missing, so a
+  // persisted 0 would show in the portal while the email claims no minutes
+  // are on file. Zero is not a schedule — clearing is.
+  irrigationRunMinutes: Joi.number().integer().min(1).max(240).allow(null),
   irrigationScheduleNotes: longText,
   // Same seven keys the pills emit — mirrors mowingDays below. A length-only
   // check would persist "Monday" with a 200, and @waves/irrigation-runtime

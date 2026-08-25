@@ -31,7 +31,7 @@ describe('property preferences — irrigation minutes per zone', () => {
   // field from any one list fails here rather than silently in prod.
   test('field is wired through schema, ALLOWED_FIELDS and the GET defaults', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
-    expect(src).toMatch(/irrigationRunMinutes: Joi\.number\(\)\.integer\(\)\.min\(0\)\.max\(240\)\.allow\(null\)/);
+    expect(src).toMatch(/irrigationRunMinutes: Joi\.number\(\)\.integer\(\)\.min\(1\)\.max\(240\)\.allow\(null\)/);
     expect(src).toMatch(/'irrigation_run_minutes'/); // ALLOWED_FIELDS
     expect(src).toMatch(/irrigationRunMinutes: null/); // GET defaults
   });
@@ -40,6 +40,16 @@ describe('property preferences — irrigation minutes per zone', () => {
   // value outside them silently vanishes from the conversion and the email
   // then claims the input is missing (GH codex P1 on #3478 r3). Writes must
   // therefore reject anything but the exact keys the portal pills emit.
+  // Zero is not a schedule — the runtime treats <= 0 as missing, so a
+  // persisted 0 would render in the portal while the email claims no
+  // minutes are on file. Null clears; 1–240 stores.
+  test('irrigationRunMinutes rejects 0 and accepts 1–240 or null', () => {
+    expect(prefsSchema.validate({ irrigationRunMinutes: 0 }).error).toBeTruthy();
+    expect(prefsSchema.validate({ irrigationRunMinutes: 241 }).error).toBeTruthy();
+    expect(prefsSchema.validate({ irrigationRunMinutes: 20 }).error).toBeUndefined();
+    expect(prefsSchema.validate({ irrigationRunMinutes: null }).error).toBeUndefined();
+  });
+
   test('wateringDays accepts only the seven canonical pill keys, unique', () => {
     expect(prefsSchema.validate({ wateringDays: ['Mon', 'Wed'] }).error).toBeUndefined();
     expect(prefsSchema.validate({ wateringDays: ['Monday'] }).error).toBeTruthy();

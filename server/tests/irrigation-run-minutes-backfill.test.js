@@ -44,6 +44,8 @@ describe('parseRunMinutesFromNotes', () => {
     ['20 min per zone, two cycles', 'multiple daily runs'],
     ['Each zone runs 20min, runs again in the evening', 'multiple daily runs'],
     ['Each zone runs 20 min, second run at 6pm', 'multiple daily runs'],
+    // Two mentions of the SAME value are two cycles, not agreement.
+    ['Each zone runs 20 min at 4am and 20 min at 6pm', 'equal-duration double run'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],

@@ -49,10 +49,11 @@ function parseRunMinutesFromNotes(notes) {
 
   // Ambiguity guards — anything the single per-zone-minutes column cannot
   // faithfully represent declines to NULL for the email ask to collect:
-  // (1) every minutes figure anywhere in the notes must agree;
+  // (1) the notes must state a minutes figure exactly ONCE — two mentions of
+  // the SAME value ("20 min at 4am and 20 min at 6pm") describe two daily
+  // cycles, not one, so equality is not enough;
   const allMinuteFigures = [...text.matchAll(/(\d{1,3})\s*min(?:ute)?s?\b/gi)].map((m) => Number(m[1]));
-  const distinct = [...new Set(allMinuteFigures)];
-  if (distinct.length !== 1 || distinct[0] !== matched) return null;
+  if (allMinuteFigures.length !== 1 || allMinuteFigures[0] !== matched) return null;
   // (2) a duration in any OTHER unit ("zone 3 runs 1 hour", "half an hour")
   // is a conflicting figure the minutes scan cannot see;
   if (/\b(?:\d+(?:\.\d+)?|an?|one|two|half)\s*(?:hour|hr)s?\b/i.test(text)) return null;

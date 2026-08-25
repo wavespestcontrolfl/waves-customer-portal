@@ -7510,11 +7510,16 @@ function PropertyTab({ customer }) {
         <input
           type="number"
           inputMode="numeric"
-          min="0"
+          min="1"
           max={MAX_RUN_MINUTES}
           step="5"
           value={prefs.irrigationRunMinutes ?? ''}
-          onChange={e => updateField('irrigationRunMinutes', e.target.value === '' ? null : Math.max(0, Math.min(MAX_RUN_MINUTES, Math.round(Number(e.target.value)))))}
+          // Zero is not a schedule — the server validates 1–240 and the
+          // runtime treats <= 0 as missing, so 0 (or blank) clears to null.
+          onChange={e => {
+            const n = Math.round(Number(e.target.value));
+            updateField('irrigationRunMinutes', e.target.value === '' || !Number.isFinite(n) || n <= 0 ? null : Math.min(MAX_RUN_MINUTES, n));
+          }}
           placeholder="20"
           aria-label="Minutes each zone runs per watering day"
           className="waves-focus-ring"
