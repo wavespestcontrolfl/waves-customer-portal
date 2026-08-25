@@ -201,7 +201,12 @@ function paymentRows(payment) {
         tone: 'muted',
       });
     }
-    return rows;
+    // A dead/uncovered prepay hands billing back to the standard path —
+    // the setup-fee warning must render BESIDE the prepay history, not be
+    // swallowed by it (Codex PR r6 P2): the server signals that state by
+    // setting billingTerm 'standard' while annualPrepay still carries the
+    // term's history.
+    if (payment.billingTerm !== 'standard') return rows;
   }
 
   if (payment.billingTerm === 'prepay_annual') {

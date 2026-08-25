@@ -697,7 +697,12 @@ function InvoiceList({
         return;
       }
       const rows = data.invoices || [];
-      setInvoices((prev) => (append ? [...prev, ...rows] : rows));
+      // Dedupe by id: a deep-linked invoice fetched ahead of its page
+      // (?invoice=) must not appear twice once pagination reaches it
+      // (Codex PR r6 P2 — duplicate keys, doubled expanded rows).
+      setInvoices((prev) => (append
+        ? [...prev, ...rows.filter((r) => !prev.some((p) => String(p.id) === String(r.id)))]
+        : rows));
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
       if (!append) {
