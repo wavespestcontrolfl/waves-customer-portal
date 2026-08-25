@@ -5,7 +5,7 @@
  * irrigation, so the lawn-profile figure and the water balance can never
  * come from different sources (pre-push audit P1 on 9a2c33a2a).
  */
-const { buildLawnWaterContext, portalIrrigationInches } = require('../services/service-report/report-data');
+const { buildLawnWaterContext, portalIrrigationInches, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 const DERIVED_PREFS = {
   // 20 min × 4 days on spray (1.5"/hr) → 2.00"
@@ -40,6 +40,33 @@ describe('portalIrrigationInches', () => {
   test('declines to null when derivation cannot be honest', () => {
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system_type: ['spray', 'rotor'] })).toBeNull();
     expect(portalIrrigationInches(null)).toBeNull();
+  });
+});
+
+describe('PDF signature tracks portal irrigation state', () => {
+  // Stub knex: no linked assessment (bare-signature path), prefs row served
+  // for property_preferences. A prefs edit that changes the resolved inches
+  // (or the toggle) MUST change the signature, or /api/reports/:token keeps
+  // serving a cached PDF with the old water balance (GH codex P1 #3478 r15).
+  const stubKnex = (prefsRow) => (table) => {
+    const chain = {
+      where: () => chain,
+      orderBy: () => chain,
+      first: async () => (table === 'property_preferences' ? prefsRow : undefined),
+    };
+    return chain;
+  };
+  const SERVICE = { customer_id: 'c1', service_line: 'lawn' };
+
+  test('signature is stable for unchanged prefs and moves when derived inches or the toggle change', async () => {
+    const base = { customer_id: 'c1', irrigation_system: true, ...DERIVED_PREFS };
+    const a = await resolveCanonicalLawnRender(SERVICE, stubKnex(base));
+    const b = await resolveCanonicalLawnRender(SERVICE, stubKnex({ ...base }));
+    expect(a.signature).toBe(b.signature);
+    const minutesChanged = await resolveCanonicalLawnRender(SERVICE, stubKnex({ ...base, irrigation_run_minutes: 40 }));
+    expect(minutesChanged.signature).not.toBe(a.signature);
+    const toggledOff = await resolveCanonicalLawnRender(SERVICE, stubKnex({ ...base, irrigation_system: false }));
+    expect(toggledOff.signature).not.toBe(a.signature);
   });
 });
 

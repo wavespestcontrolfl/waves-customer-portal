@@ -29,7 +29,7 @@ import { isNativeApp, nativePlatform } from '../native/platform';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
-import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
+import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -7957,15 +7957,13 @@ function PropertyTab({ customer }) {
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
                   // Legacy rows can hold full day names ("Monday") the server
                   // now rejects — every edit restates the field in canonical
-                  // keys (aliases mapped, unknowns dropped) so a stale value
-                  // can never 400 the customer's correction.
+                  // keys via the runtime's EXACT alias map (a prefix rule
+                  // fabricated days from non-day text), unknowns dropped, so
+                  // a stale value can never 400 the customer's correction.
                   const CANONICAL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-                  const toCanonicalDay = (d) => {
-                    const k = String(d || '').slice(0, 3);
-                    const m = k.charAt(0).toUpperCase() + k.slice(1).toLowerCase();
-                    return CANONICAL_DAYS.includes(m) ? m : null;
-                  };
-                  const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : []).map(toCanonicalDay).filter(Boolean);
+                  const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [])
+                    .map(d => DAY_ALIASES[String(d || '').trim().toLowerCase()])
+                    .filter(Boolean);
                   const active = days.includes(day);
                   return (
                     <button key={day} type="button" aria-pressed={active} onClick={() => {

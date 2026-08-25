@@ -1993,20 +1993,41 @@ class PinnedAssessmentUnavailable extends Error {
 // shows a different number — the emailed attachment and the live report
 // disagreeing, which is the whole failure class this lane exists to close.
 // Bumping forces those lawn PDFs through one fresh render.
-const LAWN_RENDER_STRATEGY = 'p2';
+// p3: signature composition gained the portal irrigation stamp (explicit or
+// derived inches + system toggle) — prefs edits must invalidate cached PDFs.
+const LAWN_RENDER_STRATEGY = 'p3';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
 
+  // The rendered water balance reads the customer's portal irrigation state
+  // (explicit inches, or the figure derived from minutes × days × head type,
+  // and the system toggle) — a prefs edit changes the payload, so it must
+  // change the signature or a cached PDF serves the old balance forever. A
+  // failed prefs read stamps random so the cache re-renders instead of
+  // serving stale (same fail-open-to-rerender posture as the outer catch).
+  let irrigationStamp;
+  try {
+    const prefs = await knex('property_preferences')
+      .where({ customer_id: service.customer_id })
+      .first();
+    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}`;
+  } catch {
+    irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
+  }
+
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
-  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` };
+  if (!assessment?.id) {
+    const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}` };
+  }
 
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
     : JSON.stringify(assessment.recommendations || '');
   const stamp = crypto.createHash('sha1')
-    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
     .digest('hex')
     .slice(0, 12);
   return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };

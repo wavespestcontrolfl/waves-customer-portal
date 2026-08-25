@@ -88,7 +88,10 @@ function parseRunMinutesFromNotes(notes) {
     'for', 'about', 'around', 'approx', 'min', 'mins', 'minute', 'minutes', 'per', 'a', 'an', 'the', 'and', 'on', 'at',
     'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
     'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-    'am', 'pm', 'morning', 'early', 'day', 'days', 'week', 'weekly',
+    // NOTE: 'week'/'weekly' are deliberately ABSENT — "20 min per zone per
+    // week" states a weekly total, not the per-watering-day minutes the
+    // structured column means, and must decline.
+    'am', 'pm', 'morning', 'early', 'day', 'days',
     'rain', 'sensor', 'starts', 'start', 'schedule', 'system', 'sprinkler', 'sprinklers', 'irrigation',
   ]);
   const tokens = (text.toLowerCase().match(/[a-z]+/g) || []);

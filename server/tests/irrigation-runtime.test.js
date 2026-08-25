@@ -44,6 +44,14 @@ describe('deriveIrrigationInchesPerWeek', () => {
     expect(deriveIrrigationInchesPerWeek({ runMinutes: 20, wateringDays: ['Mon', 'Monday', 'whenever'], systemType: ['spray'] }).runsPerWeek).toBe(1);
   });
 
+  test('non-day text never fabricates a day — exact aliases only, no prefix rule', () => {
+    // "monthly" → Mon and "sunny" → Sun under a first-three-letters rule
+    // (GH codex P1 on #3478 r15).
+    const d = deriveIrrigationInchesPerWeek({ runMinutes: 20, wateringDays: ['monthly', 'sunny', 'Tuesday or Thursday'], systemType: ['spray'] });
+    expect(d.runsPerWeek).toBe(0);
+    expect(d.reason).toBe('missing_days');
+  });
+
   test('declines totals over the 5" weekly ceiling shared with the explicit-inches field', () => {
     // 240 min × 7 days × spray would be 42"/week — an entry artifact.
     const d = deriveIrrigationInchesPerWeek({ runMinutes: 240, wateringDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], systemType: ['spray'] });

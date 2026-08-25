@@ -67,6 +67,9 @@ describe('parseRunMinutesFromNotes', () => {
     // number budget catches them (GH codex P1 on #3478 r11).
     ['Each zone runs 20 min at 4 and 6am', 'abbreviated double start time'],
     ['Each zone runs 20 min at 4am and 6', 'abbreviated double start time'],
+    // A weekly total is not per-watering-day minutes (GH codex P1 r15).
+    ['20 min per zone per week', 'weekly total, wrong unit'],
+    ['Each zone runs 20 min weekly', 'weekly total, wrong unit'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],

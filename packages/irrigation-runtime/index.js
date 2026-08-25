@@ -70,15 +70,24 @@ function positiveInt(value, max) {
   return i > max ? null : i;
 }
 
+// Legacy rows predate the canonical-keys route validation and can hold full
+// day names ("Monday") or common abbreviations. EXACT aliases only — a
+// prefix rule fabricated days out of non-day text ("monthly" → Mon,
+// "sunny" → Sun). Anything not in this map drops.
+const DAY_ALIASES = Object.freeze({
+  mon: 'Mon', monday: 'Mon',
+  tue: 'Tue', tues: 'Tue', tuesday: 'Tue',
+  wed: 'Wed', weds: 'Wed', wednesday: 'Wed',
+  thu: 'Thu', thur: 'Thu', thurs: 'Thu', thursday: 'Thu',
+  fri: 'Fri', friday: 'Fri',
+  sat: 'Sat', saturday: 'Sat',
+  sun: 'Sun', sunday: 'Sun',
+});
+
 function normalizeDays(value) {
-  // Legacy rows predate the canonical-keys route validation and can hold
-  // full day names ("Monday") — an unambiguous alias maps to its key (the
-  // same first-three-letters rule the portal pills apply on edit) so those
-  // customers derive without waiting for a portal edit. Anything else drops.
-  const seen = new Set(toArray(value).map((d) => {
-    const k = String(d || '').trim().slice(0, 3);
-    return k.charAt(0).toUpperCase() + k.slice(1).toLowerCase();
-  }));
+  const seen = new Set(toArray(value)
+    .map((d) => DAY_ALIASES[String(d || '').trim().toLowerCase()])
+    .filter(Boolean));
   return DAY_KEYS.filter((d) => seen.has(d));
 }
 
@@ -155,6 +164,7 @@ function normalizeRuntimeInputs({ runMinutes, wateringDays, systemType } = {}) {
 
 module.exports = {
   normalizeRuntimeInputs,
+  DAY_ALIASES,
   HEAD_PRECIP_RATE_IN_PER_HR,
   HEAD_LABELS,
   DAY_KEYS,
