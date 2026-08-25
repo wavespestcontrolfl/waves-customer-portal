@@ -8907,9 +8907,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // one singular estimate-wide instruction. The FIRST parked
           // visit's alert owns the setup fee + its own application; every
           // later visit mints its application charge normally.
+          // Resolved alerts do not own the parking (Codex P0, pre-push
+          // round 9): if coverage was later voided and the obligation
+          // reopened, a resolved alert must not swallow the new park —
+          // the in-transaction rewrite below reactivates it
+          // (resolvedCovered flips back to false).
           const priorParkedAlert = await db('notifications')
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+            .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
             .first('id', 'metadata');
           const parkedVisitId = priorParkedAlert && (typeof priorParkedAlert.metadata === 'string'
             ? (() => { try { return JSON.parse(priorParkedAlert.metadata)?.scheduledServiceId; } catch { return null; } })()
@@ -8924,23 +8930,54 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // bare) — log for the sweep, never park a routine later visit.
           logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — not parking this later visit`);
         } else if (!obligation.owed) {
-          // Stale-alert reconciliation (Codex P0, pre-push round 8): once
-          // coverage appears through any later path (a manual acceptance
-          // invoice, a re-accept), the detector reads not-owed and the
-          // alert's in-transaction revalidation never runs again — an
-          // unresolved parked instruction would keep telling staff to
-          // bill charges that are now covered. Rewrite it resolved here.
+          // Stale-alert reconciliation (Codex P0, pre-push rounds 8–9):
+          // once coverage appears through a later path, the detector
+          // reads not-owed and the alert's in-transaction revalidation
+          // never runs again — but not-owed alone proves NOTHING about
+          // the parked charges (a setup-only live invoice, a non-plan
+          // completing visit, or an annual term all read not-owed while
+          // the parked application stays unbilled). Resolve only on
+          // per-charge proof: one live invoice billing the fee AND one
+          // billing the parked visit's application.
           const staleAlert = await db('notifications')
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
             .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
-            .first('id');
+            .first('id', 'metadata');
           if (staleAlert) {
-            await db('notifications').where({ id: staleAlert.id }).update({
-              body: `RESOLVED — no action needed: the setup-fee obligation for this estimate is no longer owed (coverage was found on a later check). The earlier manual-billing instruction no longer applies; verify the customer's invoices before billing anything, and do NOT bill again on this alert.`,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
-            });
-            logger.warn(`[dispatch] visit ${svc.id}: stale unminted-setup-fee alert ${staleAlert.id} rewritten as resolved — obligation no longer owed`);
+            const {
+              invoiceContainsSetupFeeLine, invoiceContainsNonSetupCharge,
+            } = require('../services/estimate-first-application-invoice');
+            const staleMeta = typeof staleAlert.metadata === 'string'
+              ? (() => { try { return JSON.parse(staleAlert.metadata); } catch { return null; } })()
+              : staleAlert.metadata;
+            const deadAway = new Set([...require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
+            const stampedLive = (await db('invoices')
+              .where({ customer_id: svc.customer_id })
+              .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
+              .select('id', 'status', 'line_items', 'notes'))
+              .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
+            const parkedVisitId = staleMeta?.scheduledServiceId || null;
+            const onParkedLive = parkedVisitId
+              ? (await db('invoices')
+                .where((qb) => {
+                  qb.orWhere({ scheduled_service_id: parkedVisitId });
+                  if (staleMeta?.serviceRecordId) qb.orWhere({ service_record_id: staleMeta.serviceRecordId });
+                })
+                .select('id', 'status', 'line_items', 'notes'))
+                .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()))
+              : [];
+            const feeProven = [...stampedLive, ...onParkedLive].some(invoiceContainsSetupFeeLine);
+            const applicationProven = onParkedLive.some(invoiceContainsNonSetupCharge)
+              || stampedLive.some((r) => /first (service )?application/i.test(String(r.notes || ''))
+                || invoiceContainsNonSetupCharge(r));
+            if (feeProven && applicationProven) {
+              await db('notifications').where({ id: staleAlert.id }).update({
+                body: `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and the parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
+              });
+              logger.warn(`[dispatch] visit ${svc.id}: stale unminted-setup-fee alert ${staleAlert.id} rewritten as resolved — fee and application coverage both proven`);
+            }
           }
         }
       } catch (lookupErr) {
@@ -9449,9 +9486,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}.`;
           }
           if (already) {
+            // resolvedCovered flips back to false: a re-park after a
+            // resolved round means the obligation REOPENED (coverage
+            // voided) — the alert must read active again or every later
+            // lookup treats it as settled (Codex P0, pre-push round 9).
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody + crossVisitNote,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {})]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
           }
