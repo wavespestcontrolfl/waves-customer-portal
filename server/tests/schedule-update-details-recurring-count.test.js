@@ -31,7 +31,7 @@ const {
   MAX_SERIES_VISIT_COUNT,
 } = adminScheduleRouter._test;
 const { transitionJobStatus } = require('../services/job-status');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
@@ -531,7 +531,9 @@ describe('reconcileRecurringSeriesVisitCount — blackout days and weekly closur
     expect(new Set(dates).size).toBe(7);
     for (const d of dates) {
       expect(d > TODAY).toBe(true);
-      expect([0, 6]).not.toContain(new Date(`${d}T12:00:00`).getDay());
+      // scheduled_date is an ET calendar date — assert the weekday in the
+      // same explicit ET semantics the blackout logic uses, not host-local.
+      expect([0, 6]).not.toContain(etParts(parseETDateTime(`${d}T12:00`)).dayOfWeek);
     }
   });
 });
@@ -607,6 +609,29 @@ describe('planCadenceRewriteTargets — cadence edits stay future-only and clear
       blackoutDates: null,
     });
     for (const d of boosterTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
+  test('P2: a stale fallback booster is skipped, never nudged from one past date to another', () => {
+    // No booster_months on the plan → every pending booster takes the
+    // fallback branch (its own date + shift/nudge). A STALE booster whose
+    // date is blacked out used to be nudged to the next past day — the
+    // write path then rewound its lifecycle and reset its reminder. The
+    // fallback must apply the same future-only floor as the recomputed walk
+    // and leave the stale row alone.
+    const stale = daysOut(-10);
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [{ id: 'b1', scheduled_date: stale }],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: new Set([stale]),
+    });
+    expect(boosterTargets.has('b1')).toBe(false);
   });
 
   test('a child landing on a blacked-out day is nudged forward by the shared clear-of-blackout', () => {

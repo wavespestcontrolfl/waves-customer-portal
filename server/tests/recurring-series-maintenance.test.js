@@ -66,10 +66,12 @@ function makeConn(handler, opts = {}) {
     const record = (name) => (...args) => {
       if ((name === 'where' || name === 'whereNotExists') && typeof args[0] === 'function') {
         const nested = [];
-        const sub = {
-          where(...a) { nested.push(['where', ...a]); return sub; },
-          orWhere(...a) { nested.push(['orWhere', ...a]); return sub; },
-        };
+        const sub = {};
+        // The occupancy probe's nested predicates (findConflictingVisits)
+        // chain whereNull/orWhereRaw/etc. inside the callback too.
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw']) {
+          sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
+        }
         args[0].call(sub, sub);
         calls.push(['whereFn', nested]);
       } else {
@@ -77,7 +79,7 @@ function makeConn(handler, opts = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -126,6 +128,8 @@ function ongoingScenario({
   weeklyValue = null, blackoutRows = [],
   latestDate = '2098-07-15', seriesDates = ['2098-01-15', '2098-04-15', '2098-07-15'],
   addonRows = [],
+  // Dates the global occupancy probe reports as clashing ('*' = every date).
+  clashDates = [],
 }) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -157,6 +161,13 @@ function ongoingScenario({
         return parent;
       }
       if (op === 'await') {
+        // Global occupancy probe (findConflictingVisits — the whereRaw
+        // overlap predicate marks it): clash when scripted, else clear.
+        if (calls.some((c) => c[0] === 'whereRaw')) {
+          const dateWhere = calls.find((c) => c[0] === 'where' && c[1] === 'scheduled_date');
+          const probed = dateWhere ? dateWhere[2] : null;
+          return (clashDates === '*' || clashDates.includes(probed)) ? [{ id: 'occupied-1' }] : [];
+        }
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
           return seriesDates.map((scheduled_date) => ({ scheduled_date }));
         }
@@ -305,6 +316,22 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // registration cancellation window via the shared helper.
     expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, row.id, 'recurring-alerts');");
     expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');");
+  });
+
+  test('P1: auto-extend skips a candidate day another visit already occupies (global occupancy probe)', async () => {
+    // The blackout nudge can land a candidate on an adjacent day that holds
+    // an overlapping visit from ANOTHER series/customer — the series-date
+    // dedupe is blind to those. The walk must probe global occupancy and
+    // advance to the next cadence step instead of double-booking.
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      clashDates: ['2098-10-15'],
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date).not.toBe('2098-10-15');
+    expect(inserted[0].scheduled_date > '2098-10-15').toBe(true);
   });
 
   test('falls back to the parent template when no sibling carries the flag', async () => {
@@ -627,7 +654,7 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 // queries DB-honestly (whereNotIn + status/date filters applied) — so a
 // second run sees exactly what the first committed. Dates live in 2098 so
 // the honest today-or-later upcoming math never rots.
-function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null } = {}) {
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [] } = {}) {
   const state = {
     parent: {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -688,6 +715,13 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
           }
           if (update[1] && update[1].recurring_ongoing === true) { state.parent.recurring_ongoing = true; return 1; }
           return 1;
+        }
+        if (calls.some((c) => c[0] === 'whereRaw')) {
+          // Global occupancy probe (findConflictingVisits): clash when
+          // scripted, else clear.
+          const dateWhere = calls.find((c) => c[0] === 'where' && c[1] === 'scheduled_date');
+          const probed = dateWhere ? dateWhere[2] : null;
+          return (clashDates === '*' || clashDates.includes(probed)) ? [{ id: 'occupied-1' }] : [];
         }
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
           return statusVisible(calls, liveRows()).map((r) => ({ scheduled_date: r.scheduled_date }));
@@ -851,6 +885,44 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     for (const v of state.insertedVisits) {
       expect(v.scheduled_date > etDateString()).toBe(true);
     }
+  });
+
+  test('P1: the alert-route extension probes global occupancy — a clashing candidate day is skipped', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-01-15', status: 'completed' },
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+      ],
+      alertRow: { id: 60, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+      clashDates: ['2098-10-15'],
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '60', action: 'extend', count: 1, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(1);
+    expect(state.insertedVisits[0].scheduled_date).not.toBe('2098-10-15');
+    expect(state.insertedVisits[0].scheduled_date > '2098-10-15').toBe(true);
+  });
+
+  test('P1: an extension that places ZERO visits fails (409) and leaves the alert OPEN', async () => {
+    // Every candidate clashes (stand-in for all-weekdays-off / fully
+    // blacked-out configs): the walk creates nothing, so resolving the
+    // alert and returning 200 would silently dismiss the banner while the
+    // requested extension never happened. The action must throw (trx rolls
+    // back) and the alert row must stay unresolved.
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+      ],
+      alertRow: { id: 61, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+      clashDates: '*',
+    });
+    await expect(
+      runRecurringAlertAction(makeConn(handler), { idParam: '61', action: 'extend', count: 2, adminUserId: null }),
+    ).rejects.toMatchObject({ statusCode: 409, isOperational: true, code: 'NO_PLACEABLE_DATE' });
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
   });
 
   test('a series cancelled before the click is refused under the lock (409), inserting nothing', async () => {

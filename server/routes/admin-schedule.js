@@ -711,6 +711,11 @@ function planCadenceRewriteTargets({
       if (!rawDate) continue;
       const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });
       if (!candidate) continue;
+      // Same future-only floor as the recomputed branch above: a stale
+      // pending booster that the 12-month walk could not map must be left
+      // alone, not nudged from one past date to another (the write path
+      // rewinds its lifecycle and resets its reminder on any move).
+      if (candidate <= etDateString()) continue;
       const currentDate = normalizeDateOnly(booster.scheduled_date);
       if (seenDates.has(candidate) && candidate !== currentDate) continue;
       if (candidate !== currentDate) seenDates.add(candidate);
@@ -777,6 +782,32 @@ function occupancyBlockFor(row) {
     end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   }
   return { start, end };
+}
+
+// Best-effort destination probe for the maintenance / alert-action series
+// extension walks: the blackout nudge can move a candidate onto an adjacent
+// day that already holds an overlapping visit, and those walks insert
+// directly (their series-date dedupe only covers their OWN series). Probe
+// each candidate through the shared tech-blind occupancy check and skip a
+// clashing date — the walks advance to the next cadence step. Windowless
+// templates carry no occupancy and skip the probe (module convention).
+// NOT a commit gate: these writers run under the per-parent maintenance
+// advisory lock, and the candidate date is only known mid-trx — after the
+// rung-6 comms lock — so a rung-1 date-occupancy key cannot be taken here
+// without inverting the ORDERING CONTRACT. The probe closes the practical
+// double-book window; the update-details path keeps its full peek → rung-1
+// → guardRecurrenceDestination gate.
+async function seriesCandidateDateClashes(conn, template, date) {
+  const block = occupancyBlockFor(template);
+  if (!block) return false;
+  const clash = await findConflictingVisits({
+    db: conn,
+    date,
+    windowStart: block.start,
+    windowEnd: block.end,
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  return clash.length > 0;
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -9351,8 +9382,14 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             attempt++;
             continue;
           }
-          if (!existingDates.has(candidate)) { nextStr = candidate; break; }
-          attempt++;
+          if (existingDates.has(candidate)) { attempt++; continue; }
+          // The blackout nudge can land a candidate on an adjacent day
+          // another visit already occupies (the series dedupe above only
+          // covers THIS series) — probe global occupancy before accepting,
+          // skipping clashing dates to the next cadence step.
+          if (await seriesCandidateDateClashes(conn, parent, candidate)) { attempt++; continue; }
+          nextStr = candidate;
+          break;
         }
         // Re-check the ongoing flag immediately before inserting: it was
         // read once at the top of this block, and a cancellation (the
@@ -13954,6 +13991,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
+        // The blackout nudge can land a candidate on an adjacent day another
+        // visit already occupies (`seen` only covers THIS series) — probe
+        // global occupancy before accepting; a clashing date is skipped to
+        // the next cadence step.
+        if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
         const data = {
           customer_id: parent.customer_id,
@@ -13981,6 +14023,18 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         spawned.push({ id: row?.id, date: nd });
         inserted++;
         created++;
+      }
+      // Zero placements is a FAILED extension, not a resolvable outcome:
+      // with every weekday configured off (or every candidate blacked out /
+      // booked past the bounded nudge) the walk creates nothing, and
+      // resolving the alert + returning 200 would silently dismiss the
+      // banner while the requested visits never happened. Throw (rolls the
+      // trx back, alert left open) so the operator sees the failure.
+      if (created === 0) {
+        throw Object.assign(
+          new Error('No extension date could be placed — every candidate is blacked out, on a configured day off, or already booked. Adjust the days-off/blackout settings or schedule the visits manually; the alert has been left open.'),
+          { statusCode: 409, isOperational: true, code: 'NO_PLACEABLE_DATE' },
+        );
       }
     } else if (action === 'convert_ongoing') {
       if (cols.recurring_ongoing) {
@@ -14010,6 +14064,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
+        // Same global occupancy probe as the extend loop above — a nudged
+        // candidate must not double-book an adjacent day.
+        if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
         const data = {
           customer_id: parent.customer_id,
@@ -14038,6 +14095,17 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         spawned.push({ id: row?.id, date: nd });
         inserted++;
         created++;
+      }
+      // Mirror the extend branch: owing visits and placing none is a
+      // failure. The throw also rolls back the recurring_ongoing flip above
+      // — committing the flip while the top-up silently failed would leave
+      // an "ongoing" plan with no future visits and a dismissed banner.
+      // (need === 0 stays a success: the flip alone was the whole action.)
+      if (need > 0 && created === 0) {
+        throw Object.assign(
+          new Error('Converted to ongoing could not be completed — no top-up visit date could be placed (every candidate is blacked out, on a configured day off, or already booked). Adjust the days-off/blackout settings or schedule the visits manually; the alert has been left open.'),
+          { statusCode: 409, isOperational: true, code: 'NO_PLACEABLE_DATE' },
+        );
       }
     } else if (action === 'let_lapse') {
       // Stop the plan ATOMICALLY with the alert resolution (P0): resolving
