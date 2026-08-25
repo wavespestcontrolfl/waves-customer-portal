@@ -37,6 +37,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const elementsRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  // The checkbox assents to the RENDERED authorization — if the variant
+  // changes (per-application Auto Pay ↔ immediate annual prepay charge),
+  // the prior check must not carry over (Codex r5 P1).
+  useEffect(() => { setAgreed(false); }, [prepay]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop

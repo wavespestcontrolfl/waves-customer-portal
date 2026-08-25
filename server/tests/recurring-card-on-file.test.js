@@ -57,9 +57,11 @@ const mockHasEnrollmentScopedConsent = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent1' }));
 const mockLinkPaymentMethodId = jest.fn(async () => {});
 const mockFindConsentedChargeableCard = jest.fn(async () => null);
+const mockHasConsentSnapshotForVariant = jest.fn(async () => false);
 jest.mock('../services/payment-method-consents', () => ({
   hasConsentFor: (...a) => mockHasConsentFor(...a),
   hasEnrollmentScopedConsent: (...a) => mockHasEnrollmentScopedConsent(...a),
+  hasConsentSnapshotForVariant: (...a) => mockHasConsentSnapshotForVariant(...a),
   recordConsent: (...a) => mockRecordConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
   findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),

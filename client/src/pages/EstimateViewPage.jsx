@@ -3011,15 +3011,23 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
           This estimate was already accepted — you're all set.
         </div>
       ) : null}
-      {isAnnualPrepay && acceptResult?.invoiceSettled ? (
+      {isAnnualPrepay && acceptResult?.invoiceSettled && acceptResult?.prepayChargeStatus ? (
         // Prepay auto-charged at accept (GATE_PREPAY_CARD_AND_CHARGE): the
         // 'confirmed' outcome is a PAID (or ACH-processing) year, not a
         // payer-billed pass-through — say what the money did so the
-        // customer isn't left expecting an invoice.
+        // customer isn't left expecting an invoice. Gated on
+        // prepayChargeStatus (Codex r5 P1): a settled-but-uncollected state
+        // (refunded/canceled) must render neither line. The cited amount is
+        // the ACKNOWLEDGED charged total, never the invoice face value
+        // (credits/surcharge move them apart); absent, name no number.
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-          {acceptResult?.prepayChargeStatus === 'processing'
-            ? `Your annual prepay bank payment${prepayAmountText} is processing — we'll confirm when it completes.`
-            : `Your annual prepay payment${prepayAmountText} went through — your receipt is on the way.`}
+          {(() => {
+            const chargedTotal = Number(acceptResult?.prepayChargedTotal);
+            const chargedText = Number.isFinite(chargedTotal) && chargedTotal > 0 ? ` of ${fmtMoney(chargedTotal)}` : '';
+            return acceptResult.prepayChargeStatus === 'processing'
+              ? `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`
+              : `Your annual prepay payment${chargedText} went through — your receipt is on the way.`;
+          })()}
         </div>
       ) : null}
       {recurring && !isNativeApp() ? (
@@ -4153,6 +4161,13 @@ function EstimateViewPageInner() {
   useEffect(() => {
     prepayChargeAckRef.current = null;
     setPrepayChargeQuote(null);
+    // Consent-variant boundary (Codex r5 P1): a card captured or a checkbox
+    // agreed under one authorization (per-application Auto Pay vs immediate
+    // annual charge) must not silently ride into the other — drop the
+    // captured SetupIntent and the mounted inline element so the switched
+    // preference re-captures under ITS consent text.
+    recurringCardSetupIntentIdRef.current = null;
+    setInlineCardIntent(null);
   }, [paymentPreference]);
   // Seamless single-screen booking (owner 2026-07-12): when the review card
   // owes an Auto Pay card, the Payment Element renders INLINE in the review

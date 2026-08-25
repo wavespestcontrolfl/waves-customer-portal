@@ -320,8 +320,14 @@ async function completeRecurringCardEnrollment({
     // estimate_card_hold row on this pm passes the plain version check but
     // only ever authorized that visit's charges — the estimate_accept row
     // IS the audit artifact for recurring Auto Pay, so it must be recorded
-    // unless a real save-and-charge consent already exists.
-    if (!(await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId))) {
+    // unless a real save-and-charge consent already exists. A VARIANT
+    // consent (prepay immediate charge) is checked against its own snapshot
+    // (Codex r5 P1): an older future-invoice consent must not suppress the
+    // immediate-charge authorization the prepay checkbox rendered.
+    const consentAlreadyRecorded = consentVariant
+      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant })
+      : await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId);
+    if (!consentAlreadyRecorded) {
       // The capture modal rendered the locked v8 card consent verbatim
       // (checkbox-gated) before confirmSetup — this row is the faithful
       // record of what the customer agreed to.

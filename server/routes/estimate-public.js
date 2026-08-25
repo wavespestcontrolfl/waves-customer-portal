@@ -12114,6 +12114,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       prepayChargeStatus: prepayAutoCharge?.status === 'paid'
         ? 'paid'
         : (['processing', 'ambiguous'].includes(prepayAutoCharge?.status) ? 'processing' : null),
+      prepayChargedTotal: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
+        ? prepayChargePlan.quote.totalCents / 100
+        : null,
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -15338,6 +15341,11 @@ function buildAcceptSuccessPayload({
   // 'paid' | 'processing' | null — prepay auto-charge outcome for the
   // success card's payment copy (GATE_PREPAY_CARD_AND_CHARGE).
   prepayChargeStatus = null,
+  // The exact surcharged total that was acknowledged and charged — the
+  // success copy must cite THIS, never the invoice face value, which
+  // credits/surcharge can move (Codex r5 P1). Null when unknown (retries):
+  // the copy then names no number.
+  prepayChargedTotal = null,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -15385,6 +15393,7 @@ function buildAcceptSuccessPayload({
     // keys its "payment went through" copy off this.
     invoiceSettled,
     prepayChargeStatus,
+    prepayChargedTotal,
   };
 }
 
@@ -15596,6 +15605,15 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       reservationCommitted,
       siteConfirmationHold,
       invoiceSettled,
+      // Explicit payment outcome from the LIVE invoice status (Codex r5
+      // P1): only paid/prepaid may say "payment went through", only
+      // 'processing' may say a debit is processing — refunded/canceled
+      // settled states render neither.
+      prepayChargeStatus: prepayTerm && invoice
+        ? (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
+          ? 'paid'
+          : (String(invoice.status || '').toLowerCase() === 'processing' ? 'processing' : null))
+        : null,
     }),
     alreadyAccepted: true,
   };

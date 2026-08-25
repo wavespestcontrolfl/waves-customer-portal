@@ -111,6 +111,21 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
     && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
 }
 
+// Whether a consent row already snapshots EXACTLY this variant's current
+// text for this method — the idempotency check for variant-specific
+// recording (Codex r5 P1: a prepay accept must always land the
+// immediate-charge authorization in the ledger even when an older
+// future-invoice consent exists, while webhook-backstop retries must not
+// stack duplicate rows).
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, dbh = db } = {}) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const text = getConsentText(methodType, { variant });
+  const row = await dbh('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text })
+    .first('id');
+  return !!row;
+}
+
 // dbh: callers holding an OPEN transaction must pass it (Codex #3395 r12
 // P1) — the default pool handle nested inside a caller's transaction is a
 // second pool checkout per request, and a wave of such transactions can
@@ -201,6 +216,7 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 
 module.exports = {
   recordConsent,
+  hasConsentSnapshotForVariant,
   hasConsentFor,
   hasEnrollmentScopedConsent,
   consentVersionQualifiesForEnrollment,
