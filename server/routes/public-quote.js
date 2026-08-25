@@ -520,7 +520,10 @@ function compactServiceInterestPart(value) {
   };
   return labels[key]
     || compactRoachInterestPart(key)
-    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+    // Generic tail-compactors: the 2026-08-25 catalog renames suffixed
+    // every service name with " Service", which pushed common combos past
+    // the 32-char gate and silently dropped parts (codex #3484 P2).
+    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '').replace(/\s+Service$/, '');
 }
 
 // Compact form of the roach add-on suffix. The customer-facing name is
