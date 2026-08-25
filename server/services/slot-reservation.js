@@ -261,6 +261,8 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // rows' NAMES are admin-editable and already diverge between prod and
 // migration-built databases (codex #3485 r3 P1, monthly mosquito). Only
 // finite visit counts map; an unknown cadence stays unlinked (fail open).
+const CADENCE_FAMILY_KEYS = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+
 function cadenceCatalogKeyForProfile(primary, isOneTime) {
   if (isOneTime || !primary) return null;
   // Commercial plans collapse to the residential categories in the slot
@@ -326,6 +328,14 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
+  // The four cadence-family category keys intentionally span MULTIPLE
+  // catalog rows, so containment can never name one row for them. When no
+  // exact cadence key resolves (off-catalog visit count, commercial,
+  // unknown cadence, or a category-keyed one-time with no engine key), the
+  // profile stays unlinked — falling through to containment would let a
+  // single admin-authored family mapping stamp every off-cadence accept
+  // with that one row's identity (pre-push P1).
+  if (!cadenceKey && CADENCE_FAMILY_KEYS.has(engineKey)) return null;
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {

@@ -168,6 +168,24 @@ async function loadState(knex) {
   try { return JSON.parse(row.value); } catch { return null; }
 }
 
+// Catalog mappings are admin-editable, so a seeded key may ALREADY belong to
+// a different active row by the time this migration runs. Stamping the seed
+// anyway would give the key two active owners — catalogLinkForProfile fails
+// closed on that ambiguity, so the "coverage" this migration adds would stop
+// BOTH rows from resolving (pre-push P1). Skip the seed instead: the admin
+// mapping stays the sole owner.
+async function activeOwnerElsewhere(knex, excludeId, engineKeys) {
+  for (const key of engineKeys) {
+    const owner = await knex('services')
+      .whereNot({ id: excludeId })
+      .where({ is_active: true })
+      .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([key])])
+      .first('id');
+    if (owner) return true;
+  }
+  return false;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
@@ -191,6 +209,7 @@ exports.up = async function up(knex) {
       .whereNull('engine_keys')
       .first('id');
     if (!row) continue;
+    if (await activeOwnerElsewhere(knex, row.id, seed.engine_keys)) continue;
     const count = await knex('services')
       .where({ id: row.id })
       .whereNull('engine_keys')
@@ -209,7 +228,7 @@ exports.up = async function up(knex) {
         .where({ service_key: candidateKey })
         .first('id', 'engine_keys');
       if (!row) continue;
-      if (row.engine_keys == null) {
+      if (row.engine_keys == null && !(await activeOwnerElsewhere(knex, row.id, seed.engine_keys))) {
         const count = await knex('services')
           .where({ id: row.id })
           .whereNull('engine_keys')
@@ -232,6 +251,7 @@ exports.up = async function up(knex) {
       && current.length === target.shipped.length
       && target.shipped.every((k, i) => current[i] === k);
     if (!isShipped) continue;
+    if (await activeOwnerElsewhere(knex, row.id, [target.append])) continue;
     // Compare-and-set: the expected current value rides in the UPDATE
     // predicate, so an admin edit landing between the SELECT and this
     // UPDATE hits zero rows instead of being overwritten (codex #3485 r1

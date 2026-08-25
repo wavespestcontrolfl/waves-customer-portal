@@ -16,25 +16,36 @@ const STATE_KEY = 'migration.20260825000011.state';
 function fakeKnex(db) {
   const knex = (table) => {
     const filters = [];
+    const notFilters = [];
     const rawWheres = [];
     const rowsNow = () => db[table] || [];
+    const condMatch = (r, cond) => Object.entries(cond).every(([k, v]) => {
+      if (v === null) return r[k] === null || r[k] === undefined;
+      return r[k] === v;
+    });
+    const parsedKeys = (r) => (Array.isArray(r.engine_keys) ? r.engine_keys
+      : (() => { try { return JSON.parse(r.engine_keys); } catch { return null; } })());
     const rowMatch = (r) => (
-      filters.every((cond) => Object.entries(cond).every(([k, v]) => {
-        if (v === null) return r[k] === null || r[k] === undefined;
-        return r[k] === v;
-      }))
-      // Emulates the jsonb CAS shape: engine_keys = ?::jsonb
-      && rawWheres.every((rw) => JSON.stringify(
-        Array.isArray(r.engine_keys) ? r.engine_keys
-          : (() => { try { return JSON.parse(r.engine_keys); } catch { return null; } })()
-      ) === rw.bindings[0])
+      filters.every((cond) => condMatch(r, cond))
+      && notFilters.every((cond) => !condMatch(r, cond))
+      // Emulates the jsonb shapes: engine_keys = ?::jsonb (CAS) and
+      // engine_keys @> ?::jsonb (containment, duplicate-owner guard)
+      && rawWheres.every((rw) => {
+        const keys = parsedKeys(r);
+        if (rw.op === 'contains') {
+          return Array.isArray(keys) && JSON.parse(rw.bindings[0]).every((k) => keys.includes(k));
+        }
+        return JSON.stringify(keys) === rw.bindings[0];
+      })
     );
     const q = {
       where(cond) { filters.push(cond); return q; },
+      whereNot(cond) { notFilters.push(cond); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
       whereRaw(sql, bindings) {
+        if (/engine_keys\s*@>\s*\?::jsonb/.test(sql)) { rawWheres.push({ op: 'contains', bindings }); return q; }
         if (!/engine_keys\s*=\s*\?::jsonb/.test(sql)) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
-        rawWheres.push({ bindings });
+        rawWheres.push({ op: 'eq', bindings });
         return q;
       },
       first: async () => {
@@ -108,6 +119,26 @@ describe('20260825000011 engine-key coverage expansion', () => {
     const state = JSON.parse(stateRow(db).value);
     expect(state.stamped.some((r) => r.service_key === 'foam_drill')).toBe(false);
     expect(state.appended.some((r) => r.service_key === 'bee_wasp_removal')).toBe(false);
+  });
+
+  test('a key already owned by a DIFFERENT active row is skipped — no duplicate owners', async () => {
+    // Admin mappings are free-form: if another active row already claims a
+    // seeded key, stamping the seed would give the key two active owners and
+    // catalogLinkForProfile would fail closed on BOTH (pre-push P1).
+    const db = seedDb();
+    const seed = ENGINE_KEY_SEEDS[0];
+    db.services.push({ id: 'svc-admin', service_key: 'admin_custom', is_active: true, engine_keys: [seed.engine_keys[0]] });
+    const appendTarget = ALIAS_APPENDS[0];
+    db.services.push({ id: 'svc-admin2', service_key: 'admin_custom2', is_active: true, engine_keys: [appendTarget.append] });
+    await migration.up(fakeKnex(db));
+    expect(svc(db, seed.service_key).engine_keys).toBeNull();
+    expect(keysOf(svc(db, appendTarget.service_key))).toEqual([...appendTarget.shipped]);
+    // Unaffected seeds still stamp.
+    const other = ENGINE_KEY_SEEDS[1];
+    expect(keysOf(svc(db, other.service_key))).toEqual(other.engine_keys);
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.stamped.some((r) => r.service_key === seed.service_key)).toBe(false);
+    expect(state.appended.some((r) => r.service_key === appendTarget.service_key)).toBe(false);
   });
 
   test('admin pre-stamp of the IDENTICAL array is never claimed nor rolled back', async () => {

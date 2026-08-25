@@ -4733,6 +4733,7 @@ const EstimateConverter = {
           // same object reference when ids match.
           row.service_type = combo.route.name;
           if (update.service_id) row.service_id = update.service_id;
+          if (update.service_key_snapshot) row.service_key_snapshot = update.service_key_snapshot;
           if (update.estimated_duration_minutes) row.estimated_duration_minutes = update.estimated_duration_minutes;
           if (reservedStart && row.id === reservedStart.id) {
             reservedSeedSvc = combo.service;

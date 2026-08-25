@@ -439,6 +439,11 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       // as their parent (combined services especially — name matching alone
       // breaks if the catalog row is ever renamed).
       'service_id',
+      // Durable identity snapshot: children must survive the same
+      // ON DELETE SET NULL catalog outage the parent does, or a cleared FK
+      // leaves follow-ups resolving by mutable label while the parent keeps
+      // its key (pre-push P1). Cols-guarded like the rest of the row.
+      'service_key_snapshot',
       'lat',
       'lng',
       // Stamped service address (property linkage): a series booked for a

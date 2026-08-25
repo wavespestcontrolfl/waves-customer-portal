@@ -55,6 +55,26 @@ describe('recurring appointment seeder', () => {
     }));
   });
 
+  test('follow-ups inherit the parent catalog link AND durable key snapshot', () => {
+    // service_id alone dies with the catalog FK (ON DELETE SET NULL);
+    // children must carry the same service_key_snapshot as the parent or a
+    // catalog outage strips their identity while the parent keeps its key
+    // (pre-push P1).
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-2',
+      customer_id: 'customer-1',
+      scheduled_date: '2026-06-05',
+      service_type: 'Quarterly Pest Control Service',
+      service_id: 'svc-quarterly',
+      service_key_snapshot: 'pest_general_quarterly',
+    }, { pattern: 'quarterly', plannedCount: 4 });
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.service_id).toBe('svc-quarterly');
+      expect(row.service_key_snapshot).toBe('pest_general_quarterly');
+    }
+  });
+
   test('stamps the classifier tag on every seeded follow-up', () => {
     const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
       id: 'parent-2',

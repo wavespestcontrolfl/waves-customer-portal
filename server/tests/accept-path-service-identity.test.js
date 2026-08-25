@@ -248,13 +248,20 @@ describe('catalogServiceIdForProfile', () => {
   test('picks the SAME primary the display label picks (pest_control wins)', async () => {
     // canonicalServiceTypeForProfile prefers a pest_control line over
     // services[0]; the id must describe the same service as the label, or one
-    // row would claim two different services.
-    let bindings = null;
+    // row would claim two different services. The family category resolves
+    // through its cadence key (family keys are never containment-queried),
+    // so the cadence lookup firing for pest proves pest_control won.
+    let where = null;
+    const conn = () => ({
+      whereRaw: () => { throw new Error('family key must not be containment-queried'); },
+      where: (cond) => { where = cond; return { limit: () => ({ select: async () => [{ id: 'svc-pest', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }; },
+    });
+    conn.transaction = async (cb) => cb(conn);
     await catalogServiceIdForProfile(
-      makeConn((b) => { bindings = b; return [{ id: 'svc-pest' }]; }),
-      { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control' }] },
+      conn,
+      { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control', visitsPerYear: 12 }] },
     );
-    expect(bindings).toEqual([JSON.stringify(['pest_control'])]);
+    expect(where).toEqual({ service_key: 'pest_general_monthly', is_active: true });
   });
 
   test('only ACTIVE catalog rows are eligible', async () => {
@@ -368,6 +375,28 @@ describe('catalogServiceIdForProfile', () => {
         services: [{ service: 'pest_control', visitsPerYear: 12 }],
       });
       expect(link).toMatchObject({ id: 'svc-monthly', service_key: 'pest_general_monthly' });
+      expect(containmentQueried).toBe(false);
+    });
+
+    test('an off-cadence family profile NEVER falls through to containment', async () => {
+      // 8-visit pest, cadence-less lawn, 10-visit mosquito: the shared
+      // family key spans multiple catalog rows, so a single admin-authored
+      // family mapping would stamp every off-cadence accept with that one
+      // row's identity (pre-push P1). They stay unlinked instead.
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-admin-mapped' }] }) }) }; },
+        where: () => ({ limit: () => ({ select: async () => [] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      for (const services of [
+        [{ service: 'pest_control', visitsPerYear: 8 }],
+        [{ service: 'lawn_care' }],
+        [{ service: 'mosquito', visitsPerYear: 10 }],
+        [{ service: 'tree_shrub', visitsPerYear: 12 }],
+      ]) {
+        expect(await catalogLinkForProfile(conn, { services })).toBeNull();
+      }
       expect(containmentQueried).toBe(false);
     });
 
