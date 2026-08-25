@@ -587,3 +587,15 @@ describe('normalizeAdditionalProperties unit conflicts', () => {
     })).toEqual([]);
   });
 });
+
+describe('normalizeAdditionalProperties camelCase aliases', () => {
+  const { normalizeAdditionalProperties } = require('../utils/address-normalizer');
+
+  test('accepts addressLine1/addressLine2 spellings', () => {
+    const out = normalizeAdditionalProperties({
+      additionalProperties: [{ addressLine1: '123 Main St', addressLine2: 'Unit 2', city: 'Sarasota', state: 'FL', zip: '34236' }],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ address_line1: '123 Main St', address_line2: 'Unit 2', city: 'Sarasota' });
+  });
+});

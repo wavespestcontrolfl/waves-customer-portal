@@ -594,8 +594,8 @@ function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
     } else if (typeof entry === 'object' && !Array.isArray(entry)) {
       normalized = normalizeLeadAddress({
         raw: String(entry.formatted || entry.address || '').slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH),
-        line1: clip(entry.line1 || entry.address_line1),
-        line2: clip(entry.line2 || entry.address_line2 || entry.unit),
+        line1: clip(entry.line1 || entry.address_line1 || entry.addressLine1),
+        line2: clip(entry.line2 || entry.address_line2 || entry.addressLine2 || entry.unit),
         city: clip(entry.city),
         state: clip(entry.state),
         zip: clip(entry.zip),
