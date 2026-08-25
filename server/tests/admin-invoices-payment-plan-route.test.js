@@ -107,6 +107,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       if (table === 'invoice_followup_sequences') return trxFollowups;
       throw new Error(`unexpected trx table ${table}`);
     });
+    trx.isTransaction = true; // real knex trx flag — completeActivePlansForInvoice reuses a caller trx as-is
 
     const invoicesQB = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
     // first() with no args = the pre-existing-active-plan check (none);

@@ -17,6 +17,17 @@ const logger = require('./logger');
  */
 async function completeActivePlansForInvoice(invoiceId, conn = db) {
   if (!invoiceId) return 0;
+  // Both updates commit ATOMICALLY (codex PR r5 P1): on a plain connection
+  // they were separate autocommit statements, and a dispute reopening the
+  // invoice between them made the settled-gated sequence release a no-op —
+  // with the plan already 'completed', retries found nothing to flip and
+  // the plan-owned stop suppressed dunning forever. A caller-supplied trx
+  // is reused as-is (the cancel route's settled branch).
+  const run = (trx) => completeActivePlansLocked(invoiceId, trx);
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
+}
+
+async function completeActivePlansLocked(invoiceId, conn) {
   const now = new Date();
   // Settlement is re-verified IN the update statement (codex PR r4 P2): a
   // delayed post-commit caller can run after a dispute reopened the invoice

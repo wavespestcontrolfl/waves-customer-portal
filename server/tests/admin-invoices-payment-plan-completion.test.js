@@ -127,6 +127,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       if (table === 'invoice_followup_sequences') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
     });
+    trx.isTransaction = true; // real knex trx flag — completeActivePlansForInvoice reuses a caller trx as-is
     trx.fn = { now: jest.fn(() => 'NOW()') };
 
     const invoicesQB = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
