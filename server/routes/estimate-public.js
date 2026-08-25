@@ -9353,8 +9353,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         const { computeChargeAmount } = require('../services/stripe-pricing');
         const chargeInfo = computeChargeAmount(prepayProjectedDue, prepayChargeMethod.methodType || 'card', { funding: prepayChargeMethod.funding });
+        // The acknowledgement must bind BOTH the exact cents AND the method
+        // it was quoted for (pre-push Codex P0 r3): an Auto Pay default
+        // switched between quote and resubmit can leave the total unchanged
+        // while the card differs — the method-key mismatch forces a fresh
+        // quote instead of charging a card the customer never saw.
+        const currentMethodKey = RecurringCards.prepayChargeMethodKey(prepayChargeMethod.stripePaymentMethodId);
         const acknowledged = Number(req.body?.prepayChargeAcknowledgedTotalCents);
-        if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents) {
+        const acknowledgedMethodKey = typeof req.body?.prepayChargeAcknowledgedMethodKey === 'string'
+          ? req.body.prepayChargeAcknowledgedMethodKey : '';
+        if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
+          || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey) {
           return res.status(402).json({
             code: 'PREPAY_CHARGE_QUOTE',
             error: 'Confirm your exact annual prepay total to finish booking',
@@ -9363,6 +9372,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               surcharge: chargeInfo.surchargeCents / 100,
               total: chargeInfo.totalCents / 100,
               totalCents: chargeInfo.totalCents,
+              methodKey: currentMethodKey,
               funding: prepayChargeMethod.funding || null,
               methodType: prepayChargeMethod.methodType || 'card',
               last4: prepayChargeMethod.last4 || null,
@@ -10799,6 +10809,35 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
 
+      // Durable prepay auto-charge job (pre-push Codex P0 r3): persisted
+      // ATOMICALLY with the acceptance so a crash before the post-commit
+      // executor leaves a resumable 'pending' stamp for the billing-cron
+      // sweep (sweepStrandedPrepayAutoCharges), never a silently unpaid
+      // booking. Carries the BOUND method + the exact acknowledged cents —
+      // recovery may charge only these; anything else falls back to
+      // pay-link delivery + an office alert.
+      if (prepayChargePlan && invoiceKindResult === 'annual_prepay' && invoiceIdResult) {
+        const freshRow = await trx('estimates').where({ id: estimate.id }).first('estimate_data');
+        let stampBase = freshRow?.estimate_data;
+        if (typeof stampBase === 'string') {
+          try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; }
+        }
+        const stamped = {
+          ...(stampBase && typeof stampBase === 'object' ? stampBase : {}),
+          prepayAutoChargeJob: {
+            invoice_id: invoiceIdResult,
+            stripe_payment_method_id: prepayChargePlan.method.stripePaymentMethodId,
+            payment_method_row_id: prepayChargePlan.method.paymentMethodRowId || null,
+            method_key: RecurringCards.prepayChargeMethodKey(prepayChargePlan.method.stripePaymentMethodId),
+            authorized_total_cents: prepayChargePlan.quote.totalCents,
+            authorized_base_cents: prepayChargePlan.quote.baseCents,
+            status: 'pending',
+            created_at: new Date().toISOString(),
+          },
+        };
+        await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
+      }
+
       return {
         customerId,
         reservationCommitted,
@@ -11418,6 +11457,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'is being sent to the customer'} — follow up if it goes unpaid.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
+      }
+      // Resolve the durable job stamp with the in-flow outcome — the
+      // billing-cron sweep resumes only stamps still 'pending', so every
+      // handled outcome (paid/processing/declined/skipped) must land here
+      // or the sweep would re-attempt a charge this request already
+      // dispositioned. Best-effort: a failed stamp update degrades to the
+      // sweep re-verifying against the live invoice (settled → resolved).
+      try {
+        const freshEst = await db('estimates').where({ id: estimate.id }).first('estimate_data');
+        let stampBase = freshEst?.estimate_data;
+        if (typeof stampBase === 'string') { try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; } }
+        if (stampBase?.prepayAutoChargeJob) {
+          stampBase.prepayAutoChargeJob = {
+            ...stampBase.prepayAutoChargeJob,
+            status: prepayAutoCharge.status,
+            reason: prepayAutoCharge.reason || null,
+            resolved_at: new Date().toISOString(),
+            resolved_by: 'accept',
+          };
+          await db('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stampBase) });
+        }
+      } catch (stampErr) {
+        logger.warn(`[estimate-accept] prepay job stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
       }
     }
 

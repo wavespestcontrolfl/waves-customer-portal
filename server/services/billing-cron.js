@@ -604,6 +604,17 @@ const BillingCron = {
       logger.warn(`[billing-cron] setup-fee alert sweep failed: ${err.message} — next run retries`);
     }
 
+    // Stranded prepay auto-charge recovery (GATE_PREPAY_CARD_AND_CHARGE):
+    // an accept that crashed between commit and its in-flow charge left a
+    // 'pending' prepayAutoChargeJob stamp — resume it under the frozen
+    // authorization, or deliver the pay link + alert. No-op while the gate
+    // is off; idempotent + best-effort inside the service.
+    try {
+      await require('./recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+    } catch (err) {
+      logger.warn(`[billing-cron] stranded prepay auto-charge sweep failed: ${err.message} — next run retries`);
+    }
+
     const failedPayments = await db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')

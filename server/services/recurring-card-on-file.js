@@ -433,11 +433,120 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
   }
 }
 
+// Opaque binding of a prepay charge quote to the method it was quoted for
+// (pre-push Codex P0 r3): the client echoes this key with its
+// acknowledgement, and the accept re-derives it from the CURRENT method —
+// a default-method switch between quote and resubmit changes the key even
+// when the total happens to match, forcing a fresh quote instead of
+// charging a card the customer never saw. Truncated digest, never the raw
+// Stripe id, so the public page learns nothing about the stored method.
+function prepayChargeMethodKey(stripePaymentMethodId) {
+  if (!stripePaymentMethodId) return null;
+  return require('crypto').createHash('sha256').update(String(stripePaymentMethodId)).digest('hex').slice(0, 16);
+}
+
+// Crash-recovery sweep (pre-push Codex P0 r3): the accept transaction
+// stamps a durable prepayAutoChargeJob (invoice, bound method, the exact
+// acknowledged cents) BEFORE it commits; the in-flow executor resolves the
+// stamp in the same request. A process restart in the commit→charge gap
+// leaves the stamp 'pending' — this sweep (billing-cron) resumes it:
+// re-charge under the FROZEN authorization (expectedTotal equality on the
+// acknowledged cents, bound method row, live Auto Pay re-check in-lock —
+// never a fresh eligibility guess), or, when the charge can't complete,
+// deliver the pay link + office alert so an accepted prepay booking can
+// never sit silently unpaid. Idempotent: the charge service's durable
+// claim fences a concurrent in-flow executor, and every outcome resolves
+// the stamp.
+async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, limit = 20 } = {}) {
+  if (!isPrepayCardAndChargeEnabled()) return { scanned: 0 };
+  const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
+  let rows = [];
+  try {
+    rows = await db('estimates')
+      .where({ status: 'accepted' })
+      .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = ?", ['pending'])
+      .limit(limit)
+      .select('id', 'estimate_data');
+  } catch (err) {
+    logger.warn(`[recurring-cof] prepay charge sweep query failed: ${err.message}`);
+    return { scanned: 0 };
+  }
+  let resumed = 0;
+  for (const row of rows) {
+    let data = row.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { continue; } }
+    const job = data?.prepayAutoChargeJob;
+    if (!job || job.status !== 'pending' || !job.invoice_id) continue;
+    if (job.created_at && new Date(job.created_at) > cutoff) continue; // in-flow executor may still be running
+    const resolve = async (status, extra = {}) => {
+      try {
+        const fresh = await db('estimates').where({ id: row.id }).first('estimate_data');
+        let base = fresh?.estimate_data;
+        if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+        if (!base || typeof base !== 'object') base = {};
+        base.prepayAutoChargeJob = { ...(base.prepayAutoChargeJob || job), status, resolved_at: new Date().toISOString(), resolved_by: 'sweep', ...extra };
+        await db('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify(base) });
+      } catch (stampErr) {
+        logger.warn(`[recurring-cof] prepay sweep stamp update failed for estimate ${row.id}: ${stampErr.message}`);
+      }
+    };
+    try {
+      const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
+      if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
+      const settled = ['paid', 'prepaid', 'processing', 'refunded', 'canceled', 'cancelled', 'void', 'voided'].includes(String(invoice.status || '').toLowerCase());
+      if (settled) { await resolve('paid', { reason: 'already_settled' }); continue; }
+      if (invoice.payer_id) { await resolve('skipped', { reason: 'payer_billed' }); continue; }
+      let pmRow = job.payment_method_row_id
+        ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id')
+        : await db('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id }).first('id', 'customer_id', 'stripe_payment_method_id');
+      // The BOUND method only — a different row (method swapped/removed)
+      // was never quoted to the customer.
+      if (pmRow && (String(pmRow.customer_id) !== String(invoice.customer_id)
+        || (job.stripe_payment_method_id && pmRow.stripe_payment_method_id !== job.stripe_payment_method_id))) {
+        pmRow = null;
+      }
+      if (pmRow && Number(job.authorized_total_cents) > 0) {
+        await StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
+          expectedTotal: Number(job.authorized_total_cents) / 100,
+          maxAuthorizedTotalCents: Number(job.authorized_total_cents),
+          requireAutopayForCustomerId: invoice.customer_id,
+        });
+        const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status');
+        const freshStatus = String(freshInvoice?.status || '').toLowerCase();
+        if (['paid', 'prepaid'].includes(freshStatus)) { resumed += 1; await resolve('paid'); continue; }
+        if (freshStatus === 'processing') { resumed += 1; await resolve('processing'); continue; }
+        throw new Error(`post-charge status ${freshStatus || 'unknown'}`);
+      }
+      throw new Error(pmRow ? 'no authorized total on job' : 'bound method not found');
+    } catch (err) {
+      // Charge can't complete under the frozen authorization — fall back to
+      // the delivered pay link + office alert (never silent, never a
+      // different amount/method than quoted).
+      logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
+      try {
+        await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
+      } catch (sendErr) {
+        logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
+      }
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Annual prepay accepted — stranded auto-charge could not complete',
+        `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). The pay link was sent — follow up if it goes unpaid.`,
+        { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id, reason: err.message } },
+      ).catch(() => {});
+      await resolve('delivered_fallback', { reason: err.message });
+    }
+  }
+  return { scanned: rows.length, resumed };
+}
+
 module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
   resolvePrepayChargeMethod,
+  prepayChargeMethodKey,
+  sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
   completeRecurringCardEnrollment,

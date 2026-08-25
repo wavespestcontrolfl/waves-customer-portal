@@ -81,6 +81,8 @@ const {
   isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
   resolvePrepayChargeMethod,
+  prepayChargeMethodKey,
+  sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
   completeRecurringCardEnrollment,
@@ -239,6 +241,35 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     it('never throws — a Stripe failure resolves null', async () => {
       mockRetrievePaymentMethod.mockRejectedValue(new Error('stripe down'));
       expect(await resolvePrepayChargeMethod({ verification: { ok: true, paymentMethodId: 'pm_1' }, customerId: 'cust-1' })).toBe(null);
+    });
+  });
+
+  describe('prepayChargeMethodKey (quote↔ack method binding)', () => {
+    it('is deterministic, truncated, and never the raw Stripe id', () => {
+      const key = prepayChargeMethodKey('pm_abc123');
+      expect(key).toHaveLength(16);
+      expect(key).toBe(prepayChargeMethodKey('pm_abc123'));
+      expect(key).not.toContain('pm_');
+      expect(prepayChargeMethodKey('pm_other')).not.toBe(key);
+      expect(prepayChargeMethodKey(null)).toBe(null);
+    });
+  });
+
+  describe('sweepStrandedPrepayAutoCharges', () => {
+    it('no-ops while the prepay gate is off', async () => {
+      delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      expect(await sweepStrandedPrepayAutoCharges()).toEqual({ scanned: 0 });
+    });
+
+    it('degrades to scanned:0 when the scan query fails (never throws into the cron)', async () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      try {
+        // The minimal db mock has no whereRaw chain — the scan throws and
+        // the sweep must swallow it.
+        expect(await sweepStrandedPrepayAutoCharges()).toEqual({ scanned: 0 });
+      } finally {
+        delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      }
     });
   });
 

@@ -4842,7 +4842,11 @@ function EstimateViewPageInner() {
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
           recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
-          prepayChargeAcknowledgedTotalCents: prepayChargeAckRef.current ?? undefined,
+          prepayChargeAcknowledgedTotalCents: prepayChargeAckRef.current?.totalCents ?? undefined,
+          // Binds the ack to the method the quote displayed — a default
+          // switch server-side re-quotes instead of charging a card the
+          // customer never saw.
+          prepayChargeAcknowledgedMethodKey: prepayChargeAckRef.current?.methodKey ?? undefined,
         }),
       });
       if (!r.ok) {
@@ -6209,7 +6213,7 @@ function EstimateViewPageInner() {
                 type="button"
                 disabled={ctaPhase === 'submitting'}
                 onClick={() => {
-                  prepayChargeAckRef.current = prepayChargeQuote.totalCents;
+                  prepayChargeAckRef.current = { totalCents: prepayChargeQuote.totalCents, methodKey: prepayChargeQuote.methodKey || null };
                   setPrepayChargeQuote(null);
                   handleConfirm();
                 }}
