@@ -62,22 +62,23 @@ const SETUP_FEE_RULE_SAFE_CUTOFF = '2026-07-11T04:00:00Z'; // 2026-07-11 00:00 E
 // Did the estimate the customer accepted actually SHOW the setup fee?
 // Reads the persisted send-snapshot pricing bundle using the same
 // service-key recognizers as pricingBundleMissingRequiredSetupFee.
-// Returns true on affirmative evidence, else null — NEVER false: a
-// fee-less bundle on a fee-due mix is exactly the STALE shape
-// estimate-public deliberately invalidates and recomputes WITH the fee
-// at view time (pricingBundleMissingRequiredSetupFee), so the persisted
-// fee-less snapshot is not proof of what the customer ultimately saw
-// (Codex P0, pre-push round 4). Absent affirmative evidence, the date
-// cutoff decides.
+// Returns 'shown' on affirmative evidence, 'feeless' when a bundle
+// exists with no fee, null when there is no bundle at all. 'feeless' is
+// deliberately NOT no-fee proof for a PUBLIC accept — a fee-less bundle
+// on a fee-due mix is exactly the STALE shape estimate-public
+// invalidates and recomputes WITH the fee at view time (Codex P0,
+// pre-push round 4) — but a MANUAL Mark Won accept involves no page
+// view, so there the fee-less snapshot IS the last pricing the customer
+// saw (Codex P0, pre-push round 15).
 function snapshotShowsSetupFee(estimateData) {
   const bundle = estimateData?.sendSnapshot?.pricingBundle;
   if (!bundle || typeof bundle !== 'object') return null;
   if (Array.isArray(bundle.firstVisitFees)
-    && bundle.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) return true;
+    && bundle.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) return 'shown';
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
-    && bundle.oneTimeBreakdown.items.some((row) => row?.service === 'waveguard_setup')) return true;
-  if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return true;
-  return null;
+    && bundle.oneTimeBreakdown.items.some((row) => row?.service === 'waveguard_setup')) return 'shown';
+  if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return 'shown';
+  return 'feeless';
 }
 
 function parseEstimateData(raw) {
@@ -141,13 +142,22 @@ async function findUnmintedSetupFeeObligation({
   const EstimateConverter = require('./estimate-converter');
   const estimateData = parseEstimateData(estimate.estimate_data);
   // Display evidence first, date proxy second: a snapshot that shows the
-  // fee puts the accept in scope regardless of date. A fee-less or
-  // missing snapshot is NOT evidence either way (stale bundles are
-  // repaired with the fee at view time) — then only accepts after the
-  // rule day fully ended qualify.
-  if (snapshotShowsSetupFee(estimateData) !== true
-    && acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) {
-    return { owed: false };
+  // fee puts the accept in scope regardless of date. Otherwise only
+  // accepts after the rule day fully ended qualify, and even then a
+  // FEE-LESS snapshot accepted via manual Mark Won stays OUT of scope
+  // (Codex P0, pre-push round 15): a public accept necessarily rendered
+  // the repaired page with the fee, but a Mark Won accept involves no
+  // page view — the fee-less snapshot is the last pricing the customer
+  // saw, and billing an unagreed $99 is never fail-safe.
+  const feeEvidence = snapshotShowsSetupFee(estimateData);
+  if (feeEvidence !== 'shown') {
+    if (acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) return { owed: false };
+    if (feeEvidence === 'feeless') {
+      const manualAccept = await conn('activity_log')
+        .where({ estimate_id: estimate.id, action: 'estimate_manual_accept' })
+        .first('id');
+      if (manualAccept) return { owed: false };
+    }
   }
   const recurringServices = EstimateConverter.recurringServicesFromEstimateData(estimateData);
   if (!EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })) {

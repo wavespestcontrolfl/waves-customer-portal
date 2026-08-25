@@ -297,7 +297,8 @@ test('persisted snapshot SHOWING the fee puts the accept in scope regardless of 
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
-test('a fee-less snapshot is NOT no-fee evidence — post-cutoff accepts stay in scope (stale bundles are repaired at view time)', async () => {
+test('a fee-less snapshot with a PUBLIC accept stays in scope post-cutoff (stale bundles are repaired at view time)', async () => {
+  let alCall = 0;
   mockTables = baseTables({
     estimates: acceptedEstimate({
       accepted_at: '2026-08-01T12:00:00Z',
@@ -305,8 +306,24 @@ test('a fee-less snapshot is NOT no-fee evidence — post-cutoff accepts stay in
         sendSnapshot: { pricingBundle: { firstVisitFees: [], oneTimeBreakdown: { items: [] } } },
       })),
     }),
+    // Call 1 = manual-accept probe (none — this was a public accept),
+    // call 2 = converter provenance.
+    activity_log: () => (++alCall === 1 ? null : { id: 'log-1' }),
   });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
+});
+
+test('a fee-less snapshot accepted via manual Mark Won is OUT of scope — no page view ever showed the fee', async () => {
+  mockTables = baseTables({
+    estimates: acceptedEstimate({
+      accepted_at: '2026-08-01T12:00:00Z',
+      estimate_data: JSON.stringify(soloPestEstimateData({
+        sendSnapshot: { pricingBundle: { firstVisitFees: [] } },
+      })),
+    }),
+    activity_log: { id: 'log-manual' },
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
 test('a fee-less snapshot on a PRE-cutoff accept stays out of scope', async () => {

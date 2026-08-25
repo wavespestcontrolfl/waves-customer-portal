@@ -8937,21 +8937,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
             .select('id', 'status', 'line_items', 'notes'))
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
-          const parkedAlertVisitId = staleMeta?.scheduledServiceId || null;
-          const onParkedLive = parkedAlertVisitId
+          // EVERY parked visit must have its application billed (Codex
+          // P0, pre-push round 15): a cross-visit race parks additional
+          // visits into parkedVisitIds, and resolving on the primary
+          // visit alone would strand the others unbilled with no alert.
+          const parkedIds = [...new Set([
+            ...(staleMeta?.scheduledServiceId ? [String(staleMeta.scheduledServiceId)] : []),
+            ...(Array.isArray(staleMeta?.parkedVisitIds) ? staleMeta.parkedVisitIds.map(String) : []),
+          ])];
+          const onParkedLive = parkedIds.length
             ? (await db('invoices')
               .where((qb) => {
-                qb.orWhere({ scheduled_service_id: parkedAlertVisitId });
+                qb.whereIn('scheduled_service_id', parkedIds);
                 if (staleMeta?.serviceRecordId) qb.orWhere({ service_record_id: staleMeta.serviceRecordId });
               })
-              .select('id', 'status', 'line_items', 'notes'))
+              .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id'))
               .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()))
             : [];
           // Notes are provenance, never charge coverage (Codex P0,
           // pre-push round 12) — only a positive parseable base line
-          // (invoiceBillsBaseApplication) proves the application billed.
+          // (invoiceBillsBaseApplication) proves an application billed.
+          // The stamped acceptance invoice can cover only the PRIMARY
+          // visit's (first) application; every other parked visit needs
+          // its own attached invoice.
           const feeProven = [...stampedLive, ...onParkedLive].some(invoiceContainsSetupFeeLine);
-          const applicationProven = [...onParkedLive, ...stampedLive].some(invoiceBillsBaseApplication);
+          const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
+          const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
+            String(r.scheduled_service_id || '') === String(visitId)
+            || (String(visitId) === primaryVisitId
+              && staleMeta?.serviceRecordId
+              && String(r.service_record_id || '') === String(staleMeta.serviceRecordId))
+          ) && invoiceBillsBaseApplication(r));
+          const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
+            visitApplicationBilled(visitId)
+            || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
+          ));
           if (feeProven && applicationProven) {
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and the parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`,
@@ -9287,7 +9307,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;
           const liveBesideLabel = liveBesideNow ? (liveBesideNow.invoice_number || liveBesideNow.id) : null;
           const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status);
-          if (covered) {
+          // Settled visit coverage does NOT settle a still-owed setup fee
+          // (Codex P0, pre-push round 15): when the detector reported the
+          // fee unminted, the alert stays ACTIVE carrying the fee-only
+          // instruction — fall through to the body build below instead of
+          // resolving away the fee's only follow-up.
+          if (covered && !terminalSetupFeeNote) {
             // Settled coverage: no NEW alert — and an already-parked one is
             // rewritten so its "bill/collect" instruction cannot cause a
             // duplicate collection (codex r11).
@@ -9300,7 +9325,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
             return true;
           }
-          const liveBesideNote = liveBesideNow
+          const liveBesideNote = covered
+            // Only reachable with terminalSetupFeeNote set: the visit
+            // charge is settled — never instruct another collection.
+            ? ` Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status} — the visit charge is SETTLED; do NOT bill or collect it again.`
+            : liveBesideNow
             ? (liveBesideNow.status === 'processing'
               ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
               : (terminalRestored
@@ -9510,9 +9539,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // resolved round means the obligation REOPENED (coverage
             // voided) — the alert must read active again or every later
             // lookup treats it as settled (Codex P0, pre-push round 9).
+            // Every parked visit is PERSISTED in parkedVisitIds (Codex
+            // P0, pre-push round 15): a cross-visit race suppressed this
+            // visit's mint too, so reconciliation must require its
+            // application billed before resolving — a note alone loses
+            // ownership of the second unbilled application.
+            const parkedVisitIds = [...new Set([
+              ...(Array.isArray(alreadyMeta?.parkedVisitIds) ? alreadyMeta.parkedVisitIds.map(String) : []),
+              ...(alreadyMeta?.scheduledServiceId ? [String(alreadyMeta.scheduledServiceId)] : []),
+              String(svc.id),
+            ])];
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody + crossVisitNote,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
           }
