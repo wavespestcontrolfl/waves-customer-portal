@@ -458,6 +458,10 @@ export function persistedSendDisposition(persisted) {
   if (status === "draft" && (persisted?.sent_at || persisted?.sms_sent_at)) {
     return "unknown";
   }
+  // 'sending' is a live claim, not delivery evidence — the server may still
+  // fail and restore the row to draft after this read. Reporting it as
+  // committed would close recovery on a send that never happened.
+  if (status === "sending") return "unknown";
   return status === "draft" ? "unsent" : "committed";
 }
 

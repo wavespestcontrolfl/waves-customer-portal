@@ -64,6 +64,17 @@ function makeDupChain(result, { updateResult = 1 } = {}) {
   return chain;
 }
 
+// The atomic batch-key registry (invoice_batch_keys): insert-or-ignore then
+// read-back. `existing` scripts the fingerprint an EARLIER batch bound to
+// the key (null = key unclaimed / claimed by this request).
+function makeRegistryChain(existing = null) {
+  const chain = {};
+  chain.insert = jest.fn(() => ({ onConflict: () => ({ ignore: async () => {} }) }));
+  chain.where = jest.fn(() => chain);
+  chain.first = jest.fn(async () => existing);
+  return chain;
+}
+
 describe('POST /:id/send error surface', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -186,7 +197,7 @@ describe('POST /batch idempotency (batchKey)', () => {
       { id: 'inv-existing', invoice_number: 'WPC-1', status: 'sent', payer_id: null },
       undefined,
     ];
-    db.mockImplementation(() => makeDupChain(dupResults.shift()));
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain(dupResults.shift()));
     InvoiceService.create.mockResolvedValue({
       id: 'inv-new', invoice_number: 'WPC-2', total: 100, token: 'tok-2', payer_id: null,
     });
@@ -240,7 +251,7 @@ describe('POST /batch idempotency (batchKey)', () => {
   });
 
   test('a keyed retry COMPLETES an unfinished immediate send on the existing draft row instead of stranding it', async () => {
-    db.mockImplementation(() => makeDupChain({
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
     }));
     InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true });
@@ -264,13 +275,16 @@ describe('POST /batch idempotency (batchKey)', () => {
     });
   });
 
-  test('a keyed retry releases a STALE sending claim back to draft without re-texting (crashed worker recovery)', async () => {
+  test('a keyed retry leaves a STALE sending claim to the central recovery — no status write, no re-text', async () => {
+    // The claim may have started from sent/viewed/overdue (a resend), and
+    // the crashed worker may have delivered — no status is safe to restore
+    // blindly here. processScheduledSends owns stale-claim recovery; this
+    // route only reports.
     const chain = makeDupChain({
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'sending', payer_id: null,
       updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     });
-    db.mockImplementation(() => chain);
-    db.fn = { now: jest.fn(() => 'NOW') };
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : chain);
 
     await withServer(async (baseUrl) => {
       const response = await post(baseUrl, '/batch', {
@@ -282,29 +296,44 @@ describe('POST /batch idempotency (batchKey)', () => {
       });
       const body = await response.json();
       expect(body.skipped_count).toBe(1);
-      expect(body.skipped[0].reason).toMatch(/stale send claim/i);
-      // Status restore only — release must NEVER deliver — and it stamps
-      // the durable uncertainty marker so no LATER automatic sender treats
-      // the released draft as provably unsent.
-      expect(chain.update).toHaveBeenCalledWith({
-        status: 'draft',
-        scheduled_send_error: expect.stringMatching(/stale send claim released/i),
-        updated_at: 'NOW',
-      });
+      expect(body.skipped[0].reason).toMatch(/crashed send claim.*automatic recovery/i);
+      expect(chain.update).not.toHaveBeenCalled();
       expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
       expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(InvoiceService.create).not.toHaveBeenCalled();
     });
   });
 
-  test('a keyed retry never auto-sends a draft carrying the stale-release marker (delivery uncertainty survives the release)', async () => {
-    // A prior retry released a crashed 'sending' claim: the row is draft
-    // again, but the crashed worker may have texted before dying. A later
-    // keyed retry with sendImmediately must NOT enter the draft auto-send
-    // branch — manual verification only.
-    db.mockImplementation(() => makeDupChain({
+  test('P0: the batch-key registry refuses the WHOLE request when the key is bound to a different payload (409, nothing created)', async () => {
+    // The atomic up-front claim: per-row checks alone would let customers
+    // without an existing row still be invoiced with the changed terms.
+    db.mockImplementation((table) => (table === 'invoice_batch_keys'
+      ? makeRegistryChain({ fingerprint: 'bound-to-a-different-payload' })
+      : makeDupChain(undefined)));
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1', 'cust-2'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000006',
+      });
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.code).toBe('BATCH_KEY_PAYLOAD_MISMATCH');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    });
+  });
+
+  test('reusing a batch key with a CHANGED payload is refused for existing rows (fingerprint mismatch)', async () => {
+    // The stored row carries the fingerprint of the ORIGINAL payload; this
+    // request's differing terms must fail the entry instead of silently
+    // keeping the old invoice while other customers get the new terms.
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
-      scheduled_send_error: 'stale send claim released — verify delivery before resending',
+      batch_fingerprint: 'fingerprint-of-a-different-payload',
     }));
 
     await withServer(async (baseUrl) => {
@@ -316,11 +345,10 @@ describe('POST /batch idempotency (batchKey)', () => {
         batchKey: 'b7f9c2d4-0000-4000-8000-000000000005',
       });
       const body = await response.json();
-      expect(body.skipped_count).toBe(1);
-      expect(body.skipped[0].reason).toMatch(/verify whether the customer was texted/i);
-      expect(body.skipped[0].sent).toBeUndefined();
+      expect(body.failed_count).toBe(1);
+      expect(body.failed[0].error).toMatch(/different payload/i);
+      expect(body.skipped_count).toBe(0);
       expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
-      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(InvoiceService.create).not.toHaveBeenCalled();
     });
   });
@@ -330,7 +358,7 @@ describe('POST /batch idempotency (batchKey)', () => {
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'sending', payer_id: null,
       updated_at: new Date().toISOString(),
     });
-    db.mockImplementation(() => chain);
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : chain);
 
     await withServer(async (baseUrl) => {
       const response = await post(baseUrl, '/batch', {
@@ -349,7 +377,7 @@ describe('POST /batch idempotency (batchKey)', () => {
   });
 
   test('a keyed retry never re-texts an already-delivered row', async () => {
-    db.mockImplementation(() => makeDupChain({
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'sent', payer_id: null,
     }));
     await withServer(async (baseUrl) => {
@@ -372,7 +400,7 @@ describe('POST /batch idempotency (batchKey)', () => {
     // Pre-check SELECT sees nothing (both requests passed it), insert loses on
     // invoices_customer_batch_key_uniq, re-select finds the winner's row.
     const dupResults = [undefined, { id: 'inv-winner', invoice_number: 'WPC-9' }];
-    db.mockImplementation(() => makeDupChain(dupResults.shift()));
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain(dupResults.shift()));
     const uniqueErr = new Error('duplicate key value violates unique constraint "invoices_customer_batch_key_uniq"');
     uniqueErr.code = '23505';
     uniqueErr.constraint = 'invoices_customer_batch_key_uniq';

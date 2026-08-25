@@ -226,8 +226,8 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(persistedSendDisposition({ status: "draft" })).toBe("unsent");
   });
 
-  it("any committed/delivering state blocks the auto-resend prompt (duplicate comms hazard)", () => {
-    for (const status of ["sending", "scheduled", "sent", "viewed", "overdue", "paid", "prepaid"]) {
+  it("any committed state blocks the auto-resend prompt (duplicate comms hazard)", () => {
+    for (const status of ["scheduled", "sent", "viewed", "overdue", "paid", "prepaid"]) {
       expect(persistedSendDisposition({ status })).toBe("committed");
     }
   });
@@ -235,6 +235,10 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
   it("an unverifiable row fails closed as unknown", () => {
     expect(persistedSendDisposition(null)).toBe("unknown");
     expect(persistedSendDisposition({})).toBe("unknown");
+  });
+
+  it("a live 'sending' claim is unknown, not committed — the server can still fail and restore draft", () => {
+    expect(persistedSendDisposition({ status: "sending" })).toBe("unknown");
   });
 
   it("a draft row with a delivery stamp is NOT provably unsent (provider-success/db-failure)", () => {

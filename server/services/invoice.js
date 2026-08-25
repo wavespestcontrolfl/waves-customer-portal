@@ -894,6 +894,10 @@ const InvoiceService = {
       // created; the partial unique index (customer_id, batch_key) makes the
       // concurrent-retry case lose atomically at the DB.
       batchKey = null,
+      // Canonical hash of the batch payload the key rode in with — a later
+      // keyed duplicate with a DIFFERENT fingerprint is a misused key, not a
+      // retry (the batch route refuses it).
+      batchFingerprint = null,
       // skipAccrual: this invoice must NOT accrue to a payer statement even for a
       // NET-terms payer — set by callers that immediately settle the invoice
       // (annual-prepay, paid in the same flow) or create a throwaway preview
@@ -1441,6 +1445,7 @@ const InvoiceService = {
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...(batchKey ? { batch_key: batchKey } : {}),
+          ...(batchKey && batchFingerprint ? { batch_fingerprint: batchFingerprint } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
@@ -2312,9 +2317,10 @@ const InvoiceService = {
         // would make the UI's "still draft ⇒ provably unsent ⇒ offer
         // Resend" check duplicate a delivered SMS, and reversing the credit
         // would refund a message that went out. Retry the finalize once;
-        // if it still fails, leave the 'sending' claim in place (the
-        // stale-claim release paths tell the operator to verify delivery
-        // before resending) and report the send as delivered.
+        // if it still fails, leave the 'sending' claim in place — the
+        // stale-claim recovery in processScheduledSends PARKS such rows for
+        // operator review (delivery unverified, no automatic resend) — and
+        // report the send as delivered.
         logger.error(
           `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
         );
@@ -2731,12 +2737,22 @@ const InvoiceService = {
   },
 
   async processScheduledSends({ limit = 25 } = {}) {
+    // Stale-claim recovery PARKS the row instead of re-arming it: a claim
+    // that died mid-send may have died AFTER the provider accepted the SMS
+    // (a delivered send whose finalize failed is deliberately left under its
+    // claim — see sendViaSMS's post-delivery recovery), and DB state cannot
+    // distinguish that from a crash before delivery. Clearing
+    // scheduled_send_at keeps the row out of the due query below, so an
+    // ambiguous claim is surfaced for operator review (fail closed) rather
+    // than automatically re-texting a message the customer may already have.
     await db("invoices")
       .where({ status: "sending" })
       .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
       .update({
         status: "scheduled",
-        scheduled_send_error: "Recovered from stale sending claim",
+        scheduled_send_at: null,
+        scheduled_send_error:
+          "Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually",
         updated_at: new Date(),
       });
 

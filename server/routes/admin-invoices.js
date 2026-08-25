@@ -682,11 +682,43 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
     // stale claim (claimInvoiceForSend stamps updated_at when it takes the
     // claim); a live send finishes in seconds, not minutes.
     const STALE_SEND_CLAIM_MS = 15 * 60 * 1000;
-    // Durable uncertainty marker a stale-claim release stamps on the row:
-    // delivery evidence was lost with the crashed worker, so automatic
-    // senders must treat the draft as possibly-delivered. Cleared by the
-    // next successful send's finalize (scheduled_send_error: null).
-    const STALE_CLAIM_RELEASE_NOTE = 'stale send claim released — verify delivery before resending';
+    // Canonical fingerprint of this batch's payload, persisted beside the
+    // key on every created row: a keyed duplicate whose fingerprint differs
+    // is the SAME key reused with CHANGED terms — a misuse, not a retry.
+    // Without this, a changed re-submit silently kept the old invoices for
+    // existing customers while minting the new terms for the rest.
+    const batchFingerprint = batchKey
+      ? require('crypto').createHash('sha256').update(JSON.stringify({
+        // The customer set is part of the request's identity: without it,
+        // reusing a key with an expanded/changed list would bill (and text)
+        // the new customers under the old key. Sorted-unique so ordering
+        // never breaks a legitimate retry.
+        customerIds: [...new Set(customerIds.map(String))].sort(),
+        title, lineItems, notes: notes || null, dueDate: dueDate || null,
+        taxRate: taxRate ?? null, sendImmediately: !!sendImmediately,
+      })).digest('hex')
+      : null;
+    // Claim the key ATOMICALLY for the whole batch BEFORE creating anything:
+    // the registry PK makes the first request bind the key to its payload,
+    // and every later (or concurrent) request with a different payload is
+    // refused up front — a per-row check alone lets one key mint invoices
+    // with conflicting terms across the customer loop. Same key + same
+    // fingerprint proceeds (that IS the retry the key exists for).
+    if (batchKey) {
+      await db('invoice_batch_keys')
+        .insert({ batch_key: batchKey, fingerprint: batchFingerprint })
+        .onConflict('batch_key')
+        .ignore();
+      const registered = await db('invoice_batch_keys')
+        .where({ batch_key: batchKey })
+        .first('fingerprint');
+      if (registered && registered.fingerprint !== batchFingerprint) {
+        return res.status(409).json({
+          error: 'This batch key was already used with a DIFFERENT payload (title/line items/terms changed). Use a fresh batch key for a new billing run.',
+          code: 'BATCH_KEY_PAYLOAD_MISMATCH',
+        });
+      }
+    }
 
     for (const customerId of customerIds) {
       // Shared disposition for a keyed duplicate, whether it surfaced on the
@@ -703,43 +735,35 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           invoiceNumber: existing.invoice_number,
           reason,
         };
-        // A row stuck in 'sending' is either a live concurrent send or a
-        // crashed worker's stale claim. A stale claim would otherwise be
-        // locked FOREVER (manual sends reject 'sending'): release it back
-        // to draft — a pure status restore, no delivery — and tell the
-        // operator. We deliberately do NOT auto-resend a released claim:
-        // the crashed worker may have texted before dying, and without
-        // provider evidence an automatic retry risks duplicate customer
-        // comms (fail closed; the operator resends with eyes on it).
-        if (existing.status === 'sending') {
-          const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
-          if (claimAgeMs > STALE_SEND_CLAIM_MS) {
-            // The release stamps a durable uncertainty marker: the crashed
-            // worker may have delivered before dying, so the row must not
-            // look like a provably-unsent draft to ANY later automatic
-            // sender (a later keyed retry's draft branch below included).
-            // The marker clears on the next successful send's finalize.
-            const released = await db('invoices')
-              .where({ id: existing.id, status: 'sending' })
-              .update({
-                status: 'draft',
-                scheduled_send_error: STALE_CLAIM_RELEASE_NOTE,
-                updated_at: db.fn.now(),
-              });
-            entry.reason = released
-              ? 'Stale send claim from a crashed batch worker released back to draft — verify whether the customer was texted, then resend manually'
-              : 'Send state changed while checking a stale claim — review the invoice before resending';
-          } else {
-            entry.reason = 'A send for this invoice is in progress right now — not re-sent';
-          }
-          skipped.push(entry);
+        // Same key, different payload = a MISUSED key, not a retry: refuse
+        // it loudly instead of silently keeping the old invoice's terms for
+        // this customer while other customers get the changed terms. A
+        // fingerprint-less row (pre-column) can't be compared — treated as
+        // a retry, matching the pre-fingerprint behavior.
+        if (batchFingerprint && existing.batch_fingerprint
+          && existing.batch_fingerprint !== batchFingerprint) {
+          failed.push({
+            customerId,
+            invoiceId: existing.id,
+            invoiceNumber: existing.invoice_number,
+            error: 'This batch key was already used with a DIFFERENT payload (title/line items/terms changed). Use a fresh batch key for a new billing run.',
+          });
           return;
         }
-        // A draft carrying the stale-release marker is NOT provably unsent —
-        // an earlier crashed worker may have delivered. Never auto-send it;
-        // the operator verifies delivery and resends with eyes on it.
-        if (existing.status === 'draft' && existing.scheduled_send_error === STALE_CLAIM_RELEASE_NOTE) {
-          entry.reason = 'This invoice had a crashed send released earlier — verify whether the customer was texted, then resend manually';
+        // A row stuck in 'sending' is either a live concurrent send or a
+        // crashed worker's stale claim. Either way this route does NOT touch
+        // it: the crashed worker may have delivered before dying, the claim
+        // can originate from sent/viewed/overdue resends (so no status here
+        // is safe to restore blindly), and stale-claim recovery already has
+        // one central owner — processScheduledSends flips >10-min 'sending'
+        // rows to 'scheduled' with a recovery note on every cron pass.
+        // Report it and let that mechanism run; the operator verifies
+        // delivery before any manual resend.
+        if (existing.status === 'sending') {
+          const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
+          entry.reason = claimAgeMs > STALE_SEND_CLAIM_MS
+            ? 'This invoice has a crashed send claim — automatic recovery will park it for review within minutes; verify whether the customer was texted before resending'
+            : 'A send for this invoice is in progress right now — not re-sent';
           skipped.push(entry);
           return;
         }
@@ -774,7 +798,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'scheduled_send_error');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
           if (existing) {
             await settleKeyedDuplicate(existing,
               'This batch key already created an invoice for this customer (retry detected)');
@@ -784,6 +808,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         const invoice = await InvoiceService.create({
           customerId, title, lineItems, notes, dueDate, taxRate,
           batchKey: batchKey || null,
+          batchFingerprint,
         });
         let sendResult = null;
         if (sendImmediately) {
@@ -827,7 +852,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           // stale claim, leave live sends alone.
           const winner = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'scheduled_send_error');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
           if (winner) {
             await settleKeyedDuplicate(winner,
               'This batch key already created an invoice for this customer (concurrent retry)');
