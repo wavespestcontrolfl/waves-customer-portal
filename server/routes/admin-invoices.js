@@ -1421,6 +1421,27 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /:id/unvoid — restore an accidentally-voided invoice to an editable,
+// collectible draft. InvoiceService.unvoidInvoice fails closed on any void
+// that returned money state (deposit credit, prepay term, finalized
+// statement, live/unverifiable payment session) — those refusals are
+// operator-actionable conflicts, surfaced as 409 so the UI toasts the
+// reason (mirrors the /void mapper).
+router.post('/:id/unvoid', requireAdmin, async (req, res, next) => {
+  try {
+    const invoice = await InvoiceService.unvoidInvoice(req.params.id);
+    res.json(invoice);
+  } catch (err) {
+    if (/Invoice not found/i.test(err.message)) {
+      return res.status(404).json({ error: err.message });
+    }
+    if (/^Cannot unvoid|^Only a voided invoice|finalized payer statement|resolve it before unvoiding|live payment session|re-check and retry/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
 // POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.
 // Creates (or re-activates) the linked annual_prepay_terms row and stamps
 // invoices.annual_prepay_term_id — that link is what surfaces the coverage

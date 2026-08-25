@@ -4340,6 +4340,150 @@ const InvoiceService = {
   },
 
   /**
+   * Restore a VOIDED invoice to an editable, collectible 'draft' — the
+   * operator's undo for an accidental void. Deliberately narrow: any void
+   * that returned money state REFUSES (fail closed) and names the correct
+   * path instead of trying to re-take the money here:
+   *   - deposit_credit line: voidInvoice's ledger restore re-opened the
+   *     deposit rows (they may have rolled forward onto another invoice
+   *     since) but the negative line stays on this invoice — restoring it
+   *     would collect a total reduced by credit the ledger no longer holds
+   *     against it. The replacement path is a NEW invoice, where the
+   *     deposit credit re-applies through the normal roll-forward.
+   *   - annual prepay term: voidInvoice synced the term; the term flow owns
+   *     its prepay invoice lifecycle.
+   * Applied ACCOUNT credit needs no guard: restoreAccountCreditForVoidedInvoice
+   * zeroed credit_applied (and the prepaid/paid stamps) on this row when it
+   * returned the balance, so the restored draft collects its full total and
+   * the operator can re-apply credit deliberately. A payment plan cancelled
+   * at void time stays cancelled — recreate it on the restored invoice.
+   */
+  async unvoidInvoice(id) {
+    const current = await db("invoices").where({ id }).first();
+    if (!current) throw new Error("Invoice not found");
+    if (current.status !== "void") {
+      throw new Error(
+        `Only a voided invoice can be unvoided (current status: ${current.status})`,
+      );
+    }
+    if (current.annual_prepay_term_id) {
+      throw new Error(
+        "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
+      );
+    }
+    if (invoiceHasDepositCreditLine(current)) {
+      throw new Error(
+        "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly",
+      );
+    }
+    // Phase 2 mirror of voidInvoice: a voided line was EXCLUDED from its
+    // statement's rollup — restoring it under a finalized/sent statement
+    // would change the document under the frozen total.
+    if (current.payer_statement_id) {
+      const stmt = await db("payer_statements")
+        .where({ id: current.payer_statement_id })
+        .first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error(
+          "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
+        );
+      }
+    }
+    // Stale pay-session stamp triage (fail closed, mirrors voidInvoice's):
+    // void cancels the open PaymentIntent but keeps the stamp on this row.
+    // Verify it is really dead before clearing — restoring a collectible
+    // invoice beside a live client secret would let a stale pay page charge
+    // an amount nothing reconciles.
+    if (current.stripe_payment_intent_id) {
+      const StripeService = require("./stripe");
+      let pi;
+      try {
+        pi = await StripeService.retrievePaymentIntent(
+          current.stripe_payment_intent_id,
+        );
+      } catch (e) {
+        throw new Error(
+          `Open payment session ${current.stripe_payment_intent_id} could not be verified (${e.message}); resolve it before unvoiding`,
+        );
+      }
+      if (!pi) {
+        throw new Error(
+          `Open payment session ${current.stripe_payment_intent_id} could not be verified (payment service unavailable); resolve it before unvoiding`,
+        );
+      }
+      if (pi.status !== "canceled") {
+        throw new Error(
+          `This invoice still has a live payment session (${pi.status}); resolve it before unvoiding`,
+        );
+      }
+    }
+    let invoice = null;
+    await db.transaction(async (trx) => {
+      // Statement re-check under lock (a concurrent close could finalize it
+      // between the fast pre-check above and this write).
+      if (current.payer_statement_id) {
+        const locked = await trx("payer_statements")
+          .where({ id: current.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error(
+            "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
+          );
+        }
+      }
+      const [updated] = await trx("invoices")
+        .where({ id, status: "void" })
+        .update({
+          status: "draft",
+          // A draft can't stay tucked under the Archived filter.
+          archived_at: null,
+          // Verified-canceled above; a kept stamp would trip the edit
+          // guard's "already started paying" fence forever.
+          stripe_payment_intent_id: null,
+          scheduled_send_at: null,
+          scheduled_send_attempts: 0,
+          scheduled_send_error: null,
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        })
+        .returning("*");
+      if (!updated) {
+        throw new Error("Invoice status changed while unvoiding — re-check and retry");
+      }
+      // Money-landed-after-void guard, on the FRESH row under the lock
+      // (mirrors voidInvoice's ordering): a late webhook can record a
+      // payment against a voided row without flipping the status this
+      // update keys on. Rolling back beats restoring beside collected
+      // money, which would double-collect.
+      const appliedPayment = await trx("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
+        .first("id");
+      if (updated.payment_recorded_at || appliedPayment) {
+        throw new Error(
+          `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
+        );
+      }
+      // Phase 2: an accrued draft re-enters its still-open statement total in
+      // the same transaction (rollupStatement excludes only status='void').
+      if (updated.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(
+          updated.payer_statement_id,
+          trx,
+        );
+      }
+      invoice = updated;
+    });
+    logger.info(`[invoice] Unvoided to draft: ${invoice.invoice_number}`);
+    // Coverage-changing transition (mirrors void/edit): the restored charge
+    // may satisfy the setup-fee alert again.
+    await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
+    return invoice;
+  },
+
+  /**
    * Settle a covered visit's PRE-EXISTING invoice as NON-CASH annual-prepay
    * coverage — the money was already collected on the term's own prepay invoice,
    * so this books NO `payments` row (which would double-count revenue; every

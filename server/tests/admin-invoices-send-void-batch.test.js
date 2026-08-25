@@ -20,6 +20,7 @@ jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(),
   sendViaSMSAndEmail: jest.fn(),
   voidInvoice: jest.fn(),
+  unvoidInvoice: jest.fn(),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -180,6 +181,55 @@ describe('POST /:id/void refusal mapping', () => {
     InvoiceService.voidInvoice.mockRejectedValue(new Error('connection refused'));
     await withServer(async (baseUrl) => {
       const response = await post(baseUrl, '/inv-1/void');
+      expect(response.status).toBe(500);
+    });
+  });
+});
+
+// Same contract for the undo: every business refusal InvoiceService.unvoidInvoice
+// throws must surface as an operator-actionable 409 toast, pinned VERBATIM.
+describe('POST /:id/unvoid refusal mapping', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each([
+    ['not void', 'Only a voided invoice can be unvoided (current status: sent)'],
+    ['annual prepay term', 'Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead'],
+    ['deposit credit returned', "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly"],
+    ['finalized payer statement', 'This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one'],
+    ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before unvoiding'],
+    ['live payment session', 'This invoice still has a live payment session (requires_capture); resolve it before unvoiding'],
+    ['payment landed after void', 'Cannot unvoid an invoice with payment already applied (payment pay-9)'],
+    ['status changed mid-unvoid', 'Invoice status changed while unvoiding — re-check and retry'],
+  ])('surfaces the %s refusal as a 409 conflict', async (_label, message) => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error(message));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ error: message });
+    });
+  });
+
+  test('a missing invoice maps to 404', async () => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error('Invoice not found'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(404);
+    });
+  });
+
+  test('a successful restore returns the draft invoice', async () => {
+    InvoiceService.unvoidInvoice.mockResolvedValue({ id: 'inv-1', status: 'draft' });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ id: 'inv-1', status: 'draft' });
+    });
+  });
+
+  test('a non-refusal failure still surfaces as a server error (mapper is not over-broad)', async () => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error('connection refused'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
       expect(response.status).toBe(500);
     });
   });
