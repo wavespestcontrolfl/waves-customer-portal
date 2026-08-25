@@ -64,7 +64,7 @@ describe('deriveIrrigationInchesPerWeek', () => {
     ['zero minutes', { runMinutes: 0, wateringDays: ['Mon'], systemType: ['spray'] }, 'missing_minutes'],
     ['absurd minutes', { runMinutes: MAX_RUN_MINUTES + 1, wateringDays: ['Mon'], systemType: ['spray'] }, 'missing_minutes'],
     ['no days', { runMinutes: 20, wateringDays: [], systemType: ['spray'] }, 'missing_days'],
-    ['non-canonical days only', { runMinutes: 20, wateringDays: ['Monday'], systemType: ['spray'] }, 'missing_days'],
+    ['unrecognizable days only', { runMinutes: 20, wateringDays: ['whenever', 'weekends'], systemType: ['spray'] }, 'missing_days'],
     ['no head type', { runMinutes: 20, wateringDays: ['Mon'], systemType: [] }, 'missing_head_type'],
     ['legacy empty scalar', { runMinutes: 20, wateringDays: ['Mon'], systemType: '' }, 'missing_head_type'],
     ['mixed heads', { runMinutes: 20, wateringDays: ['Mon'], systemType: ['spray', 'rotor'] }, 'mixed_head_types'],
