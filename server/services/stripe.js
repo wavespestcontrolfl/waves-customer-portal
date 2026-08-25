@@ -2285,6 +2285,16 @@ const StripeService = {
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
 
+        // Plan completion rides the SAME settlement transaction (codex r8
+        // P1): the post-commit best-effort call can crash or fail and leave
+        // a paid invoice carrying an active plan (edit/credit-locked, with
+        // no retry path). In-trx, the helper's invoice lock is reentrant
+        // and its settled gate sees this transaction's own paid flip.
+        // 'processing' (ACH) settles later via the webhook's own completion.
+        if (status === 'paid') {
+          await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+        }
+
         [paymentRecord] = await trx('payments').insert({
           customer_id: invoice.customer_id,
           payment_method_id: card.id,

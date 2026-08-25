@@ -211,6 +211,17 @@ const LatePaymentService = {
         const InvoiceFollowUps = require('./invoice-followups');
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
         if (await InvoiceFollowUps.isDunningStopped(inv.id)) { skipped++; continue; }
+        // An ACTIVE payment plan is a dunning stop in itself (codex PR r8
+        // P1): an invoice can carry a plan with NO sequence row at all
+        // (nothing existed to stop at plan creation), and the two checks
+        // above are blind to that shape — the plan customer would keep
+        // getting legacy overdue reminders. Fail OPEN on a read error
+        // (matching the try/catch stance here): a missed skip dunning a
+        // plan customer once beats silently never dunning anyone.
+        const activePlan = await db('payment_plans')
+          .where({ invoice_id: inv.id, status: 'active' })
+          .first('id');
+        if (activePlan) { skipped++; continue; }
       } catch { /* fall through if module unavailable */ }
 
       // Divert micro-deposit-blocked invoices to a verification re-nudge instead
