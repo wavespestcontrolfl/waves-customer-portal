@@ -29,6 +29,7 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
+const { visitsPerYearForCadence } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
@@ -3274,9 +3275,10 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   return inferred;
 }
 
-// Visits/year the derived annual-prepay coverage records. Values mirror
-// inferCoverageCadence (annual-prepay-renewals.js) so coverage aligns with
-// the seeded series. A residential-pest accepted selection outranks the
+// Visits/year the derived annual-prepay coverage records. Cadence→count goes
+// through the shared prepay-cadence authority (the same mapping
+// annual-prepay-renewals points to) so coverage aligns with the seeded
+// series. A residential-pest accepted selection outranks the
 // line's stale quote-time count (the acceptedPestSelectionVisits doctrine
 // above — the fee choke point got that fix after incident 2026-08-18; this
 // derivation didn't, so a quarterly-built quote accepted bi-monthly minted a
@@ -3286,13 +3288,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
 // whose own cadence FIELD contradicts the acceptance still resolves that
 // field's cadence, coverage must track the real series, and the line count
 // keeps deciding there.
-const PREPAY_CADENCE_VISITS = {
-  monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
-};
 function annualPrepayCoverageVisits(svc = {}, cadence, acceptedPlanFrequency) {
+  const cadenceVisits = visitsPerYearForCadence(cadence);
   const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
-  if (acceptedVisits && acceptedVisits === PREPAY_CADENCE_VISITS[cadence]) return acceptedVisits;
-  return visitsPerYearForRecurringService(svc) || PREPAY_CADENCE_VISITS[cadence] || null;
+  if (acceptedVisits && acceptedVisits === cadenceVisits) return acceptedVisits;
+  return visitsPerYearForRecurringService(svc) || cadenceVisits || null;
 }
 
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
