@@ -583,11 +583,36 @@ class GoogleBusinessService {
         // removal-reconcile stamp that committed before the lock was free
         // must win at the atomic write. Zero rows = a manual link stands or
         // the review is gone; either way the unlinked bell would be noise.
-        const updated = await db('google_reviews')
-          .where({ id: live.id })
-          .whereNull('customer_id')
-          .whereNull('missing_since')
-          .update({ customer_id: match.customerId, link_source: 'click_auto' });
+        let updated = 0;
+        try {
+          await db.transaction(async (trx) => {
+            updated = await trx('google_reviews')
+              .where({ id: live.id })
+              .whereNull('customer_id')
+              .whereNull('missing_since')
+              .update({ customer_id: match.customerId, link_source: 'click_auto' });
+            if (!updated) return;
+            // Write-boundary re-validation (pre-push P1 r5): /go records
+            // clicks WITHOUT this lock, so a competing click can commit
+            // between the correlation read above and this write. Re-running
+            // the correlation inside the transaction sees every click
+            // committed since; changed evidence rolls the link back.
+            // ACCEPTED RESIDUAL: a click that commits after this recheck
+            // but before this transaction commits is invisible — the
+            // window is milliseconds, the link is undoable in Reviews, and
+            // serializing the customer-facing /go redirect behind sync
+            // locks would trade a paper-thin race for real latency.
+            const recheck = await findConfidentClickMatch(row, { conn: trx });
+            if (!recheck || recheck.customerId !== match.customerId) {
+              const err = new Error('click evidence changed at write boundary');
+              err.code = 'CLICK_EVIDENCE_CHANGED';
+              throw err;
+            }
+          });
+        } catch (err) {
+          if (err?.code === 'CLICK_EVIDENCE_CHANGED') return { nomatch: true };
+          throw err;
+        }
         if (!updated) return { handled: true };
         await this._markCustomerLeftReview(match.customerId);
         // Same attribution side effect as the name-match and manual paths —
