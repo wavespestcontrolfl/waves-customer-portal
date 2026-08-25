@@ -395,6 +395,40 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
     }
   }
 
+  // UNATTACHED draft/scheduled invoices (bill-by-invoice accepts persist
+  // with NULL scheduled_service_id — estimate-public leaves acceptLinkedSsId
+  // null on newly selected slots), matched by their own labels since no
+  // visit links them (codex #3484 r12 P2). Same CAS + frozen-statement
+  // guards; recorded with a null visit so down() reverts them under the
+  // still-draft guard alone.
+  if (await knex.schema.hasTable('invoices')) {
+    const unattached = await knex('invoices')
+      .whereNull('scheduled_service_id')
+      .whereIn('status', ['draft', 'scheduled'])
+      .where(function labelMatch() {
+        this.whereRaw('(title = ? OR title LIKE ? OR service_type = ? OR service_type LIKE ? OR line_items::text LIKE ?)',
+          [fromName, `${fromName} %`, fromName, `${fromName} (%`, `%"${fromName}"%`]);
+      })
+      .select('id', 'title', 'line_items', 'service_type', 'payer_statement_id',
+        knex.raw('updated_at::text AS updated_at_cas'));
+    const frozenUnattached = await frozenPayerStatementIds(knex, unattached);
+    for (const inv of unattached) {
+      if (rec.invoices[inv.id]) continue;
+      if (inv.payer_statement_id && frozenUnattached.has(inv.payer_statement_id)) continue;
+      const result = relabelInvoiceSnapshot(inv, fromName, toName);
+      if (!result) continue;
+      let casQuery = knex('invoices')
+        .where({ id: inv.id })
+        .whereIn('status', ['draft', 'scheduled']);
+      casQuery = inv.updated_at_cas == null
+        ? casQuery.whereNull('updated_at')
+        : casQuery.whereRaw('updated_at::text = ?', [inv.updated_at_cas]);
+      const count = await casQuery.update({ ...result.patch, updated_at: knex.fn.now() });
+      if (!count) continue;
+      rec.invoices[inv.id] = { ...result.changed, scheduled_service_id: null };
+    }
+  }
+
   // Reminder registrations render their own service_type in the 72h/24h
   // senders. Sweep same-slot sibling rows too: the reminder merger can
   // store the combined label on the EARLIER visit's row (exemplar r5).
@@ -521,7 +555,44 @@ function mergeOwnershipState(prior, next) {
     ...(Array.isArray(prior.roachDisplayChanged) ? prior.roachDisplayChanged : []),
     ...(Array.isArray(next.roachDisplayChanged) ? next.roachDisplayChanged : []),
   ])];
+  const foamById = new Map();
+  for (const rec of [
+    ...(Array.isArray(prior.foamEngineKeys) ? prior.foamEngineKeys : []),
+    ...(Array.isArray(next.foamEngineKeys) ? next.foamEngineKeys : []),
+  ]) {
+    if (rec && rec.id) foamById.set(rec.id, rec);
+  }
+  merged.foamEngineKeys = [...foamById.values()];
   return merged;
+}
+
+// The renamed foam labels are emitted unconditionally by the runtime
+// producers in this PR, but an admin-customized foam catalog NAME skips its
+// rename (owner data) and the name candidates can't bridge new-label →
+// custom-name — the durable engine-key link keeps such rows resolvable
+// (codex #3484 r12 P2). Same admin-preserving contract as 20260810000002:
+// only NULL engine_keys are stamped, ownership recorded by row id.
+const FOAM_ENGINE_KEY_SEEDS = [
+  { service_key: 'foam_drill', engine_keys: ['foam_drill'] },
+  { service_key: 'foam_recurring', engine_keys: ['foam_recurring'] },
+];
+
+async function stampFoamEngineKeys(knex) {
+  const stamped = [];
+  if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return stamped;
+  for (const seed of FOAM_ENGINE_KEY_SEEDS) {
+    const row = await knex('services')
+      .where({ service_key: seed.service_key })
+      .whereNull('engine_keys')
+      .first('id');
+    if (!row) continue;
+    const count = await knex('services')
+      .where({ id: row.id })
+      .whereNull('engine_keys')
+      .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
+    if (count) stamped.push({ service_key: seed.service_key, id: row.id, engine_keys: seed.engine_keys });
+  }
+  return stamped;
 }
 
 exports.up = async function up(knex) {
@@ -530,6 +601,7 @@ exports.up = async function up(knex) {
   for (const [serviceKey, fromName, toName] of RENAMES) {
     state.renames[serviceKey] = await fanOutRename(knex, serviceKey, fromName, toName);
   }
+  state.foamEngineKeys = await stampFoamEngineKeys(knex);
   state.roachDisplayChanged = await renameRoachDisplayNames(knex, ROACH_DISPLAY_FROM, ROACH_DISPLAY_TO);
   const prior = await loadState(knex);
   await saveState(knex, mergeOwnershipState(prior, state));
@@ -774,6 +846,19 @@ exports.down = async function down(knex) {
           });
         }
       }
+    }
+  }
+
+  // Foam engine-key reversal: only rows this run stamped, still carrying
+  // the exact seeded value (an admin edit since up() survives).
+  if (Array.isArray(state.foamEngineKeys) && state.foamEngineKeys.length
+    && (await knex.schema.hasColumn('services', 'engine_keys'))) {
+    for (const rec of state.foamEngineKeys) {
+      if (!rec || !rec.id || !Array.isArray(rec.engine_keys)) continue;
+      await knex('services')
+        .where({ id: rec.id, service_key: rec.service_key })
+        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(rec.engine_keys)])
+        .update({ engine_keys: null, updated_at: knex.fn.now() });
     }
   }
 

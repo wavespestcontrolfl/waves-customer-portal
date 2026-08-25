@@ -24,8 +24,8 @@ function seedDb() {
   return {
     services: [
       { id: 'svc-roach', service_key: 'cockroach_control', name: ROACH_OLD, updated_at: 'orig' },
-      { id: 'svc-foam', service_key: 'foam_drill', name: FOAM_OLD, updated_at: 'orig' },
-      { id: 'svc-foamr', service_key: 'foam_recurring', name: 'Recurring Foam Treatment', updated_at: 'orig' },
+      { id: 'svc-foam', service_key: 'foam_drill', name: FOAM_OLD, engine_keys: null, updated_at: 'orig' },
+      { id: 'svc-foamr', service_key: 'foam_recurring', name: 'Recurring Foam Treatment', engine_keys: null, updated_at: 'orig' },
       // Admin-edited: shipped name gone — rename AND its fanout must skip.
       { id: 'svc-guar', service_key: 'rodent_guarantee', name: 'Rodent Guarantee Plan (Adam)', updated_at: 'orig' },
       { id: 'svc-general', service_key: 'general_pest', name: 'General Pest Control', updated_at: 'orig' },
@@ -107,6 +107,17 @@ function seedDb() {
         updated_at: 'inv-t0',
         line_items: JSON.stringify([{ description: ROACH_OLD, amount: 350 }]),
       },
+      // UNATTACHED draft (bill-by-invoice accept, NULL scheduled_service_id)
+      // — matched by its own labels (codex r12 P2).
+      {
+        id: 'inv-unattached',
+        scheduled_service_id: null,
+        status: 'draft',
+        title: ROACH_OLD,
+        service_type: ROACH_OLD,
+        updated_at: 'inv-t0',
+        line_items: JSON.stringify([{ description: ROACH_OLD, amount: 350 }]),
+      },
       {
         id: 'inv-sent',
         scheduled_service_id: 'v-open-2',
@@ -172,12 +183,23 @@ function fakeKnex(db, { missingTables = [] } = {}) {
           const s = String(r[v.col || 'service_type'] || '');
           return s === v.exact || s.startsWith(v.prefix);
         }
+        if (k === 'engine_keys_cas') {
+          const cur = Array.isArray(r.engine_keys) ? r.engine_keys
+            : (() => { try { return JSON.parse(r.engine_keys); } catch { return null; } })();
+          return JSON.stringify(cur) === v;
+        }
         return r[k] === v;
       }))
       && rawWheres.every((rw) => String(r.updated_at) === String(rw.bindings[0]))
     );
     const q = {
-      where(cond) { filters.push(cond); return q; },
+      where(cond) {
+        // Grouped-where callbacks carry only label OR-filters the per-row
+        // swap re-checks — safe to ignore in the fake.
+        if (typeof cond === 'function') return q;
+        filters.push(cond);
+        return q;
+      },
       whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
@@ -189,6 +211,12 @@ function fakeKnex(db, { missingTables = [] } = {}) {
           filters.push({ label_or_qualified: { col, exact, prefix } });
           return q;
         }
+        if (/engine_keys\s*=\s*\?::jsonb/.test(sql)) {
+          const expected = bindings[0];
+          filters.push({ engine_keys_cas: expected });
+          return q;
+        }
+        if (/title = \?/.test(sql)) return q; // unattached-invoice label OR-filter — per-row swap re-checks
         if (!/updated_at::text\s*=\s*\?/.test(sql)) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
         rawWheres.push({ sql, bindings });
         return q;
@@ -239,6 +267,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
   };
   knex.schema = {
     hasTable: async (t) => !missingTables.includes(t) && t in db,
+    hasColumn: async (t, c) => t in db && !missingTables.includes(t) && c !== undefined,
   };
   knex.fn = { now: () => 'NOW' };
   knex.raw = (sql, bindings) => {
@@ -354,6 +383,24 @@ describe('20260825000010 service name suffix renames', () => {
     expect(invoiceById(db, 'inv-frozen').title).toBe(ROACH_OLD);
     // Formatted invoice-mode title: the label swaps as a bounded segment.
     expect(invoiceById(db, 'inv-fmt').title).toBe(`${ROACH_NEW} — one-time service`);
+    // Unattached bill-by-invoice draft relabels by its own labels.
+    expect(invoiceById(db, 'inv-unattached').title).toBe(ROACH_NEW);
+  });
+
+  test('up() stamps foam engine keys (admin-customized names stay resolvable); down() clears only its stamps', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    expect(JSON.parse(svc(db, 'foam_drill').engine_keys)).toEqual(['foam_drill']);
+    expect(JSON.parse(svc(db, 'foam_recurring').engine_keys)).toEqual(['foam_recurring']);
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'foam_drill').engine_keys).toBeNull();
+
+    // Pre-stamped (admin/PR2) arrays are never claimed nor cleared.
+    const db2 = seedDb();
+    svc(db2, 'foam_drill').engine_keys = ['adam_custom'];
+    await migration.up(fakeKnex(db2));
+    await migration.down(fakeKnex(db2));
+    expect(svc(db2, 'foam_drill').engine_keys).toEqual(['adam_custom']);
   });
 
   test('up() relabels reminder components in merged labels; unrelated reminders untouched', async () => {
