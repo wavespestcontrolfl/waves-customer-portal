@@ -150,10 +150,12 @@ function makeConn(handler) {
     const record = (name) => (...args) => {
       if (name === 'where' && typeof args[0] === 'function') {
         const nested = [];
-        const sub = {
-          where(...a) { nested.push(['where', ...a]); return sub; },
-          orWhere(...a) { nested.push(['orWhere', ...a]); return sub; },
-        };
+        const sub = {};
+        // The occupancy probe's nested predicates (findConflictingVisits)
+        // chain whereNull/orWhereRaw/etc. inside the callback too.
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw']) {
+          sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
+        }
         args[0].call(sub, sub);
         calls.push(['whereFn', nested]);
       } else {
@@ -161,7 +163,7 @@ function makeConn(handler) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {

@@ -791,12 +791,19 @@ function occupancyBlockFor(row) {
 // each candidate through the shared tech-blind occupancy check and skip a
 // clashing date — the walks advance to the next cadence step. Windowless
 // templates carry no occupancy and skip the probe (module convention).
-// NOT a commit gate: these writers run under the per-parent maintenance
-// advisory lock, and the candidate date is only known mid-trx — after the
-// rung-6 comms lock — so a rung-1 date-occupancy key cannot be taken here
-// without inverting the ORDERING CONTRACT. The probe closes the practical
-// double-book window; the update-details path keeps its full peek → rung-1
-// → guardRecurrenceDestination gate.
+// NOT a commit gate — DELIBERATELY probe-only: these writers run under the
+// per-parent maintenance advisory lock, and the candidate date is only known
+// mid-trx, after the rung-6 comms lock. Taking rung 1 here inverts the
+// ORDERING CONTRACT and is a real deadlock, not a style point: a booking
+// writer holds rung 1 for the date and then takes rung 6 for the customer
+// (the contract's normal order), while this trx would hold rung 6 and wait
+// on that rung 1 — a cycle. The safe alternative (pre-trx candidate peek →
+// rung 1 first → re-verify under the lock, the update-details idiom) needs
+// the whole maintenance/alert flow restructured around a peeked lock set;
+// until then the per-parent lock + this probe close the practical window
+// (pre-probe, these walks inserted with NO cross-series check at all), and a
+// same-instant booking commit is the accepted residual. The update-details
+// path keeps its full peek → rung-1 → guardRecurrenceDestination gate.
 async function seriesCandidateDateClashes(conn, template, date) {
   const block = occupancyBlockFor(template);
   if (!block) return false;
@@ -4123,6 +4130,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (seriesDates.has(nextDateStr)) continue;
         seriesDates.add(nextDateStr);
         plannedChildDates.push(nextDateStr);
+      }
+      // Blackout/day-off exhaustion must not silently shrink the requested
+      // plan (mirror of the visit-count top-up's shortfall reporting): tell
+      // the office what was actually placed instead of returning success on
+      // an undersized series nobody can see.
+      if (plannedChildDates.length < plannedCount - 1) {
+        const placed = plannedChildDates.length + 1;
+        logger.warn(`[schedule/create] recurring series wanted ${plannedCount} visit(s), placed ${placed} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
+        bookingWarnings.push(`Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`);
       }
     }
 

@@ -460,6 +460,14 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     rows.push(row);
   }
 
+  // Blackout/day-off exhaustion must not silently shrink the plan: when the
+  // bounded walk cannot place every requested follow-up, say so — callers
+  // return success on whatever seeded, and an undersized series is otherwise
+  // invisible until the customer's visits run out.
+  if (rows.length < targetNewRows) {
+    require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} wanted ${targetNewRows} follow-up(s), placed ${rows.length} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
+  }
+
   return rows;
 }
 
