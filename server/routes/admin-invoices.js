@@ -684,6 +684,62 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
     const STALE_SEND_CLAIM_MS = 15 * 60 * 1000;
 
     for (const customerId of customerIds) {
+      // Shared disposition for a keyed duplicate, whether it surfaced on the
+      // pre-check SELECT (retry) or the 23505 unique-index loss (concurrent
+      // race): recover stale 'sending' claims, and complete an UNFINISHED
+      // immediate send instead of reporting a skipped "success" while the
+      // winning row sits as an unsent draft. Runs the same for both entry
+      // points so the concurrent loser can't strand delivery. Declared
+      // OUTSIDE the try — the 23505 handler in the catch calls it too.
+      const settleKeyedDuplicate = async (existing, reason) => {
+        const entry = {
+          customerId,
+          invoiceId: existing.id,
+          invoiceNumber: existing.invoice_number,
+          reason,
+        };
+        // A row stuck in 'sending' is either a live concurrent send or a
+        // crashed worker's stale claim. A stale claim would otherwise be
+        // locked FOREVER (manual sends reject 'sending'): release it back
+        // to draft — a pure status restore, no delivery — and tell the
+        // operator. We deliberately do NOT auto-resend a released claim:
+        // the crashed worker may have texted before dying, and without
+        // provider evidence an automatic retry risks duplicate customer
+        // comms (fail closed; the operator resends with eyes on it).
+        if (existing.status === 'sending') {
+          const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
+          if (claimAgeMs > STALE_SEND_CLAIM_MS) {
+            const released = await db('invoices')
+              .where({ id: existing.id, status: 'sending' })
+              .update({ status: 'draft', updated_at: db.fn.now() });
+            entry.reason = released
+              ? 'Stale send claim from a crashed batch worker released back to draft — verify whether the customer was texted, then resend manually'
+              : 'Send state changed while checking a stale claim — review the invoice before resending';
+          } else {
+            entry.reason = 'A send for this invoice is in progress right now — not re-sent';
+          }
+          skipped.push(entry);
+          return;
+        }
+        // Finish an UNFINISHED immediate send: the first attempt may have
+        // crashed between insert and delivery (or delivery failed),
+        // leaving the row draft — a keyed retry must complete it, not
+        // strand it. claimInvoiceForSend inside the send path is the
+        // concurrency guard (a send already in flight throws and is
+        // reported, never doubled). Non-draft rows were delivered or
+        // deliberately moved on — never re-text those.
+        if (sendImmediately && existing.status === 'draft') {
+          try {
+            entry.sent = existing.payer_id
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true })
+              : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true });
+          } catch (sendErr) {
+            logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
+            entry.sent = { sent: false, error: sendErr.message };
+          }
+        }
+        skipped.push(entry);
+      };
       try {
         // Idempotent retry: this loop has no transaction across customers, so
         // retrying a keyed request after a partial-failure response must not
@@ -698,53 +754,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             .where({ customer_id: customerId, batch_key: batchKey })
             .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at');
           if (existing) {
-            const entry = {
-              customerId,
-              invoiceId: existing.id,
-              invoiceNumber: existing.invoice_number,
-              reason: 'This batch key already created an invoice for this customer (retry detected)',
-            };
-            // A row stuck in 'sending' is either a live concurrent send or a
-            // crashed worker's stale claim. A stale claim would otherwise be
-            // locked FOREVER (manual sends reject 'sending'): release it back
-            // to draft — a pure status restore, no delivery — and tell the
-            // operator. We deliberately do NOT auto-resend a released claim:
-            // the crashed worker may have texted before dying, and without
-            // provider evidence an automatic retry risks duplicate customer
-            // comms (fail closed; the operator resends with eyes on it).
-            if (existing.status === 'sending') {
-              const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
-              if (claimAgeMs > STALE_SEND_CLAIM_MS) {
-                const released = await db('invoices')
-                  .where({ id: existing.id, status: 'sending' })
-                  .update({ status: 'draft', updated_at: db.fn.now() });
-                entry.reason = released
-                  ? 'Stale send claim from a crashed batch worker released back to draft — verify whether the customer was texted, then resend manually'
-                  : 'Send state changed while checking a stale claim — review the invoice before resending';
-              } else {
-                entry.reason = 'A send for this invoice is in progress right now — not re-sent';
-              }
-              skipped.push(entry);
-              continue;
-            }
-            // Finish an UNFINISHED immediate send: the first attempt may have
-            // crashed between insert and delivery (or delivery failed),
-            // leaving the row draft — a keyed retry must complete it, not
-            // strand it. claimInvoiceForSend inside the send path is the
-            // concurrency guard (a send already in flight throws and is
-            // reported, never doubled). Non-draft rows were delivered or
-            // deliberately moved on — never re-text those.
-            if (sendImmediately && existing.status === 'draft') {
-              try {
-                entry.sent = existing.payer_id
-                  ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true })
-                  : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true });
-              } catch (sendErr) {
-                logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
-                entry.sent = { sent: false, error: sendErr.message };
-              }
-            }
-            skipped.push(entry);
+            await settleKeyedDuplicate(existing,
+              'This batch key already created an invoice for this customer (retry detected)');
             continue;
           }
         }
@@ -785,15 +796,27 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         // insert lose — the invoice exists, so report it skipped, not failed.
         if (batchKey && err?.code === '23505'
           && `${err.constraint || ''} ${err.detail || ''}`.includes('batch_key')) {
-          const existing = await db('invoices')
+          // The winner of the concurrent race may have committed its insert
+          // and then died BEFORE delivering (crash between insert and send)
+          // — a skipped result with failed_count 0 would then read as
+          // "batch complete" while the invoice sits as an unsent draft.
+          // Load the winning row's status and run the same recovery as the
+          // pre-check branch: finish a draft immediate-send, release a
+          // stale claim, leave live sends alone.
+          const winner = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number');
-          skipped.push({
-            customerId,
-            invoiceId: existing?.id || null,
-            invoiceNumber: existing?.invoice_number || null,
-            reason: 'This batch key already created an invoice for this customer (concurrent retry)',
-          });
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at');
+          if (winner) {
+            await settleKeyedDuplicate(winner,
+              'This batch key already created an invoice for this customer (concurrent retry)');
+          } else {
+            skipped.push({
+              customerId,
+              invoiceId: null,
+              invoiceNumber: null,
+              reason: 'This batch key already created an invoice for this customer (concurrent retry)',
+            });
+          }
           continue;
         }
         logger.error(`[admin-invoices:batch] create failed for ${customerId}: ${err.message}`);

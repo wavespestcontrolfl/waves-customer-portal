@@ -451,6 +451,13 @@ export function invoiceCreatedSendToast(invoiceNumber, res) {
 export function persistedSendDisposition(persisted) {
   const status = String(persisted?.status || "").toLowerCase();
   if (!status) return "unknown";
+  // Draft alone is NOT proof of non-delivery: a provider-success /
+  // database-failure send can leave the row draft after the SMS was
+  // accepted. Delivery stamps are only ever written after provider
+  // success, so a draft row carrying one must not be offered Resend.
+  if (status === "draft" && (persisted?.sent_at || persisted?.sms_sent_at)) {
+    return "unknown";
+  }
   return status === "draft" ? "unsent" : "committed";
 }
 

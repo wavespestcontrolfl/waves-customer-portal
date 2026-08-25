@@ -236,4 +236,16 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(persistedSendDisposition(null)).toBe("unknown");
     expect(persistedSendDisposition({})).toBe("unknown");
   });
+
+  it("a draft row with a delivery stamp is NOT provably unsent (provider-success/db-failure)", () => {
+    expect(
+      persistedSendDisposition({ status: "draft", sms_sent_at: "2026-08-24T10:00:00Z" }),
+    ).toBe("unknown");
+    expect(
+      persistedSendDisposition({ status: "draft", sent_at: "2026-08-24T10:00:00Z" }),
+    ).toBe("unknown");
+    expect(
+      persistedSendDisposition({ status: "draft", sent_at: null, sms_sent_at: null }),
+    ).toBe("unsent");
+  });
 });

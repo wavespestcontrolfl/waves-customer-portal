@@ -2191,6 +2191,28 @@ const InvoiceService = {
       };
     }
 
+    // Post-delivery finalize, extracted so the delivered-SMS recovery in the
+    // catch below can retry it once after a transient DB failure.
+    const finalizeInvoiceAfterSms = () => db("invoices")
+      .where({ id: invoiceId })
+      .whereIn("status", SEND_FINALIZABLE_STATUSES)
+      .update({
+        status: db.raw(
+          "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+        ),
+        sent_at: new Date(),
+        sms_sent_at: new Date(),
+        scheduled_send_at: null,
+        scheduled_send_error: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+        updated_at: new Date(),
+      });
+    // Flips the moment the provider accepts the message. Everything after
+    // that point is bookkeeping — its failure must never be reported as a
+    // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
+    // offers Resend, duplicating a text the customer already received).
+    let smsDelivered = false;
     try {
       // Routed through customer-message middleware. payment_link is a
       // sensitive purpose: policy.requireIds includes customerId +
@@ -2247,21 +2269,8 @@ const InvoiceService = {
         throw err;
       }
 
-      await db("invoices")
-        .where({ id: invoiceId })
-        .whereIn("status", SEND_FINALIZABLE_STATUSES)
-        .update({
-          status: db.raw(
-            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-          ),
-          sent_at: new Date(),
-          sms_sent_at: new Date(),
-          scheduled_send_at: null,
-          scheduled_send_error: null,
-          scheduled_request_review: false,
-          scheduled_review_delay_minutes: null,
-          updated_at: new Date(),
-        });
+      smsDelivered = true;
+      await finalizeInvoiceAfterSms();
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -2296,10 +2305,32 @@ const InvoiceService = {
 
       return { sent: true, payUrl };
     } catch (err) {
+      if (smsDelivered) {
+        // The customer HAS the pay-link text — this is a post-delivery
+        // bookkeeping failure (invoice finalize, follow-up scheduling, lead
+        // conversion), NOT a failed send. Restoring the claim to draft here
+        // would make the UI's "still draft ⇒ provably unsent ⇒ offer
+        // Resend" check duplicate a delivered SMS, and reversing the credit
+        // would refund a message that went out. Retry the finalize once;
+        // if it still fails, leave the 'sending' claim in place (the
+        // stale-claim release paths tell the operator to verify delivery
+        // before resending) and report the send as delivered.
+        logger.error(
+          `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
+        );
+        try {
+          await finalizeInvoiceAfterSms();
+        } catch (retryErr) {
+          logger.error(
+            `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
+          );
+        }
+        return { sent: true, payUrl, finalizeError: err.message };
+      }
       await restoreSendClaim(invoiceId, previousStatus, claimed);
-      // Provider/Twilio error (or invoice-update failure) after we auto-applied
-      // credit above — the pay link was never delivered, so return the credit
-      // rather than leave it consumed + the invoice edit-locked.
+      // Provider/Twilio error after we auto-applied credit above — the pay
+      // link was never delivered, so return the credit rather than leave it
+      // consumed + the invoice edit-locked.
       await reverseSmsCreditOnFailure();
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
