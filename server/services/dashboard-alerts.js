@@ -259,6 +259,38 @@ async function computeDashboardAlertsUncached() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }
 
+  // 6b. Billable draft invoices unsent for 3+ days (owner ruling
+  //     2026-08-24, after a 7-week-old unsent completion draft was caught
+  //     by hand). Drafts are invisible to dunning, the follow-up
+  //     sequences, and the unpaid list — nothing chases the money until a
+  //     human notices. This is the feed the dashboard ACTUALLY reads
+  //     (Codex PR round 2: the command-center root endpoint has no UI
+  //     caller), so the predicate lives here too. Statement-accrued
+  //     NET-terms drafts (payer_statement_id) stay unsent BY DESIGN.
+  try {
+    const staleDraftCutoff = new Date(Date.now() - 3 * 86400000);
+    const staleDrafts = await db('invoices')
+      .whereNull('archived_at')
+      .where('status', 'draft')
+      .whereNull('sent_at')
+      .whereNull('sms_sent_at')
+      .whereNull('payer_statement_id')
+      .where('total', '>', 0)
+      .where('created_at', '<', staleDraftCutoff)
+      .count('id as c')
+      .first();
+    const staleDraftCount = parseInt(staleDrafts?.c || 0, 10);
+    if (staleDraftCount > 0) {
+      alerts.push({
+        id: 'stale_draft_invoices',
+        severity: 'warn',
+        count: staleDraftCount,
+        label: `${staleDraftCount} draft invoice${staleDraftCount === 1 ? '' : 's'} unsent 3+ days — invisible to dunning`,
+        href: '/admin/invoices',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
+
   // 7. Persisted admin command-center alerts. These are event-backed
   // operating alerts created by domain workflows such as WaveGuard lawn
   // readiness snapshots.

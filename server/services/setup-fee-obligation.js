@@ -25,8 +25,9 @@
 //     — existing-customer waiver, operator waiver, bundle rule, solo
 //     pest/mosquito rule all live there);
 //   - it is not invoice-mode (bill_by_invoice bills through its own
-//     proposal invoice) and holds no annual-prepay term (prepay waives
-//     the fee);
+//     proposal invoice) and holds no LIVE annual-prepay term (prepay
+//     waives the fee; a cancelled term returned the customer to
+//     per-application billing and does not suppress);
 //   - the converter actually ran for it (activity_log
 //     'estimate_converted' row) — the provenance that the acceptance
 //     reached the invoicing decision at all;
@@ -158,11 +159,16 @@ async function findUnmintedSetupFeeObligation({
     return { owed: false };
   }
 
-  // An annual-prepay term (any status) means the accept took the prepay
-  // path — the fee is waived by that policy and the prepay invoice is its
-  // own billing record.
+  // A LIVE annual-prepay term means the accept took (or switched to) the
+  // prepay path — the fee is waived by that policy and the prepay invoice
+  // is its own billing record. CANCELLED terms do not suppress (Codex PR
+  // round 2 P1): a voided/refunded prepay flips its term to 'cancelled'
+  // and returns the customer to per-application billing — for a Mark Won
+  // accept there is no superseded acceptance invoice to restore, so the
+  // fee would be silently lost forever if a dead term satisfied this.
   const prepayTerm = await conn('annual_prepay_terms')
     .where({ source_estimate_id: estimate.id })
+    .whereNotIn('status', ['cancelled', 'canceled'])
     .first('id');
   if (prepayTerm) return { owed: false };
 

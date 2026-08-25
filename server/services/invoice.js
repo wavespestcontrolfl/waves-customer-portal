@@ -136,6 +136,19 @@ function invoiceHasNonBaseCharges(invoice) {
   );
 }
 
+// Line-level base-application identity — THE shared predicate (PR #3476):
+// the base visit charge is tagged client_id `scheduled_<id>_primary`
+// (createFromService below) and the converter's acceptance line reads
+// "First service application". Every consumer — switch-supersede restore,
+// prepay-switch undo, the setup-fee obligation detector and its alerts —
+// shares this identity so line-identity changes land in ONE place.
+// Whether a matching line must ALSO carry a positive amount is a
+// caller-level billing-evidence requirement, not part of the identity.
+function lineIsBaseApplication(li) {
+  return /_primary$/.test(String(li?.client_id || ""))
+    || /^first (service )?application$/i.test(String(li?.description || "").trim());
+}
+
 // Ledger-backed estimate deposit credit rides as a `deposit_credit` line; voidInvoice
 // restores it (restoreDepositCreditForVoidedInvoice). Settling 'prepaid' would strand
 // it, so these defer to the caller's void.
@@ -4408,10 +4421,7 @@ const InvoiceService = {
           .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
           .select("id", "invoice_number", "line_items");
         if (liveOnVisit.length > 0) {
-          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => (
-            /_primary$/.test(String(li?.client_id || ""))
-            || /^First service application$/i.test(String(li?.description || "").trim())
-          ));
+          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some(lineIsBaseApplication);
           const unreadable = liveOnVisit.some((inv) => parseInvoiceLineItems(inv.line_items).length === 0);
           if (unreadable) {
             logger.warn(`[invoice] switch-supersede restore deferred for ${row.invoice_number || row.id}: live invoice on the visit has unreadable lines — manual review`);
@@ -4942,6 +4952,7 @@ InvoiceService._internals = {
 // in-flight money ('paid' / 'processing') that now needs a refund/credit
 // decision because the service won't happen.
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
+InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;

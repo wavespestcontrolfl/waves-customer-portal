@@ -8947,10 +8947,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .select('id', 'status', 'line_items', 'notes'))
               .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()))
             : [];
+          // Notes are provenance, never charge coverage (Codex P0,
+          // pre-push round 12) — only a positive parseable base line
+          // (invoiceBillsBaseApplication) proves the application billed.
           const feeProven = [...stampedLive, ...onParkedLive].some(invoiceContainsSetupFeeLine);
-          const applicationProven = onParkedLive.some(invoiceBillsBaseApplication)
-            || stampedLive.some((r) => /first (service )?application/i.test(String(r.notes || ''))
-              || invoiceBillsBaseApplication(r));
+          const applicationProven = [...onParkedLive, ...stampedLive].some(invoiceBillsBaseApplication);
           if (feeProven && applicationProven) {
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and the parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`,
@@ -9450,28 +9451,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .select('id', 'invoice_number', 'status', 'line_items', 'notes');
           const liveOnVisitRows = onVisitLockedRows.filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void');
           const liveOnVisit = liveOnVisitRows[0] || null;
-          const stampedCarriesFirstApplication = (inv) => {
-            if (/first (service )?application/i.test(String(inv.notes || ''))) return true;
-            let lines = inv.line_items;
-            if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
-            return Array.isArray(lines)
-              && lines.some((li) => /first (service )?application/i.test(String(li?.description || '')));
-          };
           // Coverage is judged per CHARGE, from the invoices' actual line
-          // items (Codex P0, pre-push rounds 5–6): a stamped or on-visit
-          // invoice counts toward the setup fee only when it billed the
-          // fee, and toward the application only when it carries a
-          // non-setup charge (or a first-application marker). Presence of
-          // some invoice proves neither — a setup-only invoice must not
-          // resolve the application, and a fee-carrying one must never be
-          // instructed to bill the fee again.
+          // items (Codex P0, pre-push rounds 5–6 and 12): a stamped or
+          // on-visit invoice counts toward the setup fee only when it
+          // billed the fee, and toward the application only when a
+          // POSITIVE parseable base line proves it
+          // (invoiceBillsBaseApplication) — a "first application" phrase
+          // in notes or on a zero/credited/unreadable line is provenance,
+          // never charge coverage. Presence of some invoice proves
+          // neither — a setup-only invoice must not resolve the
+          // application, and a fee-carrying one must never be instructed
+          // to bill the fee again.
           const {
             invoiceContainsSetupFeeLine, invoiceBillsBaseApplication,
           } = require('../services/estimate-first-application-invoice');
           const feeCoveredBy = liveStampedRows.find(invoiceContainsSetupFeeLine)
             || liveOnVisitRows.find(invoiceContainsSetupFeeLine) || null;
           const applicationCoveredBy = liveOnVisitRows.find(invoiceBillsBaseApplication)
-            || liveStampedRows.find((r) => stampedCarriesFirstApplication(r) || invoiceBillsBaseApplication(r)) || null;
+            || liveStampedRows.find(invoiceBillsBaseApplication) || null;
           if (feeCoveredBy && applicationCoveredBy) {
             const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
             logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);

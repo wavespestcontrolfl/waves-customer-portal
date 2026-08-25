@@ -289,6 +289,23 @@ describe('Action Inbox generators', () => {
     expect(alerts.find((a) => a.id === 'autopay_coverage_low')).toBeUndefined();
   });
 
+  test('stale_draft_invoices: warns on billable drafts unsent 3+ days; statement-accrued excluded by predicate', async () => {
+    const capture = primeDb({ invoices: { c: '2' } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    const item = alerts.find((a) => a.id === 'stale_draft_invoices');
+    expect(item).toMatchObject({ severity: 'warn', count: 2, href: '/admin/invoices' });
+    expect(item.label).toContain('unsent 3+ days');
+    // Statement-accrued NET-terms drafts stay unsent BY DESIGN — the
+    // predicate must exclude them.
+    expect(capture.some((c) => c.table === 'invoices' && c.method === 'whereNull' && c.args[0] === 'payer_statement_id')).toBe(true);
+  });
+
+  test('stale_draft_invoices: absent when no stale drafts exist', async () => {
+    primeDb({ invoices: { c: '0' } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((a) => a.id === 'stale_draft_invoices')).toBeUndefined();
+  });
+
   test('leads_unattributed_7d: counts this week\'s sourceless leads, non-engaged statuses excluded', async () => {
     const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
     const capture = primeDb({

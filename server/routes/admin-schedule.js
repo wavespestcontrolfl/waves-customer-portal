@@ -11666,10 +11666,9 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
               .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
               .select('id', 'invoice_number', 'line_items');
             if (liveOnVisit.length > 0) {
-              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some((li) => (
-                /_primary$/.test(String(li?.client_id || ''))
-                || /^First service application$/i.test(String(li?.description || '').trim())
-              ));
+              // Shared base-application identity (InvoiceService, PR #3476).
+              const { lineIsBaseApplication } = require('../services/invoice');
+              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some(lineIsBaseApplication);
               const unreadable = liveOnVisit.some((inv) => invoiceLineItems(inv.line_items).length === 0);
               if (unreadable) {
                 return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'a live invoice on this visit has unreadable lines — reconcile from Invoices' } };

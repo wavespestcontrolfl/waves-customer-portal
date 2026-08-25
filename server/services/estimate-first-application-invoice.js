@@ -100,18 +100,17 @@ function invoiceContainsSetupFeeLine(row) {
   return /setup fee/i.test(String(row?.notes || ''));
 }
 
-// Does this invoice bill the BASE plan application? Uses the SAME
-// identity as the switch-supersede restore classifier
-// (InvoiceService, Codex P0 r9/r17/r19 there; rounds 6–11 here): a
-// POSITIVE line whose client_id ends `_primary` (createFromService tags
-// the base visit charge `scheduled_<id>_primary`; add-ons are tagged
-// `_addon_`) or whose description is exactly the converter's
-// "First service application" line. Any positive-non-fee heuristic is
-// too loose — product/add-on lines and adjustment rows ("Deposit credit
-// (paid at acceptance)") must never read as the application being
-// billed, and unreadable rows FAIL CLOSED (prove nothing): the callers
-// skip parking or resolve alerts on this evidence.
+// Does this invoice bill the BASE plan application? Identity comes from
+// the ONE shared predicate (InvoiceService.lineIsBaseApplication — the
+// same classifier the switch-supersede restore and prepay-switch undo
+// use), so line-identity changes land in one place. This wrapper adds
+// the BILLING-EVIDENCE layer its callers need: the line must carry a
+// POSITIVE amount (a refunded/credited base line is not the application
+// being billed — Codex P0 rounds 6–11), and unreadable rows FAIL CLOSED
+// (prove nothing): the callers skip parking or resolve alerts on this
+// evidence.
 function invoiceBillsBaseApplication(row) {
+  const { lineIsBaseApplication } = require('./invoice');
   let items = row?.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
@@ -120,9 +119,7 @@ function invoiceBillsBaseApplication(row) {
   return items.some((li) => {
     const qty = li?.quantity != null ? Number(li.quantity) : 1;
     const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-    if (!(Number.isFinite(amt) && amt > 0)) return false;
-    return /_primary$/.test(String(li?.client_id || ''))
-      || /^first (service )?application$/i.test(String(li?.description || '').trim());
+    return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li);
   });
 }
 

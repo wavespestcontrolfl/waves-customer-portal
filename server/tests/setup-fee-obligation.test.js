@@ -11,14 +11,23 @@ jest.mock('../models/db', () => {
   const handler = (table) => {
     const spec = mockTables[table];
     const chain = {};
+    const notIn = {};
     const self = () => chain;
-    ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'orderBy'].forEach((m) => {
+    ['where', 'whereNot', 'whereIn', 'whereNull', 'orderBy'].forEach((m) => {
       chain[m] = jest.fn(self);
+    });
+    // whereNotIn is honored on `first` so status-vocabulary filters (e.g.
+    // cancelled prepay terms never suppress) are actually exercised.
+    chain.whereNotIn = jest.fn((col, vals) => {
+      notIn[col] = Array.isArray(vals) ? vals.map((v) => String(v)) : [];
+      return chain;
     });
     const resolve = () => (typeof spec === 'function' ? spec() : spec) ?? null;
     chain.first = jest.fn(async () => {
       const v = resolve();
-      return Array.isArray(v) ? (v[0] ?? null) : v;
+      const row = Array.isArray(v) ? (v[0] ?? null) : v;
+      if (row && notIn.status && notIn.status.includes(String(row.status || ''))) return null;
+      return row;
     });
     chain.select = jest.fn(async () => {
       const v = resolve();
@@ -185,9 +194,18 @@ test('a dead UNATTACHED stamped invoice leaves the fee unbilled — owed, dead i
   });
 });
 
-test('an annual prepay term waives the fee — not owed', async () => {
-  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1' } });
+test('a LIVE annual prepay term waives the fee — not owed', async () => {
+  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'active' } });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
+test('a CANCELLED prepay term does not suppress — the customer is back on per-application billing', async () => {
+  // A voided/refunded prepay flips its term to 'cancelled'; for a Mark
+  // Won accept there is no superseded acceptance invoice to restore, so
+  // a dead term must not satisfy the obligation (Codex PR r2 P1).
+  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'cancelled' } });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
 });
 
 test('accepts before the 2026-07-10 fee rule are out of scope', async () => {
