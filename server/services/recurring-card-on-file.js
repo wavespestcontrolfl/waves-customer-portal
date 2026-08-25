@@ -560,7 +560,37 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // debit; refunded/canceled/void mean NO collected prepay — record the
       // real outcome and hand it to the office, never mark it paid.
       if (['paid', 'prepaid'].includes(invStatus)) { await resolve('paid', { reason: 'already_settled' }); continue; }
-      if (invStatus === 'processing') { await resolve('processing', { reason: 'already_initiated' }); continue; }
+      if (invStatus === 'processing') {
+        // 'processing' is ALSO how an ambiguous saved-card attempt parks an
+        // invoice for reconciliation (pre-push Codex P0 r7) — that status
+        // alone does not prove an initiated ACH debit. An unresolved
+        // charge-attempt fence or orphan charge means reconciliation still
+        // owns the outcome: leave the job claimed (retryable via the
+        // stale-claim lease) so a reconciliation that reopens the invoice
+        // gets re-swept instead of stranding an unpaid accepted plan.
+        let reconciliationPending = false;
+        try {
+          const fence = await db('stripe_invoice_charge_attempts')
+            .where({ invoice_id: invoice.id })
+            .whereIn('status', ['claimed', 'ambiguous'])
+            .whereNull('resolved_at')
+            .first('id');
+          const orphan = fence ? null : await db('stripe_orphan_charges')
+            .where({ invoice_id: invoice.id, resolved: false })
+            .first('id');
+          reconciliationPending = !!(fence || orphan);
+        } catch (fenceErr) {
+          // Unknown fence state — err toward retryable, never retire.
+          logger.warn(`[recurring-cof] prepay sweep fence check failed for invoice ${invoice.id}: ${fenceErr.message}`);
+          reconciliationPending = true;
+        }
+        if (reconciliationPending) {
+          logger.info(`[recurring-cof] prepay sweep deferring estimate ${row.id}: invoice ${invoice.id} processing with reconciliation pending`);
+          continue;
+        }
+        await resolve('processing', { reason: 'already_initiated' });
+        continue;
+      }
       if (['refunded', 'canceled', 'cancelled', 'void', 'voided'].includes(invStatus)) {
         await resolve('skipped', { reason: `invoice_${invStatus}` });
         await alertUncollected(
@@ -623,16 +653,26 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // no funds moved; fall back to the delivered pay link + office alert
       // (never silent, never a different amount/method than quoted).
       logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
+      let fallbackDelivered = false;
       try {
-        await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
+        const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
+        fallbackDelivered = !!delivery?.ok;
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
       await alertUncollected(
         'Annual prepay accepted — stranded auto-charge could not complete',
-        `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). The pay link was sent — follow up if it goes unpaid.`,
+        `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). ${fallbackDelivered
+          ? 'The pay link was sent — follow up if it goes unpaid.'
+          : 'Pay-link delivery ALSO failed — the customer currently has no payment path; the sweep will retry.'}`,
       );
-      await resolve('delivered_fallback', { reason: err.message });
+      // Resolve only on CONFIRMED delivery (pre-push Codex P1 r7): a
+      // no-channel {ok:false} send must leave the job retryable (the
+      // stale-claim lease re-attempts) instead of retiring it with no
+      // collection path at all.
+      if (fallbackDelivered) {
+        await resolve('delivered_fallback', { reason: err.message });
+      }
     }
   }
   return { scanned: rows.length, resumed };
