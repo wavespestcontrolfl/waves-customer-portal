@@ -65,6 +65,14 @@ function createDbMock(initialRows = {}) {
     if (sql.includes("reviewer_name IS NULL OR reviewer_name != '_stats'")) {
       return row => row.reviewer_name == null || row.reviewer_name !== '_stats';
     }
+    // Tier-3 corroboration: delivered review asks only.
+    if (sql.includes('sms_sent_at IS NOT NULL OR sent_at IS NOT NULL')) {
+      return row => row.sms_sent_at != null || row.sent_at != null;
+    }
+    if (sql.includes('template_key IS NULL OR template_key NOT IN')) {
+      // ASK_TOUCH_SQL — the null-template canonical ask is all the tests seed.
+      return row => row.template_key == null;
+    }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
@@ -1434,6 +1442,7 @@ describe('Google Business review sync', () => {
     // asked for a review.
     db.__state.rows.review_requests = [{
       id: 'ask-1', customer_id: 'cust-mf', created_at: new Date().toISOString(),
+      sent_at: new Date().toISOString(), template_key: null,
     }];
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('maps.googleapis.com')) {
@@ -1455,7 +1464,7 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
   });
 
-  test('a surname-initial match with NO recent review ask stays unlinked (weak identity — manual queue)', async () => {
+  test('a surname-initial match with NO DELIVERED recent review ask stays unlinked (weak identity — manual queue)', async () => {
     db.__state.rows.customers.push({
       id: 'cust-mf',
       first_name: 'Michael',
@@ -1463,6 +1472,11 @@ describe('Google Business review sync', () => {
       has_left_google_review: false,
       review_marked_at: null,
     });
+    // A pending row that never reached the customer is not corroboration.
+    db.__state.rows.review_requests = [{
+      id: 'ask-pending', customer_id: 'cust-mf', created_at: new Date().toISOString(),
+      sms_sent_at: null, sent_at: null, template_key: null,
+    }];
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('maps.googleapis.com')) {
         return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };

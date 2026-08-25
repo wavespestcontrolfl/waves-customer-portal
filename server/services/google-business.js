@@ -457,9 +457,15 @@ class GoogleBusinessService {
         // when we actually ASKED this customer for a review recently, so the
         // truncated display name lands on someone with a live reason to have
         // reviewed. No ask on file → manual queue with the suggestion list.
+        // DELIVERED review asks only, same predicates as getDeliveredAskStats
+        // (pre-push P1 r2): a pending/deferred/blocked row proves nothing
+        // reached the customer, and a no-link private check-in isn't an ask.
+        const OUTREACH = require('./review-outreach-templates');
         const asked = await db('review_requests')
           .where({ customer_id: initialMatches[0].id })
           .where('created_at', '>=', new Date(Date.now() - 180 * 24 * 3600 * 1000))
+          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+          .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)')
           .first('id');
         if (asked) return initialMatches[0].id;
         logger.info('[gbp] Surname-initial match lacks a recent review ask — routing to manual match, no auto-mark');
@@ -600,12 +606,17 @@ class GoogleBusinessService {
       // "come match this" bell for an already-matched review is pure noise —
       // report handled so the caller skips the unlinked notification.
       if (live.customer_id) return true;
-      // whereNull guard: a manual match between the read above and this
-      // write must not be overwritten — zero rows updated = lost race, and
-      // the winner's link stands (handled, same as above).
+      // Conditional-write guards (pre-push P1 r2): a manual match between
+      // the read above and this write must not be overwritten, and a
+      // removal reconcile stamping missing_since concurrently must not be
+      // linked over — this flush runs OUTSIDE the per-location sync lock, so
+      // the atomic update, not the snapshot read, is the authority. Zero
+      // rows = a manual link stands or the review is gone; either way the
+      // unlinked bell would be noise (handled).
       const updated = await db('google_reviews')
         .where({ id: live.id })
         .whereNull('customer_id')
+        .whereNull('missing_since')
         .update({ customer_id: match.customerId, link_source: 'click_auto' });
       if (!updated) return true;
       await this._markCustomerLeftReview(match.customerId);
