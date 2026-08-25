@@ -358,9 +358,9 @@ test('a prior completed AND BILLED plan visit (is_recurring) flags firstVisitAlr
   expect(result.firstVisitAlreadyCompleted).toBe(true);
 });
 
-test('a prior completed AND BILLED recurring CHILD (recurring_parent_id) also counts as a plan visit', async () => {
+test('a prior completed AND BILLED recurring CHILD (is_recurring, seeder-stamped) also counts as a plan visit', async () => {
   mockTables = baseTables({
-    scheduled_services: { id: 'ss-child', is_recurring: false, recurring_parent_id: 'ss-parent' },
+    scheduled_services: { id: 'ss-child', is_recurring: true, recurring_parent_id: 'ss-parent' },
     invoices: invoicesInOrder(null, {
     id: 'inv-billed',
     status: 'paid',
@@ -391,6 +391,26 @@ test('a prior completed one-time add-on (non-recurring, even same category) does
   // pest corrective (ad-hoc, is_recurring=false) must not count as the
   // first plan application.
   mockTables = baseTables({ scheduled_services: { id: 'ss-addon', is_recurring: false, recurring_parent_id: null } });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
+  expect(result.firstVisitAlreadyCompleted).toBe(false);
+});
+
+test('a non-recurring BOOSTER child (is_recurring=false + recurring_parent_id) is NOT a plan application — its own mint never held, its completion never releases', async () => {
+  // Boosters bill their own one-off price (admin-schedule booster lane) —
+  // a parent link alone must not classify plan membership (Codex PR r3 P1).
+  expect((await findUnmintedSetupFeeObligation({
+    sourceEstimateId: EST_ID,
+    visitPlanRow: { is_recurring: false, recurring_parent_id: 'ss-parent' },
+  })).owed).toBe(false);
+  mockTables = baseTables({
+    scheduled_services: { id: 'ss-booster', is_recurring: false, recurring_parent_id: 'ss-parent' },
+    invoices: invoicesInOrder(null, {
+      id: 'inv-booster',
+      status: 'paid',
+      line_items: JSON.stringify([{ client_id: 'scheduled_ss-booster_primary', description: 'Booster', amount: 45 }]),
+    }),
+  });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);
   expect(result.firstVisitAlreadyCompleted).toBe(false);

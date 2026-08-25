@@ -232,6 +232,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   const term = await resolveAnnualPrepayTerm(estimate, scheduledServiceId);
 
   let annualPrepay = null;
+  // Canonical coverage result, hoisted for the gating below (Codex PR r3
+  // P2): a status-live term whose backing money is unpaid/clawed back
+  // reads NOT covered — the completion detector then treats the fee as
+  // owed, and the card must run the same detector instead of hiding the
+  // warning behind prepay context. null = predicate unreadable (fall back
+  // to status semantics).
+  let termCanonicallyCovered = null;
   if (term) {
     let invoice = null;
     if (term.prepay_invoice_id) {
@@ -251,6 +258,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     // reads NOT paid). Fall back to the term's own status only when the
     // predicate can't be read.
     const covered = await termCoverageStillValid(term);
+    termCanonicallyCovered = covered;
     const paid = covered != null ? covered : TERM_PAID_STATUSES.has(status);
     // Visit-level coverage: the term's money being valid ≠ THIS visit covered
     // (detached after a coverage-window change, service mismatch, date outside
@@ -307,7 +315,11 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     && ['cancelled', 'canceled', 'refunded', 'void', 'voided'].includes(String(term.status || '').toLowerCase());
   let acceptanceInvoice = null;
   let setupFeeMissing = null;
-  if (!term || termIsDead) {
+  // An UNCOVERED live-status term (unpaid payment_pending, clawed-back
+  // money) also opens this section (Codex PR r3 P2): completion's
+  // detector treats the fee as owed there, so the card must run the same
+  // detector instead of hiding the warning behind prepay context.
+  if (!term || termIsDead || termCanonicallyCovered === false) {
     const inv = await findAcceptanceInvoice(estimate);
     if (inv) {
       acceptanceInvoice = {
@@ -375,7 +387,11 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // the converter's standard (pay-per-application) path. Null when nothing is
   // known — the card renders nothing rather than guessing.
   let billingTerm = null;
-  if (term && !termIsDead) billingTerm = 'prepay_annual';
+  // An uncovered term keeps prepay billing-term authority ONLY while no
+  // setup-fee obligation stands — an owed fee means completion will park
+  // on the standard path, and the card must say so (the warning row
+  // renders under the standard section).
+  if (term && !termIsDead && !(termCanonicallyCovered === false && setupFeeMissing)) billingTerm = 'prepay_annual';
   else if (!termIsDead && paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
   // An owed-but-unminted setup fee proves the accept converted onto the
   // standard per-application plan even when no explicit preference was ever

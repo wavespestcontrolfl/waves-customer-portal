@@ -427,7 +427,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   test('the manual-billing alert rides the existing admin notification mechanism (notifyAdmin, billing, bell, deduped per visit)', () => {
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at - 1600, at + 10500);
+    const block = src.slice(at - 1600, at + 12500);
     expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");

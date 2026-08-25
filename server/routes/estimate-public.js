@@ -22095,6 +22095,10 @@ async function handleEstimateAsk(req, res, next) {
 
 module.exports = router;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
+// Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
+// snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
+// counts as fee-shown (PR #3476).
+module.exports.isWaveGuardSetupOneTimeItem = isWaveGuardSetupOneTimeItem;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;

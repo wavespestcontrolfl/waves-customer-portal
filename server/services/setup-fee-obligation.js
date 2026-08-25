@@ -73,11 +73,20 @@ const SETUP_FEE_RULE_SAFE_CUTOFF = '2026-07-11T04:00:00Z'; // 2026-07-11 00:00 E
 function snapshotShowsSetupFee(estimateData) {
   const bundle = estimateData?.sendSnapshot?.pricingBundle;
   if (!bundle || typeof bundle !== 'object') return null;
-  if (Array.isArray(bundle.firstVisitFees)
-    && bundle.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) return 'shown';
+  // Legacy frozen rows carry no normalized service key ("WaveGuard
+  // Membership Setup", price 99) — the SAME textual recognizer the public
+  // pricing path uses (isWaveGuardSetupOneTimeItem) must count them as
+  // fee-shown, or a post-cutoff manual accept of a legacy snapshot would
+  // read 'feeless' and disable the guard (Codex PR r3 P1).
+  let isLegacySetupItem = () => false;
+  try {
+    ({ isWaveGuardSetupOneTimeItem: isLegacySetupItem } = require('../routes/estimate-public'));
+  } catch { /* route unavailable in some harnesses — service-key check stands */ }
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isLegacySetupItem(row || {});
+  if (Array.isArray(bundle.firstVisitFees) && bundle.firstVisitFees.some(isSetupRow)) return 'shown';
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
-    && bundle.oneTimeBreakdown.items.some((row) => row?.service === 'waveguard_setup')) return 'shown';
-  if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return 'shown';
+    && bundle.oneTimeBreakdown.items.some(isSetupRow)) return 'shown';
+  if (bundle.setupFee && isSetupRow(bundle.setupFee)) return 'shown';
   return 'feeless';
 }
 
@@ -92,16 +101,17 @@ function parseEstimateData(raw) {
 // text: detectServiceLine only names a report category and defaults
 // unknown types to 'pest', so a same-category one-time add-on (a pest
 // corrective beside recurring pest service) would pass a text check
-// (Codex P0, pre-push round 2). The converter/seeder stamp the billed
-// plan's rows is_recurring=true and chain children via
-// recurring_parent_id — the same discriminator the converter itself uses
-// to tell a billed-plan row from an adopted ad-hoc visit. The obligation
-// belongs to plan-application visits only: a one-time add-on sourced
-// from the same estimate must neither trigger the completion hold
-// (suppressing its mint would drop the add-on's own charge) nor satisfy
-// the first-visit check.
+// (Codex P0, pre-push round 2). The converter/seeder stamp every billed
+// plan row — parent AND children — is_recurring=true; that flag alone is
+// the discriminator (Codex PR r3 P1): a non-recurring BOOSTER carries
+// recurring_parent_id while explicitly billing its own one-off price
+// (admin-schedule booster lane), so a parent link must never classify a
+// row as a plan application. The obligation belongs to plan-application
+// visits only: a one-time add-on/booster sourced from the same estimate
+// must neither trigger the completion hold (suppressing its mint would
+// drop its own charge) nor satisfy the first-visit check.
 function isPlanApplicationRow(row) {
-  return !!(row && (row.is_recurring || row.recurring_parent_id));
+  return !!(row && row.is_recurring);
 }
 
 /**
