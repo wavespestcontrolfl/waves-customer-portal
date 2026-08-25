@@ -1519,3 +1519,70 @@ describe('membership card retired (owner 2026-08-04)', () => {
     expect(page.MembershipCard).toBeUndefined();
   });
 });
+
+// Termite station rental rider (2026-08-25): server-suppressed from the
+// section list and stamped onto the termite card — the row must itemize
+// there instead of the pre-fix broken duplicate "Service" card.
+describe('ServiceSection termite station rental row', () => {
+  const termiteSection = (extra = {}) => ({
+    key: 'termite_bait',
+    label: 'Termite Bait Monitoring',
+    isRecurring: true,
+    isPest: false,
+    frequencies: [{
+      key: 'recurring',
+      label: 'Termite Bait',
+      monthly: 37.1,
+      annual: 445.2,
+      perTreatment: 111.3,
+      visitsPerYear: 4,
+      billedPerApplication: true,
+      included: [{ key: 'termite_bait', label: 'Termite Bait' }],
+      addOns: [],
+    }],
+    copy: { priceWording: {} },
+    ...extra,
+  });
+
+  it('itemizes the stamped rental with its per-application uplift', () => {
+    render(
+      <ServiceSection
+        section={termiteSection({
+          stationRental: {
+            label: 'Termite Station Rental',
+            detail: '16 rented stations · Waves-owned',
+            perApplicationAdd: 33,
+            monthlyAdd: 11,
+            annualAdd: 132,
+          },
+        })}
+        selectedFrequencyKey="recurring"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{}}
+      />,
+    );
+
+    const row = screen.getByLabelText('Termite station rental');
+    expect(row).toHaveTextContent('Termite Station Rental');
+    expect(row).toHaveTextContent('16 rented stations · Waves-owned');
+    expect(row).toHaveTextContent('$33.00 / application');
+    expect(row).toHaveTextContent('Included in your plan pricing.');
+  });
+
+  it('renders no rental row when the section carries no stamp', () => {
+    render(
+      <ServiceSection
+        section={termiteSection()}
+        selectedFrequencyKey="recurring"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{}}
+      />,
+    );
+
+    expect(screen.queryByLabelText('Termite station rental')).not.toBeInTheDocument();
+  });
+});

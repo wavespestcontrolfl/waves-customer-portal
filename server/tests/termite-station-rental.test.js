@@ -495,3 +495,82 @@ describe('recovery_quarters validation', () => {
     expect(check(TERMITE.rental.recoveryQuarters)).toBe(true);
   });
 });
+
+// Estimate-page sections (2026-08-25): the rental row minted its own split
+// section — a generic "Service" card that glassServiceSlug dressed in the
+// full termite headline, rendering as a broken duplicate termite card at the
+// bare uplift price (live case: draft EST-2026-0839). It is a RIDER like the
+// bond: section-suppressed, stamped onto the termite card, and — solo —
+// folded into the section frequencies the accept path freezes.
+describe('estimate sections treat the rental as a rider, never its own card', () => {
+  const {
+    buildPricingServices,
+    attachTermiteStationRental,
+  } = require('../routes/estimate-public');
+
+  const baitRow = {
+    service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4,
+    mo: 26.1, monthly: 26.1, annual: 313.2, perTreatment: 78.3,
+  };
+  const rentalRow = {
+    service: 'termite_station_rental', name: 'Termite Station Rental',
+    visitsPerYear: 4, mo: 11, monthly: 11, annual: 132, perTreatment: 33,
+    detail: '16 rented stations · Waves-owned', retailValue: 660,
+    discountable: false,
+  };
+  const soloEstData = { result: { recurring: { services: [baitRow, rentalRow] } } };
+
+  test('solo termite + rental builds ONE termite section, no "Service" card', () => {
+    const sections = buildPricingServices({ frequencies: [] }, {}, soloEstData);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].key).toBe('termite_bait');
+    expect(sections.some((s) => s.key === 'termite_station_rental')).toBe(false);
+  });
+
+  test('attach stamps the rental onto the termite section and folds solo frequencies', () => {
+    const sections = buildPricingServices({ frequencies: [] }, {}, soloEstData);
+    attachTermiteStationRental(sections, soloEstData);
+    const section = sections[0];
+    expect(section.stationRental).toMatchObject({
+      label: 'Termite Station Rental',
+      detail: '16 rented stations · Waves-owned',
+      perApplicationAdd: 33,
+      monthlyAdd: 11,
+      annualAdd: 132,
+    });
+    // Solo accept freezes effectiveMonthly/AnnualTotal from the selected
+    // frequency (same reason the bond folds) — the card price must be the
+    // true combined charge, matching combinedRecurring's 37.10/mo.
+    const frequency = section.frequencies[0];
+    expect(frequency.monthly).toBeCloseTo(37.1, 2);
+    expect(frequency.annual).toBeCloseTo(445.2, 2);
+    expect(frequency.perTreatment).toBeCloseTo(111.3, 2);
+  });
+
+  test('multi-service bundle suppresses the rental from memberKeys and does not fold', () => {
+    const pestRow = {
+      service: 'pest_control', name: 'Pest Control', visitsPerYear: 4,
+      mo: 33.34, monthly: 33.34, annual: 400.08, perTreatment: 100.02,
+    };
+    const estData = { result: { recurring: { services: [pestRow, baitRow, rentalRow] } } };
+    const sections = buildPricingServices({ frequencies: [] }, {}, estData);
+    expect(sections.some((s) => s.key === 'termite_station_rental')).toBe(false);
+    for (const section of sections) {
+      expect(section.memberKeys || []).not.toContain('termite_station_rental');
+    }
+    attachTermiteStationRental(sections, estData);
+    const termite = sections.find((s) => s.key === 'termite_bait');
+    if (termite) {
+      expect(termite.stationRental).toMatchObject({ perApplicationAdd: 33 });
+      // Split totals come from the summed recurring rows — the itemized
+      // section keeps the bare monitoring price.
+      expect(termite.frequencies[0].perTreatment).toBeCloseTo(78.3, 2);
+    }
+  });
+
+  test('a rental row with no monitoring plan keeps its own section (fail-safe, never vanishes)', () => {
+    const estData = { result: { recurring: { services: [rentalRow] } } };
+    const sections = buildPricingServices({ frequencies: [] }, {}, estData);
+    expect(sections.some((s) => s.key === 'termite_station_rental')).toBe(true);
+  });
+});

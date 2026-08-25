@@ -18183,6 +18183,52 @@ function attachTermiteBondSelector(services = [], estData = {}) {
   return services;
 }
 
+// Termite station rental rider (owner 2026-07-26): $0 install, Waves keeps
+// ownership of the in-ground stations, and the unpaid install price is
+// recovered as a fixed per-application uplift on the same quarterly check.
+// The row is section-suppressed in buildPricingServices (same posture as
+// the bond rider — before 2026-08-25 it minted its own generic "Service"
+// card wearing the termite headline). This stamps the rental onto the
+// TERMITE section so the card itemizes it, and for SOLO termite estimates
+// folds its figures into the section frequencies — the solo accept path
+// freezes effectiveMonthly/AnnualTotal from the selected frequency, exactly
+// the bond fold above. Split bundles keep itemized sections; their accept
+// totals already sum every recurring row (rental included).
+// Sold-state posture, no gate check: a GATE_TERMITE_STATION_RENTAL flip
+// must not hide a rental the customer was already quoted — NEW dark rental
+// saves are blocked at persistence (assertNoDarkTermiteRentalPayload).
+function attachTermiteStationRental(services = [], estData = {}) {
+  const section = (services || []).find((s) => s?.key === 'termite_bait');
+  if (!section) return services;
+  const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
+  const rentalRow = rows.find((svc) => recurringServiceKey(svc) === 'termite_station_rental') || null;
+  if (!rentalRow) return services;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const rentalMonthly = Number(rentalRow.mo ?? rentalRow.monthly) || 0;
+  const rentalAnnual = Number(rentalRow.annual) || round2(rentalMonthly * 12);
+  const rentalPerApp = Number(rentalRow.perTreatment) || 0;
+  section.stationRental = {
+    label: rentalRow.name || 'Termite Station Rental',
+    detail: rentalRow.detail || 'Waves owns the in-ground stations — $0 install.',
+    perApplicationAdd: rentalPerApp,
+    monthlyAdd: rentalMonthly,
+    annualAdd: rentalAnnual,
+  };
+  if (services.length === 1 && Array.isArray(section.frequencies)) {
+    section.frequencies = section.frequencies.map((frequency) => {
+      if (!frequency || frequency.quoteRequired) return frequency;
+      return {
+        ...frequency,
+        monthly: frequency.monthly != null ? round2(frequency.monthly + rentalMonthly) : frequency.monthly,
+        monthlyBase: frequency.monthlyBase != null ? round2(frequency.monthlyBase + rentalMonthly) : frequency.monthlyBase,
+        annual: frequency.annual != null ? round2(frequency.annual + rentalAnnual) : frequency.annual,
+        perTreatment: frequency.perTreatment != null ? round2(frequency.perTreatment + rentalPerApp) : frequency.perTreatment,
+      };
+    });
+  }
+  return services;
+}
+
 // The area a section's price was computed from, rendered next to that price
 // (owner ask 2026-08-12: the treatable area drives solution volume and the
 // per-application charge, so it belongs beside the number it explains).
@@ -18306,15 +18352,26 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   // is in the row set, so dropping its key from the row-sum side would
   // collapse every bond-carrying multi-service plan into the single bundle
   // card and strand the selector (codex #2915 r2).
-  const recurringKeys = allRecurringKeys.filter((key) => !String(key).startsWith('termite_bond'));
+  // Station-rental uplift is the same kind of rider (owner 2026-07-26): it
+  // rides its own line so bundle percentage discounts can't touch the
+  // hardware recovery, but it renders INSIDE the termite card
+  // (attachTermiteStationRental) — as its own section it fell through to a
+  // generic "Service" card wearing the termite headline (2026-08-25).
+  // Suppressed only when a termite_bait section exists to host it; a
+  // rental row with no monitoring plan (shouldn't happen) keeps its own
+  // card rather than vanishing from the page.
+  const suppressStationRental = allRecurringKeys.includes('termite_bait');
+  const isSuppressedRiderKey = (key) => String(key).startsWith('termite_bond')
+    || (suppressStationRental && key === 'termite_station_rental');
+  const recurringKeys = allRecurringKeys.filter((key) => !isSuppressedRiderKey(key));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
-  // Same rider suppression as recurringKeys above — a bond pair here would
-  // still mint its own split-section card.
+  // Same rider suppression as recurringKeys above — a bond or rental pair
+  // here would still mint its own split-section card.
   const recurringRows = recurringServiceRowsByKey(recurringServices)
-    .filter(([key]) => !String(key).startsWith('termite_bond'));
+    .filter(([key]) => !isSuppressedRiderKey(key));
   const recurringDiscount = Number(estResult?.recurring?.discount || payload?.recurring?.discount || 0) || 0;
 
   if (!isOneTimeOnly && hasRecurringPest && recurringKeys.filter((key) => key !== 'pest_control').length === 0) {
@@ -19104,6 +19161,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     lowConfidenceLines,
   );
   attachTermiteBondSelector(services, estData);
+  attachTermiteStationRental(services, estData);
   attachCommercialInteriorSelector(services, estData);
   // Same resolver as buildPricingServices — basis and price ladder must come
   // from ONE result object (ui-verify caught them diverging; see helper).
@@ -22229,6 +22287,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+module.exports.attachTermiteStationRental = attachTermiteStationRental;
 module.exports.applySelectedCommercialInteriorToEstimateData = applySelectedCommercialInteriorToEstimateData;
 module.exports.commercialInteriorOptionFromEstimateData = commercialInteriorOptionFromEstimateData;
 module.exports.commercialInteriorExcludedFromEstimateData = commercialInteriorExcludedFromEstimateData;
