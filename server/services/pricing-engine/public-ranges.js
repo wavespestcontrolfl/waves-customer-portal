@@ -916,7 +916,7 @@ function buildRows() {
 
   add('recurring_foam', () => rangeRow({
     key: 'recurring_foam',
-    name: 'Recurring Foam Treatment',
+    name: 'Recurring Termite Foam Service',
     unit: 'per application',
     values: sweepValues(
       // 20 points is the configured recurring-foam maximum; larger jobs are
@@ -931,7 +931,7 @@ function buildRows() {
   add('foam_drill', () => rangeRow({
     key: 'foam_drill',
     oneTimePerkKey: 'foam_drill',
-    name: 'Drill-and-Foam Termite Treatment',
+    name: 'Termite Foam Service',
     unit: 'per job',
     // Distinct from the termite_foam spot treatment: this is the tiered
     // drill-and-foam service the estimate path prices via priceFoamDrill.

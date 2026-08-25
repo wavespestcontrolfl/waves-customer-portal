@@ -232,7 +232,7 @@ describe('engineInputs-only foam estimate is schedulable on accept (no stored re
     });
     const section = (bundle.services || [])[0] || {};
     expect(section.key).toBe('foam_recurring');
-    expect(section.label).toBe('Recurring Foam Treatment');
+    expect(section.label).toBe('Recurring Termite Foam Service');
   });
 });
 

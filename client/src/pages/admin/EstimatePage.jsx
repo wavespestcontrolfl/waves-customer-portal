@@ -3959,7 +3959,7 @@ function EstimateToolView() {
                   </Field>{" "}
                 </div>
               )}
-              <Checkbox k="svcFoamRecurring" label="Recurring Foam Treatment" />
+              <Checkbox k="svcFoamRecurring" label="Recurring Termite Foam Service" />
               {form.svcFoamRecurring && (
                 <div style={sSubOpts}>
                   {" "}

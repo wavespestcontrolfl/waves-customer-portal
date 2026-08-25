@@ -12,6 +12,7 @@
  * insertion marker in notes.
  */
 const migration = require('../models/migrations/20260808070000_foam_termite_catalog_rows');
+const renameMigration = require('../models/migrations/20260825000010_service_name_suffix_renames');
 const { detectServiceCategory } = require('../utils/service-normalizer');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 
@@ -24,17 +25,26 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const rowMatch = (r) => filters.every((f) => {
       if (f.in) return f.in.values.includes(r[f.in.col]);
       if (f.raw) return String(r[f.raw.col] || '').toLowerCase() === String(f.raw.val).toLowerCase();
+      if (f.raw_null) return r[f.raw_null] === null || r[f.raw_null] === undefined;
       return Object.entries(f).every(([k, v]) => r[k] === v);
     });
     const q = {
       where(cond) { filters.push(cond); return q; },
       whereIn(col, values) { filters.push({ in: { col, values } }); return q; },
       whereRaw(sql, bindings) {
-        // Emulates only the lower(<col>) = lower(?) shape the completion
-        // resolver uses.
+        // Emulates only the shapes the completion resolver and the
+        // 20260825000010 rename migration use.
+        if (/scheduled_date\s*>=\s*CURRENT_DATE/.test(sql)) {
+          // Fake rows carry no scheduled_date; treat them all as future.
+          return q;
+        }
         const m = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(sql);
         if (!m) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
         filters.push({ raw: { col: m[1], val: bindings[0] } });
+        return q;
+      },
+      whereNull(col) {
+        filters.push({ raw_null: col });
         return q;
       },
       first: async () => {
@@ -68,6 +78,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     hasTable: async (t) => !missingTables.includes(t) && t in db,
     hasColumn: async (t, c) => t in db && !missingTables.includes(t) && c !== undefined,
   };
+  knex.fn = { now: () => new Date().toISOString() };
   return knex;
 }
 
@@ -129,20 +140,31 @@ describe('20260808070000 foam catalog rows', () => {
     const sp = require('../services/pricing-engine');
     const db = emptyDb();
     await migration.up(fakeKnex(db));
+    // The 2026-08-25 rename pass carries the pair to their current names;
+    // engine labels and the slot-reservation literal moved in the same PR,
+    // so the exact-name contract this test pins holds through both.
+    await renameMigration.up(fakeKnex(db));
 
     // One-time bookings schedule under the raw engine line name.
     expect(svcRow(db, 'foam_drill').name).toBe(sp.priceFoamDrill(10, {}).name);
+    expect(svcRow(db, 'foam_drill').name).toBe('Termite Foam Service');
     // Reserved-slot rows schedule under slot-reservation's label for
     // foam_recurring — pinned literally because serviceTypeForKey is
-    // module-private ('Recurring Foam Treatment', slot-reservation.js).
-    expect(svcRow(db, 'foam_recurring').name).toBe('Recurring Foam Treatment');
+    // module-private ('Recurring Termite Foam Service', slot-reservation.js).
+    expect(svcRow(db, 'foam_recurring').name).toBe('Recurring Termite Foam Service');
   });
 
   test('END-TO-END: a reserved foam visit with NO service_id resolves the typed termite profile by name', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
+    await renameMigration.up(fakeKnex(db));
 
-    for (const label of ['Recurring Foam Treatment', 'Drill-and-Foam Termite']) {
+    // Current labels AND the pre-rename legacy labels (holds created before
+    // the rename can commit after it) must all resolve the typed profile.
+    for (const label of [
+      'Recurring Termite Foam Service', 'Termite Foam Service',
+      'Recurring Foam Treatment', 'Drill-and-Foam Termite',
+    ]) {
       const resolved = await resolveCompletionProfileForScheduledService(
         { service_type: label },
         fakeKnex(db),

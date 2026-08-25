@@ -235,6 +235,22 @@ function serviceNameCandidates(serviceType) {
       expanded.push(candidate);
       seen.add(key);
     }
+    // Mirror of the trailing-" Service" strip above, in the other direction:
+    // the 2026-08-25 catalog renames suffixed every service name with
+    // " Service", while engine lines and older booking labels still carry
+    // the bare form ("Cockroach Treatment", "Bora-Care Wood Treatment").
+    // Without the append candidate those labels stop resolving the renamed
+    // rows — the strip alone only bridges label→catalog when the LABEL is
+    // the longer form. Migration 20260808080000 already treats
+    // `${name} Service` as a live alias in its rollback reference check.
+    if (!/\bservice$/i.test(candidate)) {
+      const suffixed = `${candidate} Service`;
+      const suffixedKey = suffixed.toLowerCase();
+      if (!seen.has(suffixedKey)) {
+        expanded.push(suffixed);
+        seen.add(suffixedKey);
+      }
+    }
     if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
       const alias = 'Pest & Rodent Control';
       const aliasKey = alias.toLowerCase();
@@ -242,6 +258,21 @@ function serviceNameCandidates(serviceType) {
         expanded.push(alias);
         seen.add(aliasKey);
       }
+    }
+    // The 2026-08-25 foam renames are NOT suffix-only, so the append
+    // candidate above can't bridge them. Reserved foam rows carry no
+    // service_id by design (20260808070000), and a hold labeled with the
+    // old form can commit after the rename migration relabels open visits
+    // — these aliases keep every legacy foam label resolving forever.
+    let foamAlias = null;
+    if (/^recurring\s+foam\s+treatment(\s*\(.*\))?$/i.test(candidate)) {
+      foamAlias = 'Recurring Termite Foam Service';
+    } else if (/^drill[\s-]*(?:and[\s-]*)?foam\s+termite(\s+treatment)?$/i.test(candidate)) {
+      foamAlias = 'Termite Foam Service';
+    }
+    if (foamAlias && !seen.has(foamAlias.toLowerCase())) {
+      expanded.push(foamAlias);
+      seen.add(foamAlias.toLowerCase());
     }
   }
   return expanded;

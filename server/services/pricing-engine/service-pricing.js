@@ -7712,7 +7712,7 @@ function priceFoamDrill(points = 5, options = {}) {
   const label = foamDrillTierLabel(tier);
   return {
     service: 'foam_drill',
-    name: 'Drill-and-Foam Termite',
+    name: 'Termite Foam Service',
     price,
     detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
     points: pointCount, tier: label, cans: tier.cans,
@@ -7751,7 +7751,7 @@ function priceRecurringFoam(points = 5, options = {}) {
   const tierLabel = foamDrillTierLabel(tier);
   return {
     service: 'foam_recurring',
-    name: `Recurring Foam Treatment (${cadenceLabel})`,
+    name: `Recurring Termite Foam Service (${cadenceLabel})`,
     annual,
     monthly,
     perVisit,

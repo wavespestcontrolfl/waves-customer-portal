@@ -3014,7 +3014,7 @@ function recurringServiceDisplayName(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito';
     case 'termite_bait': return 'Termite Bait';
-    case 'foam_recurring': return 'Recurring Foam Treatment';
+    case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
@@ -13443,7 +13443,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       case 'termite_bait': return 'Termite Bait';
       case 'palm_injection': return 'Palm Injection';
       case 'rodent_bait': return 'Rodent Bait Stations';
-      case 'foam_recurring': return 'Recurring Foam Treatment';
+      case 'foam_recurring': return 'Recurring Termite Foam Service';
       default: return svc;
     }
   };
@@ -15655,7 +15655,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
-    case 'foam_recurring': return 'Recurring Foam Treatment';
+    case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
     case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Trenching';
@@ -16936,7 +16936,7 @@ function foamFrequenciesFromV1Services(services = []) {
   if (!row) return [];
   return [singleCadenceFrequencyFromRow(row, {
     serviceKey: 'foam_recurring',
-    serviceLabel: 'Recurring Foam Treatment',
+    serviceLabel: 'Recurring Termite Foam Service',
     includedProgramLabel: (label) => `${label} foam treatment program`,
     defaultCadence: 'quarterly',
   })];

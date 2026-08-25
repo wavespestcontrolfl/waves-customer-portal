@@ -179,11 +179,18 @@ function serviceKeyFor(value = {}) {
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
   if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
+  // Recurring foam must be classified BEFORE the bare /termite/ test: the
+  // 2026-08-25 rename made the display name "Recurring Termite Foam Service",
+  // which carries a termite token — order alone would silently re-route it to
+  // termite_bait sizing and lose the 120/180-min foam tier. The one-time
+  // "Termite Foam Service" (no recurring token) still falls through to
+  // termite_bait below, preserving its pre-rename window.
+  if (/foam[_\s]*recurring|recurring[_\s]*(?:termite[_\s]*)?foam/.test(raw)) return 'foam_recurring';
   if (/termite/.test(raw)) return 'termite_bait';
-  // Recurring foam can reach slot sizing labeled only "Recurring Foam Treatment"
-  // / "FoamRecurring" (no mapped service key), so classify foam here — after
-  // termite so the one-time "Drill-and-Foam Termite" still maps to termite — or
-  // the booking falls to the generic window instead of the 120/180-min tier.
+  // Legacy labels reach slot sizing as bare foam forms ("Recurring Foam
+  // Treatment" / "FoamRecurring") with no mapped service key — classify foam
+  // here, after termite, so one-time drill-and-foam labels keep the termite
+  // window while bare foam labels get the foam tier.
   if (/foam/.test(raw)) return 'foam_recurring';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';

@@ -7269,7 +7269,7 @@ export default function EstimateToolViewV2({
                   </FieldV2>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcFoamRecurring" label="Recurring Foam Treatment" />
+              <CheckboxV2 k="svcFoamRecurring" label="Recurring Termite Foam Service" />
               {form.svcFoamRecurring && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}

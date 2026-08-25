@@ -270,7 +270,7 @@ const RECURRING_LINE_LABELS = {
   mosquito: 'Mosquito & No-See-Um Control',
   tree_shrub: 'Tree & Shrub Care',
   palm_injection: 'Palm Tree Injections',
-  foam_recurring: 'Recurring Foam Treatment',
+  foam_recurring: 'Recurring Termite Foam Service',
   termite_bait: 'Termite Bait Monitoring',
   termite_bond: 'Termite Bond',
   trap_only_retainer: 'Rodent Trapping Retainer',

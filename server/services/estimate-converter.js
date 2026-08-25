@@ -1904,7 +1904,7 @@ const RECURRING_SERVICE_DISPLAY_NAMES = {
   tree_shrub: 'Tree & Shrub',
   mosquito: 'Mosquito',
   termite_bait: 'Termite Bait',
-  foam_recurring: 'Recurring Foam Treatment',
+  foam_recurring: 'Recurring Termite Foam Service',
   rodent_bait: 'Rodent Bait Stations',
   palm_injection: 'Palm Injection',
   commercial_lawn: 'Commercial Turf Treatment Program',
