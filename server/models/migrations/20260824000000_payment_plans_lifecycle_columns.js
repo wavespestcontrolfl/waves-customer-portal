@@ -25,6 +25,23 @@ exports.up = async function up(knex) {
          AND pp.status = 'active'
          AND i.status IN ('paid', 'prepaid')
       `);
+    // Plans on OTHER terminal invoices (voided, refunded, cancelled) become
+    // 'cancelled': their invoices left the collection path without settling,
+    // and the forward void cleanup cannot repair an ALREADY-void invoice
+    // (voidInvoice early-returns on status 'void') — without this backfill
+    // the stale row reads active_payment_plan and satisfies every
+    // active-plan gate forever.
+    await knex.raw(`
+      UPDATE payment_plans pp
+         SET status = 'cancelled',
+             cancelled_at = NOW(),
+             cancelled_by = 'system:migration_terminal_invoice',
+             updated_at = NOW()
+        FROM invoices i
+       WHERE pp.invoice_id = i.id
+         AND pp.status = 'active'
+         AND i.status IN ('void', 'refunded', 'canceled', 'cancelled')
+      `);
     // Mirror completeActivePlansForInvoice for the historical rows too: plan
     // creation left the invoice's follow-up sequence 'stopped' with a
     // payment_plan_created:<id> stamp and stopOnPayment skips stopped rows,

@@ -2457,6 +2457,19 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
+        // An ACH payment in flight blocks cancellation (codex PR r7 P1):
+        // 'processing' is terminal to resumeSequence, so cancelling now
+        // leaves the plan-owned stop un-rearmed — and if the ACH later
+        // FAILS and the invoice reopens, no active plan remains while the
+        // stale stop suppresses reminders forever. Wait for the payment to
+        // resolve: success completes the plan, failure reopens the invoice
+        // and the cancel then re-arms normally. Mirrors voidInvoice's
+        // processing refusal.
+        if (String(invoice.status || '') === 'processing') {
+          const e = new Error('A payment is processing on this invoice — wait for it to settle (the plan completes) or fail (then cancel), and retry.');
+          e.statusCode = 409;
+          throw e;
+        }
         // Settlement may have won the race (codex PR r4 P2): the paid flip
         // committed, but the webhook's post-commit plan completion hasn't
         // run yet. Cancelling now would strand the plan-owned sequence
