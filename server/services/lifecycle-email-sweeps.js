@@ -63,7 +63,15 @@ function termYearsForVisit(v) {
   const linked = String(v.catalog_service_key || '');
   if (linked) {
     const m = linked.match(/^termite_bond_(\d+)yr$/);
-    return m ? Number(m[1]) : null;
+    if (m) return Number(m[1]);
+    // Combined bait+bond accepts link to the BAIT catalog row BY DESIGN (no
+    // combined catalog row exists — see COMBINED_SERVICE_ROUTES) and encode
+    // the bond term only in the label; the label is the term authority for
+    // exactly that route (pre-push P1 follow-up).
+    if (linked === 'termite_bait' && /termite bond/i.test(String(v.service_type || ''))) {
+      return termYearsFrom(v.service_type);
+    }
+    return null;
   }
   const m = String(v.service_key_snapshot || '').match(/^termite_bond_(\d+)yr$/);
   if (m) return Number(m[1]);
@@ -99,9 +107,17 @@ async function syncTermiteBonds() {
     })
     // The resolved link is authoritative the other way too: a visit whose
     // service_id names a NON-bond catalog row was repointed, and its stale
-    // snapshot/label must not mint a warranty (pre-push P1).
+    // snapshot/label must not mint a warranty (pre-push P1). One documented
+    // exception: combined bait+bond accepts link to the termite_bait row by
+    // design with the bond term in the label — those stay candidates when
+    // the label proves the bond.
     .where(function linkedRowAuthority() {
-      this.whereNull('services.service_key').orWhereIn('services.service_key', BOND_KEYS);
+      this.whereNull('services.service_key')
+        .orWhereIn('services.service_key', BOND_KEYS)
+        .orWhere(function combinedBaitBond() {
+          this.where('services.service_key', 'termite_bait')
+            .andWhere('scheduled_services.service_type', 'ilike', BOND_MATCH);
+        });
     })
     // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
     // seeder) — only the establishing anchor visit starts a bond term, or a

@@ -714,4 +714,20 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
       service_type: 'Termite Bond (10-Year Term)',
     })).toBeNull();
   });
+
+  test('combined bait+bond visits (termite_bait link BY DESIGN) derive the term from the label', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // COMBINED_SERVICE_ROUTES links these to the BAIT row — no combined
+    // catalog row exists — and the bond term lives only in the name.
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bait',
+      service_type: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)',
+    })).toBe(5);
+    // A PLAIN bait visit is not a bond — even with a stale bond snapshot.
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bait',
+      service_key_snapshot: 'termite_bond_1yr',
+      service_type: 'Termite Bait Station Service',
+    })).toBeNull();
+  });
 });
