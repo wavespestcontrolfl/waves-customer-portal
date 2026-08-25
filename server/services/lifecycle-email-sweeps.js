@@ -149,31 +149,34 @@ async function syncTermiteBonds() {
       'scheduled_services.check_out_time',
       'scheduled_services.scheduled_date',
     );
+  // Completion timing lives in actual_end_time / check_out_time on the
+  // closeout path (completed_at is often null there). Real timestamps get
+  // the ET-calendar conversion — a visit completed after 8 PM Eastern is
+  // already on the next UTC day. The DATE-only scheduled_date fallback is
+  // already a calendar date: converting it through a timezone would shift
+  // it BACK a day (UTC midnight → 7/8 PM ET the previous evening), so it
+  // is used verbatim.
+  const bondStartDateEt = (row) => {
+    const completionTs = row.actual_end_time || row.check_out_time || row.completed_at;
+    if (completionTs) {
+      const started = new Date(completionTs);
+      return Number.isNaN(started.getTime()) ? null : etDateString(started);
+    }
+    if (row.scheduled_date) {
+      return typeof row.scheduled_date === 'string'
+        ? row.scheduled_date.slice(0, 10)
+        : new Date(row.scheduled_date).toISOString().slice(0, 10);
+    }
+    return null;
+  };
   let inserted = 0;
   for (const v of visits) {
     if (!v.customer_id) continue;
-    // Completion timing lives in actual_end_time / check_out_time on the
-    // closeout path (completed_at is often null there). Real timestamps get
-    // the ET-calendar conversion — a visit completed after 8 PM Eastern is
-    // already on the next UTC day. The DATE-only scheduled_date fallback is
-    // already a calendar date: converting it through a timezone would shift
-    // it BACK a day (UTC midnight → 7/8 PM ET the previous evening), so it
-    // is used verbatim.
-    const completionTs = v.actual_end_time || v.check_out_time || v.completed_at;
-    let startedEt = null;
-    if (completionTs) {
-      const started = new Date(completionTs);
-      if (!Number.isNaN(started.getTime())) startedEt = etDateString(started);
-    } else if (v.scheduled_date) {
-      startedEt = typeof v.scheduled_date === 'string'
-        ? v.scheduled_date.slice(0, 10)
-        : new Date(v.scheduled_date).toISOString().slice(0, 10);
-    }
-    if (!startedEt) continue;
-    // Belt-and-braces with the query's linkedRowAuthority filter: a null
-    // term means the durable identity disproved the bond — never insert.
-    // (Cheap pre-lock skip; the authoritative check reruns under the lock.)
-    if (!termYearsForVisit(v)) continue;
+    // Cheap pre-lock skips (belt-and-braces with the query's filters): a
+    // null term means the durable identity disproved the bond, a null start
+    // means no usable timing. Both re-derive under the lock — the unlocked
+    // values never reach the insert.
+    if (!bondStartDateEt(v) || !termYearsForVisit(v)) continue;
     try {
       // Owner from the LOCKED visit row (Codex #3109 r27): a merge-undo
       // can reverse-repoint the visit between the sweep's unlocked read
@@ -182,8 +185,16 @@ async function syncTermiteBonds() {
       const bondInserted = await db.transaction(async (trx) => {
         const lockedVisit = await trx('scheduled_services')
           .where({ id: v.id }).forUpdate()
-          .first('customer_id', 'service_id', 'service_type', 'service_key_snapshot');
+          .first('customer_id', 'service_id', 'service_type', 'service_key_snapshot',
+            'status', 'completed_at', 'actual_end_time', 'check_out_time', 'scheduled_date');
         if (!lockedVisit || !lockedVisit.customer_id) return false;
+        // Status, identity, AND timing all re-derive from the LOCKED row
+        // (codex #3485 r18 P2): an un-complete or timing edit landing
+        // before the lock must not mint a bond, or date it, from the stale
+        // candidate read.
+        if (lockedVisit.status !== 'completed') return false;
+        const startedEt = bondStartDateEt(lockedVisit);
+        if (!startedEt) return false;
         // Re-derive the bond identity from the LOCKED row (pre-push P1):
         // a repoint landing between the unlocked candidate read and this
         // lock would otherwise mint from the stale identity — the exact

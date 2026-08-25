@@ -87,6 +87,11 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   // One line can carry an AGGREGATE follow-up count while the slot profile
   // books one appointment — unmapped until conversion is count-aware.
   'rodent_trapping_followup',
+  // ONE engine key sells TWO plans (Standard: two included callbacks;
+  // Unlimited) while the catalog row's completion contract is the
+  // unlimited 14-day chaining window — a Standard sale stamped with it
+  // would generate callbacks beyond the two purchased (codex r18 P1).
+  'rodent_trapping',
   // Active only in prod (admin-reactivated after the 20260519000003
   // archive) — a seed would target an archived row in migration-built
   // databases; the label resolves the row by unique name where it is live.

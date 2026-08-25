@@ -65,7 +65,13 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'rodent_inspection', engine_keys: ['rodent_inspection'] },
   // Rodent one-times — none of these were in the canonical-label whitelist,
   // so every one fell through to raw lead text.
-  { service_key: 'rodent_trapping', engine_keys: ['rodent_trapping'] },
+  // `rodent_trapping` is NOT seeded: priceRodentTrapping sells TWO plans
+  // under one engine key — Standard (two included callbacks) and Unlimited
+  // — while the catalog row's completion contract is the unlimited 14-day
+  // active window whose alert policy lets trapping follow-ups CHAIN.
+  // Stamping a Standard sale with that identity would keep generating
+  // callback obligations beyond the two purchased (codex #3485 r18 P1);
+  // unmapped until the plan choice gets its own durable identity.
   // `rodent_trapping_followup` is NOT seeded: the pricer can emit ONE line
   // carrying an AGGREGATE follow-up count/price while the slot profile
   // books a single appointment — stamping the single-visit row would give
@@ -189,6 +195,15 @@ async function activeOwnerElsewhere(knex, excludeId, engineKeys) {
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
+
+  // Serialize the owner-check → stamp span against concurrent admin edits
+  // (codex #3485 r18 P2): activeOwnerElsewhere and the guarded UPDATE are
+  // separate statements and engine_keys has no member-level uniqueness, so
+  // an admin stamp landing between them would still create two active
+  // owners. Migrations run inside a transaction — this lock holds until
+  // commit, blocking writes to services (reads proceed) for the seconds
+  // up() takes.
+  await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
 
 
   // Ownership is RECORDED, not inferred: value equality cannot prove up()

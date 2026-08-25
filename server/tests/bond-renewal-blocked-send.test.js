@@ -257,6 +257,14 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
                     service_id: locked.service_id || null,
                     service_type: locked.service_type,
                     service_key_snapshot: locked.service_key_snapshot || null,
+                    // Candidate fixtures are completed rows by definition;
+                    // an override can flip status to model an un-complete
+                    // landing before the lock.
+                    status: locked.status || 'completed',
+                    completed_at: locked.completed_at ?? null,
+                    actual_end_time: locked.actual_end_time ?? null,
+                    check_out_time: locked.check_out_time ?? null,
+                    scheduled_date: locked.scheduled_date ?? null,
                   };
                 }),
               })),
@@ -338,6 +346,31 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
 
     expect(result.inserted).toBe(0);
     expect(bondInsert).not.toHaveBeenCalled();
+  });
+
+  test('an un-complete landing before the lock vetoes the insert', async () => {
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow()], bondInsert);
+    armDb.lockedOverrides = { 'svc-b1': { status: 'cancelled' } };
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(0);
+    expect(bondInsert).not.toHaveBeenCalled();
+  });
+
+  test('a timing edit landing before the lock dates the bond from the LOCKED timestamps', async () => {
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow({ actual_end_time: '2026-07-01T16:00:00.000Z' })], bondInsert);
+    armDb.lockedOverrides = { 'svc-b1': { actual_end_time: '2026-07-10T16:00:00.000Z' } };
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(1);
+    expect(bondInsert).toHaveBeenCalledWith(expect.objectContaining({
+      started_at: '2026-07-10',
+      renews_at: '2027-07-10',
+    }));
   });
 
   test('the locked catalog link drives the inserted term when it disagrees with the candidate read', async () => {

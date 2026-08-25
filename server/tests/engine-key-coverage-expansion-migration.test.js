@@ -74,6 +74,11 @@ function fakeKnex(db) {
     hasColumn: async (t, c) => t in db && c === 'engine_keys',
   };
   knex.fn = { now: () => 'NOW' };
+  // The table lock up() takes to serialize the owner-check → stamp span;
+  // a fake single-writer store has nothing to lock.
+  knex.raw = async (sql) => {
+    if (!/^LOCK TABLE services/i.test(String(sql))) throw new Error(`fake raw: unsupported sql ${sql}`);
+  };
   return knex;
 }
 
