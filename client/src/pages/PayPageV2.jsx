@@ -1517,6 +1517,9 @@ export default function PayPageV2() {
   // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
   // it as requires_payment_method and the stale-PI triage cancels/replaces it).
   const setupPostedRef = useRef(null);
+  // One reconcile GET per (token, saveCard) after an ambiguous setup failure
+  // — see the 400/409 branch in the setup catch below.
+  const setupReconcileRef = useRef(null);
   const [saveCard, setSaveCard] = useState(saveCardDefault);
   // Server-authoritative requirement (invoice.saveRequired from the GET);
   // the URL param only pre-locks the box before data arrives so it never
@@ -1881,6 +1884,20 @@ export default function PayPageV2() {
         if (err.status === 409 && err.savedCardPending) {
           setSavedCardAttemptPending(true);
           setPaymentState('idle');
+          return;
+        }
+        // A 400/409 here can mean an EARLIER attempt actually landed and only
+        // its response was lost (Safari "Load failed" + network retry): e.g.
+        // account credit fully settled the invoice, so the follow-up trips
+        // assertInvoiceCollectible against the now-settled invoice. Reconcile
+        // with one fresh GET per setup key — a settled invoice renders its
+        // receipt/prepaid state from the reload; a still-collectible one
+        // re-runs setup, and a repeat failure falls through to the error
+        // state below (the reconcile guard makes this terminate).
+        if ((err.status === 400 || err.status === 409) && setupReconcileRef.current !== setupKey) {
+          setupReconcileRef.current = setupKey;
+          setupPostedRef.current = null;
+          setLoadAttempt((attempt) => attempt + 1);
           return;
         }
         // Allow a retry: the guard was set before the POST to stop the
