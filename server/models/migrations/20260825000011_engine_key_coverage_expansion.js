@@ -84,7 +84,11 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'flea_tick', engine_keys: ['flea_knockdown_single', 'flea_package'] },
   { service_key: 'cockroach_control', engine_keys: ['pest_initial_roach'] },
   { service_key: 'bed_bug_treatment', engine_keys: ['bed_bug', 'bed_bug_chemical', 'bed_bug_heat'] },
-  { service_key: 'palm_injection', engine_keys: ['palm_injection'] },
+  // `palm_injection` is NOT seeded: 20260519000003 archived that row, and
+  // only prod carries it admin-reactivated — a seed would target an
+  // archived (unresolvable) row in migration-built databases (codex #3485
+  // r4 P1). Palm one-time labels resolve by their unique name in prod;
+  // listed on the honesty list.
 ];
 
 // Seeds whose target row differs per environment: candidates in preference

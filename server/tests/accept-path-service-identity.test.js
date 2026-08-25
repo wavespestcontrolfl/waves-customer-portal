@@ -84,6 +84,10 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   'rodent_trapping_emergency_surcharge', 'rodent_trapping_extra_callback',
   // Priced rider with no catalog row of its own.
   'rodent_plugging',
+  // Active only in prod (admin-reactivated after the 20260519000003
+  // archive) — a seed would target an archived row in migration-built
+  // databases; the label resolves the row by unique name where it is live.
+  'palm_injection',
 ];
 
 // Load the knexfile BEFORE deciding to skip — it resolves the Railway
@@ -302,6 +306,17 @@ describe('catalogServiceIdForProfile', () => {
         { services: [{ service: 'pest_control', visitsPerYear: 4 }] },
       );
       expect(link).toEqual(row);
+    });
+
+    test('a legacy 4-application lawn profile resolves lawn_care_quarterly', async () => {
+      const capture = {};
+      const row = { id: 'svc-lq', name: 'Quarterly Lawn Care Service', service_key: 'lawn_care_quarterly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'lawn_care', visitsPerYear: 4 }] },
+      );
+      expect(link).toEqual(row);
+      expect(capture.where).toEqual({ service_key: 'lawn_care_quarterly', is_active: true });
     });
 
     test('one_time mode and unknown cadence never trigger the keyed lookup', async () => {

@@ -268,6 +268,10 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
     if (visits >= 12) return 'lawn_care_monthly';
     if (visits >= 9) return 'lawn_care_6week';
     if (visits >= 6) return 'lawn_care_recurring';
+    // 4-application Basic tier: the PUBLIC accept path 409s this retired
+    // cadence, but legacy/admin-carried 4-visit lawn profiles still reach
+    // commit and the lawn_care_quarterly row is active (codex P1).
+    if (visits >= 4) return 'lawn_care_quarterly';
     return null;
   }
   if (key === 'mosquito') {
