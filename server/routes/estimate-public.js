@@ -11511,15 +11511,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ).catch(() => {});
       }
       // Resolve the durable job stamp with the in-flow outcome — the
-      // billing-cron sweep resumes only unresolved stamps, so every
-      // dispositioned outcome (paid/processing/declined/skipped) must land
-      // here. An AMBIGUOUS outcome deliberately does NOT resolve: the sweep
-      // owns it after reconciliation. Atomic JSON-path merge, never a full
-      // estimate_data rewrite (pre-push Codex P0 r5: a read-modify-write
-      // here could erase a concurrently-written invalidation marker).
-      // Best-effort: a failed update degrades to the sweep re-verifying
-      // against the live invoice.
-      if (prepayAutoCharge.status !== 'ambiguous') {
+      // billing-cron sweep resumes only unresolved stamps. COLLECTED
+      // outcomes (paid / initiated processing) resolve here; an AMBIGUOUS
+      // outcome deliberately does NOT resolve (the sweep owns it after
+      // reconciliation); and declined/skipped resolve only AFTER the
+      // fallback pay-link delivery below actually confirms (pre-push Codex
+      // P0 r8: retiring the job before a delivery that may fail or never
+      // run would leave the booking with no payment path and no sweep).
+      // Atomic JSON-path merge, never a full estimate_data rewrite
+      // (pre-push Codex P0 r5). Best-effort: a failed update degrades to
+      // the sweep re-verifying against the live invoice.
+      if (['paid', 'processing'].includes(prepayAutoCharge.status)) {
         try {
           await db('estimates')
             .where({ id: estimate.id })
@@ -11922,6 +11924,34 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
       logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
+
+    // Late stamp resolution for UNCOLLECTED prepay outcomes (pre-push Codex
+    // P0 r8): declined/skipped jobs resolve only once the fallback pay-link
+    // delivery above CONFIRMED — an {ok:false} delivery (or a crash before
+    // it) leaves the stamp for the recovery sweep, which re-attempts the
+    // charge and its own confirmed-delivery fallback. Mirrors the sweep's
+    // fallbackDelivered guard.
+    if (['declined', 'skipped'].includes(prepayAutoCharge?.status) && invoiceLinkDelivered) {
+      try {
+        await db('estimates')
+          .where({ id: estimate.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+          .update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({
+                status: prepayAutoCharge.status,
+                reason: prepayAutoCharge.reason || null,
+                fallback_delivered: true,
+                resolved_at: new Date().toISOString(),
+                resolved_by: 'accept',
+              })],
+            ),
+          });
+      } catch (stampErr) {
+        logger.warn(`[estimate-accept] prepay job late stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
+      }
     }
 
     // Auto-convert estimate to active customer (Feature #5) now runs INSIDE
