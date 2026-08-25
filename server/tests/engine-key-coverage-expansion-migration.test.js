@@ -169,6 +169,29 @@ describe('20260825000011 engine-key coverage expansion', () => {
     expect(svc(freshDb, 'pest_initial_cleanout').engine_keys).toBeNull();
   });
 
+  test('a preferred conditional row that already carries the mapping stops the fallback (no duplicate owners)', async () => {
+    const db = seedDb();
+    db.services.push({ id: 'svc-otp', service_key: 'one_time_pest_control', engine_keys: ['one_time_pest'] });
+    db.services.push({ id: 'svc-cleanout', service_key: 'pest_initial_cleanout', engine_keys: null });
+    await migration.up(fakeKnex(db));
+    // The admin-authored preferred mapping is preserved; the twin is NOT
+    // stamped — two active owners would make catalogLinkForProfile fail
+    // closed for every one_time_pest accept.
+    expect(svc(db, 'one_time_pest_control').engine_keys).toEqual(['one_time_pest']);
+    expect(svc(db, 'pest_initial_cleanout').engine_keys).toBeNull();
+  });
+
+  test('up() → up() → down() still reverses everything the FIRST run stamped', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'bora_care').engine_keys).toBeNull();
+    for (const target of ALIAS_APPENDS) {
+      expect(keysOf(svc(db, target.service_key))).toEqual(target.shipped);
+    }
+  });
+
   test('no engine key appears in two seeds or appends', () => {
     const seen = new Set();
     const all = [

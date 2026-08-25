@@ -92,7 +92,9 @@ const ENGINE_KEY_SEEDS = [
 ];
 
 // Seeds whose target row differs per environment: candidates in preference
-// order, first existing + unstamped row wins. Never creates rows.
+// order — the first EXISTING row decides (a preferred row that already
+// carries a mapping is preserved and later candidates are never stamped,
+// or one engine key could gain two active owners). Never creates rows.
 const CONDITIONAL_SEEDS = [
   {
     engine_keys: ['one_time_pest'],
@@ -126,6 +128,25 @@ async function saveState(knex, state) {
   if (!(await knex.schema.hasTable('system_settings'))) return;
   await knex('system_settings').where({ key: STATE_KEY }).del();
   await knex('system_settings').insert({ key: STATE_KEY, value: JSON.stringify(state) });
+}
+
+// A repeated up() finds every row already stamped, so its fresh record is
+// empty — writing it over the first run's record would erase rollback
+// ownership (codex #3485 r5 P1; same contract as 20260825000010). Union by
+// row id, prior entries preserved.
+function mergeOwnershipState(prior, next) {
+  if (!prior || typeof prior !== 'object') return next;
+  const merge = (a, b) => {
+    const byId = new Map();
+    for (const rec of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+      if (rec && rec.id) byId.set(rec.id, rec);
+    }
+    return [...byId.values()];
+  };
+  return {
+    stamped: merge(prior.stamped, next.stamped),
+    appended: merge(prior.appended, next.appended),
+  };
 }
 
 async function loadState(knex) {
@@ -167,16 +188,22 @@ exports.up = async function up(knex) {
 
   for (const seed of CONDITIONAL_SEEDS) {
     for (const candidateKey of seed.service_key_candidates) {
+      // The first EXISTING candidate decides — mapped or not. Falling
+      // through to a later candidate when the preferred row already
+      // carries an (admin-authored or re-run) mapping would give the same
+      // engine key two active owners, and catalogLinkForProfile fails
+      // closed on that ambiguity (codex #3485 r5 P1).
       const row = await knex('services')
         .where({ service_key: candidateKey })
-        .whereNull('engine_keys')
-        .first('id');
+        .first('id', 'engine_keys');
       if (!row) continue;
-      const count = await knex('services')
-        .where({ id: row.id })
-        .whereNull('engine_keys')
-        .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
-      if (count) state.stamped.push({ service_key: candidateKey, id: row.id, engine_keys: seed.engine_keys });
+      if (row.engine_keys == null) {
+        const count = await knex('services')
+          .where({ id: row.id })
+          .whereNull('engine_keys')
+          .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
+        if (count) state.stamped.push({ service_key: candidateKey, id: row.id, engine_keys: seed.engine_keys });
+      }
       break;
     }
   }
@@ -207,7 +234,8 @@ exports.up = async function up(knex) {
     if (count) state.appended.push({ service_key: target.service_key, id: row.id });
   }
 
-  await saveState(knex, state);
+  const prior = await loadState(knex);
+  await saveState(knex, mergeOwnershipState(prior, state));
 };
 
 // Down reverses only what the RECORDED ownership state proves up() wrote —
