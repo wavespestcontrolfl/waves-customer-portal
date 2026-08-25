@@ -61,7 +61,7 @@ const SERVICE_FAMILIES = [
   { key: 'stinging', label: 'Bee / Wasp Nest Removal Service', re: /\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bstinging\s+insects?\b/i },
   // Exclusion work is selected and priced separately from rodent control.
   { key: 'exclusion', label: 'Rodent Exclusion', re: /\bexclusions?\b|\bseal(?:ing)?\s+(?:up\s+)?entry\s+points?\b/i },
-  { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
+  { key: 'bed_bug', label: 'Bed Bug Treatment Service', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
   // palm(?! rat| injection): "palm rats" are roof rats (rodent) and palm
   // injection is its own project type — neither is tree & shrub care.

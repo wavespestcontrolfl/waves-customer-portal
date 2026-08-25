@@ -68,7 +68,7 @@ describe('canonicalBookingServiceLabel — the label allowlist', () => {
     expect(canonicalBookingServiceLabel('Pest Control')).toBe('Pest Control');
     expect(canonicalBookingServiceLabel('  mosquito control ')).toBe('Mosquito Control');
     expect(canonicalBookingServiceLabel('TERMITE INSPECTION')).toBe('Termite Inspection');
-    expect(canonicalBookingServiceLabel('bora-care wood treatment')).toBe('Bora-Care Wood Treatment');
+    expect(canonicalBookingServiceLabel('bora-care wood treatment')).toBe('Bora-Care Wood Treatment Service');
   });
 
   test('a crafted label never echoes through', () => {

@@ -299,7 +299,7 @@ describe('appointment tagger prep email automation', () => {
     expect(executor.processTrigger).toHaveBeenCalledTimes(1);
     const call = executor.processTrigger.mock.calls[0][0];
     expect(call.automationKey).toBe('prep.bed_bug');
-    expect(call.payload.project_type).toBe('Bed Bug Treatment');
+    expect(call.payload.project_type).toBe('Bed Bug Treatment Service');
   });
 
   test('DATE column returned as a UTC-midnight Date keeps the ET calendar day', async () => {

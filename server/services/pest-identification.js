@@ -130,7 +130,7 @@ const PEST_LIBRARY = [
   entry('german-roach', 'German Cockroaches', 'roaches', 'insect', {
     aliases: ['german cockroach', 'blattella germanica'],
     disease_vector: true, urgency: 'high', inspection_required: true,
-    service_label: 'German Roach Cleanout',
+    service_label: 'German Roach Cleanout Service',
     service_key: null,
     blurb: 'German roaches breed indoors — kitchens and bathrooms — and multiply fast. This is one to treat quickly with a dedicated cleanout, not store-bought sprays that scatter them.',
     tech_notes: 'Two pronotum stripes, nymphs banded. Gel bait + IGR cleanout, no repellents. Grade infestation level for cleanout pricing — always quote after inspection.',

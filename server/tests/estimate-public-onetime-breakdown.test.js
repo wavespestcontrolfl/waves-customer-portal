@@ -1951,7 +1951,7 @@ describe('public estimate one-time breakdown', () => {
       service_interest: 'Pest Control',
       estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'bora_care', price: 1051 }] } } },
     }, { serviceMode: 'one_time' });
-    expect(namelessProfile.serviceLabel).toContain('Bora-Care Wood Treatment');
+    expect(namelessProfile.serviceLabel).toContain('Bora-Care Wood Treatment Service');
     expect(namelessProfile.serviceLabel).not.toContain('bora_care');
   });
 
@@ -3756,7 +3756,7 @@ describe('public estimate one-time breakdown', () => {
       estData: { result: { recurring: { services: [] }, oneTime: { total: 1051, items: [{ service: 'bora_care', price: 1051 }] } } },
       oneTimeList: [{ service: 'bora_care', price: 1051 }],
     });
-    expect(label).toBe('Bora-Care Wood Treatment');
+    expect(label).toBe('Bora-Care Wood Treatment Service');
   });
 
   const boraCareAssistantContext = {
@@ -3966,9 +3966,9 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('bookingServiceFor routes a Bora-Care label to the Bora-Care booking service, not pest control', () => {
-    expect(bookingServiceFor('Bora-Care Wood Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    expect(bookingServiceFor('Bora-Care Wood Treatment Service')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment Service' });
     // Bora-Care is checked before termite, so a "Termite Bora-Care" label still routes to Bora-Care.
-    expect(bookingServiceFor('Termite Bora-Care Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    expect(bookingServiceFor('Termite Bora-Care Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment Service' });
     expect(bookingServiceFor('One-Time Pest Control').id).toBe('pest_control');
   });
 
@@ -4013,7 +4013,7 @@ describe('public estimate one-time breakdown', () => {
     // #3: the Bora-Care chip is present even though the recurring sections are Pest + Lawn.
     expect(contract.askChips).toContain('What does Bora-Care treat?');
     // #5: the raw service-key label is normalized for the client payload.
-    expect(contract.oneTimeBreakdown.items[0].label).toBe('Bora-Care Wood Treatment');
+    expect(contract.oneTimeBreakdown.items[0].label).toBe('Bora-Care Wood Treatment Service');
   });
 
   test('on a mixed estimate, a lawn-fungus / shrub-beetle question is not answered with Bora-Care copy', () => {
@@ -4037,7 +4037,7 @@ describe('public estimate one-time breakdown', () => {
       serviceMode: 'recurring',
       waveGuardTier: 'WaveGuard Silver',
       services: [{ service: 'pest_control', label: 'Pest Control', summary: 'Pest Control - quarterly' }],
-      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care Wood Treatment', summary: 'Bora-Care Wood Treatment - one-time' }] },
+      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care Wood Treatment Service', summary: 'Bora-Care Wood Treatment - one-time' }] },
     };
     const answer = answerEstimateQuestionFallback('What is included in this estimate?', context);
     expect(answer).toMatch(/Pest Control/);
@@ -4178,13 +4178,13 @@ describe('public estimate one-time breakdown', () => {
       effectiveOneTimeTotal: 264 + 951,
       oneTimeList: [
         { service: 'one_time_pest', label: 'One-Time Pest Control', price: 264 },
-        { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 951 },
+        { service: 'bora_care', label: 'Bora-Care Wood Treatment Service', price: 951 },
       ],
     });
     expect(draft.lineItems).toHaveLength(2);
-    expect(draft.lineItems.map((li) => li.description)).toEqual(['One-Time Pest Control', 'Bora-Care Wood Treatment']);
-    expect(draft.lineItems.find((li) => li.description === 'Bora-Care Wood Treatment').unit_price).toBe(951);
-    expect(draft.title).toContain('Bora-Care Wood Treatment');
+    expect(draft.lineItems.map((li) => li.description)).toEqual(['One-Time Pest Control', 'Bora-Care Wood Treatment Service']);
+    expect(draft.lineItems.find((li) => li.description === 'Bora-Care Wood Treatment Service').unit_price).toBe(951);
+    expect(draft.title).toContain('Bora-Care Wood Treatment Service');
 
     // A single-service one-time accept keeps the single collapsed line.
     const single = buildEstimateInvoiceModeDraft({

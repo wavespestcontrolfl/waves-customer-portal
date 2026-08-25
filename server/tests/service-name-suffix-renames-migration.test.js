@@ -55,7 +55,26 @@ function seedDb() {
     scheduled_service_addons: [
       { id: 'add-open', scheduled_service_id: 'v-parent', service_id: 'svc-roach', service_name: ROACH_OLD },
       { id: 'add-done', scheduled_service_id: 'v-done', service_id: 'svc-roach', service_name: ROACH_OLD },
+      // Legacy NAME-ONLY add-on (nullable service_id) on an open parent —
+      // first-class existing data the fanout must reach (codex r1 P2).
+      { id: 'add-legacy', scheduled_service_id: 'v-parent', service_id: null, service_name: ROACH_OLD },
     ],
+    pricing_config: [
+      {
+        config_key: 'pest_base',
+        data: JSON.stringify({
+          base: 112,
+          initial_roach: {
+            display: {
+              german: { name: 'German Cockroach Treatment', treatments: 1 },
+              regular: { name: ROACH_OLD, treatments: 1 },
+              regular_standalone: { name: ROACH_OLD, treatments: 1 },
+            },
+          },
+        }),
+      },
+    ],
+    pricing_config_audit: [],
     payer_statements: [
       { id: 'stmt-frozen', status: 'finalized' },
     ],
@@ -256,8 +275,32 @@ describe('20260825000010 service name suffix renames', () => {
     expect(db.self_booked_appointments[0].service_type).toBe(ROACH_NEW);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(ROACH_NEW);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-done').service_name).toBe(ROACH_OLD);
+    // Legacy name-only add-on (null service_id) on an open parent relabels.
+    expect(db.scheduled_service_addons.find((a) => a.id === 'add-legacy').service_name).toBe(ROACH_NEW);
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(ROACH_NEW);
     expect(db.service_completion_profiles[1].service_name_snapshot).toBe(FOAM_NEW);
+  });
+
+  test('up() renames the DB-authoritative roach display names, with an audit row; down() restores them', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    let data = JSON.parse(db.pricing_config[0].data);
+    expect(data.initial_roach.display.regular.name).toBe(ROACH_NEW);
+    expect(data.initial_roach.display.regular_standalone.name).toBe(ROACH_NEW);
+    expect(data.initial_roach.display.german.name).toBe('German Cockroach Treatment');
+    expect(db.pricing_config_audit).toHaveLength(1);
+    // The audit must capture the PRE-change snapshot — pg returns jsonb as
+    // an object, and an aliased mutation would record identical old/new.
+    expect(db.pricing_config_audit[0].old_value).not.toBe(db.pricing_config_audit[0].new_value);
+    expect(JSON.parse(db.pricing_config_audit[0].old_value).initial_roach.display.regular.name).toBe(ROACH_OLD);
+    expect(JSON.parse(stateRow(db).value).roachDisplayChanged.sort())
+      .toEqual(['regular', 'regular_standalone']);
+
+    await migration.down(fakeKnex(db));
+    data = JSON.parse(db.pricing_config[0].data);
+    expect(data.initial_roach.display.regular.name).toBe(ROACH_OLD);
+    expect(data.initial_roach.display.regular_standalone.name).toBe(ROACH_OLD);
+    expect(db.pricing_config_audit).toHaveLength(2);
   });
 
   test('up() relabels draft invoice snapshots (labels only), skips sent and frozen-statement drafts', async () => {
@@ -335,6 +378,22 @@ describe('20260825000010 service name suffix renames', () => {
       .toEqual([ROACH_OLD, ROACH_NEW].sort());
     expect(db.protocol_template_service_types.find((r) => r.service_type === ROACH_NEW).notes).toBe('admin');
     expect(stateRow(db)).toBeUndefined();
+  });
+
+  test('up() → up() → down() still restores everything the FIRST run changed', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    // Second run finds the catalog already renamed — its empty ownership
+    // must MERGE with (not erase) the first run's record.
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'cockroach_control').name).toBe(ROACH_OLD);
+    expect(svc(db, 'foam_drill').name).toBe(FOAM_OLD);
+    expect(visit(db, 'v-open-1').service_type).toBe(ROACH_OLD);
+    expect(db.self_booked_appointments[0].service_type).toBe(ROACH_OLD);
+    expect(JSON.parse(db.pricing_config[0].data).initial_roach.display.regular.name).toBe(ROACH_OLD);
+    expect(db.protocol_template_service_types.map((r) => r.service_type).sort())
+      .toEqual([ROACH_OLD, ROACH_NEW].sort());
   });
 
   test('down() with no ownership record restores nothing', async () => {

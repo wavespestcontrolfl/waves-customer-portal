@@ -218,7 +218,7 @@ describe('composeServiceInterest', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and bed bug treatment',
-    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment Service');
     expect(composeServiceInterest({
       matched_service: 'Bed Bug Treatment',
       requested_service: 'bed bugs plus roaches',
@@ -389,7 +389,7 @@ describe('composeServiceInterest', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and bed-bug treatment',
-    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment Service');
   });
 
   test('described termite treatment next to a WDO stays visible (codex r4)', () => {
@@ -418,7 +418,7 @@ describe('composeServiceInterest', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'bed-bug extermination',
-    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment Service');
   });
 
   test('a located pest plus a separate service keeps only the request (codex r5)', () => {
@@ -447,7 +447,7 @@ describe('composeServiceInterest', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and an exterminator for bed-bugs',
-    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment Service');
   });
 
   test('termite bait stations are termite work, not rodent (codex r6)', () => {
@@ -906,7 +906,7 @@ describe('composeServiceInterest', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and bed bugs, roaches',
-    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment + Pest Control Service');
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment Service + Pest Control Service');
     // exterminator-scoped lists still collapse
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',

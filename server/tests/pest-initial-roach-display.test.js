@@ -40,7 +40,7 @@ describe('pest_initial_roach display config', () => {
 
   test('defaults carry no "Initial" and one treatment visit', () => {
     const regular = pricePestInitialRoach(PROPERTY, { roachType: 'regular', autoFiredFromRecurringPest: true });
-    expect(regular.label).toBe('Cockroach Treatment');
+    expect(regular.label).toBe('Cockroach Treatment Service');
     expect(regular.treatments).toBe(1);
     expect(regular.detail).toContain('Includes 1 treatment visit.');
     expect(regular.price).toBe(139);
@@ -76,7 +76,7 @@ describe('pest_initial_roach display config', () => {
 
   test('v1 legacy mapper carries treatments onto the persisted one-time item', () => {
     const next = cloneInitialRoach();
-    next.display.regular = { name: 'Cockroach Treatment', treatments: 2 };
+    next.display.regular = { name: 'Cockroach Treatment Service', treatments: 2 };
     constants.PEST.pestInitialRoach = next;
 
     // Server-authoritative admin estimates persist through mapV1ToLegacyShape
@@ -89,7 +89,7 @@ describe('pest_initial_roach display config', () => {
     const item = (mapped.oneTime.items || []).find((it) => it.service === 'pest_initial_roach');
     expect(item).toBeTruthy();
     expect(item.treatments).toBe(2);
-    expect(item.name).toBe('Cockroach Treatment');
+    expect(item.name).toBe('Cockroach Treatment Service');
   });
 
   test('db-bridge reverts a species to code defaults when the row stops carrying it', async () => {
@@ -139,7 +139,7 @@ describe('pest_initial_roach display config', () => {
     const roachFee = (bundle.firstVisitFees || []).find((f) => f.service === 'pest_initial_roach');
     expect(roachFee).toBeTruthy();
     expect(roachFee.amount).toBe(139);
-    expect(roachFee.label).toBe('Cockroach Treatment');
+    expect(roachFee.label).toBe('Cockroach Treatment Service');
     expect(roachFee.treatments).toBe(1);
     expect(roachFee.waivedWithPrepay).toBe(false);
   });
@@ -198,7 +198,7 @@ describe('pest_initial_roach display config', () => {
     expect(synced).toBe(true);
     expect(constants.PEST.pestInitialRoach.display.regular).toEqual({ name: 'Roach Rescue', treatments: 2 });
     expect(constants.PEST.pestInitialRoach.display.german).toEqual({ name: 'German Cockroach Treatment', treatments: 1 });
-    expect(constants.PEST.pestInitialRoach.display.regular_standalone).toEqual({ name: 'Cockroach Treatment', treatments: 1 });
+    expect(constants.PEST.pestInitialRoach.display.regular_standalone).toEqual({ name: 'Cockroach Treatment Service', treatments: 1 });
   });
 });
 
