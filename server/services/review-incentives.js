@@ -163,6 +163,11 @@ function qualifiesGoogleReview(review, policy) {
   // human confirms the match (manual attribution restamps link_source to
   // 'manual', which lifts this exclusion). Pre-push P0.
   if (review.link_source === 'click_auto') return false;
+  // 'manual_no_visit' = a human confirmed the link explicitly WITHOUT a
+  // payable visit — later-resolvable technician evidence must not silently
+  // mint the bonus that confirmation declined (pre-push P0). A human
+  // attribution WITH a visit restamps 'manual', which is payout-eligible.
+  if (review.link_source === 'manual_no_visit') return false;
   if (policy.requireCustomerMatchForGoogle && !review.customer_id) return false;
   const rating = toInt(review.star_rating, 0);
   return rating >= Math.max(1, toInt(policy.minRating, 1));
@@ -607,12 +612,15 @@ async function getAttributionQueue(options = {}) {
   // surface while the suppression flag persists forever (pre-push P1).
   // Unresolved click_auto rows are by definition awaiting action — the set
   // stays small because every confirm/re-match restamps them 'manual'.
+  // 500 = runaway guard, not a working cap (pre-push P1): unresolved rows
+  // are cleared by every confirm/re-match, so real counts stay single-digit;
+  // a cap at the UI's default limit could still hide the oldest links.
   const clickAutoRows = await conn('google_reviews')
     .where({ link_source: 'click_auto' })
     .whereNotNull('customer_id')
     .whereNull('missing_since')
     .orderBy('review_created_at', 'desc')
-    .limit(limit);
+    .limit(500);
   const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
   const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
 
@@ -650,6 +658,11 @@ async function getAttributionQueue(options = {}) {
       items.push(serializeAttributionQueueItem(review, null, 'missing_customer'));
       continue;
     }
+
+    // 'manual_no_visit' = a human already confirmed this link knowing there
+    // is no attributable visit — re-parking it as missing_technician would
+    // make the confirmation unresolvable forever (GH codex #3483 r4).
+    if (review.link_source === 'manual_no_visit') continue;
 
     const customer = await conn('customers').where({ id: review.customer_id }).first();
     const attribution = await resolveTechnicianForGoogleReview(review, conn);
@@ -795,7 +808,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // permanent in those configurations (GH codex #3483 r1 P1). For a
   // click_auto row the failures downgrade to payoutEligible=false; fresh
   // manual matches keep the strict throws (unchanged behavior).
-  const isClickAutoCorrection = review.link_source === 'click_auto';
+  // 'manual_no_visit' stays re-correctable under the same relaxation — it is
+  // a human's earlier technician-less confirm, and re-matching it must not
+  // demand the technician the first confirm proved absent.
+  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit';
   let payoutEligible = true;
   if (!policy.enabled) {
     if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
@@ -887,7 +903,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // P1): payoutEligible was derived from a pre-lock snapshot, and its
   // click-auto-only relaxation must not survive a concurrent attribution
   // that already restamped the row 'manual' — retry with fresh state instead.
-  if (!payoutEligible && prior?.link_source !== 'click_auto') {
+  if (!payoutEligible && prior?.link_source !== 'click_auto' && prior?.link_source !== 'manual_no_visit') {
     throw operationalError('Review attribution changed while this request was in flight — reload and retry', 409, 'attribution_conflict');
   }
 
@@ -907,6 +923,33 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // insert stays best-effort, outside the transaction.
   let reversedCustomerId = null;
   const linkedCount = await conn.transaction(async (trx) => {
+    // Paid-payout serialization INSIDE the relink transaction (pre-push
+    // P0 ×2): lock the payout row FOR UPDATE regardless of status so a
+    // concurrent markPaid queues behind this relink instead of racing it.
+    // Already paid → abort before any write (payroll is closed). Unpaid →
+    // re-attribute it HERE, in the same transaction, so a markPaid that was
+    // waiting on the lock pays the CORRECTED attribution when it resumes.
+    const existingPayout = await trx('review_incentive_payouts')
+      .where({ google_review_id: review.id })
+      .forUpdate()
+      .first('id', 'status');
+    if (existingPayout?.status === 'paid') {
+      throw operationalError('A paid bonus already binds this review — payroll is closed, so the attribution cannot move', 409, 'payout_already_paid');
+    }
+    if (existingPayout) {
+      const payoutPatch = {
+        customer_id: customerId,
+        updated_at: new Date(),
+      };
+      // technician_id only when the correction carries one — a no-visit
+      // confirm must not null a column an earlier attribution filled.
+      if (technicianId) payoutPatch.technician_id = technicianId;
+      if (serviceRecordId) payoutPatch.service_record_id = serviceRecordId;
+      await trx('review_incentive_payouts')
+        .where({ id: existingPayout.id })
+        .whereNot('status', 'paid')
+        .update(payoutPatch);
+    }
     const count = await trx('google_reviews')
       .where({ id: review.id })
       .whereNull('missing_since')
@@ -915,8 +958,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         // Human confirmation: a manual attribution touch (including a
         // missing_technician repair over a click-auto link) upgrades the
         // provenance, which lifts the click_auto payout exclusion in
-        // qualifiesGoogleReview.
-        link_source: 'manual',
+        // qualifiesGoogleReview. A technician-less confirm records
+        // 'manual_no_visit' — resolved by a human, nothing to pay — so the
+        // queue doesn't re-park it as missing_technician forever (GH codex
+        // #3483 r4).
+        link_source: technicianId ? 'manual' : 'manual_no_visit',
         updated_at: new Date(),
       });
     const linked = (Array.isArray(count) ? count.length : count) > 0;

@@ -1427,7 +1427,14 @@ function ReviewIncentivesPanel() {
               </div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
-                {queue.slice(0, 25).map((review) => {
+                {/* Every click_auto_confirm row must render — the render cap
+                    must never hide a probabilistic link from its only
+                    correction surface (GH codex #3483 r4). */}
+                {queue
+                  .filter((r) => r.reason === "click_auto_confirm")
+                  .concat(queue.filter((r) => r.reason !== "click_auto_confirm"))
+                  .slice(0, Math.max(25, queue.filter((r) => r.reason === "click_auto_confirm").length))
+                  .map((review) => {
                   const isOpen = activeRepairId === review.id;
                   return (
                     <div

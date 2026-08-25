@@ -588,7 +588,11 @@ class GoogleBusinessService {
           const live = await trx('google_reviews')
             .where({ google_review_id: row.google_review_id })
             .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
-          if (!live || live.missing_since) return { nomatch: true };
+          // Vanished or removal-stamped since the collector queued it: the
+          // review is no longer live, so the match-this bell would point at
+          // an unusable flow (the removal alert already rang) — handled,
+          // not ambiguous (GH codex #3483 r4).
+          if (!live || live.missing_since) return { handled: true };
           // Linked since insert (manual match mid-sync): nothing to do, and
           // a "come match this" bell for an already-matched review is pure
           // noise — handled, so the caller skips the unlinked notification.
@@ -619,18 +623,37 @@ class GoogleBusinessService {
             .whereNull('missing_since')
             .update({ customer_id: match.customerId, link_source: 'click_auto' });
           if (!updated) return { handled: true };
+          // Suppression flip in the SAME transaction (pre-push P1): a
+          // linked review with a still-false flag would keep asking the
+          // customer forever — the retry sweep only scans UNLINKED rows —
+          // so a failed flip must roll the link back for the next sweep.
+          // Same conditional shape as _markCustomerLeftReview (idempotent;
+          // 0 rows = already flagged, not an error).
+          await trx('customers')
+            .where({ id: match.customerId })
+            .whereNull('deleted_at')
+            .where(function alreadyFlagged() {
+              this.where('has_left_google_review', false).orWhereNull('has_left_google_review');
+            })
+            .update({ has_left_google_review: true, review_marked_at: new Date() });
           return { linked: true, match, live };
         });
         if (!result?.linked) return result;
-        // Side effects AFTER the link committed but still under the lock
-        // (pre-push P1 r3): manual attribution must not interleave between
-        // the link and its flag flip. NO thank-you enrollment here — like
-        // the payout (pre-push P0), customer-facing copy waits for the human
-        // confirm: a wrong probabilistic link must never text "thanks for
-        // your review" to someone who didn't write it, and a re-match can't
-        // reliably claw back an already-active enrollment (GH codex r2 P1).
+        // The flag flip committed atomically with the link above. NO
+        // thank-you enrollment here — like the payout (pre-push P0),
+        // customer-facing copy waits for the human confirm: a wrong
+        // probabilistic link must never text "thanks for your review" to
+        // someone who didn't write it, and a re-match can't reliably claw
+        // back an already-active enrollment (GH codex r2 P1).
         // manualAttributeGoogleReview enrolls on confirm.
-        await this._markCustomerLeftReview(result.match.customerId);
+        // Best-effort audit trail, mirroring _markCustomerLeftReview.
+        try {
+          await db('activity_log').insert({
+            customer_id: result.match.customerId,
+            action: 'review_auto_marked',
+            description: 'Click auto-link — marked "already left a Google review"; review asks stop pending human confirm in Reviews.',
+          });
+        } catch { /* audit only */ }
         return result;
       }, { recordHealth: false });
       if (outcome?.skipped || outcome?.nomatch) return false;

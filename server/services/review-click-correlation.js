@@ -95,8 +95,14 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     // proximity must not let it outrank the real clicker (codex #3264 r2).
     // Location-less clicks (pre-stamping legacy rows) stay in, annotated null.
     if (reviewLocationId) {
+      // Either PAIRED location may admit the row (first-click location rides
+      // google_location, latest-click location rides last_google_location —
+      // GH codex #3483 r4); the JS pass gates each timestamp against its own
+      // recorded location.
       query = query.where(function locationFilter() {
-        this.whereNull('rr.google_location').orWhere('rr.google_location', reviewLocationId);
+        this.whereNull('rr.google_location')
+          .orWhere('rr.google_location', reviewLocationId)
+          .orWhere('rr.last_google_location', reviewLocationId);
       });
     }
     const clicks = await query
@@ -106,6 +112,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         'rr.customer_id',
         'rr.redirected_at',
         'rr.last_redirected_at',
+        'rr.last_google_location',
         'rr.google_review_clicked',
         'rr.google_location',
         'c.first_name',
@@ -150,9 +157,20 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     const byCustomer = new Map();
     for (const row of clicks) {
       if (row.google_review_clicked !== true) continue;
-      if (reviewLocationId && row.google_location && row.google_location !== reviewLocationId) continue;
-      // BOTH observed timestamps are candidate clicks (see the SQL window).
-      for (const ts of new Set([row.redirected_at, row.last_redirected_at].filter(Boolean))) {
+      // BOTH observed timestamps are candidate clicks, each judged ONLY
+      // against the location recorded WITH it (GH codex #3483 r4): the
+      // first click pairs with google_location (frozen at first click), the
+      // latest with last_google_location. A legacy latest-click without a
+      // paired location stays annotated null, never borrowed.
+      const pairs = [
+        { ts: row.redirected_at, loc: row.google_location || null },
+        { ts: row.last_redirected_at, loc: row.last_google_location || null },
+      ];
+      const seenTs = new Set();
+      for (const { ts, loc } of pairs) {
+        if (!ts || seenTs.has(String(ts))) continue;
+        seenTs.add(String(ts));
+        if (reviewLocationId && loc && loc !== reviewLocationId) continue;
         const clickedAt = new Date(ts);
         if (Number.isNaN(clickedAt.getTime())) continue;
         // The OR window admits the ROW when either timestamp qualifies —
@@ -160,7 +178,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // picked as the click (also holds under mocked SQL layers).
         if (clickedAt < windowStart || clickedAt > windowEnd) continue;
         const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();
-        const candidate = { row, clickedAt, clickOffsetMs };
+        const candidate = { row, clickedAt, clickOffsetMs, pairLoc: loc };
         if (betterClick(candidate, byCustomer.get(row.customer_id))) {
           byCustomer.set(row.customer_id, candidate);
         }
@@ -185,7 +203,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       .filter(({ row }) => !linked.has(row.customer_id))
       .sort((a, b) => Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
       .slice(0, Math.max(1, limit))
-      .map(({ row, clickedAt, clickOffsetMs }) => ({
+      .map(({ row, clickedAt, clickOffsetMs, pairLoc }) => ({
         customerId: row.customer_id,
         firstName: row.first_name || null,
         lastName: row.last_name || null,
@@ -200,9 +218,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         clickOffsetMs,
         clickOffsetLabel: describeClickOffset(clickOffsetMs),
         clickedBeforeReview: clickOffsetMs >= 0,
-        // null when the click predates google_location stamping.
-        locationMatch: row.google_location && review?.location_id
-          ? row.google_location === review.location_id
+        // The location recorded WITH the chosen timestamp (GH codex r4);
+        // null when that click predates location stamping.
+        locationMatch: pairLoc && review?.location_id
+          ? pairLoc === review.location_id
           : null,
         alreadyFlagged: row.has_left_google_review === true,
       }));

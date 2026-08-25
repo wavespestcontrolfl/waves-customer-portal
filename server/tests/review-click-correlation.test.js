@@ -178,6 +178,7 @@ describe('findLikelyReviewers', () => {
       clickRows: [clickRow({
         redirected_at: '2026-08-04T17:30:00.000Z', // first click, 3d earlier
         last_redirected_at: '2026-08-07T17:50:00.000Z', // tapped again 10m before posting
+        last_google_location: 'bradenton',
       })],
     });
     const result = await findLikelyReviewers({ review_created_at: REVIEW_AT, location_id: 'bradenton' }, { conn });
@@ -249,6 +250,7 @@ describe('findConfidentClickMatch', () => {
       clickRows: [clickRow({
         redirected_at: '2026-08-04T17:30:00.000Z', // first click, days earlier
         last_redirected_at: '2026-08-07T17:55:00.000Z', // re-tap 5m before posting
+        last_google_location: 'bradenton', // stamped WITH the re-tap
       })],
     });
     const match = await findConfidentClickMatch(REVIEW, { conn });

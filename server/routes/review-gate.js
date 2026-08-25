@@ -185,8 +185,13 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         open_count: db.raw('COALESCE(open_count, 0) + 1'),
         google_review_clicked: true,
         redirected_to_google: true,
-        google_location: loc.id,
       };
+      // google_location freezes at the FIRST click's routing so it stays
+      // paired with the immutable redirected_at claim; the latest click's
+      // routing rides last_google_location beside last_redirected_at below
+      // (GH codex #3483 r4 — correlation must never judge a timestamp
+      // against a location it was not recorded with).
+      if (!request.google_location) updates.google_location = loc.id;
       if (!request.opened_at) {
         updates.opened_at = new Date();
         if (request.status === 'sent') updates.status = 'opened';
@@ -263,7 +268,10 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // redirected_at is the immutable first-click claim above and never
     // moves). Best-effort: a stamp failure must not cost the redirect.
     try {
-      await db('review_requests').where({ id: request.id }).update({ last_redirected_at: new Date() });
+      await db('review_requests').where({ id: request.id }).update({
+        last_redirected_at: new Date(),
+        last_google_location: loc.id,
+      });
     } catch (err) {
       logger.warn(`[review-gate] last-click stamp failed: ${err.message}`);
     }
