@@ -652,6 +652,18 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
     expect(bonds[0].service || bonds[0].serviceKey).toBe('termite_bond_5yr');
   });
 
+  test('a NAME-ONLY legacy stored bond row coalesces with the keyed raw row', () => {
+    // No key field at all — recurringServiceKey would derive a name-based
+    // identity that deduplicates separately (codex #3485 r11 P1).
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ name: 'Termite Bond (5-Year Term)', annual: 216, visitsPerYear: 4 }] },
+      result: { lineItems: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+    });
+    const bonds = rows.filter((r) => String(r.service || '').startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service).toBe('termite_bond_5yr');
+  });
+
   test('the term parses from serviceName/service_name label fields too', () => {
     const rows = recurringServicesFromEstimateData({
       result: {

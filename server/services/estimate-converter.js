@@ -1895,9 +1895,16 @@ function normalizeBondTermService(li) {
   // raw rows and scheduling two bond visits (codex #3485 r8 P1). Every
   // present alias field is rewritten so identity resolution agrees.
   const keyFields = ['service', 'serviceKey', 'service_key', 'key'].filter((f) => li[f] !== undefined);
-  const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
-  if (!isBareBond) return li;
   const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');
+  const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
+  // NAME-ONLY legacy rows ("Termite Bond (5-Year Term)" with no key field
+  // at all) must normalize too: recurringServiceKey derives a name-based
+  // identity for them ('termite_bond_5_year_term') that deduplicates
+  // separately from the raw row's term key, scheduling the bond twice
+  // (codex #3485 r11 P1). Only rows with NO key evidence qualify — a row
+  // keyed to anything else is never reinterpreted from its label.
+  const isNameOnlyBond = keyFields.length === 0 && /^termite\s+bond\b/i.test(labelText.trim());
+  if (!isBareBond && !isNameOnlyBond) return li;
   const bondTerm = li.bondTerm
     || (labelText.match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
     || null;
@@ -1906,6 +1913,7 @@ function normalizeBondTermService(li) {
   for (const f of keyFields) {
     if (out[f] === 'termite_bond') out[f] = `termite_bond_${bondTerm}`;
   }
+  if (isNameOnlyBond) out.service = `termite_bond_${bondTerm}`;
   return out;
 }
 
