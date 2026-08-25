@@ -437,6 +437,7 @@ describe('20260825000010 service name suffix renames', () => {
       '../services/ask-waves-intake.js',
       '../routes/booking.js',
       '../routes/public-quote.js',
+      '../services/estimate-converter.js',
       '../services/booking-abandon-recovery.js',
     ];
     // rodent_guarantee_combo keeps its own bundle label by design (it must
