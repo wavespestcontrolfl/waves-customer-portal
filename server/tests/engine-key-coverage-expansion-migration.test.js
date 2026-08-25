@@ -52,7 +52,7 @@ function fakeKnex(db) {
         return hits.length;
       },
       insert: async (row) => {
-        (db[table] = rowsNow()).push({ ...row });
+        (db[table] = rowsNow()).push({ id: `${table}-${rowsNow().length + 1}`, ...row });
         return [1];
       },
     };
@@ -147,6 +147,43 @@ describe('20260825000011 engine-key coverage expansion', () => {
     svc(db, 'dethatching').engine_keys = ['dethatching', 'adam_added'];
     await migration.down(fakeKnex(db));
     expect(svc(db, 'dethatching').engine_keys).toEqual(['dethatching', 'adam_added']);
+  });
+
+  test('a migration-built database gains the one-time pest row, seeded; prod (row present) inserts nothing', async () => {
+    // Fresh/CI shape: no one_time_pest_control row exists.
+    const db = seedDb();
+    db.services = db.services.filter((r) => r.service_key !== 'one_time_pest_control');
+    db.scheduled_services = [];
+    await migration.up(fakeKnex(db));
+    const created = svc(db, 'one_time_pest_control');
+    expect(created).toBeTruthy();
+    expect(created.name).toBe('One-Time Pest Control Service');
+    expect(keysOf(created)).toEqual(['one_time_pest']);
+    expect(JSON.parse(stateRow(db).value).createdOneTimePestId).toBe(created.id);
+
+    // Unreferenced → down() removes the created row.
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'one_time_pest_control')).toBeUndefined();
+  });
+
+  test('down() keeps the created one-time pest row while visits reference it', async () => {
+    const db = seedDb();
+    db.services = db.services.filter((r) => r.service_key !== 'one_time_pest_control');
+    await migration.up(fakeKnex(db));
+    const created = svc(db, 'one_time_pest_control');
+    db.scheduled_services = [{ id: 'v-1', service_id: created.id }];
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'one_time_pest_control')).toBeTruthy();
+  });
+
+  test('prod shape: existing one_time_pest_control row is only seeded, never re-created', async () => {
+    const db = seedDb();
+    db.scheduled_services = [];
+    const before = db.services.filter((r) => r.service_key === 'one_time_pest_control');
+    expect(before).toHaveLength(1);
+    await migration.up(fakeKnex(db));
+    expect(db.services.filter((r) => r.service_key === 'one_time_pest_control')).toHaveLength(1);
+    expect(JSON.parse(stateRow(db).value).createdOneTimePestId).toBeNull();
   });
 
   test('no engine key appears in two seeds or appends', () => {
