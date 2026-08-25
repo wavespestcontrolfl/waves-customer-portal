@@ -100,7 +100,7 @@ export default function MobileServiceEditModal({
     const nextServiceType = tierOpt ? `${baseName} — ${tierOpt.label}` : service.serviceType;
     const parsedPrice = price !== '' && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined;
     try {
-      await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: 'PUT',
         body: JSON.stringify({
           scheduledDate: service.scheduledDate
@@ -116,6 +116,11 @@ export default function MobileServiceEditModal({
           price: parsedPrice != null ? String(parsedPrice) : undefined,
         }),
       });
+      // Advisory schedule-overlap notes — the save committed (conflicts no
+      // longer block admin edits); say what now stacks before closing.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Saved.\n\n${result.warnings.join('\n\n')}`);
+      }
       onSaved?.();
     } catch (e) {
       setError(e.message || 'Failed to save');

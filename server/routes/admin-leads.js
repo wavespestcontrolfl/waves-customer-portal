@@ -5,8 +5,9 @@ const db = require('../models/db');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
-// overlap guard for this route lives in the trx below (occupancy lock rung 1
-// + findConflictingVisits before insert) — one mechanism, see #3453.
+// overlap probe for this route lives in the trx below (occupancy lock rung 1
+// + findConflictingVisits before insert) — one mechanism, see #3453; a hit
+// is advisory (warn, never block — owner ruling 2026-08-25, #3486).
 const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
@@ -1365,6 +1366,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     const performedBy = req.technician.first_name + ' ' + (req.technician.last_name || '');
 
+    // Advisory occupancy-overlap notes (owner ruling 2026-08-25, same as
+    // routes/admin-schedule.js — staff-side saves never block on schedule
+    // conflicts): collected in the trx, returned as `warnings`.
+    const bookingWarnings = [];
+
     // Everything that mutates state runs in one transaction so a failure anywhere
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
@@ -1555,25 +1561,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
       // booking.js createSelfBooking, immediately before the insert — after
       // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
-      // merge note). Runs for first conversions and rebooks alike.
+      // merge note). Runs for first conversions and rebooks alike. A hit is
+      // ADVISORY (owner ruling 2026-08-25, same as routes/admin-schedule.js —
+      // staff-side saves never block on schedule conflicts): the booking
+      // commits and the response carries a warning naming the date.
       {
         const clash = await findConflictingVisits({ db: trx, date: occupancyDate, windowStart, windowEnd });
         if (clash.length) {
-          const err = new Error('That time slot overlaps another visit on the schedule');
-          err.statusCode = 409;
-          err.status = 409;
-          err.isOperational = true;
-          err.code = 'SLOT_CONFLICT';
-          err.conflicts = clash.map((row) => ({
-            id: row.id,
-            scheduled_date: row.scheduled_date,
-            window_start: row.window_start,
-            window_end: row.window_end,
-            status: row.status,
-            technician_id: row.technician_id || null,
-            service_type: row.service_type || null,
-          }));
-          throw err;
+          bookingWarnings.push(`Heads up: this booking overlaps another appointment on the schedule on ${occupancyDate} — both are kept on the calendar.`);
         }
       }
       // ---- end slot-overlap guard part 2
@@ -1690,7 +1685,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     await bridgeLeadFunnelStage(req.params.id, 'won');
 
     const updated = await db('leads').where('id', req.params.id).first();
-    res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });
+    res.json({
+      lead: updated,
+      customerId,
+      appointmentId: appt.id,
+      createdCustomer: needsCustomer,
+      // Advisory occupancy-overlap notes — present only when this booking
+      // stacked over an existing visit.
+      ...(bookingWarnings.length ? { warnings: bookingWarnings } : {}),
+    });
   } catch (err) {
     if (err.code === 'EMAIL_MATCH_CONFIRM' || err.code === 'PHONE_MATCH_CONFIRM' || err.code === 'EMAIL_MATCH_AMBIGUOUS') {
       if (req.techRole !== 'admin') {
@@ -1700,9 +1703,6 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         return res.status(409).json({ error: err.message, code: err.code, candidates: err.candidates || [] });
       }
       return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
-    }
-    if (err.code === 'SLOT_CONFLICT') {
-      return res.status(409).json({ error: err.message, code: err.code, conflicts: err.conflicts || [] });
     }
     if (err.code === 'DUPLICATE_VISIT') {
       return res.status(409).json({ error: err.message, code: err.code, scheduled_service_id: err.scheduled_service_id || null });

@@ -3022,8 +3022,12 @@ export function LeadsSection() {
                                                   },
                                                 },
                                               );
+                                            // Response of whichever submit
+                                            // succeeded — carries advisory
+                                            // schedule-overlap warnings.
+                                            let booked = null;
                                             try {
-                                              await submitAppt({});
+                                              booked = await submitAppt({});
                                             } catch (e) {
                                               // Email matches an existing customer:
                                               // attaching is an explicit admin
@@ -3068,7 +3072,7 @@ export function LeadsSection() {
                                                   `This lead's email matches existing customer ${m.name || "(unnamed)"} (${m.emailMasked || "email hidden"}). Attach this booking as an additional property on their account?`,
                                                 );
                                               if (attach) {
-                                                await submitAppt({
+                                                booked = await submitAppt({
                                                   attachToAccountId: m.accountId,
                                                 });
                                               } else if (
@@ -3083,7 +3087,7 @@ export function LeadsSection() {
                                                 )
                                               ) {
                                                 try {
-                                                  await submitAppt({
+                                                  booked = await submitAppt({
                                                     attachToAccountId: null,
                                                     createSeparateAccount: true,
                                                   });
@@ -3102,7 +3106,7 @@ export function LeadsSection() {
                                                       `A customer with this phone already exists (${pm.name || "(unnamed)"}, ${pm.phoneMasked || "phone hidden"}) — create a separate customer anyway? (Cancel = do nothing, lead stays unbooked)`,
                                                     )
                                                   ) {
-                                                    await submitAppt({
+                                                    booked = await submitAppt({
                                                       attachToAccountId: null,
                                                       createSeparateAccount: true,
                                                       ignorePhoneMatch: true,
@@ -3122,6 +3126,18 @@ export function LeadsSection() {
                                                 setApptSaving(false);
                                                 return;
                                               }
+                                            }
+                                            // Advisory schedule-overlap notes
+                                            // — the booking committed
+                                            // (conflicts no longer block
+                                            // staff saves); say what stacks.
+                                            if (
+                                              Array.isArray(booked?.warnings) &&
+                                              booked.warnings.length
+                                            ) {
+                                              alert(
+                                                `Appointment booked.\n\n${booked.warnings.join("\n\n")}`,
+                                              );
                                             }
                                             setApptForm(null);
                                             loadLeads();

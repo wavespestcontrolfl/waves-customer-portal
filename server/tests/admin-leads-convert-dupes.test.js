@@ -758,25 +758,31 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
   it.each([
     ['rebook', () => ({ preLead: linkedLead(), lockedLead: lockedLinked }), { rebook: true }],
     ['first conversion', () => ({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null } }), {}],
-  ])('occupancy: %s overlapping another customer\'s visit (tech NULL) → 409 SLOT_CONFLICT, zero inserts', async (_label, fixture, body) => {
+  ])('occupancy: %s overlapping another customer\'s visit (tech NULL) → BOOKS with a warning naming the date (advisory — owner ruling 2026-08-25)', async (_label, fixture, body) => {
     const calls = [];
     install(makeKnex(makeResolver({ ...fixture(), existingVisits: [otherBooking] }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, body);
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json.code).toBe('SLOT_CONFLICT');
-      expect(json.conflicts).toEqual([{ id: 'appt-other', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', technician_id: null, service_type: 'Lawn' }]);
-      // The probe sits immediately before the visit insert (after the
-      // customer provisioning, which the trx rollback discards): no visit
-      // row, no lead conversion, no activity.
-      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(0);
-      expect(calls.filter((c) => c.table === 'leads' && c.op === 'update')).toHaveLength(0);
-      expect(calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert')).toHaveLength(0);
-      // Probe is tech-blind with the default cancelled exclusion.
+      // The overlap no longer refuses the booking — it commits and the
+      // response carries the advisory warning naming the date.
+      expect(json.warnings).toEqual([expect.stringContaining('2027-01-15')]);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+      // Probe still runs, tech-blind with the default cancelled exclusion.
       const probe = calls.find((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
       expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
       expect(probe.ops.some((o) => o.op === 'where' && o.args[0]?.technician_id !== undefined)).toBe(false);
+    });
+  });
+
+  it('occupancy: a clean booking carries no warnings key', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toBeUndefined();
     });
   });
 
