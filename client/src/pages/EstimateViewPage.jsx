@@ -3796,8 +3796,11 @@ export function ServiceSection({
             the rental's own section and stamps it here (same rider posture
             as the bond below); on solo termite estimates its figures are
             already folded into the price card above, and on bundles the
-            plan totals carry it — so this row itemizes, it never adds. */}
-        {sectionSlug === 'termite_bait' && section.stationRental ? (
+            plan totals carry it — so this row itemizes, it never adds.
+            Keyed on the stamp alone, not the termite slug: the server also
+            hosts it on the unsplittable 'bundle' fallback card (codex r1
+            P1 — suppressed rental must always have a rendered disclosure). */}
+        {section.stationRental ? (
           <div
             aria-label="Termite station rental"
             style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}

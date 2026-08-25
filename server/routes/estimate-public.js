@@ -18198,7 +18198,13 @@ function attachTermiteBondSelector(services = [], estData = {}) {
 // must not hide a rental the customer was already quoted — NEW dark rental
 // saves are blocked at persistence (assertNoDarkTermiteRentalPayload).
 function attachTermiteStationRental(services = [], estData = {}) {
-  const section = (services || []).find((s) => s?.key === 'termite_bait');
+  // Host resolution mirrors the comparison-sheet link: a real termite
+  // section first, else the unsplittable 'bundle' fallback whose memberKeys
+  // carry termite_bait (codex r1 P1 — a legacy bundle that can't split
+  // would otherwise suppress the rental with no rendered disclosure).
+  const section = (services || []).find((s) => s?.key === 'termite_bait')
+    || (services || []).find((s) => s?.key === 'bundle'
+      && Array.isArray(s.memberKeys) && s.memberKeys.includes('termite_bait'));
   if (!section) return services;
   const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
   const rentalRow = rows.find((svc) => recurringServiceKey(svc) === 'termite_station_rental') || null;
@@ -18214,7 +18220,10 @@ function attachTermiteStationRental(services = [], estData = {}) {
     monthlyAdd: rentalMonthly,
     annualAdd: rentalAnnual,
   };
-  if (services.length === 1 && Array.isArray(section.frequencies)) {
+  // Fold ONLY the solo termite section — a solo 'bundle' fallback builds
+  // its frequencies from the payload ladder, which already sums every
+  // recurring row (rental included); folding there would double-count.
+  if (services.length === 1 && section.key === 'termite_bait' && Array.isArray(section.frequencies)) {
     section.frequencies = section.frequencies.map((frequency) => {
       if (!frequency || frequency.quoteRequired) return frequency;
       return {

@@ -547,25 +547,50 @@ describe('estimate sections treat the rental as a rider, never its own card', ()
     expect(frequency.perTreatment).toBeCloseTo(111.3, 2);
   });
 
-  test('multi-service bundle suppresses the rental from memberKeys and does not fold', () => {
-    const pestRow = {
-      service: 'pest_control', name: 'Pest Control', visitsPerYear: 4,
-      mo: 33.34, monthly: 33.34, annual: 400.08, perTreatment: 100.02,
-    };
-    const estData = { result: { recurring: { services: [pestRow, baitRow, rentalRow] } } };
-    const sections = buildPricingServices({ frequencies: [] }, {}, estData);
-    expect(sections.some((s) => s.key === 'termite_station_rental')).toBe(false);
-    for (const section of sections) {
-      expect(section.memberKeys || []).not.toContain('termite_station_rental');
-    }
-    attachTermiteStationRental(sections, estData);
+  const pestRow = {
+    service: 'pest_control', name: 'Pest Control', visitsPerYear: 4,
+    mo: 33.34, monthly: 33.34, annual: 400.08, perTreatment: 100.02,
+  };
+  const multiEstData = { result: { recurring: { services: [pestRow, baitRow, rentalRow] } } };
+  // A reconciling ladder (row monthlies sum to the frequency monthly,
+  // rental's rider monthly INCLUDED — same convention as the bond) so
+  // canSplitRecurringSelectableLadder takes the split path.
+  const splitPayload = {
+    frequencies: [{
+      key: 'quarterly',
+      label: 'Quarterly',
+      monthly: 70.44,
+      annual: 845.28,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 100.02, displayPrice: 100.02, visitsPerYear: 4, monthly: 33.34 },
+        { service: 'termite_bait', label: 'Termite Bait', perTreatment: 78.3, displayPrice: 78.3, visitsPerYear: 4, monthly: 26.1 },
+        { service: 'termite_station_rental', label: 'Termite Station Rental', perTreatment: 33, displayPrice: 33, visitsPerYear: 4, monthly: 11 },
+      ],
+    }],
+  };
+
+  test('split bundle: rental minted no section, termite section hosts the stamp un-folded', () => {
+    const sections = buildPricingServices(splitPayload, {}, multiEstData);
+    expect(sections.map((s) => s.key).sort()).toEqual(['pest_control', 'termite_bait']);
+    attachTermiteStationRental(sections, multiEstData);
     const termite = sections.find((s) => s.key === 'termite_bait');
-    if (termite) {
-      expect(termite.stationRental).toMatchObject({ perApplicationAdd: 33 });
-      // Split totals come from the summed recurring rows — the itemized
-      // section keeps the bare monitoring price.
-      expect(termite.frequencies[0].perTreatment).toBeCloseTo(78.3, 2);
-    }
+    expect(termite.stationRental).toMatchObject({ perApplicationAdd: 33 });
+    // Split totals come from the summed recurring rows — the itemized
+    // section keeps the bare monitoring price.
+    expect(termite.frequencies[0].perTreatment).toBeCloseTo(78.3, 2);
+  });
+
+  test('unsplittable bundle fallback: the bundle card hosts the stamp, no fold (codex r1 P1)', () => {
+    // No reconcilable ladder → single 'bundle' section.
+    const sections = buildPricingServices({ frequencies: [] }, {}, multiEstData);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].key).toBe('bundle');
+    expect(sections[0].memberKeys).toEqual(['pest_control', 'termite_bait']);
+    attachTermiteStationRental(sections, multiEstData);
+    expect(sections[0].stationRental).toMatchObject({ perApplicationAdd: 33 });
+    // The bundle's ladder already sums every recurring row (rental
+    // included) — folding here would double-count.
+    expect(sections[0].frequencies).toEqual([]);
   });
 
   test('a rental row with no monitoring plan keeps its own section (fail-safe, never vanishes)', () => {
