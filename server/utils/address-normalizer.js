@@ -557,6 +557,67 @@ function normalizeLeadAddress(input = {}) {
   };
 }
 
+// Extra properties the visitor asked to have covered ("also my rental next
+// door"). Capture-only: these NEVER enter the pricing pipeline — each one is
+// follow-up-quoted manually as its own estimate. Accepts an array of
+// structured entries or bare strings (a singular second_property is folded
+// in), normalizes each through normalizeLeadAddress, drops entries that
+// duplicate each other or the primary service address, and hard-caps the
+// list so an abusive payload can't bloat extracted_data.
+const MAX_ADDITIONAL_PROPERTIES = 3;
+const MAX_ADDITIONAL_PROPERTY_INPUTS = 20;
+const MAX_ADDITIONAL_PROPERTY_RAW_LENGTH = 300;
+
+function normalizeAdditionalProperties(body = {}, primaryFullAddress = '') {
+  const rawList = [];
+  const push = (value) => {
+    if (value != null && value !== '' && rawList.length < MAX_ADDITIONAL_PROPERTY_INPUTS) rawList.push(value);
+  };
+  const listInput = body.additional_properties ?? body.additionalProperties;
+  if (Array.isArray(listInput)) listInput.forEach(push);
+  else push(listInput);
+  push(body.second_property ?? body.secondProperty);
+
+  const seen = new Set();
+  const primaryKey = cleanString(primaryFullAddress).toLowerCase();
+  if (primaryKey) seen.add(primaryKey);
+
+  const out = [];
+  for (const entry of rawList) {
+    let normalized = null;
+    if (typeof entry === 'string') {
+      normalized = normalizeLeadAddress({ raw: entry.slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH) });
+    } else if (typeof entry === 'object' && !Array.isArray(entry)) {
+      normalized = normalizeLeadAddress({
+        raw: String(entry.formatted || entry.address || '').slice(0, MAX_ADDITIONAL_PROPERTY_RAW_LENGTH),
+        line1: entry.line1 || entry.address_line1,
+        line2: entry.line2 || entry.address_line2 || entry.unit,
+        city: entry.city,
+        state: entry.state,
+        zip: entry.zip,
+        placeId: entry.place_id || entry.placeId || entry.google_place_id,
+      });
+    }
+    // A street line needs at least a digit and a letter to be a follow-up-able
+    // address — bare prose ("the one next door") is dropped, not stored.
+    if (!normalized?.fullAddress || !/\d/.test(normalized.line1) || !/[A-Za-z]/.test(normalized.line1)) continue;
+    const key = normalized.fullAddress.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      formatted: normalized.fullAddress,
+      line1: normalized.line1,
+      line2: normalized.line2 || null,
+      city: normalized.city || null,
+      state: normalized.state || null,
+      zip: normalized.zip || null,
+      placeId: normalized.placeId || null,
+    });
+    if (out.length >= MAX_ADDITIONAL_PROPERTIES) break;
+  }
+  return out;
+}
+
 // Build a single-line display address from already-parsed parts, dropping any
 // empty piece so a missing zip never renders as "Sarasota, FL null" and a
 // missing city never leaves a dangling comma ("123 Main St, , FL 34231").
@@ -571,6 +632,7 @@ function formatAddress(parts = {}) {
 
 module.exports = {
   normalizeLeadAddress,
+  normalizeAdditionalProperties,
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,

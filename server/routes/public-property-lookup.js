@@ -5,7 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, normalizeAdditionalProperties, formatAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { verifyTurnstileToken } = require('../utils/turnstile');
@@ -239,6 +239,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       placeId: req.body.google_place_id || req.body.googlePlaceId,
       components: req.body.address_components || req.body.addressComponents,
     });
+    // Optional extra properties the visitor wants covered. Capture-only —
+    // never priced here; each becomes a manual follow-up quote.
+    const additionalProperties = normalizeAdditionalProperties(req.body, normalizedAddress.fullAddress);
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail
     // closed BEFORE the lead insert/update below (same guard as
     // /public/quote/calculate) so no lead is captured on the wrong unit.
@@ -293,6 +296,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
+      ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
     };
 
     // Voicemail text-back prefill attach: when the request carries a valid
@@ -398,6 +402,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
         address: normalizedAddress,
+        ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead

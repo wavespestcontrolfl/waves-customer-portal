@@ -9,6 +9,47 @@ import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
+// leads.address may hold either a street-only line or a fully composed
+// "street, City, FL zip" string depending on which intake path wrote the row —
+// only append the standalone city/zip columns when the stored address doesn't
+// already carry them, so "…, Palmetto, FL 34221, Palmetto" can never render.
+// Containment is segment-wise, not substring: a city sharing the street name
+// ("123 Palmetto Rd" + city Palmetto) must still get its city appended.
+function formatLeadAddress(lead) {
+  const address = String(lead?.address || "").trim();
+  const city = String(lead?.city || "").trim();
+  const zip = String(lead?.zip || "").trim();
+  if (!address) return [city, zip].filter(Boolean).join(", ");
+  const segments = address
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const parts = [address];
+  if (city && !segments.includes(city.toLowerCase())) parts.push(city);
+  if (zip && !segments.some((seg) => seg.split(/\s+/).includes(zip))) parts.push(zip);
+  return parts.join(", ");
+}
+
+// Extra properties the visitor asked to have covered (captured by the quote
+// funnel into extracted_data.additional_properties; capture-only, each one is
+// follow-up-quoted manually). extracted_data arrives as jsonb or a string
+// depending on the endpoint, so parse defensively.
+function leadAdditionalProperties(lead) {
+  let data = lead?.extracted_data;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      return [];
+    }
+  }
+  const list = data?.additional_properties;
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((p) => (typeof p === "string" ? p : p?.formatted))
+    .filter(Boolean);
+}
+
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...opts,
@@ -1804,11 +1845,20 @@ export function LeadsSection() {
                                       <div>
                                         Address:{" "}
                                         <span style={{ color: C.text }}>
-                                          {[lead.address, lead.city, lead.zip]
-                                            .filter(Boolean)
-                                            .join(", ") || "--"}
+                                          {formatLeadAddress(lead) || "--"}
                                         </span>
                                       </div>{" "}
+                                      {leadAdditionalProperties(lead).length >
+                                        0 && (
+                                        <div>
+                                          Also cover:{" "}
+                                          <span style={{ color: C.text }}>
+                                            {leadAdditionalProperties(
+                                              lead,
+                                            ).join(" · ")}
+                                          </span>
+                                        </div>
+                                      )}{" "}
                                       <div>
                                         Type:{" "}
                                         <span style={{ color: C.text }}>

@@ -495,3 +495,70 @@ describe('formatAddress', () => {
       .toBe('123 Main St, Sarasota, FL 34231');
   });
 });
+
+describe('normalizeAdditionalProperties', () => {
+  const { normalizeAdditionalProperties } = require('../utils/address-normalizer');
+
+  test('normalizes a structured entry and a bare string', () => {
+    const out = normalizeAdditionalProperties({
+      additional_properties: [
+        { line1: '4102 60th Terrace E', city: 'Palmetto', state: 'FL', zip: '34221', place_id: 'abc123' },
+        '5308 10th street bradenton fl 34203',
+      ],
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({
+      formatted: '4102 60th Ter E, Palmetto, FL 34221',
+      line1: '4102 60th Ter E',
+      city: 'Palmetto',
+      state: 'FL',
+      zip: '34221',
+      placeId: 'abc123',
+    });
+    expect(out[1]).toMatchObject({ line1: '5308 10th St', city: 'Bradenton', zip: '34203' });
+  });
+
+  test('folds a singular second_property into the list', () => {
+    const out = normalizeAdditionalProperties({
+      second_property: '4102 60th Terrace E, Palmetto, FL 34221',
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].formatted).toBe('4102 60th Ter E, Palmetto, FL 34221');
+  });
+
+  test('drops entries that duplicate the primary address or each other', () => {
+    const out = normalizeAdditionalProperties({
+      additional_properties: [
+        '4100 60th Terrace E, Palmetto, FL 34221',
+        '4102 60th Terrace E, Palmetto, FL 34221',
+        '4102 60th Ter E, Palmetto, FL 34221',
+      ],
+    }, '4100 60th Ter E, Palmetto, FL 34221');
+    expect(out).toHaveLength(1);
+    expect(out[0].formatted).toBe('4102 60th Ter E, Palmetto, FL 34221');
+  });
+
+  test('drops prose that is not an addressable street line', () => {
+    expect(normalizeAdditionalProperties({ additional_properties: ['the house next door'] })).toEqual([]);
+    expect(normalizeAdditionalProperties({ additional_properties: [''] })).toEqual([]);
+  });
+
+  test('caps the stored list at 3 entries', () => {
+    const out = normalizeAdditionalProperties({
+      additional_properties: [
+        '101 Oak St, Palmetto, FL 34221',
+        '102 Oak St, Palmetto, FL 34221',
+        '103 Oak St, Palmetto, FL 34221',
+        '104 Oak St, Palmetto, FL 34221',
+      ],
+    });
+    expect(out).toHaveLength(3);
+  });
+
+  test('tolerates junk shapes without throwing', () => {
+    expect(normalizeAdditionalProperties({})).toEqual([]);
+    expect(normalizeAdditionalProperties({ additional_properties: 'not-an-array 123 Main St, Sarasota, FL 34231' })).toHaveLength(1);
+    expect(normalizeAdditionalProperties({ additional_properties: [null, 42, [], {}] })).toEqual([]);
+    expect(normalizeAdditionalProperties()).toEqual([]);
+  });
+});
