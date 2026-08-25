@@ -617,6 +617,15 @@ async function getAttributionQueue(options = {}) {
     const attribution = await resolveTechnicianForGoogleReview(review, conn);
     if (!attribution?.technicianId) {
       items.push(serializeAttributionQueueItem(review, customer, 'missing_technician'));
+      continue;
+    }
+    // A click auto-link is excluded from payouts until a human confirms
+    // (qualifiesGoogleReview) — and confirmation happens through THIS queue.
+    // Without this row, an auto-linked review with a resolvable technician
+    // would be skipped by payout sync yet absent from the only UI that can
+    // restamp it 'manual' (pre-push P0 r9): unattributable forever.
+    if (review.link_source === 'click_auto') {
+      items.push(serializeAttributionQueueItem(review, customer, 'click_auto_confirm'));
     }
   }
 
