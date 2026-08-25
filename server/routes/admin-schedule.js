@@ -4158,15 +4158,25 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
       const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
       const dates = computeBoosterDates(scheduledDate, cleaned, 12);
+      let droppedBoosters = 0;
       for (const rawDate of dates) {
         const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, !!skipWeekends, shiftDir), seriesBlackoutDates, { skipWeekends: !!skipWeekends });
-        if (!boosterDate) continue;
+        // A null nudge = the blackout walk exhausted — that booster is a
+        // SOLD billable visit that would otherwise vanish silently while
+        // the create still returns 201. Count it and warn below (the
+        // series-date dedupe skip right after is fine — that date is
+        // already served by the base series).
+        if (!boosterDate) { droppedBoosters++; continue; }
         // Skip if this date already has a row on the series (parent or
         // recurring child). Common case: monthly Jan 15 → child Apr 15
         // PLUS April booster → Apr 15 collision.
         if (seriesDates.has(boosterDate)) continue;
         seriesDates.add(boosterDate);
         plannedBoosterDates.push(boosterDate);
+      }
+      if (droppedBoosters > 0) {
+        logger.warn(`[schedule/create] ${droppedBoosters} booster visit(s) could not be placed — blackout/closed-day nudge exhausted`);
+        bookingWarnings.push(`${droppedBoosters} booster visit${droppedBoosters === 1 ? '' : 's'} could not be placed — the date${droppedBoosters === 1 ? ' falls' : 's fall'} in an extended blackout/closed-day stretch. Adjust the days-off/blackout settings or add ${droppedBoosters === 1 ? 'it' : 'them'} manually.`);
       }
     }
 
