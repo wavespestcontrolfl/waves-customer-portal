@@ -3425,7 +3425,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond', 'termite_station_rental']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const rawKey = recurringServiceKey(item);
@@ -3439,6 +3439,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         ? `termite_bond_${item.bondTerm}`
         : rawKey;
       const isBondLine = rawKey === 'termite_bond';
+      // The rental rider gets the bond's hard-coded posture (GH codex #3481
+      // r1 P1 — raw agent/engine drafts otherwise never surfaced the rental
+      // to the section/rider path at all): never tier-counting, never
+      // bundle-%-discountable. The raw engine line only carries
+      // discountable:false, so the generic !== false defaults below would
+      // tier-count it.
+      const isRentalLine = rawKey === 'termite_station_rental';
       const annual = key === 'lawn_care'
         ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
         : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
@@ -3484,9 +3491,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         // Bond riders are hard-coded out of tier counting and the bundle %
         // discount — the raw engine line only carries discountable:false, so
         // the generic !== false defaults below would tier-count it.
-        waveGuardDiscountEligible: isBondLine ? false : recurringServiceReceivesTierDiscount(item),
-        waveGuardTierEligible: isBondLine ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
-        countsTowardWaveGuardTier: isBondLine ? false : (item.countsTowardWaveGuardTier !== false),
+        waveGuardDiscountEligible: (isBondLine || isRentalLine) ? false : recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: (isBondLine || isRentalLine) ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
+        countsTowardWaveGuardTier: (isBondLine || isRentalLine) ? false : (item.countsTowardWaveGuardTier !== false),
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
@@ -18183,6 +18190,72 @@ function attachTermiteBondSelector(services = [], estData = {}) {
   return services;
 }
 
+// Termite station rental rider (owner 2026-07-26): $0 install, Waves keeps
+// ownership of the in-ground stations, and the unpaid install price is
+// recovered as a fixed per-application uplift on the same quarterly check.
+// The row is section-suppressed in buildPricingServices (same posture as
+// the bond rider — before 2026-08-25 it minted its own generic "Service"
+// card wearing the termite headline). This stamps the rental onto the
+// TERMITE section so the card itemizes it, and for SOLO termite estimates
+// folds its figures into the section frequencies — the solo accept path
+// freezes effectiveMonthly/AnnualTotal from the selected frequency, exactly
+// the bond fold above. Split bundles keep itemized sections; their accept
+// totals already sum every recurring row (rental included).
+// Sold-state posture, no gate check: a GATE_TERMITE_STATION_RENTAL flip
+// must not hide a rental the customer was already quoted — NEW dark rental
+// saves are blocked at persistence (assertNoDarkTermiteRentalPayload).
+function attachTermiteStationRental(services = [], estData = {}) {
+  // Host resolution mirrors the comparison-sheet link: a real termite
+  // section first, else the unsplittable 'bundle' fallback whose memberKeys
+  // carry termite_bait (codex r1 P1 — a legacy bundle that can't split
+  // would otherwise suppress the rental with no rendered disclosure).
+  const section = (services || []).find((s) => s?.key === 'termite_bait')
+    || (services || []).find((s) => s?.key === 'bundle'
+      && Array.isArray(s.memberKeys) && s.memberKeys.includes('termite_bait'));
+  if (!section) return services;
+  // A legacy bundle ladder can itemize the rental as a treatment row —
+  // PriceCard already renders that row's label and PRICE, so the rider must
+  // not restate the amount (GH codex #3481 r1 P2). But PriceCard never
+  // renders row.detail, so the ownership terms (Waves-owned, $0 install)
+  // still need the rider (GH r2 P1) — stamp a terms-only variant: the
+  // client drops the amount column when priceItemized is set.
+  const bundleLadderItemizesRental = section.key === 'bundle'
+    && (section.frequencies || []).some((frequency) => (frequency?.perServiceTreatments || [])
+      .some((row) => recurringServiceKey(row) === 'termite_station_rental'
+        && firstPositiveNumber(row.perTreatment, row.displayPrice)));
+  const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
+  const rentalRow = rows.find((svc) => recurringServiceKey(svc) === 'termite_station_rental') || null;
+  if (!rentalRow) return services;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const rentalMonthly = Number(rentalRow.mo ?? rentalRow.monthly) || 0;
+  const rentalAnnual = Number(rentalRow.annual) || round2(rentalMonthly * 12);
+  const rentalPerApp = Number(rentalRow.perTreatment) || 0;
+  section.stationRental = {
+    label: rentalRow.name || 'Termite Station Rental',
+    detail: rentalRow.detail || 'Waves owns the in-ground stations — $0 install.',
+    perApplicationAdd: rentalPerApp,
+    monthlyAdd: rentalMonthly,
+    annualAdd: rentalAnnual,
+    ...(bundleLadderItemizesRental ? { priceItemized: true } : {}),
+  };
+  // Fold ONLY the solo termite section — a solo 'bundle' fallback builds
+  // its frequencies from the payload ladder, which already sums every
+  // recurring row (rental included); folding there would double-count.
+  if (services.length === 1 && section.key === 'termite_bait' && Array.isArray(section.frequencies)) {
+    section.frequencies = section.frequencies.map((frequency) => {
+      if (!frequency || frequency.quoteRequired) return frequency;
+      return {
+        ...frequency,
+        monthly: frequency.monthly != null ? round2(frequency.monthly + rentalMonthly) : frequency.monthly,
+        monthlyBase: frequency.monthlyBase != null ? round2(frequency.monthlyBase + rentalMonthly) : frequency.monthlyBase,
+        annual: frequency.annual != null ? round2(frequency.annual + rentalAnnual) : frequency.annual,
+        perTreatment: frequency.perTreatment != null ? round2(frequency.perTreatment + rentalPerApp) : frequency.perTreatment,
+      };
+    });
+  }
+  return services;
+}
+
 // The area a section's price was computed from, rendered next to that price
 // (owner ask 2026-08-12: the treatable area drives solution volume and the
 // per-application charge, so it belongs beside the number it explains).
@@ -18306,15 +18379,26 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   // is in the row set, so dropping its key from the row-sum side would
   // collapse every bond-carrying multi-service plan into the single bundle
   // card and strand the selector (codex #2915 r2).
-  const recurringKeys = allRecurringKeys.filter((key) => !String(key).startsWith('termite_bond'));
+  // Station-rental uplift is the same kind of rider (owner 2026-07-26): it
+  // rides its own line so bundle percentage discounts can't touch the
+  // hardware recovery, but it renders INSIDE the termite card
+  // (attachTermiteStationRental) — as its own section it fell through to a
+  // generic "Service" card wearing the termite headline (2026-08-25).
+  // Suppressed only when a termite_bait section exists to host it; a
+  // rental row with no monitoring plan (shouldn't happen) keeps its own
+  // card rather than vanishing from the page.
+  const suppressStationRental = allRecurringKeys.includes('termite_bait');
+  const isSuppressedRiderKey = (key) => String(key).startsWith('termite_bond')
+    || (suppressStationRental && key === 'termite_station_rental');
+  const recurringKeys = allRecurringKeys.filter((key) => !isSuppressedRiderKey(key));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
-  // Same rider suppression as recurringKeys above — a bond pair here would
-  // still mint its own split-section card.
+  // Same rider suppression as recurringKeys above — a bond or rental pair
+  // here would still mint its own split-section card.
   const recurringRows = recurringServiceRowsByKey(recurringServices)
-    .filter(([key]) => !String(key).startsWith('termite_bond'));
+    .filter(([key]) => !isSuppressedRiderKey(key));
   const recurringDiscount = Number(estResult?.recurring?.discount || payload?.recurring?.discount || 0) || 0;
 
   if (!isOneTimeOnly && hasRecurringPest && recurringKeys.filter((key) => key !== 'pest_control').length === 0) {
@@ -19104,6 +19188,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     lowConfidenceLines,
   );
   attachTermiteBondSelector(services, estData);
+  attachTermiteStationRental(services, estData);
   attachCommercialInteriorSelector(services, estData);
   // Same resolver as buildPricingServices — basis and price ladder must come
   // from ONE result object (ui-verify caught them diverging; see helper).
@@ -22229,6 +22314,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+module.exports.attachTermiteStationRental = attachTermiteStationRental;
 module.exports.applySelectedCommercialInteriorToEstimateData = applySelectedCommercialInteriorToEstimateData;
 module.exports.commercialInteriorOptionFromEstimateData = commercialInteriorOptionFromEstimateData;
 module.exports.commercialInteriorExcludedFromEstimateData = commercialInteriorExcludedFromEstimateData;

@@ -3790,6 +3790,47 @@ export function ServiceSection({
           />
         ) : null}
 
+        {/* Termite station rental rider (owner 2026-07-26): stations are
+            rented, not purchased — $0 install, Waves retains ownership, and
+            the uplift rides the same quarterly check. The server suppresses
+            the rental's own section and stamps it here (same rider posture
+            as the bond below); on solo termite estimates its figures are
+            already folded into the price card above, and on bundles the
+            plan totals carry it — so this row itemizes, it never adds.
+            Keyed on the stamp alone, not the termite slug: the server also
+            hosts it on the unsplittable 'bundle' fallback card (codex r1
+            P1 — suppressed rental must always have a rendered disclosure). */}
+        {section.stationRental ? (
+          <div
+            aria-label="Termite station rental"
+            style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
+                  {section.stationRental.label || 'Termite Station Rental'}
+                </div>
+                {section.stationRental.detail ? (
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
+                    {section.stationRental.detail}
+                  </div>
+                ) : null}
+              </div>
+              {/* priceItemized (GH codex r2 P1): the bundle ladder's own
+                  treatment row already shows this amount — the rider then
+                  carries only the ownership terms, never a second price. */}
+              {section.stationRental.priceItemized ? null : (
+                <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                  {fmtMoney(section.stationRental.perApplicationAdd)} / application
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 4, lineHeight: 1.35 }}>
+              Included in your plan pricing.
+            </div>
+          </div>
+        ) : null}
+
         {/* Termite bond selector (owner 2026-07-20): optional re-treatment
             warranty riding the same quarterly station check. Amounts come
             from the section's quote-time bondOptions snapshot; a pick calls
