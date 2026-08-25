@@ -2560,9 +2560,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // (grass×season target vs. portal irrigation inches + 7-day rainfall) in
       // irrigationAdvice / LawnWaterBalance. The column still exists and is read by
       // other surfaces (waveguard-plan-engine), so it is not emitted here.
-      irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
-        ?? assessment.irrigation_inches_per_week
-        ?? portalIrrigationInches(propertyPrefs),
+      // Same portal → turf → assessment precedence as buildLawnWaterContext:
+      // this figure renders beside the water balance, and the two must come
+      // from the same source or one report shows a tech reading next to a
+      // balance computed from the customer's own (possibly derived) schedule.
+      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs)
+        ?? numberOrNull(turfProfile.irrigation_inches_per_week)
+        ?? numberOrNull(assessment.irrigation_inches_per_week),
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
