@@ -258,10 +258,15 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
       // (codex r12 P1): a settled plan's stop survives (stopOnPayment skips
       // stopped rows), and without restamping it to the NEW plan's reason the
       // replacement plan's cancel would fail the ownership check and leave
-      // reminders off. Admin stops with unrelated reasons keep their stamp.
+      // reminders off. 'completed' plan-owned rows are included too (codex PR
+      // r2 P1): plan settlement flips its stop to 'completed' keeping the
+      // stamp, and a completed row is invisible to both hasActiveSequence and
+      // isDunningStopped — a replacement plan after a dispute reopen must
+      // restamp it 'stopped' or legacy late-payment reminders keep firing
+      // under the new plan. Admin stops with unrelated reasons keep their stamp.
       this.whereIn('status', ['active', 'paused', 'autopay_hold'])
-        .orWhere(function stalePlanOwnedStop() {
-          this.where('status', 'stopped')
+        .orWhere(function planOwnedTerminalRow() {
+          this.whereIn('status', ['stopped', 'completed'])
             .where('stopped_reason', 'like', 'payment_plan_created:%');
         });
     })

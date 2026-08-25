@@ -24,7 +24,26 @@ exports.up = async function up(knex) {
        WHERE pp.invoice_id = i.id
          AND pp.status = 'active'
          AND i.status IN ('paid', 'prepaid')
-    `);
+      `);
+    // Mirror completeActivePlansForInvoice for the historical rows too: plan
+    // creation left the invoice's follow-up sequence 'stopped' with a
+    // payment_plan_created:<id> stamp and stopOnPayment skips stopped rows,
+    // so a settled invoice still reads isDunningStopped() = true. If a later
+    // dispute reopens it, every reminder path stays suppressed forever.
+    // Flip those plan-owned stops to 'completed' alongside the plans.
+    if (await knex.schema.hasTable('invoice_followup_sequences')) {
+      await knex.raw(`
+        UPDATE invoice_followup_sequences s
+           SET status = 'completed',
+               next_touch_at = NULL,
+               updated_at = NOW()
+          FROM invoices i
+         WHERE s.invoice_id = i.id
+           AND s.status = 'stopped'
+           AND s.stopped_reason LIKE 'payment_plan_created:%'
+           AND i.status IN ('paid', 'prepaid')
+      `);
+    }
   }
 };
 
