@@ -390,13 +390,16 @@ class ManagedAssistant {
       status: 'pending',
     }).returning('*');
 
-    // Update conversation
+    // The ai_escalations row above is the source of truth. Once it exists,
+    // the customer must get the escalation reply — session bookkeeping and
+    // transcript logging are best-effort (a failed UPDATE here once surfaced
+    // as the generic error fallback mid-escalation).
     await db('agent_sessions').where('id', conversation.id).update({
       escalated: true,
       escalation_reason: reason,
       status: 'escalated',
       updated_at: new Date(),
-    });
+    }).catch(e => logger.error(`[managed-assistant] Failed to mark session escalated: ${e.message}`, { conversationId: conversation.id }));
 
     // Reply to customer
     const reply = customer
@@ -409,7 +412,7 @@ class ManagedAssistant {
       content: reply,
       channel: conversation.channel,
       sent_to_customer: true,
-    });
+    }).catch(e => logger.error(`[managed-assistant] Failed to save escalation reply: ${e.message}`, { conversationId: conversation.id }));
 
     // Notify Adam via SMS for urgent escalations
     if (priority === 'urgent') {
