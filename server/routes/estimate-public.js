@@ -10136,6 +10136,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // FOR UPDATE reload serializes against such writes; a row that
           // has become cross-family or a free callback aborts the adopt
           // with the same re-pick 409 as a lost claim.
+          // Canonical lock order (Codex PR #3476 r19 P1): the shared
+          // advisory mint lock comes BEFORE the visit row FOR UPDATE —
+          // create() takes the advisory lock later in this transaction,
+          // and every scheduled-invoice writer locks advisory-then-row;
+          // taking the row first here would ABBA-deadlock against them.
+          // Re-acquisition at create() is a same-transaction no-op.
+          {
+            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
+          }
           const lockedAdoptRow = await trx('scheduled_services')
             .leftJoin('services', 'services.id', 'scheduled_services.service_id')
             .select(

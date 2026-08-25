@@ -354,7 +354,7 @@ async function findUnmintedSetupFeeObligation({
     .where({ source_estimate_id: estimate.id })
     .where('status', 'completed');
   if (excludeScheduledServiceId) priorQuery = priorQuery.whereNot('id', excludeScheduledServiceId);
-  const priorCompletedRows = await priorQuery.select('id', 'is_recurring', 'recurring_parent_id');
+  const priorCompletedRows = await priorQuery.select('id', 'is_recurring', 'recurring_parent_id', 'estimated_price');
   const priorPlanRows = (priorCompletedRows || []).filter(isPlanApplicationRow);
   let priorCompleted = null;
   let billedPriorPlanVisitIds = [];
@@ -382,10 +382,22 @@ async function findUnmintedSetupFeeObligation({
     // alert persists them, and its reconciliation revalidates ONLY those
     // — a completed inspection_only/declined visit that never billed is
     // never re-listed as owed.
-    billedPriorPlanVisitIds = planIds.map(String).filter((visitId) => (priorBilledRows || []).some((r) => (
-      (String(r.scheduled_service_id || '') === visitId
-        || priorRecordToVisit.get(String(r.service_record_id || '')) === visitId)
-      && invoiceBillsBaseApplication(r))));
+    // FULL cents coverage per visit (Codex PR r19 P1): a $10 partial line
+    // on a $100 visit is not a billed application — boolean only when the
+    // row carries no price to compare against.
+    const { sumBaseApplicationCents } = require('./estimate-first-application-invoice');
+    const priorPriceCents = new Map(priorPlanRows.map((r) => {
+      const n = Number(r.estimated_price);
+      return [String(r.id), Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null];
+    }));
+    billedPriorPlanVisitIds = planIds.map(String).filter((visitId) => {
+      const rowsFor = (priorBilledRows || []).filter((r) => (
+        String(r.scheduled_service_id || '') === visitId
+        || priorRecordToVisit.get(String(r.service_record_id || '')) === visitId));
+      const expect = priorPriceCents.get(visitId);
+      if (expect === null || expect === undefined) return rowsFor.some(invoiceBillsBaseApplication);
+      return rowsFor.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0) >= expect;
+    });
     priorCompleted = billedPriorPlanVisitIds.length ? { id: billedPriorPlanVisitIds[0] } : null;
   }
 

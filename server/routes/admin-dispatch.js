@@ -9562,7 +9562,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
             .forUpdate()
             .orderBy('created_at', 'desc')
-            .select('id', 'invoice_number', 'status', 'notes', 'line_items');
+            .select('id', 'invoice_number', 'status', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
           const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
           // ALL live rows are retained (Codex P0, pre-push round 10):
           // split coverage — one invoice billing the fee, another the
@@ -9624,7 +9624,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // r3 P1) — an additional parked visit needs its own attached
           // invoice.
           const onVisitIdSet = new Set(liveOnVisitRows.map((r) => String(r.id)));
-          const appEligibleRows = uniqueLiveNow.filter((r) => onVisitIdSet.has(String(r.id)) || currentVisitIsPrimary);
+          // A stamped row ATTACHED to another visit counts THERE, never
+          // toward this (primary) visit (Codex PR r19 P1) — only
+          // unattached acceptance invoices provide the primary fallback.
+          const appEligibleRows = uniqueLiveNow.filter((r) => onVisitIdSet.has(String(r.id))
+            || (currentVisitIsPrimary && !r.scheduled_service_id && !r.service_record_id));
           const appCentsNow = appEligibleRows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
           const applicationCovered = expectedAppCentsThisVisit > 0
             ? appCentsNow >= expectedAppCentsThisVisit

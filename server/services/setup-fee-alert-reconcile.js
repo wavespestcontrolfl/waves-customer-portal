@@ -66,35 +66,24 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
       logger.warn(`[setup-fee-reconcile]${actorLabel} parked set grew mid-lock — deferring to the next reconcile`);
       return;
     }
-    // Canonical prepay coverage FIRST (Codex P0): a covered annual-prepay
-    // term WAIVES the fee and covers the visits — every registered alert
-    // resolves as no-action instead of instructing waived charges.
+    // Canonical prepay coverage (Codex P0 → PR r19 P1): a covered
+    // annual-prepay term WAIVES the setup fee estate-wide, but each
+    // alerted VISIT is covered only per the canonical
+    // annualPrepayCoversVisit gate — an unallocated visit keeps its
+    // application follow-up. The waiver rides the normal flow as
+    // feeWaivedByTerm; visit coverage joins the per-visit predicates.
     const AnnualPrepayCoverage = require('./annual-prepay-renewals');
     const coveredTermStanding = await AnnualPrepayCoverage.coveredTermsAsOf(trx, null)
       .where('t.source_estimate_id', sourceEstimateId)
       .first('t.id');
-    if (coveredTermStanding) {
-      const allRegistered = await trx('notifications')
-        .where({ recipient_type: 'admin' })
-        .where(function coveredKeys() {
-          this.whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-            .orWhereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey]);
-        })
-        .select('id', 'metadata');
-      for (const row of allRegistered) {
-        const m = typeof row.metadata === 'string'
-          ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
-          : row.metadata;
-        if (m?.resolvedCovered === true && m?.setupFeeResolved !== false) continue;
-        await trx('notifications').where({ id: row.id }).update({
-          body: `RESOLVED — no action needed: an annual-prepay term now covers this estimate; the setup fee is waived by that plan and the visits are covered. Do NOT bill on this alert.`,
-          read_at: trx.fn.now(),
-          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true, setupFeeResolved: true })]),
-        });
-        logger.warn(`[setup-fee-reconcile]${actorLabel} alert ${row.id} resolved — covered annual-prepay term stands`);
-      }
-      return;
-    }
+    const feeWaivedByTerm = !!coveredTermStanding;
+    const annualCoversVisitId = async (visitId) => {
+      if (!feeWaivedByTerm || !visitId) return false;
+      try {
+        const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
+        return !!(visitRow && await AnnualPrepayCoverage.annualPrepayCoversVisit(visitRow, trx));
+      } catch { return false; }
+    };
           // RESOLVED rows are reconciled too (Codex P0, pre-push round
           // 18): if the fee's covering invoice is later voided while the
           // application invoice stays live, the resolved alert is the
@@ -202,9 +191,9 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               const v = Number(m?.expectedSetupFeeCents);
               return Number.isFinite(v) ? v : 0;
             }));
-            const tFeeProven = tExpect > 0
+            const tFeeProven = feeWaivedByTerm || (tExpect > 0
               ? (tLiveFeeCents + tRefundedFeeCents) >= tExpect
-              : tRefundedFeeCents > 0;
+              : tRefundedFeeCents > 0);
             await reconcileTerminalFeeAlerts(tFeeProven);
             return;
           }
@@ -380,8 +369,16 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               ? stampedUnattached.some(invoiceBillsBaseApplication)
               : stampedAppCents >= expect;
           };
+          const annualCoveredIds = new Set();
+          if (feeWaivedByTerm) {
+            for (const visitId of parkedIds) {
+               
+              if (await annualCoversVisitId(visitId)) annualCoveredIds.add(String(visitId));
+            }
+          }
           const visitCovered = (visitId) => (visitApplicationBilled(visitId)
             || prepaidCoveredIds.has(String(visitId))
+            || annualCoveredIds.has(String(visitId))
             || stampedCoversPrimary(visitId));
           const uncoveredIds = parkedIds.filter((visitId) => !visitCovered(visitId));
           // FEE-ONLY alerts (historic leaks) REVALIDATE the historical
@@ -421,6 +418,10 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 .whereIn('id', histPlanIds)
                 .where({ customer_id: scanCustomerId })
                 .select('id', 'prepaid_amount', 'prepaid_method', 'estimated_price');
+              const histPriceCents = new Map(histPrepaidRows.map((r) => {
+                const n = Number(r.estimated_price);
+                return [String(r.id), Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null];
+              }));
               const histCents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
               const histPrepaidOk = new Set(histPrepaidRows
                 .filter((r) => {
@@ -434,11 +435,25 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               // Record-linked invoices map back to their visit (Codex P0):
               // an application invoice attached only through its service
               // record is coverage for that visit, not perpetual debt.
-              feeOnlyUncoveredIds = histPlanIds.filter((visitId) => !histPrepaidOk.has(String(visitId))
-                && !histBilled.some((r) => (
-                  (String(r.scheduled_service_id || '') === String(visitId)
-                    || recordToVisit.get(String(r.service_record_id || '')) === String(visitId))
-                  && invoiceBillsBaseApplication(r))));
+              // FULL cents coverage per visit (Codex PR r19 P1), boolean
+              // only when the row carries no price.
+              const histAnnualOk = new Set();
+              if (feeWaivedByTerm) {
+                for (const visitId of histPlanIds) {
+                   
+                  if (await annualCoversVisitId(visitId)) histAnnualOk.add(String(visitId));
+                }
+              }
+              feeOnlyUncoveredIds = histPlanIds.filter((visitId) => {
+                if (histPrepaidOk.has(String(visitId))) return false;
+                if (histAnnualOk.has(String(visitId))) return false;
+                const rowsFor = histBilled.filter((r) => (
+                  String(r.scheduled_service_id || '') === String(visitId)
+                  || recordToVisit.get(String(r.service_record_id || '')) === String(visitId)));
+                const expect = histPriceCents.get(String(visitId));
+                if (expect === null || expect === undefined) return !rowsFor.some(invoiceBillsBaseApplication);
+                return rowsFor.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0) < expect;
+              });
             }
           }
           const applicationProven = feeOnlyAlert
