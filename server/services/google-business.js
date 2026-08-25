@@ -1551,8 +1551,12 @@ class GoogleBusinessService {
             const ownedByAutoLink = alRow.auto_linked_at && cust?.review_marked_at
               && new Date(cust.review_marked_at) <= new Date(alRow.auto_linked_at);
             if (!otherLink && ownedByAutoLink) {
+              // Ownership predicate IN the write (GH codex r8): a
+              // concurrent human mark bumps review_marked_at, the
+              // conditional no-ops, and the human's confirmation survives.
               await trx('customers')
                 .where({ id: alRow.customer_id })
+                .where({ review_marked_at: cust.review_marked_at })
                 .update({ has_left_google_review: false, review_marked_at: null });
               try {
                 await trx('activity_log').insert({

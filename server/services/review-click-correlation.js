@@ -237,8 +237,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // Whether this timestamp/location pair was recorded together
         // post-migration (or corroborated) — see the trust comment above.
         pairTrusted: pairTrusted === true,
-        // false only when the customer row explicitly carries active=false.
-        customerActive: row.active !== false,
+        // STRICT true only (GH codex r8): a legacy NULL active must not
+        // auto-link — the confirmation UI's candidate search requires
+        // active=true, so a null-active link would be unconfirmable.
+        customerActive: row.active === true,
       }));
   } catch (err) {
     // ID-only logging (AGENTS.md) — no names in plaintext logs.

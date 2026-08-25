@@ -1004,8 +1004,13 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       const ownedByAutoLink = prior.auto_linked_at && priorCust?.review_marked_at
         && new Date(priorCust.review_marked_at) <= new Date(prior.auto_linked_at);
       if (!otherLink && ownedByAutoLink) {
+        // Ownership predicate IN the write (GH codex r8): a human mark
+        // landing between the read above and this update bumps
+        // review_marked_at — the conditional then no-ops and the human's
+        // confirmation survives.
         await trx('customers')
           .where({ id: prior.customer_id })
+          .where({ review_marked_at: priorCust.review_marked_at })
           .update({ has_left_google_review: false, review_marked_at: null });
         reversedCustomerId = prior.customer_id;
       }
@@ -1239,6 +1244,11 @@ async function getDashboard(options = {}) {
     const confirmedRow = await conn('google_reviews')
       .where('reviewer_name', '!=', '_stats')
       .whereNull('missing_since')
+      // Provenances that can never mint a payout are not "needing
+      // attribution": manual_no_visit is human-RESOLVED with nothing to
+      // pay, and click_auto waits in its own confirm queue — counting
+      // either inflates the metric forever (GH codex #3483 r8).
+      .whereRaw("(link_source IS NULL OR link_source NOT IN ('manual_no_visit', 'click_auto'))")
       .where('review_created_at', '>=', effectivePeriodStart.toISOString())
       .where('review_created_at', '<=', periodEnd.toISOString())
       .where('star_rating', '>=', minRating)

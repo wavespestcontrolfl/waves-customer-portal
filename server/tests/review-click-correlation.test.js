@@ -22,6 +22,7 @@ function clickRow(overrides = {}) {
     state: 'FL',
     zip: '34205',
     has_left_google_review: false,
+    active: true,
     ...overrides,
   };
   // Post-migration reality unless a test says otherwise: every successful

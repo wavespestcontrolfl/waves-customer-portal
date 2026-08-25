@@ -47,6 +47,7 @@ function createDbMock(initialRows = {}) {
     rows = rows.filter((row) => query.notNull.every((key) => valueFor(row, key) != null));
     rows = rows.filter((row) => query.nulls.every((key) => valueFor(row, key) == null));
     rows = rows.filter((row) => query.ins.every(([key, values]) => values.includes(valueFor(row, key))));
+    rows = rows.filter((row) => (query.rawFilters || []).every((fn) => fn(row)));
     rows = rows.filter((row) => query.ops.every(([key, op, value]) => {
       const left = valueFor(row, key);
       if (left == null) return false;
@@ -78,6 +79,7 @@ function createDbMock(initialRows = {}) {
       nulls: [],
       ops: [],
       ins: [],
+      rawFilters: [],
       order: null,
       limitValue: null,
       where(arg, op, value) {
@@ -102,6 +104,14 @@ function createDbMock(initialRows = {}) {
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
       whereNull(column) { this.nulls.push(column); return this; },
+      whereRaw(sql) {
+        // Recognized raw clauses become row predicates; anything else is a
+        // pass-through (matches the google-business-sync mock convention).
+        if (String(sql).includes("link_source NOT IN ('manual_no_visit', 'click_auto')")) {
+          this.rawFilters.push((row) => row.link_source == null || !['manual_no_visit', 'click_auto'].includes(row.link_source));
+        }
+        return this;
+      },
       forUpdate() { return this; },
       leftJoin() { return this; },
       select() { return this; },
