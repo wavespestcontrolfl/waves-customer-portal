@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { computeQuarterlyEstimate } = require('../pnl-report');
 const { etDateString, etParts, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // ET date (Waves operates in FL; Railway server runs UTC).
@@ -332,37 +333,22 @@ async function getQuarterlyEstimate(quarter) {
   const { year, month } = etParts(now);
   const q = quarter || `Q${Math.floor((month - 1) / 3) + 1}`;
   const qNum = parseInt(q.replace('Q', ''));
-  const startMonthIdx = (qNum - 1) * 3; // 0, 3, 6, 9 (zero-based)
-  const startDate = `${year}-${String(startMonthIdx + 1).padStart(2, '0')}-01`;
-  const lastDay = new Date(Date.UTC(year, startMonthIdx + 3, 0)).getUTCDate();
-  const endDate = `${year}-${String(startMonthIdx + 3).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-  const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
-  const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
-
-  const grossIncome = parseFloat(revenue?.total || 0);
-  const totalExpenses = parseFloat(expenses?.total || 0);
-  const taxableIncome = Math.max(0, grossIncome - totalExpenses);
-
-  // SE tax: 15.3% on 92.35% of net SE earnings (IRS Schedule SE)
-  const seBase = taxableIncome * 0.9235;
-  const selfEmployment = seBase * 0.153;
-
-  // 50% of SE tax is deductible from AGI before federal income tax
-  const incomeTaxBase = Math.max(0, taxableIncome - (selfEmployment * 0.5));
-  const estimatedFederal = incomeTaxBase * 0.22; // rough 22% bracket estimate
-  const estimatedState = 0; // Florida has no state income tax
+  // SAME implementation as /admin/tax/revenue/quarterly-estimate
+  // (computeQuarterlyEstimate): P&L-basis YTD revenue net of sales tax,
+  // deductible expenses, elapsed-months annualization, prior 1040-ES
+  // credits. The old inline version used quarter-only gross payments and
+  // raw expense amounts, so this tool and the Tax page could recommend
+  // materially different payments.
+  const est = await computeQuarterlyEstimate(db, {
+    year, qNum, today: etDateString(now),
+  });
 
   return {
     quarter: q,
-    gross_income: Math.round(grossIncome),
-    total_expenses: Math.round(totalExpenses),
-    taxable_income: Math.round(taxableIncome),
-    estimated_federal: Math.round(estimatedFederal),
-    estimated_state: estimatedState,
-    self_employment_tax: Math.round(selfEmployment),
-    total_estimated: Math.round(estimatedFederal + selfEmployment),
-    note: 'Florida has no state income tax. Federal rate estimated at 22%. SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. Consult your CPA for precise calculations.',
+    ...est,
+    estimated_state: 0, // Florida has no state income tax
+    note: 'Same calculation as the Tax page quarterly estimate. Rough projection, not the IRS Form 2210 annualized-income worksheet. Assumes a flat 22% federal bracket (no standard deduction or QBI); SE tax is 15.3% on 92.35% of net earnings with 50% deducted before income tax; YTD net income (deductible expenses; sales tax excluded from revenue) is annualized over the elapsed months, and 1040-ES payments recorded as PAID (through the selected quarter) are credited. Deductions count expenses-table rows only — synced processing fees and equipment depreciation are NOT subtracted, so the figure errs toward overpayment. Florida has no state income tax. Consult your CPA for precise calculations.',
   };
 }
 

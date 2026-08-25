@@ -143,6 +143,7 @@ function pnlToCSV(pnlData) {
   lines.push(row(['  Service Revenue', (pnlData.revenue?.serviceRevenue || 0).toFixed(2)]));
   lines.push(row(['  Other Revenue', (pnlData.revenue?.otherRevenue || 0).toFixed(2)]));
   lines.push(row(['Total Revenue', (pnlData.revenue?.total || 0).toFixed(2)]));
+  lines.push(row(['  Sales tax collected (liability, not income)', (pnlData.revenue?.salesTaxCollected || 0).toFixed(2)]));
   lines.push(row(['', '']));
   lines.push(row(['COST OF GOODS SOLD', '']));
   lines.push(row(['  Labor', (pnlData.cogs?.labor || 0).toFixed(2)]));

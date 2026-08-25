@@ -1357,7 +1357,27 @@ function FilingCalendarTab() {
     try {
       const update = { status };
       if (status === "filed") update.filedDate = etDateString();
-      if (status === "paid") update.paidDate = etDateString();
+      if (status === "paid") {
+        update.paidDate = etDateString();
+        // The quarterly estimate credits SUM(amount_paid) for filed/paid
+        // 1040-ES rows — without the amount the credit reads $0 and the
+        // operator can be told to re-pay an installment. Prefill with the
+        // row's amount due when it has one.
+        const row = filings.find((f) => f.id === id);
+        // Cancel ABORTS and a paid filing REQUIRES a persisted amount
+        // (codex r4 P1): an amount-less "paid" row credits $0 to later
+        // estimates, which can then instruct re-paying the installment.
+        const entered = window.prompt(
+          "Amount paid (required — credits future estimates):",
+          row?.amountDue != null ? String(row.amountDue) : "",
+        );
+        if (entered === null) return; // operator cancelled — no status change
+        const amt = Number(entered);
+        if (entered.trim() === "" || !Number.isFinite(amt) || amt < 0) {
+          return alert("Enter a valid non-negative amount — a filing cannot be marked paid without one.");
+        }
+        update.amountPaid = amt;
+      }
       await adminFetch(`/admin/tax/filings/${id}`, {
         method: "PUT",
         body: JSON.stringify(update),
@@ -2942,11 +2962,14 @@ function RevenueTab() {
             }}
           >
             {[
-              ["YTD Revenue", fmtM(quarterly.ytdRevenue)],
-              ["YTD Expenses", fmtM(quarterly.ytdExpenses)],
-              ["Estimated Net Income", fmtM(quarterly.estimatedNetIncome)],
-              ["Self-Employment Tax (15.3%)", fmtM(quarterly.seTax)],
-              ["Estimated Income Tax", fmtM(quarterly.incomeTax)],
+              ["YTD Revenue (excl. sales tax)", fmtM(quarterly.ytdRevenue)],
+              ["YTD Deductible Expenses", fmtM(quarterly.ytdExpenses)],
+              ["YTD Net Income", fmtM(quarterly.estimatedNetIncome)],
+              ["Annualized Net Income", fmtM(quarterly.annualizedNet)],
+              ["Self-Employment Tax (15.3%, annual)", fmtM(quarterly.seTax)],
+              ["Estimated Income Tax (22%, annual)", fmtM(quarterly.incomeTax)],
+              ["Required Cumulative Through Quarter", fmtM(quarterly.requiredCumulative)],
+              ["Prior 1040-ES Payments Credited", fmtM(quarterly.priorPaymentsCredited)],
               ["Total Quarterly Payment", fmtM(quarterly.quarterlyPayment)],
             ].map(([l, v]) => (
               <div
@@ -2969,6 +2992,11 @@ function RevenueTab() {
           {quarterly.dueDate && (
             <div style={{ marginTop: 12, fontSize: 12, color: D.amber }}>
               Due: {fmtD(quarterly.dueDate)}
+            </div>
+          )}
+          {quarterly.note && (
+            <div style={{ marginTop: 8, fontSize: 11, color: D.muted }}>
+              {quarterly.note}
             </div>
           )}
         </div>
@@ -3246,6 +3274,11 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow label="Total Revenue" value={pnl.revenue?.total} bold />{" "}
+          <PnlRow
+            label="Sales tax collected (liability, not income)"
+            value={pnl.revenue?.salesTaxCollected}
+            indent
+          />{" "}
           <div style={{ height: 12 }} />{" "}
           <PnlRow label="COST OF GOODS SOLD" value={null} bold />{" "}
           <PnlRow label="Labor" value={pnl.cogs?.labor} indent />{" "}
