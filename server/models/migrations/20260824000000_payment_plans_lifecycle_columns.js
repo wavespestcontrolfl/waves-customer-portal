@@ -42,6 +42,25 @@ exports.up = async function up(knex) {
          AND pp.status = 'active'
          AND i.status IN ('void', 'refunded', 'canceled', 'cancelled')
       `);
+    // Their plan-owned sequences transition too (a failed refund can
+    // restore such an invoice to paid, and a later dispute reopens it for
+    // collection — a stale plan-owned stop with no plan left would suppress
+    // reminders forever). Admin pauses layered on the plan stop are
+    // preserved: only 'stopped' rows and the legacy plan-pause shape flip.
+    if (await knex.schema.hasTable('invoice_followup_sequences')) {
+      await knex.raw(`
+        UPDATE invoice_followup_sequences s
+           SET status = 'completed',
+               next_touch_at = NULL,
+               updated_at = NOW()
+          FROM invoices i
+         WHERE s.invoice_id = i.id
+           AND (s.status = 'stopped'
+                OR (s.status = 'paused' AND s.paused_reason = 'payment_plan_created'))
+           AND s.stopped_reason LIKE 'payment_plan_created:%'
+           AND i.status IN ('void', 'refunded', 'canceled', 'cancelled')
+        `);
+    }
     // Mirror completeActivePlansForInvoice for the historical rows too: plan
     // creation left the invoice's follow-up sequence 'stopped' with a
     // payment_plan_created:<id> stamp and stopOnPayment skips stopped rows,
@@ -62,7 +81,8 @@ exports.up = async function up(knex) {
                updated_at = NOW()
           FROM invoices i
          WHERE s.invoice_id = i.id
-           AND s.status IN ('stopped', 'paused')
+           AND (s.status = 'stopped'
+                OR (s.status = 'paused' AND s.paused_reason = 'payment_plan_created'))
            AND s.stopped_reason LIKE 'payment_plan_created:%'
            AND i.status IN ('paid', 'prepaid')
       `);

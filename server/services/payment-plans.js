@@ -64,13 +64,21 @@ async function completeActivePlansLocked(invoiceId, conn) {
   // existing paths). Unconditional (not gated on flipped>0) so a retry can
   // repair a partial earlier attempt; admin stops with unrelated reasons
   // keep their stamp.
-  // 'paused' included: legacy plan creations parked the sequence via
-  // pauseSequence(reason: 'payment_plan_created') — the stopped_reason stamp
-  // survives the pause, and a stale paused row reads as ACTIVE to
-  // hasActiveSequence, suppressing every reminder after a dispute reopen.
+  // Legacy plan-owned PAUSES are included (pauseSequence(reason:
+  // 'payment_plan_created') — the stopped_reason stamp survives the pause,
+  // and a stale paused row reads as ACTIVE to hasActiveSequence). An ADMIN
+  // pause layered on top of the plan stop (status 'paused' with the
+  // admin's own paused_reason, plan stamp retained underneath) is NOT
+  // released (codex PR r10 P1): the admin's hold outlives the plan — a
+  // dispute reopen must still find the pause suppressing reminders.
   await conn('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', ['stopped', 'paused'])
+    .where(function planOwnedReleasableShape() {
+      this.where('status', 'stopped')
+        .orWhere(function legacyPlanPause() {
+          this.where('status', 'paused').where('paused_reason', 'payment_plan_created');
+        });
+    })
     .where('stopped_reason', 'like', 'payment_plan_created:%')
     // Same settled gate as the plan flip above — releasing a replacement
     // plan's stop on a reopened invoice would disarm its dunning ownership.
