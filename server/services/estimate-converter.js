@@ -3274,6 +3274,27 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   return inferred;
 }
 
+// Visits/year the derived annual-prepay coverage records. Values mirror
+// inferCoverageCadence (annual-prepay-renewals.js) so coverage aligns with
+// the seeded series. A residential-pest accepted selection outranks the
+// line's stale quote-time count (the acceptedPestSelectionVisits doctrine
+// above — the fee choke point got that fix after incident 2026-08-18; this
+// derivation didn't, so a quarterly-built quote accepted bi-monthly minted a
+// bimonthly term covering only 4 visits and payment-time coverage would seed
+// an 8-month series inside the 12-month term). The accepted count applies
+// only when it matches the cadence the series will actually seed: a line
+// whose own cadence FIELD contradicts the acceptance still resolves that
+// field's cadence, coverage must track the real series, and the line count
+// keeps deciding there.
+const PREPAY_CADENCE_VISITS = {
+  monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+};
+function annualPrepayCoverageVisits(svc = {}, cadence, acceptedPlanFrequency) {
+  const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
+  if (acceptedVisits && acceptedVisits === PREPAY_CADENCE_VISITS[cadence]) return acceptedVisits;
+  return visitsPerYearForRecurringService(svc) || PREPAY_CADENCE_VISITS[cadence] || null;
+}
+
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
 // and weekends (bounded, fail-open — codex r8 P2). Shared by the
 // auto-schedule loop and the reserved-bundle mosquito promotion; in-season
@@ -5420,13 +5441,7 @@ const EstimateConverter = {
               // closed like the seasonal case.
               recurringPrepayCoverageInvalid = true;
             } else {
-              // Visits/year: prefer the line's explicit count (the series' own
-              // source); else map from cadence. Values mirror inferCoverageCadence
-              // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
-              const CADENCE_VISITS = {
-                monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
-              };
-              const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
+              const visits = annualPrepayCoverageVisits(coverageSvc, cadence, acceptedPlanFrequency);
               if (svcType && visits > 0) {
                 coverageServiceType = svcType;
                 coverageVisitCount = visits;
@@ -6181,6 +6196,7 @@ module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFe
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
+module.exports.annualPrepayCoverageVisits = annualPrepayCoverageVisits;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.riderAwareSingleRecurringUnit = riderAwareSingleRecurringUnit;
 module.exports.acceptedPestSelectionVisits = acceptedPestSelectionVisits;

@@ -756,3 +756,41 @@ describe('acceptedPestSelectionVisits — accepted cadence outranks stale pest-l
     expect(EstimateConverter.riderAwareSingleUnitVisits([staleQuarterlyPestLine], 0)).toBe(4);
   });
 });
+
+describe('annualPrepayCoverageVisits — prepay coverage inherits the accepted-selection doctrine', () => {
+  const { annualPrepayCoverageVisits } = EstimateConverter;
+  // Same stale shape as above, on the prepay path: a quarterly-built quote
+  // accepted bi-monthly minted a bimonthly term covering only 4 visits — the
+  // pay page showed an 8-month schedule and payment-time coverage would seed
+  // it inside the 12-month term.
+  const staleQuarterlyPestLine = { name: 'Pest Control', service: 'pest_control', visitsPerYear: 4 };
+
+  test('bi-monthly accept on a quarterly-built pest line covers 6 visits, not the stale 4', () => {
+    expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'bimonthly', 'bi_monthly')).toBe(6);
+  });
+
+  test('monthly accept covers 12; quarterly accept on a monthly-built line covers 4', () => {
+    expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'monthly', 'monthly')).toBe(12);
+    expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control', visitsPerYear: 12 }, 'quarterly', 'quarterly')).toBe(4);
+  });
+
+  test('without an accepted selection the line count keeps deciding', () => {
+    expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'bimonthly', null)).toBe(4);
+  });
+
+  test('accepted count applies only when it matches the resolved cadence — a contradicting line cadence FIELD keeps the line derivation', () => {
+    // The line's own field resolved quarterly; accepted bi_monthly (6)
+    // disagrees. Coverage must track the series the cadence will seed.
+    expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'quarterly', 'bi_monthly')).toBe(4);
+  });
+
+  test('non-pest lines never take the override — tier plans store the BILLING cadence in the selection', () => {
+    expect(annualPrepayCoverageVisits({ name: 'Tree & Shrub', service: 'tree_shrub', visitsPerYear: 6 }, 'monthly', 'monthly')).toBe(6);
+    expect(annualPrepayCoverageVisits({ name: 'Monthly Lawn Care Service', service: 'lawn_care', visitsPerYear: 12 }, 'monthly', 'monthly')).toBe(12);
+  });
+
+  test('count-less lines map from cadence; underivable shapes return null', () => {
+    expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, 'quarterly', null)).toBe(4);
+    expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, null, null)).toBeNull();
+  });
+});
