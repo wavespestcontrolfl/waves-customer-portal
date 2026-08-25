@@ -587,8 +587,10 @@ async function getAttributionQueue(options = {}) {
   const startsAt = programStart(policy);
   const effectiveSince = startsAt && startsAt > since ? startsAt : since;
 
-  if (!policy.enabled) return { items: [], policyEnabled: false };
-
+  // NOT gated on policy.enabled: click_auto rows must stay confirmable /
+  // correctable through this queue even when the payout program is off (GH
+  // codex #3483 r1 P1) — only the payout-driven reasons below require the
+  // policy. policyEnabled still reports the real flag for the UI.
   const reviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .whereNull('missing_since')
@@ -605,6 +607,22 @@ async function getAttributionQueue(options = {}) {
   const items = [];
   for (const review of reviews) {
     if (paidReviewIds.has(review.id)) continue;
+
+    // A click auto-link is excluded from payouts until a human confirms
+    // (qualifiesGoogleReview) — and confirmation happens through THIS queue.
+    // Checked BEFORE the payout-policy gates: an auto-linked review must be
+    // confirmable/correctable even when the program is disabled or the
+    // rating is below the payout bar (GH codex #3483 r1 P1), and without
+    // this row an auto-linked review with a resolvable technician would be
+    // skipped by payout sync yet absent from the only UI that can restamp
+    // it 'manual' (pre-push P0 r9): unattributable forever.
+    if (review.link_source === 'click_auto' && review.customer_id) {
+      const customer = await conn('customers').where({ id: review.customer_id }).first();
+      items.push(serializeAttributionQueueItem(review, customer, 'click_auto_confirm'));
+      continue;
+    }
+
+    if (!policy.enabled) continue;
     const rating = toInt(review.star_rating, 0);
     if (rating < Math.max(1, toInt(policy.minRating, 1))) continue;
 
@@ -617,22 +635,13 @@ async function getAttributionQueue(options = {}) {
     const attribution = await resolveTechnicianForGoogleReview(review, conn);
     if (!attribution?.technicianId) {
       items.push(serializeAttributionQueueItem(review, customer, 'missing_technician'));
-      continue;
-    }
-    // A click auto-link is excluded from payouts until a human confirms
-    // (qualifiesGoogleReview) — and confirmation happens through THIS queue.
-    // Without this row, an auto-linked review with a resolvable technician
-    // would be skipped by payout sync yet absent from the only UI that can
-    // restamp it 'manual' (pre-push P0 r9): unattributable forever.
-    if (review.link_source === 'click_auto') {
-      items.push(serializeAttributionQueueItem(review, customer, 'click_auto_confirm'));
     }
   }
 
   return {
     items,
     count: items.length,
-    policyEnabled: true,
+    policyEnabled: !!policy.enabled,
     period: {
       days,
       since: effectiveSince.toISOString(),
@@ -747,7 +756,6 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
 
   if (!reviewId) throw operationalError('reviewId required', 400, 'review_id_required');
   if (!customerId) throw operationalError('customerId required', 400, 'customer_id_required');
-  if (!policy.enabled) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
 
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
@@ -759,11 +767,27 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   if (review.missing_since != null) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
+  // Payout-policy checks gate the MONEY, not the correction: this endpoint is
+  // also the only UI path that confirms or re-matches a click auto-link, and
+  // that must stay available when the incentive program is disabled, the
+  // review predates it, or the rating is below the payout bar — otherwise a
+  // wrong probabilistic link (and the wrong customer's suppression flag) is
+  // permanent in those configurations (GH codex #3483 r1 P1). For a
+  // click_auto row the failures downgrade to payoutEligible=false; fresh
+  // manual matches keep the strict throws (unchanged behavior).
+  const isClickAutoCorrection = review.link_source === 'click_auto';
+  let payoutEligible = true;
+  if (!policy.enabled) {
+    if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
+    payoutEligible = false;
+  }
   if (!reviewWithinProgramWindow(review, policy)) {
-    throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
+    if (!isClickAutoCorrection) throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
+    payoutEligible = false;
   }
   if (toInt(review.star_rating, 0) < Math.max(1, toInt(policy.minRating, 1))) {
-    throw operationalError('Google review does not meet the minimum rating policy', 422, 'review_below_min_rating');
+    if (!isClickAutoCorrection) throw operationalError('Google review does not meet the minimum rating policy', 422, 'review_below_min_rating');
+    payoutEligible = false;
   }
 
   const customer = await conn('customers').where({ id: customerId }).first();
@@ -786,12 +810,17 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     serviceRecordId = serviceRecordId || attribution?.serviceRecordId || null;
   }
 
-  if (!technicianId) {
+  // A payout-ineligible click_auto correction doesn't mint money, so it
+  // doesn't need a technician — requiring one would re-block the correction
+  // the payout-policy relaxation above just unblocked.
+  if (!technicianId && payoutEligible) {
     throw operationalError('technicianId required for manual attribution', 422, 'technician_id_required');
   }
 
-  const technician = await conn('technicians').where({ id: technicianId }).first();
-  if (!technician) throw operationalError('Technician not found', 404, 'technician_not_found');
+  const technician = technicianId
+    ? await conn('technicians').where({ id: technicianId }).first()
+    : null;
+  if (technicianId && !technician) throw operationalError('Technician not found', 404, 'technician_not_found');
 
   // If a PAID payout already binds this review, payroll is closed and the
   // payout can't move — so DON'T relink google_reviews.customer_id either, or
@@ -806,7 +835,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       alreadyPaid: true,
       reviewId: review.id,
       customer: serializeCustomer(customer),
-      technician: { id: technician.id, name: technician.name || 'Technician' },
+      technician: technician ? { id: technician.id, name: technician.name || 'Technician' } : null,
     };
   }
 
@@ -937,18 +966,22 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     googleReviewId: review.google_review_id || null,
   };
 
-  let result = await insertPayout({
-    technicianId,
-    customerId,
-    serviceRecordId,
-    reviewRequestId: null,
-    googleReviewId: review.id,
-    source: 'google_review',
-    amountCents: policy.amountCents,
-    currency: policy.currency,
-    earnedAt: review.review_created_at || review.created_at || new Date(),
-    attributionSnapshot,
-  }, conn, { syncLockHeld: true });
+  // A correction under a disabled/ineligible payout policy links the review
+  // and runs the reversal but never mints money (GH codex #3483 r1 P1).
+  let result = payoutEligible
+    ? await insertPayout({
+      technicianId,
+      customerId,
+      serviceRecordId,
+      reviewRequestId: null,
+      googleReviewId: review.id,
+      source: 'google_review',
+      amountCents: policy.amountCents,
+      currency: policy.currency,
+      earnedAt: review.review_created_at || review.created_at || new Date(),
+      attributionSnapshot,
+    }, conn, { syncLockHeld: true })
+    : { created: false, skipped: true, reason: 'payout_policy_ineligible' };
 
   // Re-attribution: a payout already existed for this review (the partial
   // unique index on google_review_id dedups it), so insertPayout no-ops with
@@ -1014,10 +1047,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     ...attributionOutcome,
     reviewId: review.id,
     customer: serializeCustomer(customer),
-    technician: {
+    technician: technician ? {
       id: technician.id,
       name: technician.name || 'Technician',
-    },
+    } : null,
   };
 }
 

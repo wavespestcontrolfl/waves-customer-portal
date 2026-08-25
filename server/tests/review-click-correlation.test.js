@@ -29,7 +29,7 @@ function clickRow(overrides = {}) {
 // Chainable capture mock: filters are SQL-side in prod, so the mock returns
 // the configured rows verbatim and records where() args for window assertions.
 function makeConn({ clickRows = [], linkedRows = [], failClicks = false, failLinked = false } = {}) {
-  const captured = { where: [] };
+  const captured = { where: [], whereRaw: [] };
   const conn = (table) => {
     const isClicks = String(table).startsWith('review_requests');
     const q = {};
@@ -38,10 +38,15 @@ function makeConn({ clickRows = [], linkedRows = [], failClicks = false, failLin
     q.whereNull = chain;
     q.whereNotNull = chain;
     q.orderBy = chain;
+    q.orderByRaw = chain;
     q.limit = chain;
     q.whereIn = chain;
     q.where = (...args) => {
       if (isClicks) captured.where.push(args);
+      return q;
+    };
+    q.whereRaw = (...args) => {
+      if (isClicks) captured.whereRaw.push(args);
       return q;
     };
     q.select = () => {
@@ -143,15 +148,27 @@ describe('findLikelyReviewers', () => {
     expect(result).toHaveLength(2);
   });
 
-  test('queries a 72h-before / 6h-after window around the review', async () => {
+  test('queries a 72h-before / 6h-after window around the review on the LATEST click', async () => {
     const conn = makeConn({ clickRows: [] });
     await findLikelyReviewers({ review_created_at: REVIEW_AT }, { conn });
-    const bounds = conn.captured.where.filter((args) => args[0] === 'rr.redirected_at');
-    const gte = bounds.find((args) => args[1] === '>=');
-    const lte = bounds.find((args) => args[1] === '<=');
+    const bounds = conn.captured.whereRaw.filter((args) => String(args[0]).includes('COALESCE(rr.last_redirected_at, rr.redirected_at)'));
+    const gte = bounds.find((args) => String(args[0]).includes('>='));
+    const lte = bounds.find((args) => String(args[0]).includes('<='));
     const reviewMs = Date.parse(REVIEW_AT);
-    expect(gte[2].getTime()).toBe(reviewMs - 72 * 3600 * 1000);
-    expect(lte[2].getTime()).toBe(reviewMs + 6 * 3600 * 1000);
+    expect(gte[1][0].getTime()).toBe(reviewMs - 72 * 3600 * 1000);
+    expect(lte[1][0].getTime()).toBe(reviewMs + 6 * 3600 * 1000);
+  });
+
+  test('a repeat click correlates by last_redirected_at, not the first-click claim', async () => {
+    const conn = makeConn({
+      clickRows: [clickRow({
+        redirected_at: '2026-08-04T17:30:00.000Z', // first click, 3d earlier
+        last_redirected_at: '2026-08-07T17:50:00.000Z', // tapped again 10m before posting
+      })],
+    });
+    const result = await findLikelyReviewers({ review_created_at: REVIEW_AT, location_id: 'bradenton' }, { conn });
+    expect(result[0].clickedAt).toBe('2026-08-07T17:50:00.000Z');
+    expect(result[0].clickOffsetLabel).toBe('10m before');
   });
 
   test('fails open (empty list + warn log) when the click query errors', async () => {
@@ -206,6 +223,23 @@ describe('findConfidentClickMatch', () => {
     });
     expect((await findLikelyReviewers(REVIEW, { conn })).map(r => r.customerId)).toEqual(['cust-1']);
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses a sole clicker already marked as having reviewed (manual flag not ours to reverse)', async () => {
+    const conn = makeConn({ clickRows: [clickRow({ has_left_google_review: true })] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('accepts a repeat clicker whose LATEST tap is inside the 12h bound', async () => {
+    const conn = makeConn({
+      clickRows: [clickRow({
+        redirected_at: '2026-08-04T17:30:00.000Z', // first click, days earlier
+        last_redirected_at: '2026-08-07T17:55:00.000Z', // re-tap 5m before posting
+      })],
+    });
+    const match = await findConfidentClickMatch(REVIEW, { conn });
+    expect(match?.customerId).toBe('cust-1');
+    expect(match?.clickOffsetLabel).toBe('5m before');
   });
 
   test('refuses a location-unstamped sole clicker (null is not a match)', async () => {

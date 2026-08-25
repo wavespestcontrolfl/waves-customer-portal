@@ -186,6 +186,11 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         google_review_clicked: true,
         redirected_to_google: true,
         google_location: loc.id,
+        // Every server-observed click, not just the first: redirected_at is
+        // the atomic first-click claim below and never moves, but the click
+        // auto-link needs the LATEST click to correlate against a review's
+        // post time (GH codex #3483 r1).
+        last_redirected_at: new Date(),
       };
       if (!request.opened_at) {
         updates.opened_at = new Date();

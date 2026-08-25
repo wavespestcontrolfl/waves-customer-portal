@@ -80,8 +80,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // those rows are not evidence anyone reached the Google form (codex
       // #3264 r2).
       .where('rr.google_review_clicked', true)
-      .where('rr.redirected_at', '>=', windowStart)
-      .where('rr.redirected_at', '<=', windowEnd);
+      // Latest observed click, not the first: redirected_at is an atomic
+      // first-click claim that never moves, so a customer who opened the
+      // link days ago and tapped again right before posting correlates by
+      // last_redirected_at (GH codex #3483 r1; legacy rows fall back).
+      .whereRaw('COALESCE(rr.last_redirected_at, rr.redirected_at) >= ?', [windowStart])
+      .whereRaw('COALESCE(rr.last_redirected_at, rr.redirected_at) <= ?', [windowEnd]);
     // A click 302s to ONE location's review form — a click for a different
     // GBP than the review's is anti-evidence, not a weaker match; timestamp
     // proximity must not let it outrank the real clicker (codex #3264 r2).
@@ -92,11 +96,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       });
     }
     const clicks = await query
-      .orderBy('rr.redirected_at', 'desc')
+      .orderByRaw('COALESCE(rr.last_redirected_at, rr.redirected_at) desc')
       .limit(SCAN_LIMIT)
       .select(
         'rr.customer_id',
         'rr.redirected_at',
+        'rr.last_redirected_at',
         'rr.google_review_clicked',
         'rr.google_location',
         'c.first_name',
@@ -132,7 +137,8 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     for (const row of clicks) {
       if (row.google_review_clicked !== true) continue;
       if (reviewLocationId && row.google_location && row.google_location !== reviewLocationId) continue;
-      const clickedAt = new Date(row.redirected_at);
+      // Same latest-click rule as the SQL window (JS-side for mocked layers).
+      const clickedAt = new Date(row.last_redirected_at || row.redirected_at);
       if (Number.isNaN(clickedAt.getTime())) continue;
       const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();
       const prev = byCustomer.get(row.customer_id);
@@ -227,6 +233,11 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     if (meta.distinctClickers !== 1) return null;
     if (meta.scanTruncated) return null;
     const only = candidates[0];
+    // Already marked as having reviewed (manual mark, no linked row): the
+    // auto-link would add nothing they don't have, and a later re-match
+    // correction would clear a flag the auto-link never set (GH codex #3483
+    // r1 P2). Their review stays a manual-queue question.
+    if (only.alreadyFlagged) return null;
     if (only.locationMatch !== true) return null;
     if (!only.clickedBeforeReview) return null;
     if (only.clickOffsetMs > AUTO_LINK_MAX_BEFORE_MS) return null;

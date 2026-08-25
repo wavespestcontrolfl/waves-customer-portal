@@ -742,7 +742,12 @@ class GoogleBusinessService {
       star_rating: normalized.star_rating,
       review_text: normalized.review_text,
       review_created_at: normalized.review_created_at,
-      customer_id: customerId || existing?.customer_id || null,
+      // Existing link FIRST: once a review is attributed (manual, click
+      // auto-link, or an earlier name match) a later sync's name match must
+      // never silently reassign it — that would strand the original
+      // customer's suppression flag with no provenance-aware reversal (GH
+      // codex #3483 r1 P2). Corrections go through manual attribution only.
+      customer_id: existing?.customer_id || customerId || null,
       // One clock authority for the reconcile ordering tokens: synced_at is
       // compared against runner fetch-start timestamps (Node clock), so it
       // must come from the same clock — db.fn.now() (Postgres) behind the
@@ -794,7 +799,8 @@ class GoogleBusinessService {
         await db('google_reviews').where({ id: winner.id }).update({
           ...providerRow,
           synced_at: monotonicSyncedAt,
-          customer_id: customerId || winner.customer_id || null,
+          // Same existing-link-first rule as the row build above.
+          customer_id: winner.customer_id || customerId || null,
           ...winnerReplyFields,
         });
         result = { id: winner.id, inserted: false };
@@ -976,7 +982,8 @@ class GoogleBusinessService {
           star_rating: review.rating || 0,
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
-          customer_id: customerId || existing.customer_id,
+          // Existing link first — mirror of _upsertGbpReview (GH codex r1).
+          customer_id: existing.customer_id || customerId,
         };
         // synced_at participates in the authoritative reconcile's claim
         // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
