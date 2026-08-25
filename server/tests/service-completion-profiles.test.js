@@ -426,6 +426,24 @@ describe('service completion profiles', () => {
     }
   });
 
+  test('a cadence-qualified renamed foam label resolves both current and rollback rows', async () => {
+    // Forward: base-name candidate resolves the renamed catalog row.
+    const renamedRow = { service_key: 'foam_recurring', name: 'Recurring Termite Foam Service', category: 'termite', billing_type: 'recurring' };
+    let knex = makeKnex({ serviceResults: [null, renamedRow] });
+    let profile = await resolveCompletionProfileForScheduledService(
+      { id: 'svc-1', service_type: 'Recurring Termite Foam Service (Quarterly)' }, knex,
+    );
+    expect(profile).toMatchObject({ serviceKey: 'foam_recurring', serviceName: 'Recurring Termite Foam Service' });
+
+    // Rollback: same label resolves the restored old-name row via the alias.
+    const oldRow = { service_key: 'foam_recurring', name: 'Recurring Foam Treatment', category: 'termite', billing_type: 'recurring' };
+    knex = makeKnex({ serviceResults: [null, null, null, oldRow] });
+    profile = await resolveCompletionProfileForScheduledService(
+      { id: 'svc-1', service_type: 'Recurring Termite Foam Service (Quarterly)' }, knex,
+    );
+    expect(profile).toMatchObject({ serviceKey: 'foam_recurring', serviceName: 'Recurring Foam Treatment' });
+  });
+
   // The foam renames are NOT suffix-only, so they get explicit aliases:
   // reserved foam rows carry no service_id by design (20260808070000) and
   // legacy-labeled holds can commit after the rename migration runs.

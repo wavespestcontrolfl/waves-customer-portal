@@ -226,6 +226,18 @@ function serviceNameCandidates(serviceType) {
   if (programless && !candidates.some((c) => c.toLowerCase() === programless.toLowerCase())) {
     candidates.push(programless);
   }
+  // Cadence-qualified labels ("Recurring Termite Foam Service (Quarterly)"
+  // from priceRecurringFoam): when the base BEFORE the parenthetical is a
+  // full "… Service" designator, the parenthetical is a cadence qualifier,
+  // not identity — add the bare base as a candidate so it flows through the
+  // whole pipeline (including the rename aliases below). Deliberately NOT
+  // applied to non-Service bases: "German Roach Initial (3-Visit)"'s
+  // qualifier IS identity (codex pre-push P1).
+  const cadenceless = raw.replace(/\s*\([^()]*\)\s*$/, '').trim();
+  if (/\bservice$/i.test(cadenceless)
+    && !candidates.some((c) => c.toLowerCase() === cadenceless.toLowerCase())) {
+    candidates.push(cadenceless);
+  }
 
   const expanded = [];
   const seen = new Set();

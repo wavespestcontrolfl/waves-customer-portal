@@ -739,7 +739,7 @@ function buildRows() {
   add('dethatching', () => rangeRow({
     key: 'dethatching',
     oneTimePerkKey: 'dethatching',
-    name: 'Lawn Dethatching',
+    name: 'Lawn Dethatching Service',
     unit: 'per job',
     // Bermuda/Zoysia lawns under 10,000 sq ft with recorded thatch depth
     // auto-price; St. Augustine and heavy-cleanup jobs stay review-gated
@@ -776,7 +776,7 @@ function buildRows() {
   add('lawn_plugging', () => rangeRow({
     key: 'lawn_plugging',
     oneTimePerkKey: 'plugging',
-    name: 'Lawn Plugging',
+    name: 'Lawn Plugging Service',
     unit: 'per sq ft',
     decimals: 2,
     // Effective per-sq-ft rate varies with treated area because of the job
@@ -791,7 +791,7 @@ function buildRows() {
   add('top_dressing', () => rangeRow({
     key: 'top_dressing',
     oneTimePerkKey: 'top_dressing',
-    name: 'Lawn Top Dressing',
+    name: 'Lawn Top Dressing Service',
     unit: 'per job',
     // Both pricing modes: estimated area (65% reduction) and exact-area
     // (measured, or recurring-lawn customers) — the live estimate path uses
