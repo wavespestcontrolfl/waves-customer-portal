@@ -26,6 +26,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       if (f.in) return f.in.values.includes(r[f.in.col]);
       if (f.raw) return String(r[f.raw.col] || '').toLowerCase() === String(f.raw.val).toLowerCase();
       if (f.raw_null) return r[f.raw_null] === null || r[f.raw_null] === undefined;
+      if (f.not_in) return !f.not_in.vals.includes(r[f.not_in.col]);
       return Object.entries(f).every(([k, v]) => r[k] === v);
     });
     const q = {
@@ -47,6 +48,16 @@ function fakeKnex(db, { missingTables = [] } = {}) {
         filters.push({ raw_null: col });
         return q;
       },
+      whereNotIn(col, vals) {
+        filters.push({ not_in: { col, vals } });
+        return q;
+      },
+      select: async (...cols) => rowsNow().filter(rowMatch).map((r) => {
+        if (!cols.length) return { ...r };
+        const out = {};
+        cols.forEach((c) => { if (typeof c === 'string') out[c] = r[c]; });
+        return out;
+      }),
       first: async () => {
         const hit = rowsNow().find(rowMatch);
         return hit ? { ...hit } : undefined;

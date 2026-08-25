@@ -250,6 +250,20 @@ function serviceNameCandidates(serviceType) {
         expanded.push(suffixed);
         seen.add(suffixedKey);
       }
+      // Names with a trailing qualifier keep it AFTER the designator —
+      // "German Roach Initial (3-Visit)" was renamed to "German Roach
+      // Initial Service (3-Visit)", the same shape migration 20260507000002
+      // used (' Service' inserted before a trailing parenthetical), so the
+      // bridge must produce that form too, not just the plain-append one.
+      const parenMatch = /^(.*\S)\s+(\([^()]*\))$/.exec(candidate);
+      if (parenMatch && !/\bservice$/i.test(parenMatch[1])) {
+        const inserted = `${parenMatch[1]} Service ${parenMatch[2]}`;
+        const insertedKey = inserted.toLowerCase();
+        if (!seen.has(insertedKey)) {
+          expanded.push(inserted);
+          seen.add(insertedKey);
+        }
+      }
     }
     if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
       const alias = 'Pest & Rodent Control';

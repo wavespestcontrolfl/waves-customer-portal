@@ -374,6 +374,35 @@ describe('service completion profiles', () => {
     });
   });
 
+  // Names with a trailing qualifier were renamed with " Service" BEFORE the
+  // parenthetical (the 20260507000002 shape) — the bridge must produce that
+  // form, not just the plain append (codex pre-push P1, 2026-08-25).
+  test('a parenthetical-qualified label resolves the "X Service (Y)" renamed row', async () => {
+    const renamedRow = {
+      service_key: 'german_roach_initial',
+      name: 'German Roach Initial Service (3-Visit)',
+      category: 'pest_control',
+      billing_type: 'one_time',
+    };
+    // queue: raw misses, plain append misses, paren-inserted candidate hits.
+    const knex = makeKnex({ serviceResults: [null, null, renamedRow] });
+
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'German Roach Initial (3-Visit)',
+    }, knex);
+
+    expect(profile).toMatchObject({
+      serviceKey: 'german_roach_initial',
+      serviceName: 'German Roach Initial Service (3-Visit)',
+    });
+    expect(knex._whereRawCalls).toContainEqual({
+      table: 'services',
+      sql: 'lower(name) = lower(?)',
+      bindings: ['German Roach Initial Service (3-Visit)'],
+    });
+  });
+
   // The foam renames are NOT suffix-only, so they get explicit aliases:
   // reserved foam rows carry no service_id by design (20260808070000) and
   // legacy-labeled holds can commit after the rename migration runs.
