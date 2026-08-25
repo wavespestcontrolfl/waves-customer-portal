@@ -76,6 +76,7 @@ jest.mock('../routes/estimate-public', () => ({
 
 const {
   isRecurringCardOnFileEnabled,
+  isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
@@ -133,6 +134,64 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
   it('exempts invoice-mode and prepay-annual', async () => {
     expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, billByInvoice: true })).exemptReason).toBe('invoice_mode');
     expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' })).exemptReason).toBe('prepay_annual');
+  });
+
+  // Owner ruling 2026-08-25 (supersedes the 2026-07-12 prepay carve-out):
+  // with GATE_PREPAY_CARD_AND_CHARGE on, a prepay accept requires the card
+  // exactly like per-application — the legacy exemption fired on the false
+  // premise that the year was paid at accept, and two prepay accepts were
+  // serviced unpaid.
+  describe('GATE_PREPAY_CARD_AND_CHARGE (prepay joins the card lane)', () => {
+    afterEach(() => { delete process.env.GATE_PREPAY_CARD_AND_CHARGE; });
+
+    it('is off unless GATE_PREPAY_CARD_AND_CHARGE is truthy', () => {
+      delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      expect(isPrepayCardAndChargeEnabled()).toBe(false);
+      for (const v of ['true', '1', 'on']) {
+        process.env.GATE_PREPAY_CARD_AND_CHARGE = v;
+        expect(isPrepayCardAndChargeEnabled()).toBe(true);
+      }
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'false';
+      expect(isPrepayCardAndChargeEnabled()).toBe(false);
+    });
+
+    it('keeps the legacy prepay exemption while the gate is off (kill switch restores today)', async () => {
+      delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
+      expect(p).toEqual({ enforced: true, required: false, exemptReason: 'prepay_annual' });
+    });
+
+    it('requires the card for a NEW customer prepay accept when the gate is on', async () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
+      expect(p.enforced).toBe(true);
+      expect(p.required).toBe(true);
+      expect(p.exemptReason).toBe(null);
+    });
+
+    it('in-lane prepay still honors the payer-billed exemption (never enroll the homeowner for payer bills)', async () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual', scheduledServiceId: 'ss-9', useLinkedFallback: false });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('payer_billed');
+    });
+
+    it('in-lane prepay auto-satisfies with a saved consented card (never re-ask a member)', async () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-1' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('saved_method_consented');
+      expect(p.savedMethodRowId).toBe('pmrow-1');
+    });
+
+    it('in-lane prepay stays REQUIRED behind the master flag being on (RECURRING_CARD_ON_FILE off wins)', async () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      delete process.env.RECURRING_CARD_ON_FILE;
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
+      expect(p).toEqual({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    });
   });
 
   it('exempts an existing plan customer via the membership snapshot', async () => {

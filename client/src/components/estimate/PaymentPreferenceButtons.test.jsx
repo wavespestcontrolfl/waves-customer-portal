@@ -37,6 +37,40 @@ describe('PaymentPreferenceButtons', () => {
     expect(onSelect).toHaveBeenCalledWith('prepay_annual');
   });
 
+  // GATE_PREPAY_CARD_AND_CHARGE (owner ruling 2026-08-25): in-lane prepay
+  // saves a card at checkout and charges the 12-month total on confirmation —
+  // the button copy must never promise an after-the-fact invoice pay link.
+  it('in-lane prepay copy says the card is charged at confirm, not that an invoice opens later', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        prepayInLane
+      />,
+    );
+
+    expect(screen.getByText('Save your card at checkout; the 12-month total is charged when you confirm.')).toBeInTheDocument();
+    expect(screen.queryByText('12-month invoice opens after confirmation.')).not.toBeInTheDocument();
+  });
+
+  it('in-lane prepay with a waivable setup fee appends the charge-at-confirm line', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={{ amount: 99, waivedWithPrepay: true }}
+        annualPrepayEligible
+        prepayInLane
+      />,
+    );
+
+    expect(screen.getByText(/setup is included at no charge\. Save your card at checkout; the 12-month total is charged when you confirm\./)).toBeInTheDocument();
+  });
+
   it('shows setup plus first visit invoice total for pay per application', () => {
     const onSelect = vi.fn();
 

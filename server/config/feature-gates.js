@@ -44,6 +44,7 @@
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.

@@ -108,6 +108,11 @@ export default function PaymentPreferenceButtons({
   // setup + first-application invoice (they're billed after completion).
   // Without this note, the invoice preview reads as the whole cost.
   oneTimeExtrasTotal = 0,
+  // GATE_PREPAY_CARD_AND_CHARGE (server /data recurringCardPolicy.prepayInLane):
+  // prepay rides the card lane — the customer saves a card at checkout and
+  // the 12-month total is charged on confirmation, so the copy must not
+  // promise an invoice pay link that never comes.
+  prepayInLane = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -327,8 +332,10 @@ export default function PaymentPreferenceButtons({
             </button>
             <div style={optionNote}>
               {waivableSetupFee
-                ? `Approve annual prepay and the setup is included at no charge.`
-                : '12-month invoice opens after confirmation.'}
+                ? `Approve annual prepay and the setup is included at no charge.${prepayInLane ? ' Save your card at checkout; the 12-month total is charged when you confirm.' : ''}`
+                : prepayInLane
+                  ? 'Save your card at checkout; the 12-month total is charged when you confirm.'
+                  : '12-month invoice opens after confirmation.'}
             </div>
           </div>
         )}

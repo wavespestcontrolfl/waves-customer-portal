@@ -39,12 +39,27 @@ function isRecurringCardOnFileEnabled() {
   return flag === '1' || flag === 'true' || flag === 'on';
 }
 
+// Prepay-annual joins the card lane (owner ruling 2026-08-25, superseding
+// the 2026-07-12 "prepay stays an optional upsell, never the gate" carve-out).
+// The carve-out's premise — "the year is paid up front at accept" — was never
+// true: a prepay accept only minted a draft invoice and emailed a pay link,
+// so a customer who ignored the email was serviced with no card and no
+// payment (two real accepts, 2026-08). While ON, a prepay accept requires
+// the same live-verified SetupIntent capture as per-application, and the
+// accept route auto-charges the prepay invoice on the just-enrolled method
+// post-commit. Kill = unset GATE_PREPAY_CARD_AND_CHARGE.
+function isPrepayCardAndChargeEnabled() {
+  const flag = process.env.GATE_PREPAY_CARD_AND_CHARGE;
+  return flag === '1' || flag === 'true' || flag === 'on';
+}
+
 // What a recurring accept requires. Exempt lanes:
 //  - one-time accepts (the card-hold lane owns those),
 //  - invoice-mode (admin opted into manual/auto invoicing — its own billing
 //    path, and commercial accepts live here),
-//  - prepay-annual (the year is paid up front at accept; the pay page's
-//    consent capture covers any later method-on-file need),
+//  - prepay-annual ONLY while GATE_PREPAY_CARD_AND_CHARGE is off (legacy
+//    carve-out — see isPrepayCardAndChargeEnabled; with the gate on, prepay
+//    accepts require the card like any other recurring accept),
 //  - existing plan customers (mirrors the deposit exemption: this protection
 //    is for NEW recurring signups; members' billing behavior is established
 //    — and many are already enrolled),
@@ -70,7 +85,11 @@ async function resolveRecurringCardPolicyForEstimate({
   if (billByInvoice) {
     return { enforced: true, required: false, exemptReason: 'invoice_mode' };
   }
-  if (paymentMethodPreference === 'prepay_annual') {
+  if (paymentMethodPreference === 'prepay_annual' && !isPrepayCardAndChargeEnabled()) {
+    // Legacy carve-out only — see isPrepayCardAndChargeEnabled. With the
+    // gate ON, prepay continues into the customer-dependent exemptions
+    // below (plan member / payer-billed / autopay-active / saved-method)
+    // exactly like a per-application accept.
     return { enforced: true, required: false, exemptReason: 'prepay_annual' };
   }
 
@@ -351,6 +370,7 @@ async function alertEnrollmentNeedsReview({ customerId, estimateId, reason }) {
 
 module.exports = {
   isRecurringCardOnFileEnabled,
+  isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,

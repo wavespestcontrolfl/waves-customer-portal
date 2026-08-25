@@ -10813,6 +10813,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // This flag re-opens the standard delivery path so the invoice routes to
     // the payer AP inbox like any payer-billed accept (Codex #2680 r3).
     let recurringCardPayerFallback = false;
+    // Enrollment outcome for the prepay auto-charge below — carries the
+    // payment_methods row id the charge runs against. Null when enrollment
+    // was skipped, refused, or errored (the charge then falls back to the
+    // delivered pay link exactly like today).
+    let recurringCardEnrollmentResult = null;
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -10849,7 +10854,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         recurringCardPayerFallback = true;
         logger.info(`[estimate-public] recurring-cof enrollment skipped: resolved customer ${customerId} is payer-billed (estimate ${estimate.id})`);
       } else {
-        await RecurringCards.completeRecurringCardEnrollment({
+        recurringCardEnrollmentResult = await RecurringCards.completeRecurringCardEnrollment({
           customerId,
           stripePaymentMethodId: recurringCardVerification.paymentMethodId,
           setupIntentId: recurringCardVerification.setupIntentId,
@@ -10861,7 +10866,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // customer-paid — the enrollment's in-lock payer check must not
           // fall back to the account payer and refuse.
           scheduledServiceId: recurringCardScopeSsId || null,
-        }).catch(() => {});
+        }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
       && recurringCardPolicy.savedMethodRowId && customerId) {
@@ -10901,6 +10906,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // policy check and here) must not fail silently — this accepted
         // plan would lose its card-on-file protection (Codex #2680). Same
         // office exception the fresh-capture path raises.
+        if (enrollment.enrolled || enrollment.reason === 'already_enrolled') {
+          recurringCardEnrollmentResult = { enrolled: true, paymentMethodRowId: recurringCardPolicy.savedMethodRowId };
+        }
         if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -11597,14 +11605,97 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
     }
 
+    // Prepay auto-charge (owner ruling 2026-08-25, GATE_PREPAY_CARD_AND_CHARGE):
+    // the card was live-verified BEFORE the accept committed, so charge the
+    // just-minted prepay invoice on the enrolled method now, instead of
+    // emailing a pay link and hoping. Post-commit and non-fatal by design —
+    // the booking stands either way; a decline/skip falls through to the
+    // existing pay-link delivery below plus an office alert (strictly better
+    // than today's silent unpaid path). chargeInvoiceWithSavedCard owns the
+    // surcharge/credit/ledger/receipt semantics (single surcharge authority);
+    // it refuses payer-billed invoices internally, and the ceiling pins the
+    // charge to the accepted amount (waves-billing amount agreement).
+    let prepayAutoCharge = null; // { status: 'paid'|'declined'|'skipped', reason? }
+    if (annualPrepaySelected && invoiceId && customerId
+      && RecurringCards.isPrepayCardAndChargeEnabled()) {
+      const prepayChargePmRowId = recurringCardEnrollmentResult?.paymentMethodRowId || null;
+      const prepayCeilingCents = Math.round(Number(invoiceAmount || 0) * 100);
+      // Payer check on the MINTED invoice (the converter auto-resolves a
+      // default payer): never charge the homeowner's card for a bill that
+      // routes to a third-party payer. Fail closed — an unverifiable payer
+      // state skips the charge (the charge service re-refuses internally
+      // regardless). The route-level invoiceIsPayerBilled flag is computed
+      // further down; this block runs first, so it reads directly.
+      let prepayInvoicePayerBilled = false;
+      try {
+        const payerRow = await db('invoices').where({ id: invoiceId }).first('payer_id');
+        prepayInvoicePayerBilled = !!payerRow?.payer_id;
+      } catch { prepayInvoicePayerBilled = true; }
+      if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
+        prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+      } else if (!prepayChargePmRowId) {
+        // Enrollment refused/errored (already office-alerted inside the
+        // enrollment path) or the accept ran with the gate's card
+        // requirement unmet (legacy in-flight accept) — no method to charge.
+        prepayAutoCharge = { status: 'skipped', reason: 'no_enrolled_method' };
+      } else if (!(prepayCeilingCents > 0)) {
+        // No verifiable accepted amount — never charge without a ceiling.
+        prepayAutoCharge = { status: 'skipped', reason: 'no_accepted_amount' };
+      } else {
+        try {
+          const StripeService = require('../services/stripe');
+          await StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+            // Hard cap at the accepted prepay total: any upward drift of the
+            // just-minted invoice refuses instead of charging above what the
+            // customer accepted (a downward drift — more credit — is fine).
+            maxAuthorizedChargeCents: prepayCeilingCents,
+            // Serialize against a concurrently-committing pause/opt-out or
+            // method switch — enrollment just ran, but the in-lock re-check
+            // is what makes the ordering atomic.
+            requireAutopayForCustomerId: customerId,
+          });
+          const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token');
+          const freshStatus = String(freshInvoice?.status || '').toLowerCase();
+          if (['paid', 'prepaid'].includes(freshStatus)) {
+            prepayAutoCharge = { status: 'paid' };
+            invoicePayUrl = null; // nothing left to pay — never advertise a pay link
+            logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
+          } else {
+            // Charge call returned without throwing but the invoice is not
+            // settled (e.g. parked 'processing' for reconciliation) — treat
+            // as declined for flow purposes: alert + keep the pay path,
+            // but sendViaSMSAndEmail below will refuse a non-collectible
+            // invoice, so only alert here.
+            prepayAutoCharge = { status: 'declined', reason: `post-charge status ${freshStatus || 'unknown'}` };
+          }
+        } catch (chargeErr) {
+          prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
+          logger.warn(`[estimate-accept] prepay auto-charge declined/failed for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
+        }
+      }
+      if (prepayAutoCharge.status !== 'paid') {
+        // The booking stands with a card on file but the year isn't
+        // collected — surface it instead of the silent unpaid path that
+        // caused the 2026-08 incidents. Best-effort.
+        await require('../services/notification-service').notifyAdmin(
+          'billing',
+          'Annual prepay accepted — auto-charge did not complete',
+          `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'was sent to the customer'} — follow up if it goes unpaid.`,
+          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+        ).catch(() => {});
+      }
+    }
+
     // Post-commit invoice delivery for every accept-minted invoice —
     // invoice-mode, annual prepay, and the standard conversion's setup/
     // first-application invoice (which the converter used to auto-send;
     // it is now minted in-transaction with delivery deferred here).
     // Card-on-file lane: the standard setup/first-application invoice is
     // minted as the amount anchor but NEVER advertised — completion
-    // auto-charges it. Invoice-mode and prepay accepts keep their delivery.
-    if (invoiceId && (billByInvoice || annualPrepaySelected
+    // auto-charges it. Invoice-mode and prepay accepts keep their delivery;
+    // an auto-charged (paid) prepay invoice has nothing to deliver — the
+    // charge path already handles the receipt.
+    if (invoiceId && prepayAutoCharge?.status !== 'paid' && (billByInvoice || annualPrepaySelected
       || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
@@ -11774,6 +11865,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
+        prepayCharged: prepayAutoCharge?.status === 'paid',
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -11817,6 +11909,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+      // Auto-charged prepay is settled money — the success payload must say
+      // "confirmed", never "pay your prepay invoice" (same override the
+      // already-accepted retry path derives from the live invoice status).
+      invoiceSettled: prepayAutoCharge?.status === 'paid',
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -15080,6 +15176,10 @@ function buildAcceptSuccessPayload({
     billingTerm,
     prepayInvoiceAmount,
     bookingUrl,
+    // Distinguishes a PAID prepay 'confirmed' (auto-charged at accept /
+    // settled on retry) from the payer-billed 'confirmed' — the success card
+    // keys its "payment went through" copy off this.
+    invoiceSettled,
   };
 }
 
@@ -15385,6 +15485,7 @@ function buildAcceptNotificationPayload({
   bookingUrl = null,
   billingTerm = 'standard',
   annualPrepayAmount = null,
+  prepayCharged = false,
 } = {}) {
   // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
   // the homeowner gets the report and owes nothing, so never advertise a
@@ -15499,6 +15600,17 @@ function buildAcceptNotificationPayload({
 
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
+    // Auto-charged at accept (GATE_PREPAY_CARD_AND_CHARGE): the year is
+    // collected — no follow-up owed, no pay link to advertise.
+    if (prepayCharged) {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved and paid — card on file auto-charged.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay payment went through. Your receipt is on the way.`,
+        customerLink: '/?tab=billing',
+      };
+    }
     if (!invoiceMode && !invoicePayUrl) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
@@ -21705,10 +21817,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
-    // Recurring card-on-file policy for the React capture UI — the page only
-    // enforces it on a recurring accept with the pay-per-application choice
-    // (prepay is exempt; the accept gate re-resolves authoritatively with the
-    // actual preference). Inert ({enforced:false}) while RECURRING_CARD_ON_FILE
+    // Recurring card-on-file policy for the React capture UI — the page
+    // enforces it on a recurring accept with the pay-per-application choice,
+    // and on the prepay choice too when GATE_PREPAY_CARD_AND_CHARGE is on
+    // (the payload's prepayInLane flag; the accept gate re-resolves
+    // authoritatively with the actual preference either way). Inert
+    // ({enforced:false}) while RECURRING_CARD_ON_FILE
     // is off. Structurally one-time-only estimates have no recurring lane to
     // protect, so they resolve exempt via treatAsOneTime.
     const recurringCardPolicyForData = await RecurringCards.resolveRecurringCardPolicyForEstimate({
@@ -21740,12 +21854,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringCardLaneActiveForData = recurringCardPolicyForData.required
       || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicyForData.exemptReason || '');
     if (recurringCardLaneActiveForData && depositPolicy.required) {
-      // Prepay accepts sit OUTSIDE the card lane (the resolver exempts
-      // prepay_annual before any customer checks), so their deposit is
-      // still owed at accept — preserve the pre-supersede requirement for
-      // the client's prepay branch or it skips /deposit-intent and loops
-      // on DEPOSIT_REQUIRED 402s (Codex #2680 r3).
-      depositPolicy.requiredForPrepay = true;
+      // Prepay accepts sit OUTSIDE the card lane only while the legacy
+      // carve-out is in force (the resolver exempts prepay_annual before any
+      // customer checks), so their deposit is still owed at accept —
+      // preserve the pre-supersede requirement for the client's prepay
+      // branch or it skips /deposit-intent and loops on DEPOSIT_REQUIRED
+      // 402s (Codex #2680 r3). With GATE_PREPAY_CARD_AND_CHARGE on, prepay
+      // rides the card lane like per-application and the supersede applies
+      // to it too.
+      depositPolicy.requiredForPrepay = !RecurringCards.isPrepayCardAndChargeEnabled();
       depositPolicy.required = false;
       depositPolicy.exemptReason = 'recurring_card_supersedes';
     }
@@ -22037,6 +22154,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         enforced: recurringCardPolicyForData.enforced === true,
         required: recurringCardPolicyForData.required === true,
         exemptReason: recurringCardPolicyForData.exemptReason || null,
+        // Prepay accepts ride the card lane when the prepay gate is on —
+        // the client's prepay branch keys its capture step off this flag
+        // (the accept gate re-resolves authoritatively either way).
+        prepayInLane: RecurringCards.isPrepayCardAndChargeEnabled(),
       },
       estimate: {
         id: estimate.id,

@@ -1,5 +1,20 @@
 # Card-on-File Booking — Build Spec
 
+> **Amendment (Adam, 2026-08-25):** the prepay-annual carve-out ("prepay-annual
+> stays an optional upsell, never the gate", §3 Phase 2 exemption 3 / §6) is
+> **superseded**. Its premise — "the year is paid up front at accept" — was never
+> true: a prepay accept only minted a draft invoice and emailed a pay link, and two
+> prepay accepts in 2026-08 were serviced with no card and no payment. New ruling:
+> **a card on file is required to complete EVERY booking regardless of billing
+> choice** ("we don't book appts without a card on file or pre payment — either per
+> application or annual pre pay"), and an annual-prepay accept **auto-charges the
+> prepay invoice on the just-enrolled method immediately post-accept** (a narrow,
+> owner-ruled exception to the §6 "charge event = services rendered" rule — prepay's
+> service IS the year). Implemented behind `GATE_PREPAY_CARD_AND_CHARGE`
+> (`server/services/recurring-card-on-file.js`); decline/skip falls back to the
+> delivered pay link + an office alert. Other Phase 2 exemptions (payer-billed,
+> invoice-mode, existing plan member, commercial site-confirmation hold) stand.
+
 **Owner decision (Adam, 2026-07-12, working session):** completing a booking in the
 estimate flow requires a **card on file** — for both one-time and recurring services.
 **No deposit.** Nothing is charged at booking; the saved card is charged **when
