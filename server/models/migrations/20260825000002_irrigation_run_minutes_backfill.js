@@ -92,7 +92,10 @@ function parseRunMinutesFromNotes(notes) {
     // week" states a weekly total, not the per-watering-day minutes the
     // structured column means, and must decline.
     'am', 'pm', 'morning', 'early', 'day', 'days',
-    'rain', 'sensor', 'starts', 'start', 'schedule', 'system', 'sprinkler', 'sprinklers', 'irrigation',
+    // NOTE: 'start'/'starts' are deliberately ABSENT — "per start" states
+    // one cycle's duration, not the per-watering-day total the column
+    // means, and "start times" is repetition; either declines.
+    'rain', 'sensor', 'schedule', 'system', 'sprinkler', 'sprinklers', 'irrigation',
   ]);
   const tokens = (text.toLowerCase().match(/[a-z]+/g) || []);
   if (tokens.some((t) => !BENIGN_WORDS.has(t))) return null;

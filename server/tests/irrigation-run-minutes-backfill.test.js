@@ -67,6 +67,10 @@ describe('parseRunMinutesFromNotes', () => {
     // number budget catches them (GH codex P1 on #3478 r11).
     ['Each zone runs 20 min at 4 and 6am', 'abbreviated double start time'],
     ['Each zone runs 20 min at 4am and 6', 'abbreviated double start time'],
+    // "per start" is one cycle's duration, not the daily total (GH codex
+    // P1 r19) — start/starts are outside the allowlist entirely.
+    ['20 min per zone per start', 'per-start duration'],
+    ['Each zone runs 20 min, starts at 4am', 'start vocabulary'],
     // A weekly total is not per-watering-day minutes (GH codex P1 r15).
     ['20 min per zone per week', 'weekly total, wrong unit'],
     ['Each zone runs 20 min weekly', 'weekly total, wrong unit'],
