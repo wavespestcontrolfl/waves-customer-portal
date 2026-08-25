@@ -273,7 +273,12 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
     })
     .update({
       status: 'stopped',
-      stopped_reason: paymentPlanFollowupStopReason(paymentPlanId),
+      // The stamp carries the PRE-PLAN status (`:prev=<status>`) so cancel
+      // can restore it faithfully (codex PR r8 P1): a pause saved with an
+      // EMPTY reason left no other durable trace, and cancel used to
+      // reactivate reminders the admin had explicitly held. `status` here
+      // reads the row's pre-update value (SQL UPDATE semantics).
+      stopped_reason: database.raw('? || status', [`${paymentPlanFollowupStopReason(paymentPlanId)}:prev=`]),
       stopped_by_admin_id: adminId || null,
       next_touch_at: null,
     });
@@ -302,10 +307,19 @@ async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
     .forUpdate()
     .first('id', 'status', 'stopped_reason', 'paused_reason', 'is_autopay_held');
   if (!seq) return 'schedule';
-  const planOwned = seq.stopped_reason === paymentPlanFollowupStopReason(planId)
+  // The stamp is either the bare legacy form (`payment_plan_created:<id>`)
+  // or the current form carrying the pre-plan status
+  // (`payment_plan_created:<id>:prev=<status>`).
+  const stampBase = paymentPlanFollowupStopReason(planId);
+  const stamp = String(seq.stopped_reason || '');
+  const stampMatches = stamp === stampBase || stamp.startsWith(`${stampBase}:prev=`);
+  const planOwned = stampMatches
     && (seq.status === 'stopped'
       || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
   if (!planOwned) return 'untouched';
+  const prePlanStatus = stamp.startsWith(`${stampBase}:prev=`)
+    ? stamp.slice(`${stampBase}:prev=`.length)
+    : null;
   // Autopay customers re-enter the HOLD, not the active cadence (codex PR r1
   // P1): resumeSequence would set status 'active' with a due time and the
   // next cron would dun a customer whose card is on autopay — the existing
@@ -321,13 +335,18 @@ async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
     });
     return 'held';
   }
-  // A pre-plan ADMIN pause survives the plan (codex PR r6 P1): the plan
-  // stop restamped the row 'stopped' but kept its paused_reason/paused_until
-  // memo. Restore the PAUSE instead of activating the cadence — the admin's
-  // hold still applies to the reopened invoice, and its own expiry/release
-  // paths decide when reminders resume. ('payment_plan_created' as
-  // paused_reason is the legacy PLAN pause shape, not an admin hold.)
-  if (seq.paused_reason && seq.paused_reason !== 'payment_plan_created') {
+  // A pre-plan ADMIN pause survives the plan (codex PR r6+r8 P1s): the
+  // plan stop restamped the row 'stopped' but recorded prev=paused in the
+  // stamp (and kept the paused_reason/paused_until memo). Restore the
+  // PAUSE instead of activating the cadence — the admin's hold still
+  // applies to the reopened invoice, and its own expiry/release paths
+  // decide when reminders resume. The prev= memo catches REASONLESS pauses
+  // (pauseSequence permits an empty reason, which the field check alone
+  // misses); the paused_reason check remains for legacy bare stamps.
+  // ('payment_plan_created' as paused_reason is the legacy PLAN pause
+  // shape, not an admin hold.)
+  if (seq.paused_reason !== 'payment_plan_created'
+    && (prePlanStatus === 'paused' || seq.paused_reason)) {
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       status: 'paused',
       stopped_reason: null,
@@ -2543,17 +2562,32 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       }
     }
 
-    if (!alreadyCancelled) await db('activity_log').insert({
-      customer_id: plan.customer_id || invoice.customer_id,
-      action: 'payment_plan_cancelled',
-      description: `Payment plan cancelled for invoice ${invoice.invoice_number || invoice.id}`
-        + `${reason ? ` — ${reason}` : ''} — ${cancelledBy}`,
-      metadata: {
-        invoice_id: invoice.id,
-        payment_plan_id: plan.id,
-        reason,
-      },
-    }).catch((err) => logger.warn(`[admin-invoices:payment-plan-cancel] activity_log insert failed: ${err.message}`));
+    // Idempotent by lookup, not by the alreadyCancelled flag (codex PR r8
+    // P2): a 502 on the re-arm leg committed the cancellation without its
+    // audit line, and the successful retry then arrived as alreadyCancelled
+    // — skipping the insert left that cancellation permanently absent from
+    // activity_log. Best-effort like the insert itself.
+    try {
+      const existingAudit = await db('activity_log')
+        .where({ action: 'payment_plan_cancelled' })
+        .whereRaw("metadata::jsonb ->> 'payment_plan_id' = ?", [String(plan.id)])
+        .first('id');
+      if (!existingAudit) {
+        await db('activity_log').insert({
+          customer_id: plan.customer_id || invoice.customer_id,
+          action: 'payment_plan_cancelled',
+          description: `Payment plan cancelled for invoice ${invoice.invoice_number || invoice.id}`
+            + `${reason ? ` — ${reason}` : ''} — ${cancelledBy}`,
+          metadata: {
+            invoice_id: invoice.id,
+            payment_plan_id: plan.id,
+            reason,
+          },
+        });
+      }
+    } catch (err) {
+      logger.warn(`[admin-invoices:payment-plan-cancel] activity_log insert failed: ${err.message}`);
+    }
 
     res.json({ ok: true, paymentPlan: plan, ...(alreadyCancelled ? { alreadyCancelled: true } : {}) });
   } catch (err) {

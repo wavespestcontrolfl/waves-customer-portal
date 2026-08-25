@@ -65,7 +65,12 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
-    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+    if (!queue || !queue.length) {
+      // The checker's active-plan gate (fail-closed) probes payment_plans
+      // per invoice — default to "no active plan" unless a test scripts one.
+      if (table === 'payment_plans') return chain({ first: undefined });
+      throw new Error(`Unexpected db table ${table}`);
+    }
     return queue.shift();
   });
 }

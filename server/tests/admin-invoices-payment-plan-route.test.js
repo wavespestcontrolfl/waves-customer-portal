@@ -108,6 +108,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       throw new Error(`unexpected trx table ${table}`);
     });
     trx.isTransaction = true; // real knex trx flag — completeActivePlansForInvoice reuses a caller trx as-is
+    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, __bindings: bindings }));
 
     const invoicesQB = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
     // first() with no args = the pre-existing-active-plan check (none);
@@ -150,7 +151,8 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       expect(trxFollowups.update).toHaveBeenCalledWith(
         expect.objectContaining({
           status: 'stopped',
-          stopped_reason: 'payment_plan_created:plan-1',
+          // Raw SQL concat stamping the pre-plan status for cancel restore.
+          stopped_reason: { __raw: '? || status', __bindings: ['payment_plan_created:plan-1:prev='] },
           stopped_by_admin_id: 'admin-1',
         }),
       );
