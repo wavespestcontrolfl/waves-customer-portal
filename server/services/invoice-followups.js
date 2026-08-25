@@ -1195,6 +1195,13 @@ async function resumeSequence(invoiceId, dbc = db) {
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,
+    // A re-armed row must carry NO stale stop stamp (codex PR r9 P1): a
+    // lingering payment_plan_created:* on an active row would let a later
+    // settlement cleanup claim an unrelated administrative pause as
+    // plan-owned and flip it 'completed', re-arming dunning a dispute
+    // reopen was supposed to leave alone.
+    stopped_reason: null,
+    stopped_by_admin_id: null,
     next_touch_at: nextTouchAt,
   });
 }
