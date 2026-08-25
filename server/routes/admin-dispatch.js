@@ -9021,7 +9021,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // when a Charge Now invoice already exists on the visit — the
       // completion must keep reusing that invoice exactly as before; the
       // alert then requests only the still-unbilled fee (Codex PR r2 P1).
-      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice,
+      // Both lookups are consulted (Codex P0, pre-push round 7): an
+      // invoice minted between the two reads appears only in
+      // preMintedInvoice, and the hold and beside-branch must agree.
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -9265,11 +9268,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // already exists on the visit carrying only the application charge —
     // the completion reused it unheld above, and the alert's liveOnVisit
     // branch directs staff to collect it and bill the fee BESIDE it).
-    // No !preMintedInvoice here (Codex P0, pre-push round 4): the Charge
-    // Now invoice IS preMintedInvoice — completionSuppressorInvoiceLookup
-    // finds the same row by scheduled_service_id — so excluding it would
-    // suppress this branch for exactly the case it exists for.
-    const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation && existingCompletionInvoice
+    // The Charge Now invoice appears as existingCompletionInvoice AND/OR
+    // preMintedInvoice (same row, two lookups — Codex P0 rounds 4 and 7:
+    // an invoice minted between the two reads shows only in the second),
+    // so the beside-branch keys on EITHER; excluding preMintedInvoice
+    // would suppress this branch for exactly the case it exists for.
+    const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation
+      && (existingCompletionInvoice || preMintedInvoice)
       && !terminalCompletionInvoice && !recapReviewOnly);
     if (setupFeeChargeNowBeside
       || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly

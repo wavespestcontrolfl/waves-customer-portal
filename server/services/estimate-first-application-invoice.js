@@ -102,16 +102,29 @@ function invoiceContainsSetupFeeLine(row) {
 
 // Does this invoice bill anything BESIDES the one-time setup fee (a visit
 // application charge, a service line)? Complement of the setup-only shape.
-// Rows without parseable line items fall back on the fee recognizer: a
-// fee-marked unparseable row is assumed setup-only, any other unparseable
-// row is assumed to carry the visit charge (the pre-line-items status quo).
+// Only a POSITIVE billable line counts: InvoiceService.create appends
+// adjustment lines like "Deposit credit (paid at acceptance)" to
+// setup-only invoices, and counting those as an application charge would
+// report the performed application covered while it was never billed
+// (Codex P0). Credits/discounts/adjustments and non-positive or
+// amount-less lines are never billing evidence. Rows without parseable
+// line items fall back on the fee recognizer: a fee-marked unparseable
+// row is assumed setup-only, any other unparseable row is assumed to
+// carry the visit charge (the pre-line-items status quo).
 function invoiceContainsNonSetupCharge(row) {
   let items = row?.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
   if (Array.isArray(items) && items.length) {
-    return items.some((li) => !/setup fee/i.test(String(li?.description || '')));
+    return items.some((li) => {
+      const desc = String(li?.description || '');
+      if (/setup fee/i.test(desc)) return false;
+      if (/credit|discount|adjustment|waiver|refund/i.test(desc)) return false;
+      const qty = li?.quantity != null ? Number(li.quantity) : 1;
+      const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+      return Number.isFinite(amt) && amt > 0;
+    });
   }
   return !invoiceContainsSetupFeeLine(row);
 }

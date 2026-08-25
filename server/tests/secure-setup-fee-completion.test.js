@@ -77,19 +77,20 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
 });
 
 describe('unminted setup-fee parking — Charge Now beside-branch wiring', () => {
-  test('the beside-branch never excludes preMintedInvoice — the Charge Now invoice IS preMintedInvoice', () => {
+  test('the beside-branch keys on EITHER invoice lookup — a mint between the two reads shows only in preMintedInvoice', () => {
     // completionSuppressorInvoiceLookup finds the same row by
-    // scheduled_service_id that populates existingCompletionInvoice, so a
-    // !preMintedInvoice term would suppress the branch for exactly the
-    // case it exists for (Codex P0, pre-push round 4).
-    expect(dispatchSource).toMatch(/const setupFeeChargeNowBeside = !!\(unmintedSetupFeeObligation && existingCompletionInvoice\s*\n\s*&& !terminalCompletionInvoice && !recapReviewOnly\);/);
+    // scheduled_service_id that populates existingCompletionInvoice, and a
+    // Charge Now invoice created between the two reads appears only in
+    // preMintedInvoice (Codex P0, pre-push rounds 4 and 7) — the branch
+    // must fire on either, never require the absence of one.
     const besideDecl = dispatchSource.match(/const setupFeeChargeNowBeside =[^;]*;/);
     expect(besideDecl).toBeTruthy();
-    expect(besideDecl[0]).not.toMatch(/preMintedInvoice/);
+    expect(besideDecl[0]).toMatch(/\(existingCompletionInvoice \|\| preMintedInvoice\)/);
+    expect(besideDecl[0]).not.toMatch(/!preMintedInvoice|!existingCompletionInvoice/);
   });
 
-  test('the mint hold releases when a Charge Now invoice already exists — the completion keeps reusing it', () => {
-    expect(dispatchSource).toMatch(/unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice,/);
+  test('the mint hold releases when EITHER lookup found an invoice — the completion keeps reusing it', () => {
+    expect(dispatchSource).toMatch(/unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,/);
   });
 });
 
