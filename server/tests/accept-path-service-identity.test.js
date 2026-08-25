@@ -414,6 +414,26 @@ describe('catalogServiceIdForProfile', () => {
       expect(capture.where).toBeUndefined();
     });
 
+    test('commercial profiles never resolve through CONTAINMENT either (termite bait collapse)', async () => {
+      // resolveEstimateSlotProfile collapses commercial_termite_bait to
+      // service 'termite_bait' with commercial: true — containment would
+      // otherwise stamp the RESIDENTIAL bait row (pre-push P1).
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-resi-bait' }] }) }) }; },
+        where: () => ({ limit: () => ({ select: async () => [] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      expect(await catalogLinkForProfile(conn, {
+        services: [{ service: 'termite_bait', commercial: true, visitsPerYear: 4 }],
+      })).toBeNull();
+      // Raw-identity fallback when the flag is absent but the text says so.
+      expect(await catalogLinkForProfile(conn, {
+        services: [{ service: 'termite_bait', name: 'Commercial Termite Bait Stations', visitsPerYear: 4 }],
+      })).toBeNull();
+      expect(containmentQueried).toBe(false);
+    });
+
     test('an ambiguous cadence key FAILS CLOSED', async () => {
       expect(await catalogLinkForProfile(
         makeCadenceConn([{ id: 'a' }, { id: 'b' }]),

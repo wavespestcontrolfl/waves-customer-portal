@@ -326,6 +326,16 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   // leaving it null and failing open.
   const engineKey = String(primary?.engineKey || primary?.service || '').trim();
   if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
+  // Commercial profiles never stamp catalog identity — ANY lane, not just
+  // the cadence families: the profile builder collapses commercial keys to
+  // their residential category (commercial_termite_bait → 'termite_bait')
+  // while keeping the commercial flag, so containment would otherwise
+  // resolve the RESIDENTIAL row and put a commercial accept on residential
+  // billing/completion (pre-push P1). Same two-signal check the cadence
+  // helper uses: the pre-collapse flag plus the raw identity text.
+  const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
+    .filter(Boolean).join(' ');
+  if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
   // The four cadence-family category keys intentionally span MULTIPLE
