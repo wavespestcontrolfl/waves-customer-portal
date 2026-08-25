@@ -702,4 +702,16 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
     // …and the historical 1-year default only applies when NOTHING names a term.
     expect(termYearsForVisit({ service_type: 'Termite Bond' })).toBe(1);
   });
+
+  test('a linked NON-bond catalog row disproves the bond — stale snapshot/label never mint', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // A repointed visit (service_id now names quarterly pest) keeps its old
+    // snapshot and label; the authoritative link must veto the warranty
+    // (pre-push P1), not fall through to the stale evidence.
+    expect(termYearsForVisit({
+      catalog_service_key: 'pest_general_quarterly',
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (10-Year Term)',
+    })).toBeNull();
+  });
 });

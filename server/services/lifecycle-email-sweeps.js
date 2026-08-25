@@ -26,6 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 // Term)" (admin-schedule.js termite category). Term still parses from the
 // "(N-Year" fragment; names without one default to 1 year.
 const BOND_MATCH = '%Termite Bond%';
+const BOND_KEYS = ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr'];
 const RENEWAL_WINDOW_DAYS = 30;
 const GRACE_DAYS = 7; // still notify up to a week past renews_at (missed runs)
 
@@ -50,15 +51,22 @@ function termYearsFrom(serviceType) {
 // (service_key_snapshot, then the linked catalog row's service_key) names
 // the term outright; the label regex stays as the legacy fallback for
 // name-only history.
+// Returns null when the visit is provably NOT a bond.
 function termYearsForVisit(v) {
   // The LINKED catalog row outranks the snapshot — the same precedence
   // completion identity uses (service_id first), and pre-fix combined
   // promotions changed service_id without restamping the snapshot, so the
-  // two can disagree on real rows (codex #3485 r10 P1).
-  for (const key of [v.catalog_service_key, v.service_key_snapshot]) {
-    const m = String(key || '').match(/^termite_bond_(\d+)yr$/);
-    if (m) return Number(m[1]);
+  // two can disagree on real rows (codex #3485 r10 P1). And it is
+  // authoritative BOTH ways: a resolved link that names a non-bond service
+  // means the visit was repointed — falling through to the stale snapshot
+  // or label would mint a warranty for non-bond work (pre-push P1).
+  const linked = String(v.catalog_service_key || '');
+  if (linked) {
+    const m = linked.match(/^termite_bond_(\d+)yr$/);
+    return m ? Number(m[1]) : null;
   }
+  const m = String(v.service_key_snapshot || '').match(/^termite_bond_(\d+)yr$/);
+  if (m) return Number(m[1]);
   return termYearsFrom(v.service_type);
 }
 
@@ -83,11 +91,17 @@ async function syncTermiteBonds() {
     // still a bond when its snapshot/catalog key says so (2026-08-25 audit).
     .where(function bondCandidate() {
       this.where('scheduled_services.service_type', 'ilike', BOND_MATCH)
-        .orWhereIn('scheduled_services.service_key_snapshot', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr'])
+        .orWhereIn('scheduled_services.service_key_snapshot', BOND_KEYS)
         // A visit whose only bond evidence is its LINKED catalog row (valid
         // service_id, no snapshot, drifted label) must still be a candidate
         // — otherwise termYearsForVisit never sees it (codex #3485 r1 P2).
-        .orWhereIn('services.service_key', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr']);
+        .orWhereIn('services.service_key', BOND_KEYS);
+    })
+    // The resolved link is authoritative the other way too: a visit whose
+    // service_id names a NON-bond catalog row was repointed, and its stale
+    // snapshot/label must not mint a warranty (pre-push P1).
+    .where(function linkedRowAuthority() {
+      this.whereNull('services.service_key').orWhereIn('services.service_key', BOND_KEYS);
     })
     // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
     // seeder) — only the establishing anchor visit starts a bond term, or a
@@ -129,6 +143,9 @@ async function syncTermiteBonds() {
     }
     if (!startedEt) continue;
     const years = termYearsForVisit(v);
+    // Belt-and-braces with the query's linkedRowAuthority filter: a null
+    // term means the linked row disproved the bond — never insert.
+    if (!years) continue;
     // Add the term years with UTC-safe date math (Feb 29 normalizes to Mar 1).
     const [sy, sm, sd] = startedEt.split('-').map(Number);
     const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
