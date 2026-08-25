@@ -660,10 +660,17 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
       .map((row) => {
         const key = serviceKeyFor(row);
         const label = labelForService(row);
+        // The category collapse erases the commercial identity
+        // (commercial_pest → 'pest_control'), and an operator-authored
+        // label need not say "commercial" — carry the fact as data so the
+        // cadence catalog link can refuse residential rows (codex r12 P1).
+        const rawIdentity = [row.service, row.serviceKey, row.service_key, row.key, row.name, row.label, row.displayName]
+          .filter(Boolean).join(' ');
         return {
           service: key,
           label,
           visitsPerYear: visitsForService(row),
+          commercial: /commercial/i.test(rawIdentity) || undefined,
         };
       })
       .filter((row) => row.service && row.label);

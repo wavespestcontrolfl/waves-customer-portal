@@ -1894,7 +1894,11 @@ function normalizeBondTermService(li) {
   // `service` left alias-keyed stored rows deduplicating separately from
   // raw rows and scheduling two bond visits (codex #3485 r8 P1). Every
   // present alias field is rewritten so identity resolution agrees.
-  const keyFields = ['service', 'serviceKey', 'service_key', 'key'].filter((f) => li[f] !== undefined);
+  // Blank aliases (null/''/undefined) are ABSENT — recurringServiceKey's
+  // `||` chain treats them that way, so a { service: null } name-only row
+  // must take the name-only path, not skip normalization (codex r12 P1).
+  const keyFields = ['service', 'serviceKey', 'service_key', 'key']
+    .filter((f) => li[f] != null && String(li[f]).trim() !== '');
   const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');
   const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
   // NAME-ONLY legacy rows ("Termite Bond (5-Year Term)" with no key field

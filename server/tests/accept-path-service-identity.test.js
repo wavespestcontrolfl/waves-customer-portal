@@ -84,6 +84,9 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   'rodent_trapping_emergency_surcharge', 'rodent_trapping_extra_callback',
   // Priced rider with no catalog row of its own.
   'rodent_plugging',
+  // One line can carry an AGGREGATE follow-up count while the slot profile
+  // books one appointment — unmapped until conversion is count-aware.
+  'rodent_trapping_followup',
   // Active only in prod (admin-reactivated after the 20260519000003
   // archive) — a seed would target an archived row in migration-built
   // databases; the label resolves the row by unique name where it is live.

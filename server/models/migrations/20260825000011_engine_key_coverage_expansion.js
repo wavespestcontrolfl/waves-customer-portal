@@ -66,7 +66,11 @@ const ENGINE_KEY_SEEDS = [
   // Rodent one-times — none of these were in the canonical-label whitelist,
   // so every one fell through to raw lead text.
   { service_key: 'rodent_trapping', engine_keys: ['rodent_trapping'] },
-  { service_key: 'rodent_trapping_followup', engine_keys: ['rodent_trapping_followup'] },
+  // `rodent_trapping_followup` is NOT seeded: the pricer can emit ONE line
+  // carrying an AGGREGATE follow-up count/price while the slot profile
+  // books a single appointment — stamping the single-visit row would give
+  // multi-callback purchases a one-callback durable identity. Unmapped
+  // until conversion is count-aware (codex #3485 r12 P1).
   { service_key: 'rodent_exclusion_only', engine_keys: ['rodent_exclusion', 'exclusion', 'exclusion_v2'] },
   { service_key: 'rodent_wire_mesh', engine_keys: ['rodent_wire_mesh'] },
   { service_key: 'rodent_bird_box', engine_keys: ['rodent_bird_box'] },

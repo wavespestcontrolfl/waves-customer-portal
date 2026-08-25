@@ -269,7 +269,9 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   // exist, so they stay unlinked (codex #3485 r10 P1).
   const rawIdentity = [primary.engineKey, primary.key, primary.serviceKey, primary.service_key, primary.name, primary.label, primary.displayName]
     .filter(Boolean).join(' ');
-  if (/commercial/i.test(rawIdentity)) return null;
+  // primary.commercial is the profile builder's pre-collapse flag — the
+  // label alone can't be trusted to say "commercial" (codex r12 P1).
+  if (primary.commercial || /commercial/i.test(rawIdentity)) return null;
   const visits = Number(primary.visitsPerYear);
   if (!Number.isFinite(visits) || visits <= 0) return null;
   // EXACT catalog visit counts only (codex #3485 r8 P2): bucketing would
