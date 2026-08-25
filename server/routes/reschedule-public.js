@@ -302,7 +302,7 @@ async function loadByToken(token) {
 // and no rain chips (the chip fetch below is already rain/lightning-only).
 const WEATHER_REASON_CODES = new Set([
   'weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat',
-  'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow',
+  'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow', 'gate_locked',
   // Custom Quick Move (GATE_QUICKMOVE_CUSTOM_REASON): the SMS's link
   // promises "New time & other options", so the page must banner the
   // was/now context like every other Quick Move; the client heading map
