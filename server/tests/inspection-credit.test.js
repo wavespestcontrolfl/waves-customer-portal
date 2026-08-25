@@ -928,9 +928,9 @@ describe('closeout route wiring — source contracts (the completion route is to
     // #3109 rung-6 / #3454 rung-1: the tool opens db.transaction, takes the
     // (gated) occupancy lock, then the comms fence (lockCustomerComms), then
     // inserts — the marker still rides that same trx as the insert.
-    const trxAt = ib.indexOf("await lockCustomerComms(trx, customer_id);\n      const [created] = await trx('scheduled_services').insert({");
+    const trxAt = ib.indexOf("await lockCustomerComms(trx, customer_id);\n    const [created] = await trx('scheduled_services').insert({");
     const markerAt = ib.indexOf('markBookingForInspectionCredit(trx, {', trxAt);
-    const trxEndAt = ib.indexOf('\n    });', trxAt);
+    const trxEndAt = ib.indexOf('\n  });', trxAt);
     expect(trxAt).toBeGreaterThan(-1);
     expect(markerAt).toBeGreaterThan(trxAt);
     expect(markerAt).toBeLessThan(trxEndAt); // marker rides the same trx

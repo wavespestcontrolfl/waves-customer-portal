@@ -7,7 +7,8 @@ jest.mock('../models/db', () => jest.fn());
 
 const {
   assertAdminAppointmentWindow,
-  assertNoSlotOverlap,
+  probeSlotOverlap,
+  slotOverlapWarning,
   adminSlotOverlapGuardEnabled,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
@@ -71,7 +72,7 @@ describe('assertAdminAppointmentWindow', () => {
   });
 });
 
-describe('assertNoSlotOverlap gate', () => {
+describe('probeSlotOverlap gate', () => {
   const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
   afterEach(() => {
     if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
@@ -88,14 +89,46 @@ describe('assertNoSlotOverlap gate', () => {
     expect(adminSlotOverlapGuardEnabled()).toBe(true);
   });
 
-  test('gate off: no lock, no probe, no throw', async () => {
+  test('gate off: no lock, no probe, resolves empty', async () => {
     delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
     const trx = jest.fn();
     trx.raw = jest.fn();
-    await expect(assertNoSlotOverlap({ trx, date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00' }))
+    await expect(probeSlotOverlap({ trx, date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00' }))
       .resolves.toEqual([]);
     expect(trx).not.toHaveBeenCalled();
     expect(trx.raw).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a clash is RETURNED (advisory — never thrown), mapped without customer data', async () => {
+    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+    const row = {
+      id: 'svc-other', customer_id: 'cust-9', scheduled_date: '2099-01-15',
+      window_start: '09:30:00', window_end: '10:30:00', status: 'confirmed',
+      technician_id: null, service_type: 'Pest Control',
+    };
+    const chain = {
+      where: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([row]),
+    };
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn().mockResolvedValue({});
+    const conflicts = await probeSlotOverlap({ trx, date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00' });
+    expect(conflicts).toEqual([{
+      id: 'svc-other', scheduled_date: '2099-01-15', window_start: '09:30:00',
+      window_end: '10:30:00', status: 'confirmed', technician_id: null, service_type: 'Pest Control',
+    }]);
+    // customer_id never crosses the advisory boundary.
+    expect(conflicts[0]).not.toHaveProperty('customer_id');
+    // Rung 1 was still taken before the probe.
+    expect(trx.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && b?.includes('occupancy:2099-01-15'))).toBe(true);
+  });
+
+  test('slotOverlapWarning names the date (date-only, no customer data)', () => {
+    expect(slotOverlapWarning('2099-01-15T10:00')).toMatch(/on 2099-01-15/);
+    expect(slotOverlapWarning(null)).toMatch(/overlaps another appointment/);
   });
 });
 

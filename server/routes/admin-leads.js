@@ -8,7 +8,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 // overlap probe for this route lives in the trx below (occupancy lock rung 1
 // + findConflictingVisits before insert) — one mechanism, see #3453; a hit
 // is advisory (warn, never block — owner ruling 2026-08-25, #3486).
-const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
+const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../services/scheduling/window-rules');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1568,7 +1568,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       {
         const clash = await findConflictingVisits({ db: trx, date: occupancyDate, windowStart, windowEnd });
         if (clash.length) {
-          bookingWarnings.push(`Heads up: this booking overlaps another appointment on the schedule on ${occupancyDate} — both are kept on the calendar.`);
+          bookingWarnings.push(slotOverlapWarning(occupancyDate));
         }
       }
       // ---- end slot-overlap guard part 2

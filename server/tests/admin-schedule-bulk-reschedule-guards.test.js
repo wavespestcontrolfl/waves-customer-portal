@@ -776,7 +776,7 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
     return c;
   }
 
-  test('gate ON: an overlapping non-cancelled visit refuses the move (SLOT_CONFLICT) under the date lock; nothing persisted', async () => {
+  test('gate ON: an overlapping non-cancelled visit MOVES with an advisory overlap note (owner ruling 2026-08-25 — never a block)', async () => {
     process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     const probe = probeChain([{
@@ -789,6 +789,7 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
         probe,
         updateChain,
       ],
+      reschedule_log: [chain()],
     });
 
     const { status, body } = await bulk({
@@ -798,9 +799,10 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
     });
 
     expect(status).toBe(200);
-    expect(body.updated).toEqual([]);
-    expect(body.failed[0].reason).toMatch(/overlaps another visit/);
-    expect(updateChain.update).not.toHaveBeenCalled();
+    expect(body.updated).toEqual(['svc-1']);
+    expect(body.failed).toEqual([]);
+    expect(body.overlapWarnings).toEqual([{ id: 'svc-1', warning: expect.stringContaining('2099-01-15') }]);
+    expect(updateChain.update).toHaveBeenCalled();
     // Rung 1: the date-wide occupancy advisory lock was taken in this trx.
     expect(trx.raw.mock.calls.some(([sql, bindings]) =>
       /pg_advisory_xact_lock/.test(sql) && bindings?.includes('occupancy:2099-01-15'))).toBe(true);

@@ -345,7 +345,7 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '11:00' });
   });
 
-  test('GATE_ADMIN_SLOT_OVERLAP_GUARD=true: an overlapping visit refuses the create (rung 1 before the comms lock) — no insert', async () => {
+  test('GATE_ADMIN_SLOT_OVERLAP_GUARD=true: an overlapping visit BOOKS with an advisory warning (owner ruling 2026-08-25 — never a block)', async () => {
     process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     try {
       const probe = chain({
@@ -360,8 +360,9 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       const result = await executeTool('create_appointment', {
         customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM',
       });
-      expect(result.error).toMatch(/overlaps another visit/);
-      expect(insertChain.insert).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+      expect(result.warning).toMatch(/2099-01-15/);
+      expect(insertChain.insert).toHaveBeenCalled();
     } finally {
       delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
     }
@@ -782,19 +783,20 @@ describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_O
 
   afterEach(() => { delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD; });
 
-  test('gate ON: an overlapping visit refuses the move — nothing updated', async () => {
+  test('gate ON: an overlapping visit MOVES with an advisory warning (owner ruling 2026-08-25 — never a block)', async () => {
     process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     wireDb({
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), probeHit(), updateChain],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
     const result = await executeTool('reschedule_appointment', {
       appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM',
     });
-    expect(result.error).toMatch(/overlaps another visit/);
-    expect(result.success).toBeUndefined();
-    expect(updateChain.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(result.warning).toMatch(/2099-01-15/);
+    expect(updateChain.update).toHaveBeenCalled();
   });
 
   test('gate ON: a clear slot moves normally and the probe excludes the moving visit', async () => {
@@ -845,7 +847,7 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
 
   afterEach(() => { delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD; });
 
-  test('gate ON: a DATE-ONLY move of a null-end row onto an occupied slot is refused — nothing updated', async () => {
+  test('gate ON: a DATE-ONLY move of a null-end row onto an occupied slot still PROBES (derived block) and moves with a warning', async () => {
     process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     const probeHit = chain({
@@ -855,10 +857,12 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
     wireDb({
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), probeHit, updateChain],
       customers: customersQ(),
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
     const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
-    expect(result.error).toMatch(/overlaps another visit/);
-    expect(updateChain.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true });
+    expect(result.warning).toMatch(/2099-01-15/);
+    expect(updateChain.update).toHaveBeenCalled();
   });
 
   test('gate ON: the probed block is the DERIVED 09:00-10:00 span, and the persisted end stays null', async () => {

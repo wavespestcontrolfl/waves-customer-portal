@@ -11,7 +11,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
-  assertAdminAppointmentWindow, assertNoSlotOverlap, adminSlotOverlapGuardEnabled,
+  assertAdminAppointmentWindow, probeSlotOverlap, adminSlotOverlapGuardEnabled, slotOverlapWarning,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
@@ -645,10 +645,8 @@ const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', '
 // generated child date months out). The rung-1 locks and the tech-blind
 // probes still run — detection, lock ordering, and every customer
 // self-booking / rebooker / public reschedule gate are unchanged; only the
-// admin-side abort is gone.
-function occupancyOverlapWarning(date) {
-  return `Heads up: this booking overlaps another appointment on the schedule${date ? ` on ${date}` : ''} — both are kept on the calendar.`;
-}
+// admin-side abort is gone. Warning copy is shared:
+// scheduling/window-rules.js slotOverlapWarning.
 
 // ---- update-details recurrence date planning (rung-1 lock set) -----------
 //
@@ -867,7 +865,7 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
   });
   if (clash.length) {
     logger.warn(`[schedule] occupancy overlap on ${date} allowed (advisory — admin writes never block on conflicts)`);
-    if (Array.isArray(warnings)) warnings.push(occupancyOverlapWarning(date));
+    if (Array.isArray(warnings)) warnings.push(slotOverlapWarning(date));
   }
 }
 
@@ -4374,7 +4372,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
         });
         if (adminCreateClash.length) {
-          bookingWarnings.push(occupancyOverlapWarning(dateOnly(scheduledDate)));
+          bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
         }
       }
 
@@ -4450,7 +4448,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
           });
           if (childClash.length) {
-            bookingWarnings.push(occupancyOverlapWarning(nextDateStr));
+            bookingWarnings.push(slotOverlapWarning(nextDateStr));
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
@@ -4527,7 +4525,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
             });
             if (boosterClash.length) {
-              bookingWarnings.push(occupancyOverlapWarning(boosterDate));
+              bookingWarnings.push(slotOverlapWarning(boosterDate));
             }
           }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
@@ -5114,6 +5112,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // go out — returned alongside updated/failed so the operator learns the
     // batch moved/cancelled fine but someone wasn't notified.
     const notificationFailures = [];
+    // Advisory occupancy-overlap notes for rows that moved onto an occupied
+    // slot (owner ruling 2026-08-25 — staff-side saves never block on
+    // schedule conflicts): { id, warning } per stacked row.
+    const overlapWarnings = [];
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -5159,7 +5161,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
               // tech-day fence below — so take it up front when the overlap
-              // guard is on; the probe itself (assertNoSlotOverlap, which
+              // guard is on; the probe itself (probeSlotOverlap, which
               // re-takes the reentrant lock) runs once the window is final.
               if (adminSlotOverlapGuardEnabled()) {
                 await acquireOccupancyLock(trx, bulkTargetDate);
@@ -5282,15 +5284,19 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               }
               // Gated overlap probe (lock already held at the top of this trx);
               // the moving row excludes itself. An end-less row probes its
-              // DERIVED end (same effective duration), never skips.
+              // DERIVED end (same effective duration), never skips. A hit is
+              // advisory: the move commits and the row gets an overlap note.
               {
                 const effStart = updates.window_start || normalizeHHMM(svc.window_start);
                 const effEnd = updates.window_end || normalizeHHMM(svc.window_end)
                   || (effStart ? deriveWindowEnd(effStart, windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes)) : null);
                 if (effStart && effEnd) {
-                  await assertNoSlotOverlap({
+                  const bulkOverlap = await probeSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
                   });
+                  if (bulkOverlap.length) {
+                    overlapWarnings.push({ id, warning: slotOverlapWarning(bulkTargetDate) });
+                  }
                 }
               }
               // A live (en_route/on_site) row being moved rewinds its tracker
@@ -5635,6 +5641,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       updated,
       failed,
       notificationFailures,
+      // Advisory occupancy-overlap notes — rows that committed onto an
+      // occupied slot (gated probe; empty while the gate is off).
+      overlapWarnings,
     });
   } catch (err) { next(err); }
 });
@@ -6763,7 +6772,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               });
               if (adminMoveClash.length) {
                 logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory — admin writes never block on conflicts)`);
-                editWarnings.push(occupancyOverlapWarning(occDate));
+                editWarnings.push(slotOverlapWarning(occDate));
               }
             }
           }
