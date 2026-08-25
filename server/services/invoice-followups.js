@@ -1166,15 +1166,36 @@ async function resumeSequence(invoiceId, dbc = db) {
   if (!seq) return;
   const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
+  // A shifted anchor (delivered-invoice due-date edit while paused) wins so
+  // the re-armed step lands on the same timeline fireStep progression uses.
+  const nextTouchAt = computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index);
+  if (!nextTouchAt) {
+    // Sequence exhausted — step_index is past the last configured step, so
+    // there is nothing to schedule. 'active' with a null due time is a dead
+    // state: runPending can never select it, yet hasActiveSequence sees it
+    // as live and suppresses the legacy late-payment checker — a reopened
+    // invoice would never be reminded again. Restore terminal 'completed'
+    // (clearing any plan-owned stamp: this is a natural completion now) so
+    // the legacy checker owns the invoice again.
+    await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: dbc.fn.now(),
+      status: 'completed',
+      paused_reason: null,
+      paused_until: null,
+      paused_by_admin_id: null,
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+    });
+    return;
+  }
   await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
     updated_at: dbc.fn.now(),
     status: 'active',
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,
-    // A shifted anchor (delivered-invoice due-date edit while paused) wins so
-    // the re-armed step lands on the same timeline fireStep progression uses.
-    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
+    next_touch_at: nextTouchAt,
   });
 }
 
