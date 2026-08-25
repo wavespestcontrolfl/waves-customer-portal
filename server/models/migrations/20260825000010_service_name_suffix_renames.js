@@ -283,21 +283,26 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       .whereRaw('(service_type = ? OR service_type LIKE ?)', [fromName, qualified])
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
       .select('id', 'service_type', 'self_booking_id');
-    // Per-row CAS updates scoped to the id + observed label + status (codex
-    // pre-push r2 P1 #1: a row appearing between read and write must never
-    // be renamed-but-unrecorded), computing the qualifier-preserving label.
-    for (const v of [...linked, ...legacy]) {
+    // Per-row CAS updates scoped to the id + observed label + status AND
+    // the population's catalog-identity predicate (codex pre-push r10 P1:
+    // an admin repointing service_id between read and write must not have
+    // the label overwritten and claimed) — a row appearing between read
+    // and write is never renamed-but-unrecorded (r2 P1 #1).
+    const relabelVisit = async (v, identityScope) => {
       const next = swapRenamedPrefix(v.service_type, fromName, toName);
-      if (!next) continue;
-      const count = await knex('scheduled_services')
-        .where({ id: v.id, service_type: v.service_type })
-        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-        .update({ service_type: next });
+      if (!next) return;
+      const count = await identityScope(
+        knex('scheduled_services')
+          .where({ id: v.id, service_type: v.service_type })
+          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      ).update({ service_type: next });
       if (count) {
         rec.visitIds.push(v.id);
         if (v.self_booking_id) visitsByBooking.set(v.id, v.self_booking_id);
       }
-    }
+    };
+    for (const v of linked) await relabelVisit(v, (q) => q.where({ service_id: row.id }));
+    for (const v of legacy) await relabelVisit(v, (q) => q.whereNull('service_id'));
   }
 
   // Self-booking snapshots (booking status API renders its own copy) —
@@ -346,15 +351,18 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
           .select('id')).map((v) => v.id)
         : []
     );
-    const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
-    for (const a of targets) {
+    // Same population-scoped CAS as the visit relabel (codex r10 P1).
+    const relabelAddon = async (a, identityScope) => {
+      if (!openParentIds.has(a.scheduled_service_id)) return;
       const next = swapRenamedPrefix(a.service_name, fromName, toName);
-      if (!next) continue;
-      const count = await knex('scheduled_service_addons')
-        .where({ id: a.id, service_name: a.service_name })
-        .update({ service_name: next });
+      if (!next) return;
+      const count = await identityScope(
+        knex('scheduled_service_addons').where({ id: a.id, service_name: a.service_name })
+      ).update({ service_name: next });
       if (count) rec.addons[a.id] = a.scheduled_service_id;
-    }
+    };
+    for (const a of linkedAddons) await relabelAddon(a, (q) => q.where({ service_id: row.id }));
+    for (const a of legacyAddons) await relabelAddon(a, (q) => q.whereNull('service_id'));
     rec.addonParentVisitIds = [...new Set(Object.values(rec.addons).filter(Boolean))];
   }
 

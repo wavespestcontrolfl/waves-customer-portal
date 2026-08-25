@@ -247,6 +247,15 @@ function serviceNameCandidates(serviceType) {
       expanded.push(candidate);
       seen.add(key);
     }
+    // Derived candidates go BACK through the strip too (codex #3484 r10
+    // P1): "German Roach Cleanout Service — 2 Visit Program" derives
+    // "German Roach Cleanout Service", whose stripped form is the rollback
+    // catalog name — computing the strip on the raw label alone missed it.
+    const candSuffixless = candidate.replace(/\s+service$/i, '').trim();
+    if (candSuffixless && !seen.has(candSuffixless.toLowerCase())) {
+      expanded.push(candSuffixless);
+      seen.add(candSuffixless.toLowerCase());
+    }
     // Mirror of the trailing-" Service" strip above, in the other direction:
     // the 2026-08-25 catalog renames suffixed every service name with
     // " Service", while engine lines and older booking labels still carry
