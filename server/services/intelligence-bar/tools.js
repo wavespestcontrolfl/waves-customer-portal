@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
+const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
@@ -964,9 +965,8 @@ async function createCustomer(input) {
       active: true,
     }).returning('*');
 
-    // Default child rows — same as the New Customer form's creation path
-    await trx('property_preferences').insert({ customer_id: customer.id }).onConflict('customer_id').ignore();
-    await trx('notification_prefs').insert({ customer_id: customer.id }).onConflict('customer_id').ignore();
+    // Default child rows — same canonical helper as every creation path
+    await createDefaultCustomerRows(trx, customer.id);
 
     if (Array.isArray(input.tags)) {
       for (const tag of input.tags) {

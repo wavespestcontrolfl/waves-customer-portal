@@ -5,6 +5,7 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const LeadScorer = require('../services/lead-scorer');
 const { resolveLocationFromCandidates, isOfficeCity, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
@@ -430,8 +431,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }).returning('*');
       customer = newCust;
 
-      await db('property_preferences').insert({ customer_id: customer.id });
-      await db('notification_prefs').insert({ customer_id: customer.id });
+      await createDefaultCustomerRows(db, customer.id);
 
       await db('customer_interactions').insert({
         customer_id: customer.id, interaction_type: 'note',

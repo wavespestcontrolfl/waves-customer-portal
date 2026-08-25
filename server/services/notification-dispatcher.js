@@ -180,10 +180,28 @@ const NotificationDispatcher = {
     const results = {};
     let sent = false;
 
+    // Marketing-purpose SMS is opt-IN (TCPA), not merely not-opted-out:
+    // the consentBasis below reads stored prefs as captured consent, so the
+    // SMS leg requires an EXPLICIT true on one of the policy's consent
+    // columns (seasonal_tips OR marketing_offers — a promotions opt-in
+    // covers seasonal SMS too, matching the validator's any-of), with
+    // seasonal_tips === false staying the master marketing kill (already
+    // enforced for the seasonal type by the toggle check above). EMAIL
+    // legs keep the opt-out semantics content emails have always had —
+    // NULL ("never asked") must not silence them.
+    const purpose = purposeForNotificationType(notificationType);
+    const marketingSmsOptIn = purpose !== 'marketing'
+      || (prefs
+        && prefs.seasonal_tips !== false
+        && (prefs.seasonal_tips === true || prefs.marketing_offers === true));
+
     // Send SMS
-    if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone) {
+    if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone && !marketingSmsOptIn) {
+      logger.info(`[notify] ${notificationType} SMS skipped — no stored marketing opt-in for customer ${customerId}`);
+      results.sms = 'no_marketing_consent';
+    }
+    if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone && marketingSmsOptIn) {
       try {
-        const purpose = purposeForNotificationType(notificationType);
         const smsResult = await sendCustomerMessage({
           to: customer.phone,
           body: smsMessage,

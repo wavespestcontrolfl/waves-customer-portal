@@ -389,11 +389,9 @@ async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
   if (!skipBackfill) {
     await database('estimates').where({ id: estimate.id }).update({ customer_id: created.id });
   }
-  await database('property_preferences').insert({ customer_id: created.id }).catch((err) => {
-    logger.warn(`[estimate-add-service-request] property_preferences create skipped for ${created.id}: ${err.message}`);
-  });
-  await database('notification_prefs').insert({ customer_id: created.id }).catch((err) => {
-    logger.warn(`[estimate-add-service-request] notification_prefs create skipped for ${created.id}: ${err.message}`);
+  const { createDefaultCustomerRows } = require('./customer-default-rows');
+  await createDefaultCustomerRows(database, created.id).catch((err) => {
+    logger.warn(`[estimate-add-service-request] default rows create skipped for ${created.id}: ${err.message}`);
   });
 
   return created;

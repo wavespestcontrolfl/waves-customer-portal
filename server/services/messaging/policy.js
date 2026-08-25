@@ -412,6 +412,13 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'marketing',
     prefsColumn: 'seasonal_tips',
+    // Stored opt-in accepted from EITHER toggle: the 'marketing' purpose
+    // carries both seasonal campaigns (seasonal_tips) and promotions
+    // (marketing_offers) — a customer who explicitly opted into promotions
+    // must not be blocked because seasonal_tips is NULL. prefsColumn above
+    // keeps its opt-OUT semantics (seasonal_tips=false is the master
+    // marketing kill switch, pre-existing behavior).
+    consentColumns: ['seasonal_tips', 'marketing_offers'],
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

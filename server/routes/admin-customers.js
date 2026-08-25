@@ -1489,16 +1489,9 @@ function cleanOptionalState(value) {
 // normalizeAdminAddressInput moved to utils/intake-normalize (shared with
 // the contact-correction lane) — imported above; _private still exposes it.
 
-async function createDefaultCustomerRows(trx, customerId) {
-  await trx('property_preferences')
-    .insert({ customer_id: customerId })
-    .onConflict('customer_id')
-    .ignore();
-  await trx('notification_prefs')
-    .insert({ customer_id: customerId })
-    .onConflict('customer_id')
-    .ignore();
-}
+// Canonical implementation lives in services/customer-default-rows (route
+// modules re-export it for existing importers; services require it directly).
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 
 async function attachMatchedCustomerToAccount(trx, customer) {
   if (!customer) return null;
@@ -4015,10 +4008,13 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
     } else {
-      await db('notification_prefs').insert({
-        customer_id: req.params.id,
-        ...dbUpdates,
-      });
+      // Create through the canonical helper (marketing flags NULL), then
+      // apply exactly the admin-named fields — a bare insert would take the
+      // legacy true defaults and mint marketing consent as a side effect.
+      await createDefaultCustomerRows(db, req.params.id);
+      await db('notification_prefs')
+        .where({ customer_id: req.params.id })
+        .update(dbUpdates);
     }
 
     const prefs = await db('notification_prefs')

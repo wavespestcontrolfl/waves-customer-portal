@@ -11,9 +11,12 @@ router.get('/', async (req, res, next) => {
     let prefs = await db('notification_prefs').where({ customer_id: req.customerId }).first();
 
     if (!prefs) {
-      // Create default prefs for this customer
-      const [created] = await db('notification_prefs').insert({ customer_id: req.customerId }).returning('*');
-      prefs = created;
+      // Create default prefs via the canonical helper — marketing-grade
+      // flags seed NULL ("never asked"); a portal READ must never mint
+      // marketing consent.
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(db, req.customerId);
+      prefs = await db('notification_prefs').where({ customer_id: req.customerId }).first();
     }
 
     res.json({
@@ -25,11 +28,17 @@ router.get('/', async (req, res, next) => {
       // notices carry no per-purpose opt-out — billing_reminder is retired
       // (column drops in a follow-up deploy). billingChannel (below) still
       // routes delivery.
-      seasonalTips: prefs.seasonal_tips ?? true,
+      // seasonal_tips renders like the seasonal-content senders read it
+      // (opt-OUT semantics: NULL = not opted out — the weekly lawn email
+      // keeps sending) so the portal never claims seasonal messages are
+      // off while emails still arrive. The PUT below persists only real
+      // flips vs this rendered state, so the ON rendering of a NULL row
+      // can't round-trip into a stored true (fabricated SMS consent).
+      seasonalTips: prefs.seasonal_tips !== false,
       // New toggles
       reviewRequest: prefs.review_request ?? true,
       referralNudge: prefs.referral_nudge ?? true,
-      marketingOffers: prefs.marketing_offers ?? true,
+      marketingOffers: prefs.marketing_offers === true,
       weatherAlerts: prefs.weather_alerts ?? true,
       paymentReceipt: prefs.payment_receipt ?? true,
       // Channel preferences
@@ -93,14 +102,42 @@ router.put('/', async (req, res, next) => {
       return res.status(400).json({ error: 'No valid fields provided' });
     }
 
-    updates.updated_at = new Date();
-
-    // Upsert
     const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
+
+    // seasonal_tips / marketing_offers are marketing-CONSENT flags with
+    // tri-state storage: true = captured opt-in, false = explicit opt-out,
+    // NULL = never asked. Persist only real FLIPS relative to the state the
+    // GET rendered — an unchanged value in a full-object save is a
+    // round-trip, and writing it would either fabricate consent
+    // (NULL -> true) or burn the never-asked tri-state (NULL -> false).
+    // seasonal_tips renders opt-out style (ON unless explicitly false);
+    // marketing_offers renders opt-in style (ON only when true).
+    const renderedFlag = (flag, stored) => (flag === 'seasonal_tips'
+      ? stored !== false
+      : stored === true);
+    for (const flag of ['seasonal_tips', 'marketing_offers']) {
+      if (typeof updates[flag] === 'boolean'
+        && updates[flag] === renderedFlag(flag, existing ? existing[flag] : null)) {
+        delete updates[flag];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      // Nothing left to write (e.g. an untouched round-trip of unconsented
+      // marketing flags) — a successful no-op, not a client error.
+      return res.json({ success: true });
+    }
+
+    updates.updated_at = new Date();
     if (existing) {
       await db('notification_prefs').where({ customer_id: req.customerId }).update(updates);
     } else {
-      await db('notification_prefs').insert({ customer_id: req.customerId, ...updates });
+      // Canonical helper first (marketing flags NULL) — a bare insert
+      // would take the legacy true defaults, turning an unrelated
+      // preference update into minted marketing consent.
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(db, req.customerId);
+      await db('notification_prefs').where({ customer_id: req.customerId }).update(updates);
     }
 
     res.json({ success: true });

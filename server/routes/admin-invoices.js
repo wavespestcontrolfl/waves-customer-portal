@@ -495,10 +495,13 @@ async function saveBillingRecipientPreference(customerId, { email, name }) {
       .where({ customer_id: customerId })
       .update(updates);
   } else {
-    await db('notification_prefs').insert({
-      customer_id: customerId,
-      ...updates,
-    });
+    // Canonical helper first (marketing flags NULL) — a bare insert would
+    // take the legacy true defaults and mint marketing consent.
+    const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+    await createDefaultCustomerRows(db, customerId);
+    await db('notification_prefs')
+      .where({ customer_id: customerId })
+      .update(updates);
   }
 }
 

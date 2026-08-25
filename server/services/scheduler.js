@@ -3072,6 +3072,33 @@ function initScheduledJobs() {
             && MESSAGE_PURPOSES.includes(claimMeta.replay_purpose))
             ? claimMeta.replay_purpose
             : purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
+          // Marketing-grade replays (retention/marketing) lose their
+          // enqueue-time consentBasis — reconstruct it from the STORED
+          // opt-in only, at fire time: the policy's prefsColumn must be
+          // exactly true on the CURRENT notification_prefs row (the consent
+          // validator independently re-requires both the stored flag and
+          // the basis). No stored opt-in → no basis → the validator blocks
+          // the replay, same as an immediate send. Never forward an
+          // enqueue-time basis snapshot — consent can be revoked overnight.
+          let replayConsentBasis;
+          if (msg.customer_id) {
+            const { resolvePolicy } = require('./messaging/policy');
+            const replayPolicy = resolvePolicy('customer', purpose);
+            const consentCols = [].concat(replayPolicy?.consentColumns || replayPolicy?.prefsColumn || []);
+            if (replayPolicy?.requireConsent === 'marketing' && consentCols.length) {
+              try {
+                const prefsRow = await db('notification_prefs').where({ customer_id: msg.customer_id }).first();
+                const matched = prefsRow && consentCols.find((c) => prefsRow[c] === true);
+                if (matched) {
+                  replayConsentBasis = {
+                    status: 'opted_in',
+                    source: `notification_prefs.${matched}`,
+                    capturedAt: new Date(prefsRow.updated_at || prefsRow.created_at || Date.now()).toISOString(),
+                  };
+                }
+              } catch { /* leave undefined — the consent validator fails closed */ }
+            }
+          }
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -3315,13 +3342,14 @@ function initScheduledJobs() {
             // only honors a consentBasis on transactional-grade policies for the
             // lead audience; marketing/retention purposes still require a real
             // stored consent record regardless of what a row's metadata claims.
-            consentBasis: (claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
-              ? claimMeta.consent_basis
-              : undefined,
-            // NOTE: marketing/retention scheduled sends must arrive with a real
-            // stored consent record — we no longer manufacture opted_in here.
-            // Routes that queue marketing-grade types are responsible for
-            // gating against `messaging_consent`.
+            // Marketing-grade replays take the basis reconstructed above from
+            // the CURRENT stored opt-in (never a metadata snapshot — consent
+            // can be revoked overnight, and one consolidated property means
+            // the persisted basis can't overwrite the reconstruction).
+            consentBasis: replayConsentBasis
+              || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
+                ? claimMeta.consent_basis
+                : undefined),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,

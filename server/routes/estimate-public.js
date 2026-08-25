@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
@@ -9938,8 +9939,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
-          await trx('property_preferences').insert({ customer_id: customerId });
-          await trx('notification_prefs').insert({ customer_id: customerId });
+          await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
       }

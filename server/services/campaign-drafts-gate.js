@@ -103,17 +103,27 @@ function parseOpportunityRef(sourceRef) {
 }
 
 /**
- * sms_enabled / seasonal_tips must not be explicitly false. A missing
- * notification_prefs row passes here (both columns default true, and the
- * default-row backfill covers existing customers) — the consent validator
- * re-checks at send time and fails closed regardless.
+ * Marketing-grade gate: sms_enabled must not be explicitly false AND at
+ * least one consent column must be EXPLICITLY true — the same any-of set
+ * the marketing policy declares (seasonal_tips for seasonal campaigns,
+ * marketing_offers for promotions), so a promotions-only opt-in is
+ * honored here too. Campaign sending asserts an opted_in consentBasis
+ * downstream, so NULL flags (system-seeded default row or backfill — the
+ * customer was never asked) or a missing row is NOT captured consent and
+ * fails closed.
  */
 async function prefsAllowMarketingSms(customerId) {
   const prefs = await db('notification_prefs')
     .where({ customer_id: customerId })
-    .first('sms_enabled', 'seasonal_tips');
-  if (!prefs) return true;
-  return prefs.sms_enabled !== false && prefs.seasonal_tips !== false;
+    .first('sms_enabled', 'seasonal_tips', 'marketing_offers');
+  if (!prefs) return false;
+  // seasonal_tips === false is the master marketing kill switch (the
+  // central validator's prefsColumn opt-out enforces it too) — without
+  // this leg a promotions-only row with seasonal_tips=false would pass
+  // here, then hard-block at the validator, stranding drafts pending.
+  return prefs.sms_enabled !== false
+    && prefs.seasonal_tips !== false
+    && (prefs.seasonal_tips === true || prefs.marketing_offers === true);
 }
 
 /**
