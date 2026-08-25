@@ -197,7 +197,8 @@ async function findUnmintedSetupFeeObligation({
   // estimate_id column, so the stamp is the deterministic linkage (same
   // convention as estimate-payment-context / buildAlreadyAcceptedSuccessPayload).
   // A stamped invoice satisfies the obligation only when it actually
-  // BILLED the fee (invoiceContainsSetupFeeLine — round-5 P0: stamped
+  // BILLED the fee (invoiceHasPositiveSetupFeeLine, strict — no notes
+  // fallback, round-17 P0; round-5 P0: stamped
   // "first application only" invoices are legitimate converter output):
   //   - LIVE + fee line → minted, done;
   //   - refunded + fee line, ANY attachment → the fee was collected then
@@ -212,7 +213,7 @@ async function findUnmintedSetupFeeObligation({
   // so the office can distinguish "voided without replacement" from
   // "never minted".
   const DEAD_STATUSES = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
-  const { invoiceContainsSetupFeeLine, invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
+  const { invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
     .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
@@ -226,7 +227,7 @@ async function findUnmintedSetupFeeObligation({
   // the completion hold then suppresses the duplicate application mint
   // and the alert's revalidation directs staff to bill only the fee.
   const liveStampedFee = stampedRows.find((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase())
-    && invoiceContainsSetupFeeLine(r));
+    && invoiceHasPositiveSetupFeeLine(r));
   if (liveStampedFee) return { owed: false };
   // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
   // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
@@ -237,7 +238,7 @@ async function findUnmintedSetupFeeObligation({
   // paid: instructing a manual re-bill here would risk a double
   // collection.
   const refundedFee = stampedRows.find((r) => String(r.status || '').toLowerCase() === 'refunded'
-    && invoiceContainsSetupFeeLine(r));
+    && invoiceHasPositiveSetupFeeLine(r));
   if (refundedFee) return { owed: false };
   // A CANCELED fee-carrying invoice satisfies only when #3474's
   // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
@@ -251,7 +252,7 @@ async function findUnmintedSetupFeeObligation({
   const canceledAttachedFee = stampedRows.find((r) => {
     const status = String(r.status || '').toLowerCase();
     return (status === 'canceled' || status === 'cancelled')
-      && r.scheduled_service_id && invoiceContainsSetupFeeLine(r);
+      && r.scheduled_service_id && invoiceHasPositiveSetupFeeLine(r);
   });
   if (canceledAttachedFee && excludeScheduledServiceId) {
     const attachedRow = await conn('scheduled_services')
@@ -270,7 +271,7 @@ async function findUnmintedSetupFeeObligation({
   // Name only a dead FEE-CARRYING invoice — a dead application-only row
   // never billed the fee, so "never invoiced" is the accurate story.
   const deadInvoice = stampedRows.find((r) => DEAD_STATUSES.has(String(r.status || '').toLowerCase())
-    && invoiceContainsSetupFeeLine(r)) || null;
+    && invoiceHasPositiveSetupFeeLine(r)) || null;
 
   // Converter provenance: the accept actually ran the conversion (tier
   // flip, activity row) and still minted nothing. Accepts that never
