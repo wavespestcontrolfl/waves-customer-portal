@@ -8880,8 +8880,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the invoice unheld (see unmintedSetupFeeHold below) and the alert
     // block parks a bill-the-fee-beside-it instruction instead of a mint
     // hold. Terminal (refunded) invoices keep their own alert lane.
+    // Terminal invoices no longer skip the detector (Codex P0, pre-push
+    // round 11): a refunded Charge Now application invoice reaches only
+    // the terminal alert, whose default instruction says to bill the
+    // visit — with a Mark Won accept the setup fee is STILL unbilled, so
+    // the detector runs and the terminal alert appends the missing-fee
+    // instruction (terminalSetupFeeNote below) instead of a second park.
+    // The detector's own fee-carrying-refund suppression is retained: a
+    // refunded invoice that BILLED the fee reads not-owed.
     let unmintedSetupFeeObligation = null;
-    if (!recapReviewOnly && !terminalCompletionInvoice
+    let terminalSetupFeeNote = '';
+    if (!recapReviewOnly
       && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
       try {
         const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
@@ -8917,7 +8926,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .first('id', 'metadata');
           if (!staleAlert) return;
           const {
-            invoiceContainsSetupFeeLine, invoiceContainsNonSetupCharge,
+            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication,
           } = require('../services/estimate-first-application-invoice');
           const staleMeta = typeof staleAlert.metadata === 'string'
             ? (() => { try { return JSON.parse(staleAlert.metadata); } catch { return null; } })()
@@ -8939,9 +8948,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()))
             : [];
           const feeProven = [...stampedLive, ...onParkedLive].some(invoiceContainsSetupFeeLine);
-          const applicationProven = onParkedLive.some(invoiceContainsNonSetupCharge)
+          const applicationProven = onParkedLive.some(invoiceBillsBaseApplication)
             || stampedLive.some((r) => /first (service )?application/i.test(String(r.notes || ''))
-              || invoiceContainsNonSetupCharge(r));
+              || invoiceBillsBaseApplication(r));
           if (feeProven && applicationProven) {
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and the parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`,
@@ -8950,7 +8959,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[dispatch] visit ${svc.id}: stale unminted-setup-fee alert ${staleAlert.id} rewritten as resolved — fee and application coverage both proven`);
           }
         };
-        if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+        if (obligation.owed && !obligation.firstVisitAlreadyCompleted && terminalCompletionInvoice) {
+          // The terminal (refunded-invoice) alert lane owns this visit —
+          // append the missing-fee instruction to ITS alert rather than
+          // parking a second one (Codex P0, pre-push round 11).
+          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
+        } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
           // the fee obligation stays owed while a parked visit sits
           // unbilled, so a LATER plan visit would also qualify — but
@@ -9294,7 +9308,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             : (completionTerminalIncludedSetupFee
               ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
               : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
-          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}`;
+          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}${terminalSetupFeeNote}`;
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
             // situation may have changed since it was written (codex r11).
@@ -9452,12 +9466,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // resolve the application, and a fee-carrying one must never be
           // instructed to bill the fee again.
           const {
-            invoiceContainsSetupFeeLine, invoiceContainsNonSetupCharge,
+            invoiceContainsSetupFeeLine, invoiceBillsBaseApplication,
           } = require('../services/estimate-first-application-invoice');
           const feeCoveredBy = liveStampedRows.find(invoiceContainsSetupFeeLine)
             || liveOnVisitRows.find(invoiceContainsSetupFeeLine) || null;
-          const applicationCoveredBy = liveOnVisitRows.find(invoiceContainsNonSetupCharge)
-            || liveStampedRows.find((r) => stampedCarriesFirstApplication(r) || invoiceContainsNonSetupCharge(r)) || null;
+          const applicationCoveredBy = liveOnVisitRows.find(invoiceBillsBaseApplication)
+            || liveStampedRows.find((r) => stampedCarriesFirstApplication(r) || invoiceBillsBaseApplication(r)) || null;
           if (feeCoveredBy && applicationCoveredBy) {
             const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
             logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);

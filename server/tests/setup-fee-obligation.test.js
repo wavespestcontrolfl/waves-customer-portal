@@ -254,7 +254,11 @@ function invoicesInOrder(stampedSpec, billedSpec) {
 test('a prior completed AND BILLED plan visit (is_recurring) flags firstVisitAlreadyCompleted (historic leak, no parking)', async () => {
   mockTables = baseTables({
     scheduled_services: { id: 'ss-prior', is_recurring: true, recurring_parent_id: null },
-    invoices: invoicesInOrder(null, { id: 'inv-billed', status: 'sent' }),
+    invoices: invoicesInOrder(null, {
+    id: 'inv-billed',
+    status: 'sent',
+    line_items: JSON.stringify([{ client_id: 'scheduled_ss-prior_primary', description: 'Quarterly Pest Control', amount: 88 }]),
+  }),
   });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);
@@ -264,7 +268,11 @@ test('a prior completed AND BILLED plan visit (is_recurring) flags firstVisitAlr
 test('a prior completed AND BILLED recurring CHILD (recurring_parent_id) also counts as a plan visit', async () => {
   mockTables = baseTables({
     scheduled_services: { id: 'ss-child', is_recurring: false, recurring_parent_id: 'ss-parent' },
-    invoices: invoicesInOrder(null, { id: 'inv-billed', status: 'paid' }),
+    invoices: invoicesInOrder(null, {
+    id: 'inv-billed',
+    status: 'paid',
+    line_items: JSON.stringify([{ client_id: 'scheduled_ss-child_primary', description: 'Quarterly Pest Control', amount: 88 }]),
+  }),
   });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);

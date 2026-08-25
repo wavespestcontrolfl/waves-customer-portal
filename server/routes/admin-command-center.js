@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString } = require('../utils/datetime-et');
 const {
@@ -421,7 +422,13 @@ async function getMoneyCollections() {
     .select('i.*', 'c.first_name', 'c.last_name')
     .orderBy('i.created_at', 'asc')
     .limit(40)
-    .catch(() => []);
+    .catch((err) => {
+      // Never a silent [] (Codex P1): a query failure here would read as
+      // "no stale drafts" and quietly disable the monitor — log loudly so
+      // the outage is visible even though the aggregate still renders.
+      logger.error(`[command-center] stale-draft invoice sweep FAILED — stale drafts NOT monitored this load: ${err.message}`);
+      return [];
+    });
   const staleDraftIssues = staleDrafts.map((row) => {
     const name = customerName(row);
     const ageDays = Math.floor((Date.now() - new Date(row.created_at).getTime()) / 86400000);
