@@ -7930,7 +7930,9 @@ function PropertyTab({ customer }) {
               {irrigationMinutesInput()}
               {hasLawnCare && irrigationInchesInput()}
             </div>
-            {derivedIrrigationLine && (
+            {/* Lawn customers only — the copy references the Weekly Inches
+                field, which is gated on hasLawnCare just above. */}
+            {hasLawnCare && derivedIrrigationLine && (
               <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
                 {derivedIrrigationLine}
               </div>
