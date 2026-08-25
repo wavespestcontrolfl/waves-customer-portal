@@ -2358,32 +2358,33 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     // which carries the locked-row customer_id the plan was inserted with.
     const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
-    // Confirmation is MUTUALLY EXCLUSIVE with the cancel transition (codex
-    // PR r3/r4 P2): the cancel path flips the plan inside a trx whose FIRST
-    // lock is the invoice row, so holding that same lock across the status
-    // re-read AND the send removes the TOCTOU — a cancel either committed
-    // before us (we see it and suppress) or waits until this confirmation
-    // committed (confirm-then-cancel: two real events in order, and the
-    // cancel path owns its own messaging). The send runs under a short
-    // row-lock window by design; the idempotencyKey keeps retries single.
-    // Fail closed: an unreadable status suppresses the confirmation — the
-    // plan itself is already committed either way.
-    const emailResult = await db.transaction(async (trx) => {
+    // Confirmation-vs-cancel coordination (codex PR r3/r4/r6): the ACTIVE
+    // check runs under the invoice row lock (the cancel trx's first lock)
+    // in its own SHORT transaction that commits BEFORE the provider call —
+    // holding a row lock across a slow SendGrid request would block
+    // settlement, cancellation, edits, and webhook processing for this
+    // invoice. A cancel therefore either committed before the check (we
+    // see it and suppress) or serializes after it; the residual
+    // commit-to-dispatch window is the irreducible provider-boundary race
+    // — the durable idempotencyKey keeps retries single, and a cancel
+    // landing in that window owns its own messaging. Fail closed: an
+    // unreadable status suppresses the confirmation.
+    const planStillActive = await db.transaction(async (trx) => {
       await trx('invoices').where({ id }).forUpdate().first();
       const planNow = await trx('payment_plans')
         .where({ id: paymentPlan.id })
         .first('status');
-      if (!planNow || planNow.status !== 'active') {
-        return { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
-      }
-      return PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+      return !!(planNow && planNow.status === 'active');
+    }).catch(() => false);
+    const emailResult = planStillActive
+      ? await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
         customerId: planCustomerId,
         paymentPlanId: paymentPlan.id,
         paymentMethodId,
         plan: paymentPlan,
         idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
-      });
-    }).catch((err) => ({ ok: false, error: err.message }));
+      }).catch((err) => ({ ok: false, error: err.message }))
+      : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
 
     // NOTE: no post-commit pauseSequence here (codex r9 P1). The in-trx
     // stopInvoiceFollowupsForPaymentPlan above already stopped the sequence

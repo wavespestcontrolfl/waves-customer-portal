@@ -4027,6 +4027,20 @@ const InvoiceService = {
       if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
         throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
       }
+      // A void is a terminal exit for the invoice's collection path — an
+      // ACTIVE payment plan must not survive it (it blocks edits/credit
+      // reversal forever on a dead invoice). Cancel it in the SAME
+      // transaction, stamped system:invoice_void. Deliberately NO dunning
+      // re-arm: a void invoice collects nothing, so the plan-owned sequence
+      // stop simply becomes moot with the invoice terminal.
+      await trx("payment_plans")
+        .where({ invoice_id: id, status: "active" })
+        .update({
+          status: "cancelled",
+          cancelled_at: new Date(),
+          cancelled_by: "system:invoice_void",
+          updated_at: new Date(),
+        });
       const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
       await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
       // Return any auto-applied/prepaid account credit to the customer's balance
