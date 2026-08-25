@@ -590,10 +590,17 @@ exports.down = async function down(knex) {
         return !visitId || !sbTerminal.has(visitId);
       });
       if (revertible.length) {
-        await knex('self_booked_appointments')
+        // Per-row: cadence-qualified copies restore with their qualifier.
+        const sbRows = await knex('self_booked_appointments')
           .whereIn('id', revertible)
-          .where({ service_type: toName })
-          .update({ service_type: fromName });
+          .select('id', 'service_type');
+        for (const sb of sbRows) {
+          const restored = swapRenamedPrefix(sb.service_type, toName, fromName);
+          if (!restored) continue;
+          await knex('self_booked_appointments')
+            .where({ id: sb.id, service_type: sb.service_type })
+            .update({ service_type: restored });
+        }
       }
     }
 
@@ -608,10 +615,17 @@ exports.down = async function down(knex) {
         return !parentId || !addonTerminal.has(parentId);
       });
       if (revertible.length) {
-        await knex('scheduled_service_addons')
+        // Per-row: cadence-qualified names restore with their qualifier.
+        const addonRows = await knex('scheduled_service_addons')
           .whereIn('id', revertible)
-          .where({ service_name: toName })
-          .update({ service_name: fromName });
+          .select('id', 'service_name');
+        for (const a of addonRows) {
+          const restored = swapRenamedPrefix(a.service_name, toName, fromName);
+          if (!restored) continue;
+          await knex('scheduled_service_addons')
+            .where({ id: a.id, service_name: a.service_name })
+            .update({ service_name: restored });
+        }
       }
     }
 
