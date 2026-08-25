@@ -36,6 +36,14 @@ describe('deriveIrrigationInchesPerWeek', () => {
     expect(a.inchesPerWeek).toBe(0.5);
   });
 
+  test('legacy full day names map to canonical keys — pre-validation rows still derive', () => {
+    const d = deriveIrrigationInchesPerWeek({ runMinutes: 20, wateringDays: ['Monday', 'wednesday', 'FRIDAY', 'Sunday'], systemType: ['spray'] });
+    expect(d.inchesPerWeek).toBe(2);
+    expect(d.runsPerWeek).toBe(4);
+    // Duplicates across spellings collapse; garbage drops.
+    expect(deriveIrrigationInchesPerWeek({ runMinutes: 20, wateringDays: ['Mon', 'Monday', 'whenever'], systemType: ['spray'] }).runsPerWeek).toBe(1);
+  });
+
   test('declines totals over the 5" weekly ceiling shared with the explicit-inches field', () => {
     // 240 min × 7 days × spray would be 42"/week — an entry artifact.
     const d = deriveIrrigationInchesPerWeek({ runMinutes: 240, wateringDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], systemType: ['spray'] });

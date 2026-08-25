@@ -71,7 +71,14 @@ function positiveInt(value, max) {
 }
 
 function normalizeDays(value) {
-  const seen = new Set(toArray(value).map((d) => String(d || '').trim()));
+  // Legacy rows predate the canonical-keys route validation and can hold
+  // full day names ("Monday") — an unambiguous alias maps to its key (the
+  // same first-three-letters rule the portal pills apply on edit) so those
+  // customers derive without waiting for a portal edit. Anything else drops.
+  const seen = new Set(toArray(value).map((d) => {
+    const k = String(d || '').trim().slice(0, 3);
+    return k.charAt(0).toUpperCase() + k.slice(1).toLowerCase();
+  }));
   return DAY_KEYS.filter((d) => seen.has(d));
 }
 
