@@ -199,6 +199,27 @@ test('a LIVE annual prepay term waives the fee — not owed', async () => {
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
+test('a REFUNDED prepay term does not suppress either (the table CHECK permits it)', async () => {
+  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'refunded' } });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
+});
+
+test('a live prepay invoice whose line says "setup fee waived" is NOT a billed fee — obligation survives', async () => {
+  // The converter's real annual-prepay line reads "12 months prepaid
+  // (setup fee waived)" — after that prepay is refunded and its term
+  // cancelled, the waived text must not read as fee-collected.
+  mockTables = baseTables({
+    annual_prepay_terms: { id: 'term-1', status: 'cancelled' },
+    invoices: {
+      id: 'inv-1',
+      status: 'refunded',
+      line_items: JSON.stringify([{ description: '12 months prepaid (setup fee waived)', amount: 340 }]),
+    },
+  });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
+});
+
 test('a CANCELLED prepay term does not suppress — the customer is back on per-application billing', async () => {
   // A voided/refunded prepay flips its term to 'cancelled'; for a Mark
   // Won accept there is no superseded acceptance invoice to restore, so

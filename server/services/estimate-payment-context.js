@@ -297,9 +297,17 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     };
   }
 
+  // A DEAD term (cancelled/refunded prepay) returned the customer to
+  // per-application billing — it must not gate the acceptance-invoice /
+  // setup-fee-missing section or claim billing-term authority, or the
+  // card shows only prepay context while completion parks the visit for
+  // the missing fee (Codex PR round 2 P1). The annualPrepay panel above
+  // still renders the term's history either way.
+  const termIsDead = !!term
+    && ['cancelled', 'canceled', 'refunded', 'void', 'voided'].includes(String(term.status || '').toLowerCase());
   let acceptanceInvoice = null;
   let setupFeeMissing = null;
-  if (!term) {
+  if (!term || termIsDead) {
     const inv = await findAcceptanceInvoice(estimate);
     if (inv) {
       acceptanceInvoice = {
@@ -367,8 +375,8 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // the converter's standard (pay-per-application) path. Null when nothing is
   // known — the card renders nothing rather than guessing.
   let billingTerm = null;
-  if (term) billingTerm = 'prepay_annual';
-  else if (paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
+  if (term && !termIsDead) billingTerm = 'prepay_annual';
+  else if (!termIsDead && paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
   // An owed-but-unminted setup fee proves the accept converted onto the
   // standard per-application plan even when no explicit preference was ever
   // stored ("inferred" profiles) — without this the card would render no

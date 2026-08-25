@@ -166,9 +166,11 @@ async function findUnmintedSetupFeeObligation({
   // and returns the customer to per-application billing — for a Mark Won
   // accept there is no superseded acceptance invoice to restore, so the
   // fee would be silently lost forever if a dead term satisfied this.
+  // The table's CHECK also permits 'refunded' (Codex P0, pre-push round
+  // 13) — every dead-term status is excluded, not just the cancel pair.
   const prepayTerm = await conn('annual_prepay_terms')
     .where({ source_estimate_id: estimate.id })
-    .whereNotIn('status', ['cancelled', 'canceled'])
+    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'void', 'voided'])
     .first('id');
   if (prepayTerm) return { owed: false };
 

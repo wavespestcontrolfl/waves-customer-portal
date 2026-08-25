@@ -83,21 +83,33 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { l
   return canceledSetupFee ? { invoice: null, liveBeside: null, canceledSetupFee } : { invoice: null, liveBeside: null };
 }
 
-// Does this invoice row carry the one-time setup-fee charge? Authoritative
+// Does this invoice row carry the one-time setup-fee CHARGE? Authoritative
 // source: a parsed line_items entry (the acceptance mint writes
-// 'WaveGuard Membership — one-time setup fee'); provenance fallback for rows
-// without parseable line items: the acceptance notes name the fee only when
-// it was charged ("$99 setup fee plus first application" vs
-// "first application only").
+// 'WaveGuard Membership — one-time setup fee') — but only a POSITIVE line
+// whose text does not say the fee was WAIVED: the converter's real
+// annual-prepay line reads "12 months prepaid (setup fee waived)", and
+// counting it as a billed fee would let a refunded prepay read as
+// fee-collected while nothing was ever billed for it (Codex P0, pre-push
+// round 13). Provenance fallback for rows without parseable line items:
+// the acceptance notes name the fee only when it was charged
+// ("$99 setup fee plus first application" vs "first application only"),
+// with the same waived-language rejection.
 function invoiceContainsSetupFeeLine(row) {
   let items = row?.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
   if (Array.isArray(items) && items.length) {
-    return items.some((li) => /setup fee/i.test(String(li?.description || '')));
+    return items.some((li) => {
+      const desc = String(li?.description || '');
+      if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return false;
+      const qty = li?.quantity != null ? Number(li.quantity) : 1;
+      const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+      return Number.isFinite(amt) && amt > 0;
+    });
   }
-  return /setup fee/i.test(String(row?.notes || ''));
+  const notes = String(row?.notes || '');
+  return /setup fee/i.test(notes) && !/setup fee waiv/i.test(notes);
 }
 
 // Does this invoice bill the BASE plan application? Identity comes from
