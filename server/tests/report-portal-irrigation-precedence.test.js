@@ -70,6 +70,22 @@ describe('PDF signature tracks portal irrigation state', () => {
   });
 });
 
+describe('failed prefs read never caches', () => {
+  // Source pin (same style as lawn-week-weather-freeze): the render-time
+  // prefs read must distinguish failure from absence and ride the
+  // weekWeatherUncacheable gate both PDF cache sites already honor — a
+  // blipped read rendering tech values must not be stored under the
+  // portal-stamped cache key (GH codex P1 #3478 r18).
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+
+  test('prefs read failure marks the render uncacheable', () => {
+    expect(source).toMatch(/prefsReadFailed = true/);
+    expect(source).toMatch(/weekWeatherUncacheable: weekWeatherUnfrozen \|\| !!weekWeatherPendingReason \|\| prefsReadFailed/);
+  });
+});
+
 describe('mixed sources agree across the report', () => {
   test('derived portal schedule beats turf and assessment readings in the water balance', () => {
     const ctx = buildLawnWaterContext({

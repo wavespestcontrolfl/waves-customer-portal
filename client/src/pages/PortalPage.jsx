@@ -7562,7 +7562,10 @@ function PropertyTab({ customer }) {
     switch (derivedIrrigation.reason) {
       case 'missing_days': return 'Pick your watering days below and we can work out your weekly inches.';
       case 'missing_head_type': return 'Pick a system type below and we can work out your weekly inches.';
-      case 'mixed_head_types': return "Spray and rotor heads put down water at very different rates, so we can't turn minutes into inches for a mixed system — enter Weekly Inches if you know it.";
+      // Head-type-neutral: the mix may be any combination (spray+drip,
+      // rotor+drip…) — naming types the customer didn't pick reads as us
+      // corrupting their profile.
+      case 'mixed_head_types': return "Different head types put down water at very different rates, so we can't turn minutes into inches for a mixed system — enter Weekly Inches if you know it.";
       case 'drip_only': return 'Drip waters beds rather than turf — if the lawn gets sprinkler water too, add that head type.';
       case 'implausible_total': return 'Those numbers work out to more water each week than any lawn could use — double-check the minutes per zone.';
       default: return null;

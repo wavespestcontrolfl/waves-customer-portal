@@ -2348,10 +2348,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .where({ customer_id: service.customer_id, active: true })
     .first()
     .catch(() => null);
+  // A FAILED prefs read is not a missing row: the cache signature stamps the
+  // portal irrigation state from its own (successful) prefs read, so a render
+  // whose prefs read blipped would fall back to tech/assessment values and
+  // then be stored under the portal-based key — served indefinitely. The
+  // failure marks the render uncacheable below instead.
+  let prefsReadFailed = false;
   const propertyPrefs = await knex('property_preferences')
     .where({ customer_id: service.customer_id })
     .first()
-    .catch(() => null);
+    .catch(() => { prefsReadFailed = true; return null; });
   const trend = historyRows.map((row) => ({
     date: row.service_date,
     overallScore: calculateLawnOverallScore(row),
@@ -2577,7 +2583,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     weekWeatherPendingReason,
     // What CACHE sites gate on — the superset. Delivery gates on
     // weekWeatherUnfrozen alone, so a merely-pending week never blocks a send.
-    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason,
+    // …plus a failed property-preferences read: the payload rendered without
+    // the customer's portal irrigation state, but the cache key (computed
+    // from an independent, possibly-successful prefs read) stamps that state
+    // — caching the mismatch would serve the wrong water balance until the
+    // customer's next prefs edit.
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {

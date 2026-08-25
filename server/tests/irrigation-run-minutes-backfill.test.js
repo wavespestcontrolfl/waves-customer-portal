@@ -88,6 +88,10 @@ describe('noteDaysConsistent', () => {
     expect(noteDaysConsistent('Each zone runs 20 min on Tuesday and Thursday', ['Mon', 'Wed', 'Fri'])).toBe(false);
     expect(noteDaysConsistent('Each zone runs 20 min on Tue', ['Tue', 'Thu'])).toBe(false);
     expect(noteDaysConsistent('Each zone runs 20 min on Tuesday', null)).toBe(false);
+    // A daily-cadence phrase claims all seven days (GH codex P1 #3478 r18).
+    expect(noteDaysConsistent('Every zone runs 20 minutes every day', ['Mon', 'Wed', 'Fri'])).toBe(false);
+    expect(noteDaysConsistent('Every zone runs 20 minutes every day', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])).toBe(true);
+    expect(noteDaysConsistent('Each zone runs 20 min, all days', ['Mon', 'Wed'])).toBe(false);
     // JSONB-as-string rows and no-claim notes both behave.
     expect(noteDaysConsistent('Each zone runs 20 min Mon/Wed', '["Mon","Wed"]')).toBe(true);
     expect(noteDaysConsistent('Each zone runs 20 min', ['Mon', 'Wed', 'Fri'])).toBe(true);

@@ -120,10 +120,18 @@ const NOTE_DAY_ALIASES = {
   fri: 'Fri', friday: 'Fri', sat: 'Sat', saturday: 'Sat', sun: 'Sun', sunday: 'Sun',
 };
 
+const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
 function noteDaysConsistent(notes, wateringDays) {
-  const noteDays = new Set((String(notes || '').toLowerCase().match(/[a-z]+/g) || [])
+  const text = String(notes || '');
+  const noteDays = new Set((text.toLowerCase().match(/[a-z]+/g) || [])
     .map((t) => NOTE_DAY_ALIASES[t])
     .filter(Boolean));
+  // A daily-cadence phrase is a claim of ALL seven days — "every day" beside
+  // structured Mon/Wed/Fri would multiply by 3 while the note says 7.
+  if (/\b(?:every|each|all)\s+(?:day|days|night|nights|morning|mornings)\b/i.test(text)) {
+    for (const d of ALL_DAYS) noteDays.add(d);
+  }
   if (!noteDays.size) return true; // no day claims — nothing to contradict
   let structured = wateringDays;
   if (typeof structured === 'string') {
