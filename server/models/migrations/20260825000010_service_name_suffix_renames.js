@@ -388,12 +388,21 @@ const ROACH_DISPLAY_TO = 'Cockroach Treatment Service';
 
 async function renameRoachDisplayNames(knex, fromName, toName) {
   if (!(await knex.schema.hasTable('pricing_config'))) return [];
-  const row = await knex('pricing_config').where({ config_key: 'pest_base' }).first();
+  // FOR UPDATE inside the migration transaction: this is a whole-object
+  // read-modify-write, so an admin pricing save landing between the read
+  // and the update would be silently overwritten without the lock
+  // (established pricing-config migration pattern; codex pre-push P0).
+  const row = await knex('pricing_config')
+    .where({ config_key: 'pest_base' })
+    .forUpdate()
+    .first();
   if (!row) return [];
-  let data = row.data;
-  if (typeof data === 'string') {
-    try { data = JSON.parse(data); } catch { return []; }
-  }
+  // Serialize the pre-change snapshot BEFORE any mutation: pg returns
+  // jsonb as an object, so `row.data` and the working copy would alias —
+  // the audit row would record identical old/new (codex pre-push P1).
+  const oldSerialized = typeof row.data === 'string' ? row.data : JSON.stringify(row.data);
+  let data;
+  try { data = JSON.parse(oldSerialized); } catch { return []; }
   const display = data?.initial_roach?.display;
   if (!display || typeof display !== 'object') return [];
   const changed = [];
@@ -410,7 +419,7 @@ async function renameRoachDisplayNames(knex, fromName, toName) {
   if (await knex.schema.hasTable('pricing_config_audit')) {
     await knex('pricing_config_audit').insert({
       config_key: 'pest_base',
-      old_value: JSON.stringify(row.data),
+      old_value: oldSerialized,
       new_value: JSON.stringify(data),
       changed_by: 'migration:20260825000010',
       reason: `Roach display name(s) [${changed.join(', ')}] "${fromName}" → "${toName}" (catalog rename parity)`,
@@ -590,10 +599,19 @@ exports.down = async function down(knex) {
   // only while they still carry the written value.
   if (Array.isArray(state.roachDisplayChanged) && state.roachDisplayChanged.length
     && (await knex.schema.hasTable('pricing_config'))) {
-    const row = await knex('pricing_config').where({ config_key: 'pest_base' }).first();
-    let data = row ? row.data : null;
-    if (typeof data === 'string') {
-      try { data = JSON.parse(data); } catch { data = null; }
+    // Same lock + pre-mutation snapshot rules as up() (codex pre-push
+    // P0/P1): whole-object rewrite under FOR UPDATE, audit from the
+    // serialized original.
+    const row = await knex('pricing_config')
+      .where({ config_key: 'pest_base' })
+      .forUpdate()
+      .first();
+    const oldSerialized = row
+      ? (typeof row.data === 'string' ? row.data : JSON.stringify(row.data))
+      : null;
+    let data = null;
+    if (oldSerialized) {
+      try { data = JSON.parse(oldSerialized); } catch { data = null; }
     }
     const display = data?.initial_roach?.display;
     if (display && typeof display === 'object') {
@@ -611,7 +629,7 @@ exports.down = async function down(knex) {
         if (await knex.schema.hasTable('pricing_config_audit')) {
           await knex('pricing_config_audit').insert({
             config_key: 'pest_base',
-            old_value: JSON.stringify(row.data),
+            old_value: oldSerialized,
             new_value: JSON.stringify(data),
             changed_by: 'migration:20260825000010',
             reason: `rollback: roach display name(s) [${reverted.join(', ')}] restored to "${ROACH_DISPLAY_FROM}"`,

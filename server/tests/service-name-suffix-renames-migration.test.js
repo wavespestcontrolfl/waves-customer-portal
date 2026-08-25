@@ -289,6 +289,10 @@ describe('20260825000010 service name suffix renames', () => {
     expect(data.initial_roach.display.regular_standalone.name).toBe(ROACH_NEW);
     expect(data.initial_roach.display.german.name).toBe('German Cockroach Treatment');
     expect(db.pricing_config_audit).toHaveLength(1);
+    // The audit must capture the PRE-change snapshot — pg returns jsonb as
+    // an object, and an aliased mutation would record identical old/new.
+    expect(db.pricing_config_audit[0].old_value).not.toBe(db.pricing_config_audit[0].new_value);
+    expect(JSON.parse(db.pricing_config_audit[0].old_value).initial_roach.display.regular.name).toBe(ROACH_OLD);
     expect(JSON.parse(stateRow(db).value).roachDisplayChanged.sort())
       .toEqual(['regular', 'regular_standalone']);
 
