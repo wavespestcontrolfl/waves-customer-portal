@@ -8997,7 +8997,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 if (!created) throw new Error('historic fee-only notification insert failed');
               });
             } catch (histErr) {
-              logger.error(`[dispatch] historic setup-fee alert FAILED for ${svc.id} (retries on the series' next completion): ${histErr.message}`);
+              // FAIL CLOSED (Codex PR r15 P1): this alert is the fee's
+              // only durable follow-up — a customer's LAST completion (or
+              // a cancellation before another) would otherwise carry the
+              // leak forward with nothing standing. Same
+              // release-for-resume + 503 shape as the parking alert.
+              logger.error(`[dispatch] historic setup-fee alert FAILED for ${svc.id} — closeout NOT finalized: ${histErr.message}`);
+              const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, histErr);
+              if (!released) {
+                logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+              }
+              return res.status(503).json({
+                error: released
+                  ? 'A historic setup-fee alert for this estimate could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+                  : `A historic setup-fee alert for this estimate could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+                code: 'historic_setup_fee_alert_failed',
+                ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+                serviceRecordId: record.id,
+              });
             }
           }
           await reconcileParkedSetupFeeAlert();
