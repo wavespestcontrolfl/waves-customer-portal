@@ -139,22 +139,26 @@ exports.down = async function down(knex) {
     if (!current) continue;
 
     // Undo only the version THIS migration published, identified
-    // structurally: active, carries exactly our callout, and the version
-    // directly beneath it carries exactly the seeded callout. Anything else
-    // means a human has edited since, and the rollback declines.
+    // structurally: active, carries exactly our callout, and an ARCHIVED
+    // version whose blocks equal current-with-the-seeded-callout-restored.
+    // The predecessor is found by that structural identity, NOT by
+    // version_number - 1 — an unpublished draft can hold an intermediate
+    // number (active v3 + draft v4 → up() published v5, predecessor is v3).
+    // Anything else means a human has edited since, and rollback declines.
     const blocks = parseBlocks(current.blocks) || [];
     const replacement = calloutFor(target.variable);
     const at = blocks.findIndex((b) => b && b.type === 'callout' && b.content === replacement.content);
     if (at < 0) continue;
 
-    const previous = await knex('email_template_versions')
-      .where({ template_id: tpl.id })
-      .where({ version_number: Number(current.version_number) - 1 })
-      .first();
-    if (!previous) continue;
-    const prevBlocks = parseBlocks(previous.blocks) || [];
     const restored = blocks.map((b, i) => (i === at ? { type: 'callout', content: target.seededCallout } : b));
-    if (JSON.stringify(restored) !== JSON.stringify(prevBlocks)) continue;
+    const restoredJson = JSON.stringify(restored);
+    const archived = await knex('email_template_versions')
+      .where({ template_id: tpl.id, status: 'archived' });
+    const previous = (archived || [])
+      .slice()
+      .sort((a, b) => Number(b.version_number) - Number(a.version_number))
+      .find((v) => JSON.stringify(parseBlocks(v.blocks) || []) === restoredJson);
+    if (!previous) continue;
 
     await knex('email_template_versions').where({ id: previous.id }).update({ status: 'active', updated_at: new Date() });
     await knex('email_templates').where({ id: tpl.id }).update({

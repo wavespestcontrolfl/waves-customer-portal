@@ -1,0 +1,86 @@
+/**
+ * Backfill irrigation_run_minutes from legacy schedule notes.
+ *
+ * Before the column existed, customers put their per-zone runtime where they
+ * could: irrigation_schedule_notes free text ("Each zone runs 20min"). The
+ * email sweep and report derivation read ONLY the structured column, so
+ * without a backfill those customers — the very ones this feature exists to
+ * fix — would keep receiving copy claiming their minutes are missing
+ * (GH codex P1 on #3478).
+ *
+ * This copies the customer's OWN stated number, never a guess, and only when
+ * it is unambiguous:
+ *   - irrigation_run_minutes is still NULL (a structured entry always wins),
+ *   - the notes match an explicit per-zone-runtime phrasing, and
+ *   - the notes contain exactly ONE distinct minutes figure — two figures
+ *     ("front zones 20 min, beds 45 min") mean per-zone schedules the single
+ *     column cannot represent, so the row is left for the email ask instead.
+ *   - 1–240 bounds (the column's validation range).
+ *
+ * down() is a deliberate no-op: after the backfill, customers can edit the
+ * structured value in the portal, and rows set here are indistinguishable
+ * from rows they typed — clearing either would destroy customer data. The
+ * 20260825000000 down() dropping the column is the real rollback.
+ */
+
+const PER_ZONE_PATTERNS = [
+  // "each zone runs 20min", "every zone gets about 25 minutes", "all zones run 15 min"
+  /\b(?:each|every|all)\s+zones?\s+(?:runs?|gets?|waters?|goes)\s*(?:for\s+)?(?:about\s+|around\s+|approx\.?\s*|~\s*)?(\d{1,3})\s*min(?:ute)?s?\b/i,
+  // "20 min per zone", "20 minutes/zone", "25 min each zone", "20 mins a zone"
+  /\b(\d{1,3})\s*min(?:ute)?s?\s*(?:per|\/|each|a|every)\s*zone\b/i,
+  // "zones run 20 minutes", "zones for 20 min"
+  /\bzones?\s+(?:runs?|for)\s+(?:about\s+|around\s+|approx\.?\s*|~\s*)?(\d{1,3})\s*min(?:ute)?s?\b/i,
+];
+
+/**
+ * @returns {number|null} the single unambiguous per-zone runtime the notes
+ * state, or null when there is nothing certain enough to promote.
+ */
+function parseRunMinutesFromNotes(notes) {
+  const text = String(notes || '');
+  if (!text.trim()) return null;
+
+  let matched = null;
+  for (const re of PER_ZONE_PATTERNS) {
+    const m = text.match(re);
+    if (m) { matched = Number(m[1]); break; }
+  }
+  if (matched == null) return null;
+
+  // Ambiguity guard: every minutes figure anywhere in the notes must agree.
+  const allMinuteFigures = [...text.matchAll(/(\d{1,3})\s*min(?:ute)?s?\b/gi)].map((m) => Number(m[1]));
+  const distinct = [...new Set(allMinuteFigures)];
+  if (distinct.length !== 1 || distinct[0] !== matched) return null;
+
+  if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
+  return matched;
+}
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('property_preferences'))) return;
+  if (!(await knex.schema.hasColumn('property_preferences', 'irrigation_run_minutes'))) return;
+  if (!(await knex.schema.hasColumn('property_preferences', 'irrigation_schedule_notes'))) return;
+
+  const rows = await knex('property_preferences')
+    .whereNull('irrigation_run_minutes')
+    .whereNotNull('irrigation_schedule_notes')
+    .select('id', 'irrigation_schedule_notes');
+
+  for (const row of rows) {
+    const minutes = parseRunMinutesFromNotes(row.irrigation_schedule_notes);
+    if (minutes == null) continue;
+    // Guarded UPDATE: only lands if the column is STILL null, so a customer
+    // entry racing the deploy window is never overwritten.
+    await knex('property_preferences')
+      .where({ id: row.id })
+      .whereNull('irrigation_run_minutes')
+      .update({ irrigation_run_minutes: minutes });
+  }
+};
+
+exports.down = async function down() {
+  // No-op by design — see header. Rows set here are indistinguishable from
+  // customer-typed values; the column-drop migration is the real rollback.
+};
+
+exports.__private = { parseRunMinutesFromNotes, PER_ZONE_PATTERNS };

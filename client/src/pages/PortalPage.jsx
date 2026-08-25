@@ -7551,6 +7551,9 @@ function PropertyTab({ customer }) {
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
         : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. Enter Weekly Inches if you know your system's actual output.`;
     }
+    // An explicit Weekly Inches entry is already authoritative — a decline
+    // prompt asking for what's filled in above would never be satisfiable.
+    if (explicitInchesEntered) return null;
     switch (derivedIrrigation.reason) {
       case 'missing_days': return 'Pick your watering days below and we can work out your weekly inches.';
       case 'missing_head_type': return 'Pick a system type below and we can work out your weekly inches.';

@@ -118,6 +118,22 @@ describe('irrigation schedule-copy migration', () => {
     expect(knex2.__db.email_templates[0].active_version_id).toBe(active.id);
   });
 
+  test('down() finds the true predecessor past an unpublished draft holding an intermediate version number', async () => {
+    // Active v3 + staff draft v4 → up() publishes v5. version_number - 1
+    // would land on the draft; the structural search must restore v3.
+    const f = fixture();
+    f.email_template_versions.push({
+      id: 'draft0', template_id: 't0', version_number: 4, status: 'draft',
+      subject: 'S', preview_text: 'P', blocks: JSON.stringify([{ type: 'paragraph', content: 'WIP rewrite' }]), text_body: null,
+    });
+    const knex = makeKnex(f);
+    await migration.up(knex);
+    await migration.down(knex);
+    expect(knex.__db.email_templates[0].active_version_id).toBe('v0');
+    expect(knex.__db.email_template_versions.find((v) => v.id === 'v0').status).toBe('active');
+    expect(knex.__db.email_template_versions.find((v) => v.id === 'draft0').status).toBe('draft');
+  });
+
   test('no-ops when the tables are absent', async () => {
     const knex = makeKnex(fixture(), { tables: [] });
     await migration.up(knex);
