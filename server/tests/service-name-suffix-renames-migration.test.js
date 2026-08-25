@@ -420,6 +420,35 @@ describe('20260825000010 service name suffix renames', () => {
     expect(visit(db, 'v-open-2').service_type).toBe(ROACH_OLD);
   });
 
+  test('public name producers carry no pre-rename catalog names (parity with RENAMES)', () => {
+    // The owner-directed rename must reach every live public/marketing
+    // producer — a quoted old catalog name in these modules means a
+    // customer-facing surface still publishes the obsolete label.
+    const fs = require('fs');
+    const path = require('path');
+    const producerFiles = [
+      '../services/pricing-engine/public-ranges.js',
+      '../services/pricing-engine/v1-legacy-mapper.js',
+      '../services/ask-waves-intake.js',
+      '../routes/booking.js',
+      '../services/booking-abandon-recovery.js',
+    ];
+    // rodent_guarantee_combo keeps its own bundle label by design (it must
+    // NOT resolve the payment-only guarantee row — see #3485).
+    const allowed = new Set(["rodent_guarantee_combo: 'Rodent Guarantee'"]);
+    for (const rel of producerFiles) {
+      const src = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      for (const [, from] of migration.RENAMES) {
+        const quoted = `'${from}'`;
+        const hits = src.split('\n')
+          .filter((l) => l.includes(quoted)
+            && !/^\s*(\/\/|\*)/.test(l)
+            && ![...allowed].some((a) => l.includes(a)));
+        expect({ file: rel, from, offending: hits }).toEqual({ file: rel, from, offending: [] });
+      }
+    }
+  });
+
   test('up() survives absent companion tables', async () => {
     const db = { services: seedDb().services, system_settings: [] };
     await migration.up(fakeKnex(db));

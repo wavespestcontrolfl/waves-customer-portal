@@ -51,7 +51,7 @@ const QUOTABLE_SERVICES = [
   { key: 'oneTimeLawn', label: 'Lawn Weed Treatment', covers: 'a one-time whole-lawn weed knockdown treatment (visitor asks about weeds only, not an ongoing program)' },
   { key: 'treeShrub', label: 'Tree & Shrub Care', covers: 'ornamental tree and shrub fertilization and insect treatment (the quote form asks how many plants, or estimates from satellite)' },
   { key: 'palm', label: 'Palm Injections', covers: 'palm tree health injections (the quote form asks how many palms)' },
-  { key: 'bedBug', label: 'Bed Bug Treatment', covers: 'a standard bed bug treatment in a single-family home the owner can prep (the quote form asks how many bedrooms). Severe/whole-home infestations, multi-unit buildings, or homes that cannot be prepped are NOT instantly quotable — see the exclusion list' },
+  { key: 'bedBug', label: 'Bed Bug Treatment Service', covers: 'a standard bed bug treatment in a single-family home the owner can prep (the quote form asks how many bedrooms). Severe/whole-home infestations, multi-unit buildings, or homes that cannot be prepped are NOT instantly quotable — see the exclusion list' },
   { key: 'plugging', label: 'Lawn Plugging Service', covers: 'St. Augustine plug installation for dead patches or a full lawn (the quote form asks the patch size)' },
   { key: 'lawnPestControl', label: 'Lawn Pest Knockdown Service', covers: 'a one-time turf-pest knockdown for chinch bugs, sod webworms, armyworms, and grubs damaging the lawn (the recurring lawn program covers season-long prevention)' },
 ];
