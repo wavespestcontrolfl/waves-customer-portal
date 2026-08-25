@@ -185,6 +185,9 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
     expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', {
       allowLive: true,
       adminWindowRules: true,
+      // Staff surface — occupancy clashes commit with a warning (owner
+      // ruling 2026-08-25, rebooker.overlapAdvisory).
+      overlapAdvisory: true,
       // The anchor state this route's window resolution read, pinned through
       // the series writer's existing expectAnchor fence.
       expectAnchor: { window_start: '09:00:00' },

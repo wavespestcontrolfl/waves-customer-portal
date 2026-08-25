@@ -12,6 +12,7 @@ const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
+const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
   {
@@ -562,6 +563,9 @@ async function moveStopsToDay(input) {
     needsLifecycleRewind, applyTrackLifecycleCas,
   } = require('../rebooker');
   const movedIds = new Set();
+  // Committed stops whose landing block overlaps another appointment on the
+  // target date (advisory — the moves stand; the result warns).
+  const overlapMovedIds = [];
   const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
   // the operator learns the move committed but someone wasn't notified.
@@ -611,7 +615,32 @@ async function moveStopsToDay(input) {
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
     const { lockTechDays } = require('../scheduling/tech-day-lock');
+    // Advisory overlap note for THIS stop, set inside the trx but reported
+    // only after the CAS commits (a missed CAS rolls back and must not warn).
+    let stopOverlapped = false;
     const updatedRows = await db.transaction(async trx => {
+      // Rung 1 + tech-blind probe FIRST (occupancy.js ORDERING CONTRACT:
+      // the date-wide lock precedes the tech-day fence below). A hit never
+      // blocks the move (owner ruling 2026-08-25 — staff saves warn, not
+      // block): the stop still moves and the result carries a warning.
+      // Windowless stops carry no occupancy and skip the probe; an end-less
+      // stop probes its duration-derived block (default 60), mirroring the
+      // shared predicate.
+      {
+        const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
+        let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
+        if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
+          const [h, m] = probeStart.split(':').map(Number);
+          const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+          probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+        }
+        if (probeStart && probeEnd) {
+          const overlap = await probeSlotOverlap({
+            trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
+          });
+          if (overlap.length) stopOverlapped = true;
+        }
+      }
       await lockTechDays(trx, [
         { techId: s.technician_id, date: observedDate },
         { techId: s.technician_id, date: dateStr },
@@ -657,6 +686,7 @@ async function moveStopsToDay(input) {
       continue;
     }
     movedIds.add(s.id);
+    if (stopOverlapped) overlapMovedIds.push(s.id);
     // Rebooker-parity side effects of the live → confirmed flip above:
     // job_status_history audit row, tech_status release, customer tracker
     // refresh. Best-effort: the move is committed — a side-effect failure
@@ -791,18 +821,28 @@ async function moveStopsToDay(input) {
 
   logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
+  // ONE `warning` key: the card renders body.result.warning only, so the
+  // overlap note and the texts-failed note must COMBINE, never overwrite
+  // each other (a later spread writing `warning` clobbered the overlap).
+  const overlapNote = overlapMovedIds.length
+    ? `${slotOverlapWarning(dateStr)} (${overlapMovedIds.length} moved stop${overlapMovedIds.length === 1 ? '' : 's'} overlap${overlapMovedIds.length === 1 ? 's' : ''} an existing appointment)`
+    : null;
+  // Top-level partial-failure signal: /confirm-action reports success (the
+  // moves DID commit), so without this the card shows a bare "Done" and
+  // the operator assumes every customer was texted.
+  const notifyNote = notifyCustomers && notificationFailures.length
+    ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote].filter(Boolean).join(' ');
+
   return {
     success: true,
     moved_count: movedStops.length,
     new_date: dateStr,
     stops: movedStops,
+    ...(combinedWarning ? { warning: combinedWarning } : {}),
+    ...(overlapMovedIds.length ? { overlap_ids: overlapMovedIds } : {}),
     ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
-    // Top-level partial-failure signal: /confirm-action reports success (the
-    // moves DID commit), so without this the card shows a bare "Done" and
-    // the operator assumes every customer was texted.
-    ...(notifyCustomers && notificationFailures.length
-      ? { warning: `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}` }
-      : {}),
     ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),

@@ -11,12 +11,14 @@
  *     (TimeGridDay DAY_END_HOUR); the customer slot finder stops at 17:00
  *     but admins book evening visits the self-booking path never offers.
  *
- * Overlap (assertNoSlotOverlap) reuses the shared occupancy mechanism
+ * Overlap (probeSlotOverlap) reuses the shared occupancy mechanism
  * (scheduling/occupancy.js — tech-blind findConflictingVisits under the
  * date-wide advisory lock) exactly as routes/booking.js createSelfBooking
- * does. It is behind GATE_ADMIN_SLOT_OVERLAP_GUARD (default OFF, only the
- * string 'true' enables — fail-closed parse); the hour rules above are NOT
- * gated.
+ * does. It runs unconditionally: a hit is ADVISORY (owner ruling 2026-08-25
+ * — staff-side saves never block on schedule conflicts), so the probe
+ * returns the conflicts for the caller to surface via slotOverlapWarning
+ * and never throws. (The former GATE_ADMIN_SLOT_OVERLAP_GUARD dark gate was
+ * removed on PR #3486 once the probe stopped blocking.)
  */
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./occupancy');
 const { DAY_START_HOUR } = require('./find-time');
@@ -89,37 +91,51 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
   return { window_start: minutesToHHMM(startMin), window_end: minutesToHHMM(endMin) };
 }
 
-// Kill switch: unset (or any value other than the exact string 'true') = OFF.
-function adminSlotOverlapGuardEnabled() {
-  return process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD === 'true';
-}
-
 /**
  * Rung 1 for a writer that will insert/move rows on SEVERAL dates in one
  * trx (series create / re-seed): every date's occupancy lock, deduped and
  * sorted via occupancy.js acquireOccupancyLocks — taken up front, before any
- * row lock. No-op when the gate is off. Returns the locked date set so the
- * writer can fail CLOSED on a date it derives later that was not pre-locked.
+ * row lock. Returns the locked date set so the writer can fail CLOSED on a
+ * date it derives later that was not pre-locked.
  */
 async function acquireAdminSlotLocks({ trx, dates = [] } = {}) {
   const locked = new Set();
-  if (!adminSlotOverlapGuardEnabled() || !trx) return locked;
+  if (!trx) return locked;
   const clean = (dates || []).filter(Boolean).map((d) => String(d).split('T')[0]);
   await acquireOccupancyLocks(trx, clean);
   for (const d of clean) locked.add(d);
   return locked;
 }
 
+// Statuses that do NOT occupy a slot for ADMIN overlap probes: the
+// rebooker's set (cancelled + completed) plus the two the edit path
+// classifies as terminal/non-occupying (skipped + no_show) — a skipped or
+// no-show future visit keeps its window on the row but has freed it on the
+// calendar (Codex #3443 P2). ONE copy here; routes/admin-schedule.js
+// imports it, and probeSlotOverlap defaults to it so a freed slot never
+// draws a false double-booking warning.
+const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+
+// One copy of the advisory-overlap warning every staff surface shows —
+// dates only, no customer data.
+function slotOverlapWarning(date) {
+  return `Heads up: this booking overlaps another appointment on the schedule${date ? ` on ${String(date).split('T')[0]}` : ''} — both are kept on the calendar.`;
+}
+
 /**
- * Gate-guarded overlap check for admin writes. Takes the date-wide occupancy
- * lock on `trx` first (rung 1 of occupancy.js's ORDERING CONTRACT — callers
- * must invoke this before any other lock in the transaction), then runs the
- * tech-blind findConflictingVisits probe. No-op when the gate is off.
- *
- * @throws 409 SLOT_CONFLICT { conflicts }
+ * Shared overlap probe for admin writes — unconditional (owner directive on
+ * PR #3486: it can only warn, never block, so there is nothing left to dark-
+ * ship behind a gate; the former GATE_ADMIN_SLOT_OVERLAP_GUARD is removed).
+ * Takes the date-wide occupancy lock on `trx` first (rung 1 of occupancy.js's
+ * ORDERING CONTRACT — callers must invoke this before any other lock in the
+ * transaction), then runs the tech-blind findConflictingVisits probe. A hit
+ * is ADVISORY: the conflicting rows are RETURNED for the caller to surface
+ * via slotOverlapWarning; nothing throws.
  */
-async function assertNoSlotOverlap({ trx, date, windowStart, windowEnd, excludeServiceIds = [] } = {}) {
-  if (!adminSlotOverlapGuardEnabled()) return [];
+async function probeSlotOverlap({
+  trx, date, windowStart, windowEnd, excludeServiceIds = [],
+  excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+} = {}) {
   if (!trx || !date || !windowStart || !windowEnd) return [];
   const dateStr = String(date).split('T')[0];
   await acquireOccupancyLock(trx, dateStr);
@@ -129,29 +145,25 @@ async function assertNoSlotOverlap({ trx, date, windowStart, windowEnd, excludeS
     windowStart,
     windowEnd,
     excludeServiceIds,
+    excludeStatuses,
   });
-  if (clash.length) {
-    throw httpError(409, 'That time slot overlaps another visit on the schedule', {
-      code: 'SLOT_CONFLICT',
-      conflicts: clash.map((row) => ({
-        id: row.id,
-        scheduled_date: row.scheduled_date,
-        window_start: row.window_start,
-        window_end: row.window_end,
-        status: row.status,
-        technician_id: row.technician_id || null,
-        service_type: row.service_type || null,
-      })),
-    });
-  }
-  return [];
+  return clash.map((row) => ({
+    id: row.id,
+    scheduled_date: row.scheduled_date,
+    window_start: row.window_start,
+    window_end: row.window_end,
+    status: row.status,
+    technician_id: row.technician_id || null,
+    service_type: row.service_type || null,
+  }));
 }
 
 module.exports = {
   assertAdminAppointmentWindow,
-  assertNoSlotOverlap,
+  probeSlotOverlap,
+  slotOverlapWarning,
   acquireAdminSlotLocks,
-  adminSlotOverlapGuardEnabled,
+  ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
   _internals: { parseHHMM, minutesToHHMM },

@@ -142,6 +142,28 @@ describe('reschedule — shared occupancy conflict gate', () => {
     ).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
   });
 
+  test('overlapAdvisory (staff dispatch): the same overlap COMMITS the move and returns a warning naming the date', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service());
+    findConflictingVisits.mockResolvedValue([{ id: 'svc-other', technician_id: null }]);
+
+    const result = await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
+    );
+    expect(result.success).toBe(true);
+    expect(result.warnings).toEqual([expect.stringContaining(TARGET)]);
+    expect(trxScheduled.update).toHaveBeenCalled();
+  });
+
+  test('overlapAdvisory with a clean slot carries no warnings key', async () => {
+    wireRescheduleMocks(service());
+
+    const result = await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
+    );
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeUndefined();
+  });
+
   test('clean occupancy lets a techless move commit, with the shared-module call shape', async () => {
     const { trx, trxScheduled } = wireRescheduleMocks(service());
 
@@ -437,6 +459,59 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     // The KEY invariant: the overlapping sibling is NEVER written — no
     // unassigned-but-overlapping row commits; the whole trx rolls back.
     expect(sibUpdate.update).not.toHaveBeenCalled();
+  });
+
+  test('overlapAdvisory (staff dispatch): the same sibling overlap COMMITS the series and returns a warning', async () => {
+    const anchor = {
+      id: 'svc-1', customer_id: 'cust-1', technician_id: null,
+      scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
+      status: 'confirmed',
+      recurring_parent_id: null, is_recurring: true, recurring_pattern: 'weekly',
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
+    };
+    const siblings = [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', technician_id: null },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: dayOffset(17), window_start: '09:00:00', window_end: '11:00:00', technician_id: 'tech-9' },
+    ];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const historyInsert = chain();
+    const logInsert = chain();
+
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return historyInsert;
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    // Anchor window is clear; the recomputed sibling lands on an occupied one.
+    findConflictingVisits
+      .mockResolvedValueOnce([])                     // anchor occupancy check
+      .mockResolvedValueOnce([{ id: 'other-job' }]); // sibling occupancy check
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
+    );
+    expect(result.success).toBe(true);
+    expect(result.warnings).toEqual([expect.stringMatching(/overlaps another appointment/)]);
+    // The overlapping sibling COMMITS (owner ruling — staff saves never
+    // block on conflicts); the operator gets the warning instead.
+    expect(sibUpdate.update).toHaveBeenCalled();
   });
 
   test('month-based series takes the date advisory locks BEFORE the parent row UPDATE', async () => {

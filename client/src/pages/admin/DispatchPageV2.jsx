@@ -404,7 +404,7 @@ function ServiceCardV2({
 
   async function saveEdit() {
     try {
-      await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           serviceType: editType,
@@ -414,6 +414,11 @@ function ServiceCardV2({
       service.serviceType = editType;
       service.estimatedDuration = parseInt(editDuration) || 30;
       setEditing(false);
+      // Advisory schedule-overlap notes — the save committed (conflicts no
+      // longer block admin edits); say what now stacks.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Saved.\n\n${result.warnings.join("\n\n")}`);
+      }
     } catch (e) {
       alert("Save failed: " + e.message);
     }

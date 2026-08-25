@@ -1773,7 +1773,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         ? `${created} of ${total} appointment series created. ${firstError.label} failed: ${firstError.message}.`
         : `Failed: ${firstError.message}`;
       const tail = created > 0 ? ' Click Save to retry the rest.' : '';
-      alert(lead + tail);
+      // Warnings from groups that DID commit must surface here too: those
+      // groups are recorded in createdGroupKeysRef and skipped on retry, so
+      // this partial-failure alert is their only chance to be seen (e.g. an
+      // advisory schedule-overlap note on an already-booked group).
+      const committedWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
+      alert(lead + tail + (committedWarnings.length ? `\n\n${committedWarnings.join('\n\n')}` : ''));
       return;
     }
     // Annual prepay on a manual booking: mint AFTER the series is committed,

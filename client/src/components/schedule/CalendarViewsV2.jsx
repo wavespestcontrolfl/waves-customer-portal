@@ -505,6 +505,11 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
       if (notifyCustomer && result?.notificationSent === false) {
         alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
       }
+      // Advisory schedule-overlap notes — the move committed (conflicts no
+      // longer block staff saves); say what now stacks.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Moved.\n\n${result.warnings.join('\n\n')}`);
+      }
       await reload();
       setPending(null);
     } catch (err) {
