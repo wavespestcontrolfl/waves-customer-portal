@@ -589,6 +589,7 @@ describe('ReschedulePage weather-move banner', () => {
       ['equipment_issue', /equipment trouble slowed us down, so we moved your pest control to a new window/],
       ['tech_emergency', /an emergency came up on our end, so we moved your pest control to a new window/],
       ['customer_noshow', /we missed you, so we moved your pest control to a new window/],
+      ['gate_locked', /we couldn't get through the gate, so we moved your pest control to a new window/],
     ];
     for (const [reasonCode, heading] of cases) {
       stubFetch({

@@ -278,6 +278,7 @@ const SCHEDULE_MOVE_LEADS = {
   equipment_issue: 'equipment trouble slowed us down',
   tech_emergency: 'an emergency came up on our end',
   customer_noshow: 'we missed you',
+  gate_locked: "we couldn't get through the gate",
   // Custom Quick Move: the dispatcher's specific reason lives only in the
   // SMS itself — the banner keeps a generic honest lead (the was/now rows
   // below carry the facts).

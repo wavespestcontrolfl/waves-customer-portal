@@ -970,7 +970,7 @@ describe('rain-out service', () => {
     };
 
     test('gate off: every extra reason is rejected before any reschedule (fail closed)', async () => {
-      for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+      for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow', 'gate_locked']) {
         wireSingle();
         const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode });
         expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
@@ -1012,6 +1012,78 @@ describe('rain-out service', () => {
       expect(result).toMatchObject({ ok: false, reason: 'noshow_route_scope' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: gate_locked REJECTS route scope — only the anchor property was inaccessible', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'gate_locked', scope: 'route' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'gate_route_scope' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on + banner gate: gate_locked texts the gate lead, the portal fix-it nudge, then the reschedule link', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'gate_locked' });
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.weather_lead).toBe("we couldn't get through your gate today");
+      // Portal nudge FIRST (scheme-stripped house style), reschedule link
+      // still closes the message — no weather claims anywhere.
+      expect(vars.link_clause).toBe(
+        ' Add gate access for next time: portal.wavespestcontrol.com.'
+        + ' New time & other options: https://waves.test/r/tok123',
+      );
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      // A locked gate is not a customer no-show — never feeds the
+      // missed-appointment outreach counter.
+      expect(MissedAppointment.evaluateThreshold).not.toHaveBeenCalled();
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'gate_locked' });
+    });
+
+    test('gate on, banner OFF (v2 rung): the portal nudge still rides, ahead of the reschedule clause', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'gate_locked' });
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.weather_lead).toBe("we couldn't get through your gate today");
+      expect(vars.alt_clause).toBe(
+        ' Add gate access for next time: portal.wavespestcontrol.com.'
+        + ' Need a different time? Reschedule online: https://waves.test/r/tok123',
+      );
+      expect(vars.forecast_clause).toBe('');
+      expect(vars.better_day_clause).toBe('');
+    });
+
+    test('gate_locked v3 render with the portal nudge stays GSM-7 and fits the 2-segment design budget', () => {
+      const { BODY } = require('../models/migrations/20260730600000_rain_out_moved_v3_template')._test;
+      const { GATE_ACCESS_CLAUSE } = RainOut._test;
+      const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
+      expect(detectEncoding(GATE_ACCESS_CLAUSE).encoding).toBe('GSM_7');
+      // Same representative vars as the v3 budget test above — the nudge
+      // plus the non-weather link clause must not push a typical send to a
+      // third segment (codex pre-push P1 on the first draft of this copy).
+      const rendered = BODY
+        .replace('{first_name}', 'Riley')
+        .replace('{weather_lead}', "we couldn't get through your gate today")
+        .replace('{service_type}', 'quarterly pest control')
+        .replace('{new_option}', 'Sun, Aug 2, 9:00 AM - 11:00 AM')
+        .replace('{link_clause}', `${GATE_ACCESS_CLAUSE} New time & other options: https://wavespestcontrol.com/l/t42w2x`);
+      expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+      expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
     });
 
     test('gate on: running_late rejects same-day targets at/before the current window, allows later + day moves', async () => {
@@ -1118,6 +1190,8 @@ describe('rain-out service', () => {
         .toBe('an emergency came up on our end');
       expect(lead({ reasonCode: 'customer_noshow', isSameDay: true, hour: 16 }))
         .toBe('we missed you today');
+      expect(lead({ reasonCode: 'gate_locked', isSameDay: true, hour: 9, todayChance: 85 }))
+        .toBe("we couldn't get through your gate today");
     });
 
     test('isValidReason: weather codes always, extra reasons only behind the gate', () => {

@@ -55,7 +55,21 @@ const EXTRA_REASON_LEADS = {
   equipment_issue: 'we had equipment trouble today',
   tech_emergency: 'an emergency came up on our end',
   customer_noshow: 'we missed you today',
+  gate_locked: "we couldn't get through your gate today",
 };
+// gate_locked reuses the reason_code vocabulary the reschedule_log schema
+// and the admin Schedule page's manual-reschedule dropdown already carry —
+// one code for "couldn't get in", whichever surface moved the visit.
+// Like customer_noshow it is about THIS property only (route scope would
+// text "your gate" to strangers), so commit() rejects route scope.
+// The moved-SMS closes with this fix-it nudge ahead of the reschedule
+// link on EVERY rung (v3 link_clause, v2 alt_clause): the portal's My
+// Property section stores gate/access codes (property.js prefs), so the
+// customer can solve next time's visit themselves. GSM-7 only, portal
+// link scheme-stripped per house SMS style, and SHORT on purpose — a
+// representative v3 render must stay inside the template's 2-segment
+// design budget (regression-tested against the real template body).
+const GATE_ACCESS_CLAUSE = ' Add gate access for next time: portal.wavespestcontrol.com.';
 function extraReasonsEnabled() {
   return process.env.GATE_QUICKMOVE_EXTRA_REASONS === 'true';
 }
@@ -1201,9 +1215,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   const { url: rescheduleUrl } = prebuiltCustomSms
     ? { url: prebuiltCustomSms.url }
     : await buildRescheduleLink(serviceId, { customerId: customer.id });
-  const altClause = rescheduleUrl
+  // gate_locked carries the portal fix-it nudge ahead of the reschedule
+  // clause on whichever rung renders — the customer must hear how to fix
+  // next time's access even when v3 is absent and v2 falls in.
+  const gateAccessClause = reasonCode === 'gate_locked' ? GATE_ACCESS_CLAUSE : '';
+  const altClause = gateAccessClause + (rescheduleUrl
     ? ` Need a different time? Reschedule online: ${rescheduleUrl}`
-    : ' Need a different time? Reply to this message.';
+    : ' Need a different time? Reply to this message.');
   // Stamped service-address coordinates/zip beat the customer profile —
   // same precedence as track-transitions and gps-arrival-detector — so a
   // rain-out at a secondary property quotes THAT address's forecast.
@@ -1321,11 +1339,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       weather_lead: weatherLead,
       // "forecast" only when the page's banner will actually show one —
       // a non-weather move renders the banner without weather chips.
-      link_clause: rescheduleUrl
+      // gate_locked leads with the portal fix-it nudge so the reschedule
+      // link still closes the message (owner ask 2026-08-25).
+      link_clause: gateAccessClause + (rescheduleUrl
         ? (isExtraReason(reasonCode)
           ? ` New time & other options: ${rescheduleUrl}`
           : ` New time, forecast & other options: ${rescheduleUrl}`)
-        : ' Need a different time? Reply to this message.',
+        : ' Need a different time? Reply to this message.'),
     }, renderContext);
     if (body) {
       renderedKey = 'rain_out_moved_v3';
@@ -1432,7 +1452,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  * @param {string} args.technicianId    acting tech (route scope filter)
  * @param {string} args.reasonCode      weather_rain | weather_wind | weather_lightning | weather_heat
  *                                       | running_late | equipment_issue | tech_emergency
- *                                       | customer_noshow (extra reasons need GATE_QUICKMOVE_EXTRA_REASONS)
+ *                                       | customer_noshow | gate_locked (extra reasons need
+ *                                       GATE_QUICKMOVE_EXTRA_REASONS; customer_noshow and
+ *                                       gate_locked are single stop only)
  *                                       | custom (needs GATE_QUICKMOVE_CUSTOM_REASON; single stop
  *                                       only; customerNote becomes the SMS's opening line and is
  *                                       required when notifying; assembled SMS capped at 2 segments)
@@ -1507,6 +1529,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // scope toggle for this reason; the server is the enforcer.
   if (reasonCode === 'customer_noshow' && scope === 'route') {
     return { ok: false, reason: 'noshow_route_scope' };
+  }
+  // Same one-customer logic for a locked gate: the SMS says "your gate",
+  // and only the anchor stop's property was inaccessible. The sheets hide
+  // the scope toggle for this reason; the server is the enforcer.
+  if (reasonCode === 'gate_locked' && scope === 'route') {
+    return { ok: false, reason: 'gate_route_scope' };
   }
   // Custom reason: the dispatcher's message is the SMS's opening line, so
   // it's as stop-specific as the note (route scope would fan one customer's
@@ -1931,7 +1959,7 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
-    EXTRA_REASON_LEADS, isValidReason, sanitizeCustomerNote,
+    EXTRA_REASON_LEADS, GATE_ACCESS_CLAUSE, isValidReason, sanitizeCustomerNote,
     CUSTOM_REASON, CUSTOM_TEMPLATE_KEY, customLinkClause, renderCustomMovedBody,
     conflictsForTarget,
   },

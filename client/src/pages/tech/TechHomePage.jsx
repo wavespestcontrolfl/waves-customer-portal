@@ -1210,12 +1210,17 @@ const EXTRA_REASONS = [
   { code: 'equipment_issue', label: 'Equipment trouble' },
   { code: 'tech_emergency', label: 'Emergency' },
   { code: 'customer_noshow', label: 'No-show' },
+  // Single stop only, like No-show (server enforces gate_route_scope);
+  // the SMS adds a portal nudge so the customer can put gate access on
+  // file, then the reschedule link.
+  { code: 'gate_locked', label: "Can't access gate" },
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 
 // Friendly copy for the server's structured rejections.
 const EXTRA_REASON_ERROR_COPY = {
   noshow_route_scope: 'No-show moves apply to this stop only.',
+  gate_route_scope: 'Gate-access moves apply to this stop only.',
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
 };
 
@@ -1310,7 +1315,7 @@ function RainOutSheet({ service, onClose, onDone }) {
   // scope); running late may hide the highlighted same-day preset.
   const pickReason = (code) => {
     setReason(code);
-    if (code === 'customer_noshow') setScope('job');
+    if (code === 'customer_noshow' || code === 'gate_locked') setScope('job');
     if (selectedKey) {
       const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
       if (!stillVisible) {
@@ -1478,7 +1483,7 @@ function RainOutSheet({ service, onClose, onDone }) {
               </div>
             )}
 
-            {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && (
+            {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && (
               <>
                 <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
