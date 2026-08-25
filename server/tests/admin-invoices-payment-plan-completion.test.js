@@ -114,7 +114,9 @@ describe('active payment plans auto-complete when the invoice settles', () => {
 
     const paidRow = { ...INVOICE, status: 'paid' };
     trxInvoices = makeRecorder({
-      first: jest.fn(async () => ({ ...INVOICE })),
+      // first('status') = completeActivePlansForInvoice's FOR UPDATE
+      // settlement re-check — the same trx already flipped the row paid.
+      first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'paid' } : { ...INVOICE })),
       update: jest.fn(() => ({ returning: jest.fn(async () => [paidRow]) })),
     });
     trxPayments = makeRecorder();

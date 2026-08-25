@@ -821,11 +821,19 @@ function InvoiceList({
       return;
     setCancellingPlanInvoiceId(id);
     try {
-      await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
+      const res = await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
         method: "POST",
         body: JSON.stringify({ paymentPlanId: planId }),
       });
-      showToast("Payment plan cancelled");
+      // Settlement can win the cancel race — the server then COMPLETES the
+      // plan instead. Surface what actually happened; a "cancelled" toast
+      // would misrepresent the collection state.
+      showToast(
+        res?.completedInsteadOfCancelled
+          ? res.message ||
+              "Invoice settled while cancelling — the plan was completed, not cancelled"
+          : "Payment plan cancelled",
+      );
       load();
       onRefresh();
     } catch (err) {

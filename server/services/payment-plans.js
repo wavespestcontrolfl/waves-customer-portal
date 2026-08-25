@@ -29,6 +29,16 @@ async function completeActivePlansForInvoice(invoiceId, conn = db) {
 
 async function completeActivePlansLocked(invoiceId, conn) {
   const now = new Date();
+  // LOCK the invoice row first (codex PR r6 P1): the EXISTS gates below are
+  // non-locking reads, and under READ COMMITTED a dispute reopen could
+  // commit 'overdue' between the plan flip's snapshot and the sequence
+  // release's snapshot — completing the plan while leaving its sequence
+  // stopped, unrepairable (no active plan left to flip). FOR UPDATE
+  // serializes this whole transition against the reopen's own row write:
+  // either we complete both legs from a settled invoice before the reopen
+  // commits, or we see the reopened status and touch nothing.
+  const invoice = await conn('invoices').where({ id: invoiceId }).forUpdate().first('status');
+  if (!invoice || !['paid', 'prepaid'].includes(String(invoice.status || ''))) return 0;
   // Settlement is re-verified IN the update statement (codex PR r4 P2): a
   // delayed post-commit caller can run after a dispute reopened the invoice
   // and an admin created a REPLACEMENT plan — completing that plan (and its

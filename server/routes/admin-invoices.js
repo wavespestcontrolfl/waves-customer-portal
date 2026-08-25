@@ -291,8 +291,15 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
  * the caller arms one post-commit via scheduleForInvoice.
  */
 async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
+  // FOR UPDATE (codex PR r6 P2): pauseSequence/stopSequence write this row
+  // without taking the invoice lock, so a non-locking read here could
+  // observe the plan-owned state, lose the race to a concurrent admin
+  // pause/stop, and then resumeSequence would steamroll that fresh control
+  // back to 'active'. Locking the row serializes: their write either
+  // committed first (we see and honor it) or waits until this trx commits.
   const seq = await trx('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
+    .forUpdate()
     .first('id', 'status', 'stopped_reason', 'paused_reason', 'is_autopay_held');
   if (!seq) return 'schedule';
   const planOwned = seq.stopped_reason === paymentPlanFollowupStopReason(planId)
@@ -313,6 +320,22 @@ async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
       updated_at: new Date(),
     });
     return 'held';
+  }
+  // A pre-plan ADMIN pause survives the plan (codex PR r6 P1): the plan
+  // stop restamped the row 'stopped' but kept its paused_reason/paused_until
+  // memo. Restore the PAUSE instead of activating the cadence — the admin's
+  // hold still applies to the reopened invoice, and its own expiry/release
+  // paths decide when reminders resume. ('payment_plan_created' as
+  // paused_reason is the legacy PLAN pause shape, not an admin hold.)
+  if (seq.paused_reason && seq.paused_reason !== 'payment_plan_created') {
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      status: 'paused',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+      updated_at: new Date(),
+    });
+    return 'restored_pause';
   }
   const FollowUpsSvc = require('../services/invoice-followups');
   await FollowUpsSvc.resumeSequence(invoiceId, trx);
