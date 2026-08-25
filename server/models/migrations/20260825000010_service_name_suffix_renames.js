@@ -344,13 +344,13 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
   if (snapshotVisitIds.length && (await knex.schema.hasTable('appointment_reminders'))) {
     const linked = await knex('appointment_reminders')
       .whereIn('scheduled_service_id', snapshotVisitIds)
-      .select('id', 'service_type', 'customer_id', 'appointment_time');
+      .select('id', 'service_type', 'customer_id', 'appointment_time', 'scheduled_service_id');
     const targets = new Map(linked.map((r) => [r.id, r]));
     for (const rem of linked) {
       if (rem.customer_id == null || rem.appointment_time == null) continue;
       const siblings = await knex('appointment_reminders')
         .where({ customer_id: rem.customer_id, appointment_time: rem.appointment_time })
-        .select('id', 'service_type', 'customer_id', 'appointment_time');
+        .select('id', 'service_type', 'customer_id', 'appointment_time', 'scheduled_service_id');
       for (const sib of siblings) {
         if (!targets.has(sib.id)) targets.set(sib.id, sib);
       }
@@ -361,7 +361,15 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       const count = await knex('appointment_reminders')
         .where({ id: rem.id, service_type: rem.service_type })
         .update({ service_type: next, updated_at: knex.fn.now() });
-      if (count) rec.reminders[rem.id] = { prior: rem.service_type, written: next };
+      // The linked visit rides in the record so down() can honor the
+      // completed-history invariant for reminders too (codex #3484 P2).
+      if (count) {
+        rec.reminders[rem.id] = {
+          prior: rem.service_type,
+          written: next,
+          scheduled_service_id: rem.scheduled_service_id || null,
+        };
+      }
     }
   }
 
@@ -599,8 +607,17 @@ exports.down = async function down(knex) {
 
     const reminderRecs = rec.reminders && typeof rec.reminders === 'object' ? rec.reminders : {};
     if (Object.keys(reminderRecs).length && (await knex.schema.hasTable('appointment_reminders'))) {
+      // Completed-history invariant applies to reminders too (codex #3484
+      // P2): a reminder whose linked visit completed since up() keeps the
+      // new label in agreement with the visit/invoice/add-on snapshots.
+      const reminderTerminal = await terminalVisitIdSet(
+        [...new Set(Object.values(reminderRecs)
+          .map((r) => r && r.scheduled_service_id)
+          .filter(Boolean))]
+      );
       for (const [id, r] of Object.entries(reminderRecs)) {
         if (!r || typeof r.written !== 'string' || typeof r.prior !== 'string') continue;
+        if (r.scheduled_service_id && reminderTerminal.has(r.scheduled_service_id)) continue;
         await knex('appointment_reminders')
           .where({ id, service_type: r.written })
           .update({ service_type: r.prior, updated_at: knex.fn.now() });
