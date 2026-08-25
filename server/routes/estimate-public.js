@@ -567,7 +567,11 @@ function classifyServiceFamilyText(text) {
   // accept adopt a liquid-trenching visit. Mirror
   // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
   // stays the seeder's foam_recurring family (delegated below).
-  const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
+  // The optional "termite" token covers the 2026-08-25 renamed label
+  // ("Recurring Termite Foam Service") — without it a relabeled legacy
+  // visit (null service_id) would classify as one-time termite_foam and
+  // the accept would duplicate the existing foam appointment (codex P1).
+  const isRecurringFoam = /foam\s*recurring|recurring\s*(?:termite\s*)?foam/.test(raw);
   if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
   // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
   // generic termite branch buckets liquid / trenching WITH the bait

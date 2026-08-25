@@ -19,9 +19,9 @@ const SERVICE_TYPE_MAP = [
   { match: /general\s*pest/i,                               type: 'General Pest Control' },
   { match: /pest\s*control.*service/i,                      type: 'Pest Control Service' },
   { match: /pest\s*control/i,                               type: 'Pest Control' },
-  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment' },
+  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment Service' },
   { match: /german\s*roach/i,                               type: 'German Roach Treatment' },
-  { match: /bed\s*bug/i,                                    type: 'Bed Bug Treatment' },
+  { match: /bed\s*bug/i,                                    type: 'Bed Bug Treatment Service' },
   { match: /ant\s*(control|treatment|extermination)/i,      type: 'Ant Treatment' },
   { match: /flea.*tick|tick.*flea/i,                        type: 'Flea & Tick Treatment' },
   { match: /stinging|wasp|hornet|yellow\s*jacket/i,         type: 'Stinging Insect Removal' },
@@ -101,6 +101,16 @@ function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
   const cleaned = stripServiceSuffixes(raw);
+
+  // Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
+  // entry: collapsing them would drop the cadence the schedule shows
+  // ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
+  // renamed forms carry a termite token that would otherwise collapse to
+  // the generic "Termite Service" (codex #3484 P2). Same token family as
+  // detectServiceCategory's foamTermiteToken, plus the renamed forms.
+  if (/foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i.test(cleaned)) {
+    return cleaned;
+  }
 
   // Match against known patterns
   for (const mapping of SERVICE_TYPE_MAP) {
