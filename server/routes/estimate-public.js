@@ -3425,7 +3425,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond', 'termite_station_rental']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const rawKey = recurringServiceKey(item);
@@ -3439,6 +3439,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         ? `termite_bond_${item.bondTerm}`
         : rawKey;
       const isBondLine = rawKey === 'termite_bond';
+      // The rental rider gets the bond's hard-coded posture (GH codex #3481
+      // r1 P1 — raw agent/engine drafts otherwise never surfaced the rental
+      // to the section/rider path at all): never tier-counting, never
+      // bundle-%-discountable. The raw engine line only carries
+      // discountable:false, so the generic !== false defaults below would
+      // tier-count it.
+      const isRentalLine = rawKey === 'termite_station_rental';
       const annual = key === 'lawn_care'
         ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
         : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
@@ -3484,9 +3491,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         // Bond riders are hard-coded out of tier counting and the bundle %
         // discount — the raw engine line only carries discountable:false, so
         // the generic !== false defaults below would tier-count it.
-        waveGuardDiscountEligible: isBondLine ? false : recurringServiceReceivesTierDiscount(item),
-        waveGuardTierEligible: isBondLine ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
-        countsTowardWaveGuardTier: isBondLine ? false : (item.countsTowardWaveGuardTier !== false),
+        waveGuardDiscountEligible: (isBondLine || isRentalLine) ? false : recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: (isBondLine || isRentalLine) ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
+        countsTowardWaveGuardTier: (isBondLine || isRentalLine) ? false : (item.countsTowardWaveGuardTier !== false),
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
@@ -18206,6 +18213,16 @@ function attachTermiteStationRental(services = [], estData = {}) {
     || (services || []).find((s) => s?.key === 'bundle'
       && Array.isArray(s.memberKeys) && s.memberKeys.includes('termite_bait'));
   if (!section) return services;
+  // A legacy bundle ladder can itemize the rental as a treatment row —
+  // PriceCard already renders those, so stamping the rider too would show
+  // the price twice (GH codex #3481 r1 P2). The itemized row IS the
+  // disclosure there; the stamp is only for layouts that suppressed it.
+  if (section.key === 'bundle'
+    && (section.frequencies || []).some((frequency) => (frequency?.perServiceTreatments || [])
+      .some((row) => recurringServiceKey(row) === 'termite_station_rental'
+        && firstPositiveNumber(row.perTreatment, row.displayPrice)))) {
+    return services;
+  }
   const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
   const rentalRow = rows.find((svc) => recurringServiceKey(svc) === 'termite_station_rental') || null;
   if (!rentalRow) return services;

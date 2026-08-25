@@ -593,6 +593,56 @@ describe('estimate sections treat the rental as a rider, never its own card', ()
     expect(sections[0].frequencies).toEqual([]);
   });
 
+  test('raw engine drafts ({engineResult.lineItems}) reach the rider path too (GH codex r1 P1)', () => {
+    const rawEstData = {
+      engineResult: {
+        lineItems: [
+          { service: 'termite_bait', name: 'Termite Bait', monthly: 26.1, annual: 313.2, perApp: 78.3, visitsPerYear: 4 },
+          { service: 'termite_station_rental', name: 'Termite Station Rental', monthly: 11, annual: 132, perApp: 33, visitsPerYear: 4, retailValue: 660, retainedOwnership: true, discountable: false },
+        ],
+      },
+    };
+    const sections = buildPricingServices({ frequencies: [] }, {}, rawEstData);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].key).toBe('termite_bait');
+    attachTermiteStationRental(sections, rawEstData);
+    expect(sections[0].stationRental).toMatchObject({ perApplicationAdd: 33, monthlyAdd: 11 });
+    expect(sections[0].frequencies[0].perTreatment).toBeCloseTo(111.3, 2);
+    // The raw-mapped rental row must keep the bond's posture: never
+    // tier-counting, never bundle-%-discountable.
+    const { recurringServicesWithSupplements } = require('../routes/estimate-public');
+    const rentalMapped = recurringServicesWithSupplements(rawEstData.engineResult)
+      .find((svc) => svc.service === 'termite_station_rental');
+    expect(rentalMapped).toMatchObject({
+      countsTowardWaveGuardTier: false,
+      waveGuardTierEligible: false,
+      waveGuardDiscountEligible: false,
+    });
+  });
+
+  test('a bundle ladder that already itemizes the rental is NOT stamped (GH codex r1 P2)', () => {
+    // Mismatched monthly (999) fails split reconciliation → bundle fallback,
+    // but the kept ladder itemizes the rental — PriceCard renders that row,
+    // so the rider stamp would show the price twice.
+    const itemizedLadder = {
+      frequencies: [{
+        key: 'quarterly',
+        label: 'Quarterly',
+        monthly: 999,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Pest Control', perTreatment: 100.02, displayPrice: 100.02, visitsPerYear: 4, monthly: 33.34 },
+          { service: 'termite_bait', label: 'Termite Bait', perTreatment: 78.3, displayPrice: 78.3, visitsPerYear: 4, monthly: 26.1 },
+          { service: 'termite_station_rental', label: 'Termite Station Rental', perTreatment: 33, displayPrice: 33, visitsPerYear: 4, monthly: 11 },
+        ],
+      }],
+    };
+    const sections = buildPricingServices(itemizedLadder, {}, multiEstData);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].key).toBe('bundle');
+    attachTermiteStationRental(sections, multiEstData);
+    expect(sections[0].stationRental).toBeUndefined();
+  });
+
   test('a rental row with no monitoring plan keeps its own section (fail-safe, never vanishes)', () => {
     const estData = { result: { recurring: { services: [rentalRow] } } };
     const sections = buildPricingServices({ frequencies: [] }, {}, estData);
