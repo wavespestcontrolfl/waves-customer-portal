@@ -173,4 +173,51 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
   }
 }
 
-module.exports = { findLikelyReviewers, describeClickOffset };
+// ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK) ────────────────────────
+//
+// The suggestion list above tolerates ambiguity because a person reads it.
+// Auto-linking tolerates none: a wrong link suppresses that customer's future
+// review asks and can enroll them in a thank-you sequence. So the bar is
+// deliberately higher than "nearest click":
+//   - EXACTLY ONE candidate customer in the whole correlation window (a
+//     second clicker anywhere in the 72h window — even location-unstamped —
+//     means a human decides);
+//   - the click's stamped GBP location MATCHES the review's (null = legacy
+//     unstamped click = not confident);
+//   - the click landed BEFORE the review, within a tight window (people tap
+//     the link, then write — prod evidence: 2min and ~3h gaps).
+const AUTO_LINK_MAX_BEFORE_MS = 12 * 3600 * 1000;
+
+/**
+ * Decide whether click evidence alone is strong enough to link an unlinked
+ * Google review to a customer with no human in the loop.
+ *
+ * @param {{review_created_at?: string|Date, location_id?: string}} review
+ * @param {{conn?: object}} [options]
+ * @returns {Promise<{customerId: string, clickedAt: string, clickOffsetMs: number, clickOffsetLabel: string}|null>}
+ *   null on any ambiguity or error — auto-link must fail toward the manual
+ *   queue, never toward a guess.
+ */
+async function findConfidentClickMatch(review, { conn = db } = {}) {
+  try {
+    // SCAN_LIMIT bounds the underlying query; a limit above it returns every
+    // deduped candidate, which the sole-candidate check needs.
+    const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT });
+    if (candidates.length !== 1) return null;
+    const only = candidates[0];
+    if (only.locationMatch !== true) return null;
+    if (!only.clickedBeforeReview) return null;
+    if (only.clickOffsetMs > AUTO_LINK_MAX_BEFORE_MS) return null;
+    return {
+      customerId: only.customerId,
+      clickedAt: only.clickedAt,
+      clickOffsetMs: only.clickOffsetMs,
+      clickOffsetLabel: only.clickOffsetLabel,
+    };
+  } catch (err) {
+    logger.warn(`[review-click-correlation] confident-match lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset };

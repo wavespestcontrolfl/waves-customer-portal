@@ -428,15 +428,34 @@ class GoogleBusinessService {
       .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
       .select('id')
       .limit(2);
-    if (matches.length !== 1) {
-      if (matches.length > 1) {
-        // ID-less log — reviewer names are PII (AGENTS.md); the name rides in
-        // the unlinked-review admin notification, not the plaintext log.
-        logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
-      }
+    if (matches.length === 1) return matches[0].id;
+    if (matches.length > 1) {
+      // ID-less log — reviewer names are PII (AGENTS.md); the name rides in
+      // the unlinked-review admin notification, not the plaintext log.
+      logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
       return null;
     }
-    return matches[0].id;
+
+    // TIER 3 — surname initial. Google truncates many display names to
+    // "Michael F." — Tier 2's exact-last-name arm can never match those. A
+    // single-LETTER final token is treated as an initial: first name exact,
+    // last name starting with that letter, still unambiguous-only. Only
+    // fires when Tiers 1-2 found nothing, so a full-surname match always
+    // outranks an initial expansion.
+    if (lastToken.length === 1 && /^[a-z]$/i.test(lastToken)) {
+      const initialMatches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
+        .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) LIKE LOWER(?)", [`${lastToken}%`])
+        .whereRaw("TRIM(COALESCE(last_name, '')) != ''")
+        .select('id')
+        .limit(2);
+      if (initialMatches.length === 1) return initialMatches[0].id;
+      if (initialMatches.length > 1) {
+        logger.info('[gbp] Reviewer surname initial matched multiple active customers — routing to manual match, no auto-mark');
+      }
+    }
+    return null;
   }
 
   /**
@@ -534,6 +553,112 @@ class GoogleBusinessService {
       logger.info(`[gbp] Unlinked review (${row.google_review_id || 'unknown id'}) at ${locName} — admin notified`);
     } catch (err) {
       logger.warn(`[gbp] Unlinked-review notify failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * GATE_REVIEW_CLICK_AUTOLINK: link an unlinked review to the ONE customer
+   * whose tracked review-link click confidently explains it (sole clicker in
+   * the correlation window, location match, tight before-window — see
+   * findConfidentClickMatch). Runs from the deferred end-of-batch phase so
+   * the sole-clicker exclusion sees the whole batch's links, and re-reads
+   * the live row so a manual match landed mid-sync always wins.
+   *
+   * @param {{google_review_id?: string, reviewer_name?: string, location_id?: string, review_created_at?: string}} row
+   * @returns {Promise<boolean>} true when linked (caller skips the
+   *   unlinked-review notification); false on gate-off, ambiguity, a lost
+   *   race, or any error — failure routes to the manual queue, never a guess.
+   */
+  async _attemptClickAutoLink(row) {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('reviewClickAutoLink')) return false;
+      if (!row?.google_review_id) return false;
+      const { findConfidentClickMatch } = require('./review-click-correlation');
+      const match = await findConfidentClickMatch(row);
+      if (!match) return false;
+      // The collector entry is a detached payload — re-read the live row.
+      const live = await db('google_reviews')
+        .where({ google_review_id: row.google_review_id })
+        .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+      if (!live || live.missing_since) return false;
+      // Linked since insert (manual match mid-sync): nothing to do, and a
+      // "come match this" bell for an already-matched review is pure noise —
+      // report handled so the caller skips the unlinked notification.
+      if (live.customer_id) return true;
+      // whereNull guard: a manual match between the read above and this
+      // write must not be overwritten — zero rows updated = lost race, and
+      // the winner's link stands (handled, same as above).
+      const updated = await db('google_reviews')
+        .where({ id: live.id })
+        .whereNull('customer_id')
+        .update({ customer_id: match.customerId, link_source: 'click_auto' });
+      if (!updated) return true;
+      await this._markCustomerLeftReview(match.customerId);
+      // Same attribution side effect as the name-match and manual paths —
+      // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
+      const { enrollReviewThankYou } = require('./automation-enroll');
+      await enrollReviewThankYou({
+        customerId: match.customerId,
+        locationId: live.location_id,
+        starRating: live.star_rating,
+        source: 'google_review_click_autolink',
+      });
+      // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
+      // match is one glance + one manual re-match away, not silent.
+      try {
+        const stars = Number(live.star_rating) || 0;
+        await NotificationService.notifyAdmin(
+          'review',
+          `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
+          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (only click in the window, same location). Wrong match? Re-match it in Reviews.`,
+          {
+            link: '/admin/reviews',
+            metadata: {
+              googleReviewId: row.google_review_id,
+              customerId: match.customerId,
+              clickedAt: match.clickedAt,
+              clickOffsetLabel: match.clickOffsetLabel,
+              reason: 'click_auto_link',
+            },
+          },
+        );
+      } catch { /* best-effort — the link itself already stands */ }
+      // ID-only logging (AGENTS.md) — reviewer display names are PII.
+      logger.info(`[gbp] Click auto-link: review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
+      return true;
+    } catch (err) {
+      logger.warn(`[gbp] Click auto-link failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Retry the confident click auto-link over reviews that synced in unlinked
+   * on EARLIER runs — a click stamped after a review's first sync (rate-page
+   * fallback, delayed tap) can turn a parked review decidable later. Runs at
+   * the end of each batch sync; idempotent (linked rows drop out of the
+   * unlinked set), capped, and per-row failures never break the sync.
+   */
+  async _retryUnlinkedReviewAutoLink() {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('reviewClickAutoLink')) return;
+      const rows = await db('google_reviews')
+        .whereNull('customer_id')
+        .whereNull('missing_since')
+        .whereNotNull('google_review_id')
+        .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
+        .whereNot('google_review_id', 'like', 'places_stats_%')
+        .where('review_created_at', '>=', new Date(Date.now() - 90 * 24 * 3600 * 1000))
+        .orderBy('review_created_at', 'desc')
+        .limit(25)
+        .select('google_review_id', 'reviewer_name', 'location_id', 'review_created_at', 'star_rating');
+      for (const row of rows) {
+        await this._attemptClickAutoLink(row);
+      }
+    } catch (err) {
+      logger.warn(`[gbp] Unlinked-review auto-link retry failed: ${err.message}`);
     }
   }
 
@@ -687,7 +812,7 @@ class GoogleBusinessService {
       // (codex #3264 r2).
       if (Array.isArray(pendingUnlinkedNotifications)) {
         pendingUnlinkedNotifications.push(row);
-      } else {
+      } else if (!(await this._attemptClickAutoLink(row))) {
         await this._notifyUnlinkedReview(row);
       }
     }
@@ -898,7 +1023,7 @@ class GoogleBusinessService {
         };
         if (Array.isArray(pendingUnlinkedNotifications)) {
           pendingUnlinkedNotifications.push(notifyRow);
-        } else {
+        } else if (!(await this._attemptClickAutoLink(notifyRow))) {
           await this._notifyUnlinkedReview(notifyRow);
         }
       }
@@ -1036,11 +1161,16 @@ class GoogleBusinessService {
     }
 
     // Whole batch is now inserted/linked — safe to run the likely-reviewer
-    // lookup inside each deferred notification. _notifyUnlinkedReview
-    // self-catches, so one failure can't drop the rest.
+    // lookup inside each deferred notification. Confident click evidence
+    // links the review outright (gated) instead of parking it in the manual
+    // queue; both helpers self-catch, so one failure can't drop the rest.
     for (const row of pendingUnlinked) {
-      await this._notifyUnlinkedReview(row);
+      const autoLinked = await this._attemptClickAutoLink(row);
+      if (!autoLinked) await this._notifyUnlinkedReview(row);
     }
+    // Clicks stamped after a review's first sync can turn an already-parked
+    // review decidable — sweep the recent unlinked set each run (gated).
+    await this._retryUnlinkedReviewAutoLink();
 
     await this._resolveGbpResourceNames();
     try {

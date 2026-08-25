@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { findLikelyReviewers, describeClickOffset } = require('../services/review-click-correlation');
+const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset } = require('../services/review-click-correlation');
 
 const REVIEW_AT = '2026-08-07T18:00:00.000Z';
 
@@ -166,5 +166,62 @@ describe('findLikelyReviewers', () => {
     const result = await findLikelyReviewers({ review_created_at: REVIEW_AT }, { conn });
     expect(result).toEqual([]);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('findConfidentClickMatch', () => {
+  const REVIEW = { review_created_at: REVIEW_AT, location_id: 'bradenton' };
+
+  test('matches a sole location-stamped clicker shortly before the review', async () => {
+    const conn = makeConn({ clickRows: [clickRow()] }); // 30m before, bradenton
+    const match = await findConfidentClickMatch(REVIEW, { conn });
+    expect(match).toEqual({
+      customerId: 'cust-1',
+      clickedAt: '2026-08-07T17:30:00.000Z',
+      clickOffsetMs: 30 * 60000,
+      clickOffsetLabel: '30m before',
+    });
+  });
+
+  test('refuses when a second customer clicked anywhere in the window — even location-unstamped', async () => {
+    const conn = makeConn({
+      clickRows: [
+        clickRow(),
+        clickRow({ customer_id: 'cust-2', google_location: null, redirected_at: '2026-08-05T12:00:00.000Z' }),
+      ],
+    });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses a location-unstamped sole clicker (null is not a match)', async () => {
+    const conn = makeConn({ clickRows: [clickRow({ google_location: null })] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses when the review carries no location to corroborate against', async () => {
+    // locationMatch is null without a review location_id — never confident.
+    const conn = makeConn({ clickRows: [clickRow()] });
+    expect(await findConfidentClickMatch({ review_created_at: REVIEW_AT }, { conn })).toBeNull();
+  });
+
+  test('refuses a click AFTER the review posted', async () => {
+    const conn = makeConn({ clickRows: [clickRow({ redirected_at: '2026-08-07T19:00:00.000Z' })] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses a click more than 12h before the review', async () => {
+    const conn = makeConn({ clickRows: [clickRow({ redirected_at: '2026-08-07T05:00:00.000Z' })] }); // 13h before
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('accepts a click just inside the 12h bound', async () => {
+    const conn = makeConn({ clickRows: [clickRow({ redirected_at: '2026-08-07T06:30:00.000Z' })] }); // 11h30m before
+    const match = await findConfidentClickMatch(REVIEW, { conn });
+    expect(match?.customerId).toBe('cust-1');
+  });
+
+  test('fails toward the manual queue (null) on query error', async () => {
+    const conn = makeConn({ failClicks: true });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 });
