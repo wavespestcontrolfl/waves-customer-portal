@@ -611,6 +611,32 @@ describe('planCadenceRewriteTargets — cadence edits stay future-only and clear
     for (const d of boosterTargets.values()) expect(d > TODAY).toBe(true);
   });
 
+  test('P2: a stale booster never consumes a recomputed FUTURE target — a missed historical visit is not resurrected', () => {
+    // planBase fast-forwards to the current phase, so the recomputed walk
+    // emits future candidates; the oldest pending booster being PAST-dated
+    // must not receive one (that re-dates a missed visit into the future and
+    // resets its lifecycle/reminder). The future booster still gets a target.
+    const allMonths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [
+        { id: 'b-stale', scheduled_date: daysOut(-20) },
+        { id: 'b-future', scheduled_date: daysOut(30) },
+      ],
+      boosterMonths: allMonths,
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(boosterTargets.has('b-stale')).toBe(false);
+    expect(boosterTargets.has('b-future')).toBe(true);
+    expect(boosterTargets.get('b-future') > TODAY).toBe(true);
+  });
+
   test('P2: a stale fallback booster is skipped, never nudged from one past date to another', () => {
     // No booster_months on the plan → every pending booster takes the
     // fallback branch (its own date + shift/nudge). A STALE booster whose

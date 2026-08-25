@@ -689,6 +689,16 @@ function planCadenceRewriteTargets({
     let recomputedTargetIndex = 0;
     if (boosterMonths.length > 0) {
       for (const rawDate of computeBoosterDates(planBase, boosterMonths, 12)) {
+        // Stale (past-dated) boosters never consume recomputed FUTURE
+        // targets: planBase fast-forwards to the current cadence phase, so
+        // assigning its first future candidate to a missed historical
+        // booster would resurrect an extra billable visit (and reset its
+        // lifecycle/reminder). Same floor the fallback branch applies —
+        // stale rows are left alone.
+        while (pendingBoosters[recomputedTargetIndex]
+          && (normalizeDateOnly(pendingBoosters[recomputedTargetIndex].scheduled_date) || '') <= etDateString()) {
+          recomputedTargetIndex++;
+        }
         const targetBooster = pendingBoosters[recomputedTargetIndex];
         if (!targetBooster) break;
         const candidate = clearOfBlackout(shiftPastWeekend(rawDate, skip, dir), blackoutDates, { skipWeekends: !!skip });
