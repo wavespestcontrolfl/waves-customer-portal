@@ -729,6 +729,7 @@ function InvoiceList({
     const invoiceId = searchParams.get("invoice");
     if (!invoiceId) {
       setExpanded(null);
+      setDeepLinkedInvoice(null);
       return;
     }
     const match = invoices.find(
@@ -736,8 +737,13 @@ function InvoiceList({
     );
     if (match) {
       setExpanded(match.id);
+      // The separately fetched row is only for OUT-OF-PAGE targets —
+      // clear a stale one so it stops rendering outside the active
+      // filters (Codex PR r10 P2).
+      setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
       return;
     }
+    setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
     let cancelled = false;
     adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
       .then((row) => {

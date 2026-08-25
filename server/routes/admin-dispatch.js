@@ -9394,7 +9394,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // APPLICATION amount only — the fee still needs its durable follow-up
     // (Codex PR r4 P1): without this branch, prepaidCovered suppressed
     // both the mint AND the alert and the $99 simply vanished.
+    // Only the OUT-OF-BAND leg counts (Codex PR r10 P1): an annual
+    // prepay that settled between the obligation read and here WAIVES the
+    // fee — it must extinguish the alert, never become "application
+    // covered, bill the fee".
     const setupFeePrepaidBeside = !!(unmintedSetupFeeObligation && prepaidCovered
+      && !annualPrepayCovered
       && !terminalCompletionInvoice && !recapReviewOnly);
     if (setupFeeChargeNowBeside || setupFeePrepaidBeside
       || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
@@ -9449,6 +9454,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           //    application uninvoiced with no follow-up (Codex P0, round
           //    1). Coverage = a first-application line/notes marker on the
           //    stamped invoice, or a live invoice on the visit itself.
+          // Annual-prepay race recheck under the locks (Codex PR r10
+          // P1): a term whose payment settled after the obligation read
+          // waives the fee — resolve/skip instead of instructing it.
+          const AnnualPrepayReval = require('../services/annual-prepay-renewals');
+          const coveredTermNow = await AnnualPrepayReval.coveredTermsAsOf(trx, null)
+            .where('t.source_estimate_id', svc.source_estimate_id)
+            .first('t.id');
+          if (coveredTermNow) {
+            logger.warn(`[dispatch] visit ${svc.id}: annual-prepay term now covers estimate ${feeEstimateRef} — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'} (fee waived by prepay)`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`,
+                read_at: trx.fn.now(),
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
+              });
+            }
+            return true;
+          }
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
             .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)

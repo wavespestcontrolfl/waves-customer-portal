@@ -258,9 +258,17 @@ async function findUnmintedSetupFeeObligation({
   // a frozen $99 obligation — live/canceled resolution requires SUMMED
   // fee cents >= the accepted amount. (Refunded keeps the any-positive
   // doctrine: refunded money is never re-instructed, rounds 5/13/19.)
-  const expectedFeeCents = Math.round(Number(
-    snapshotFeeAmount != null ? snapshotFeeAmount : EstimateConverter.WAVEGUARD_SETUP_FEE,
-  ) * 100);
+  // Amount authority ladder (Codex PR r10 P1): display-frozen snapshot
+  // amount → accept-frozen stamp (public accepts of fee-less snapshots
+  // persist the rendered fee as acceptedSetupFeeAmount) → the current
+  // constant only when neither frozen figure exists.
+  const acceptedFrozenFee = Number(estimateData?.acceptedSetupFeeAmount);
+  const authoritativeFee = snapshotFeeAmount != null
+    ? snapshotFeeAmount
+    : (Number.isFinite(acceptedFrozenFee) && acceptedFrozenFee > 0
+      ? Math.round(acceptedFrozenFee * 100) / 100
+      : EstimateConverter.WAVEGUARD_SETUP_FEE);
+  const expectedFeeCents = Math.round(Number(authoritativeFee) * 100);
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
     .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
@@ -373,7 +381,7 @@ async function findUnmintedSetupFeeObligation({
   return {
     owed: true,
     // The accepted (frozen) amount wins over the current constant.
-    setupFee: snapshotFeeAmount != null ? snapshotFeeAmount : EstimateConverter.WAVEGUARD_SETUP_FEE,
+    setupFee: authoritativeFee,
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,

@@ -9618,6 +9618,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? { ...acceptedEstDataForPricing }
         : null;
       if (nextEstimateData) {
+        // Freeze the RENDERED setup fee at acceptance (PR #3476, Codex
+        // r10 P1): a fee-less stored snapshot is repaired WITH the fee at
+        // view time, but acceptance persists the original data — without
+        // this stamp the unminted-fee detector would later fall back to
+        // whatever WAVEGUARD_SETUP_FEE is configured to, not what the
+        // customer accepted. Best-effort: on failure the detector's
+        // constant fallback stands.
+        try {
+          const EstimateConverter = require('../services/estimate-converter');
+          const frozenRecurring = EstimateConverter.recurringServicesFromEstimateData(nextEstimateData);
+          if (nextEstimateData.acceptedSetupFeeAmount == null
+            && EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+              recurringServices: frozenRecurring, estimateData: nextEstimateData,
+            })) {
+            nextEstimateData.acceptedSetupFeeAmount = EstimateConverter.WAVEGUARD_SETUP_FEE;
+          }
+        } catch (feeFreezeErr) {
+          logger.warn(`[estimate-public] accept-time setup-fee freeze skipped: ${feeFreezeErr.message}`);
+        }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       if (selectedFrequency) {
