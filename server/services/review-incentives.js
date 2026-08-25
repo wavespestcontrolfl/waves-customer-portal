@@ -809,6 +809,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // review about to be marked removed. Holding the lock means no cycle is in
   // flight; a busy lock is a retryable 409 BEFORE any side effect.
   const attributionOutcome = await runExclusive(`gbp-review-sync:${review.location_id}`, async () => {
+  // Live prior-state read INSIDE the lock (pre-push P1 r7): the outer
+  // `review` snapshot predates the lock, so two concurrent re-matches would
+  // both see the same original owner and the second would reverse the wrong
+  // customer. The click-auto reversal below keys off who the row points at
+  // NOW, not who it pointed at when the request loaded.
+  const prior = await conn('google_reviews')
+    .where({ id: review.id })
+    .first('customer_id', 'link_source');
+
   // Conditional write, not a snapshot re-check: a stamp can still have
   // committed before the lock was free. Zero rows updated means liveness was
   // lost — abort BEFORE any side effect (the has_left_google_review mark,
@@ -835,25 +844,25 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // human just declared wrong. Only when this review was the sole basis —
   // another linked review still proves they reviewed. Best-effort: a
   // reversal hiccup must not fail the attribution itself.
-  if (review.link_source === 'click_auto' && review.customer_id && review.customer_id !== customerId) {
+  if (prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
     try {
       const otherLink = await conn('google_reviews')
-        .where({ customer_id: review.customer_id })
+        .where({ customer_id: prior.customer_id })
         .whereNot('id', review.id)
         .first('id');
       if (!otherLink) {
         await conn('customers')
-          .where({ id: review.customer_id })
+          .where({ id: prior.customer_id })
           .update({ has_left_google_review: false, review_marked_at: null });
         await conn('activity_log').insert({
-          customer_id: review.customer_id,
+          customer_id: prior.customer_id,
           admin_user_id: attrs.adminId || null,
           action: 'review_automark_reversed',
           description: 'Click auto-link re-matched to a different customer — "already left a Google review" cleared; review asks resume.',
         });
       }
     } catch (revErr) {
-      logger.warn(`[review-incentives] auto-mark reversal failed for customer ${review.customer_id}: ${revErr.message}`);
+      logger.warn(`[review-incentives] auto-mark reversal failed for customer ${prior.customer_id}: ${revErr.message}`);
     }
   }
 

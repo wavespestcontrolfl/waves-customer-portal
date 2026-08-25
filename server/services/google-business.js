@@ -567,83 +567,77 @@ class GoogleBusinessService {
       // interleave between the link and its flag-flip/thank-you. Lock
       // contention (another mutator active) = fall to the manual queue.
       const outcome = await runExclusive(`gbp-review-sync:${row.location_id}`, async () => {
-        const { findConfidentClickMatch } = require('./review-click-correlation');
-        const match = await findConfidentClickMatch(row);
-        if (!match) return { nomatch: true };
-        // The collector entry is a detached payload — re-read the live row.
-        const live = await db('google_reviews')
-          .where({ google_review_id: row.google_review_id })
-          .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
-        if (!live || live.missing_since) return { nomatch: true };
-        // Linked since insert (manual match mid-sync): nothing to do, and a
-        // "come match this" bell for an already-matched review is pure
-        // noise — handled, so the caller skips the unlinked notification.
-        if (live.customer_id) return { handled: true };
-        // One click must correspond to ONE eligible review (pre-push P1
-        // r6): if another unlinked review at this location also sits inside
-        // the click's forward window, the click can't say which of them the
-        // customer wrote — whichever processed first would steal it. JS-side
-        // id filter so mocked whereNot can't silently drop the guard.
-        const { AUTO_LINK_MAX_BEFORE_MS } = require('./review-click-correlation');
-        const clickedAtMs = new Date(match.clickedAt).getTime();
-        const windowRows = await db('google_reviews')
-          .whereNull('customer_id')
-          .whereNull('missing_since')
-          .where('location_id', row.location_id)
-          .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
-          .where('review_created_at', '>=', new Date(clickedAtMs))
-          .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
-          .limit(10)
-          .select('id');
-        if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
-        // Conditional-write guards (pre-push P1 r2): a manual match or a
-        // removal-reconcile stamp that committed before the lock was free
-        // must win at the atomic write. Zero rows = a manual link stands or
-        // the review is gone; either way the unlinked bell would be noise.
-        let updated = 0;
-        try {
-          await db.transaction(async (trx) => {
-            updated = await trx('google_reviews')
-              .where({ id: live.id })
-              .whereNull('customer_id')
-              .whereNull('missing_since')
-              .update({ customer_id: match.customerId, link_source: 'click_auto' });
-            if (!updated) return;
-            // Write-boundary re-validation (pre-push P1 r5): /go records
-            // clicks WITHOUT this lock, so a competing click can commit
-            // between the correlation read above and this write. Re-running
-            // the correlation inside the transaction sees every click
-            // committed since; changed evidence rolls the link back.
-            // ACCEPTED RESIDUAL: a click that commits after this recheck
-            // but before this transaction commits is invisible — the
-            // window is milliseconds, the link is undoable in Reviews, and
-            // serializing the customer-facing /go redirect behind sync
-            // locks would trade a paper-thin race for real latency.
-            const recheck = await findConfidentClickMatch(row, { conn: trx });
-            if (!recheck || recheck.customerId !== match.customerId) {
-              const err = new Error('click evidence changed at write boundary');
-              err.code = 'CLICK_EVIDENCE_CHANGED';
-              throw err;
-            }
-          });
-        } catch (err) {
-          if (err?.code === 'CLICK_EVIDENCE_CHANGED') return { nomatch: true };
-          throw err;
-        }
-        if (!updated) return { handled: true };
-        await this._markCustomerLeftReview(match.customerId);
+        const { findConfidentClickMatch, AUTO_LINK_MAX_BEFORE_MS } = require('./review-click-correlation');
+        // Evidence checks + guarded write in ONE transaction: the
+        // correlation runs against the same snapshot the write commits
+        // against, so a click committed since the flush was queued is seen
+        // here (pre-push P1 r5), and the correlation must run BEFORE the
+        // update — after it, the just-linked customer would vanish from its
+        // own candidate set and the recheck would reject every link
+        // (pre-push P1 r7; the mocked-correlation tests couldn't catch
+        // that — MOCK ≠ prod).
+        // ACCEPTED RESIDUAL: a click that commits between this transaction's
+        // snapshot and its commit is invisible — the window is milliseconds,
+        // the link is undoable in Reviews, and serializing the
+        // customer-facing /go redirect behind sync locks would trade a
+        // paper-thin race for real latency.
+        const result = await db.transaction(async (trx) => {
+          const match = await findConfidentClickMatch(row, { conn: trx });
+          if (!match) return { nomatch: true };
+          // The collector entry is a detached payload — re-read the live row.
+          const live = await trx('google_reviews')
+            .where({ google_review_id: row.google_review_id })
+            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+          if (!live || live.missing_since) return { nomatch: true };
+          // Linked since insert (manual match mid-sync): nothing to do, and
+          // a "come match this" bell for an already-matched review is pure
+          // noise — handled, so the caller skips the unlinked notification.
+          if (live.customer_id) return { handled: true };
+          // One click must correspond to ONE eligible review (pre-push P1
+          // r6): if another unlinked review at this location also sits
+          // inside the click's forward window, the click can't say which of
+          // them the customer wrote — whichever processed first would steal
+          // it. JS-side id filter so mocked whereNot can't drop the guard.
+          const clickedAtMs = new Date(match.clickedAt).getTime();
+          const windowRows = await trx('google_reviews')
+            .whereNull('customer_id')
+            .whereNull('missing_since')
+            .where('location_id', row.location_id)
+            .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
+            .where('review_created_at', '>=', new Date(clickedAtMs))
+            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
+            .limit(10)
+            .select('id');
+          if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
+          // Conditional-write guards (pre-push P1 r2): a manual match or a
+          // removal-reconcile stamp that committed before the lock was free
+          // must win at the atomic write. Zero rows = a manual link stands
+          // or the review is gone; either way the unlinked bell is noise.
+          const updated = await trx('google_reviews')
+            .where({ id: live.id })
+            .whereNull('customer_id')
+            .whereNull('missing_since')
+            .update({ customer_id: match.customerId, link_source: 'click_auto' });
+          if (!updated) return { handled: true };
+          return { linked: true, match, live };
+        });
+        if (!result?.linked) return result;
+        // Side effects AFTER the link committed but still under the lock
+        // (pre-push P1 r3): manual attribution must not interleave between
+        // the link and its flag flip / thank-you.
+        await this._markCustomerLeftReview(result.match.customerId);
         // Same attribution side effect as the name-match and manual paths —
         // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
         // Payouts are NOT a side effect here: qualifiesGoogleReview excludes
         // link_source='click_auto' until a human confirms (pre-push P0).
         const { enrollReviewThankYou } = require('./automation-enroll');
         await enrollReviewThankYou({
-          customerId: match.customerId,
-          locationId: live.location_id,
-          starRating: live.star_rating,
+          customerId: result.match.customerId,
+          locationId: result.live.location_id,
+          starRating: result.live.star_rating,
           source: 'google_review_click_autolink',
         });
-        return { linked: true, match };
+        return result;
       }, { recordHealth: false });
       if (outcome?.skipped || outcome?.nomatch) return false;
       if (!outcome?.linked) return true;
