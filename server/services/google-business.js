@@ -579,6 +579,23 @@ class GoogleBusinessService {
         // "come match this" bell for an already-matched review is pure
         // noise — handled, so the caller skips the unlinked notification.
         if (live.customer_id) return { handled: true };
+        // One click must correspond to ONE eligible review (pre-push P1
+        // r6): if another unlinked review at this location also sits inside
+        // the click's forward window, the click can't say which of them the
+        // customer wrote — whichever processed first would steal it. JS-side
+        // id filter so mocked whereNot can't silently drop the guard.
+        const { AUTO_LINK_MAX_BEFORE_MS } = require('./review-click-correlation');
+        const clickedAtMs = new Date(match.clickedAt).getTime();
+        const windowRows = await db('google_reviews')
+          .whereNull('customer_id')
+          .whereNull('missing_since')
+          .where('location_id', row.location_id)
+          .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
+          .where('review_created_at', '>=', new Date(clickedAtMs))
+          .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
+          .limit(10)
+          .select('id');
+        if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
         // Conditional-write guards (pre-push P1 r2): a manual match or a
         // removal-reconcile stamp that committed before the lock was free
         // must win at the atomic write. Zero rows = a manual link stands or

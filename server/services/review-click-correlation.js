@@ -242,4 +242,4 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
   }
 }
 
-module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset };
+module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, AUTO_LINK_MAX_BEFORE_MS };

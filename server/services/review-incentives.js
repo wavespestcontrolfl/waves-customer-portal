@@ -829,6 +829,34 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
 
+  // Reversal of a wrong click auto-link (pre-push P1 r6): re-matching a
+  // click_auto attribution to a DIFFERENT customer must un-suppress the
+  // previously linked one, or their review asks stay silenced by a link a
+  // human just declared wrong. Only when this review was the sole basis —
+  // another linked review still proves they reviewed. Best-effort: a
+  // reversal hiccup must not fail the attribution itself.
+  if (review.link_source === 'click_auto' && review.customer_id && review.customer_id !== customerId) {
+    try {
+      const otherLink = await conn('google_reviews')
+        .where({ customer_id: review.customer_id })
+        .whereNot('id', review.id)
+        .first('id');
+      if (!otherLink) {
+        await conn('customers')
+          .where({ id: review.customer_id })
+          .update({ has_left_google_review: false, review_marked_at: null });
+        await conn('activity_log').insert({
+          customer_id: review.customer_id,
+          admin_user_id: attrs.adminId || null,
+          action: 'review_automark_reversed',
+          description: 'Click auto-link re-matched to a different customer — "already left a Google review" cleared; review asks resume.',
+        });
+      }
+    } catch (revErr) {
+      logger.warn(`[review-incentives] auto-mark reversal failed for customer ${review.customer_id}: ${revErr.message}`);
+    }
+  }
+
   // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
   // attribution touch: this customer verifiably left a review, so future
   // review ASKS must stop (the completion-SMS bundler and review-request
