@@ -140,38 +140,47 @@ function serviceKeyForLabel(value = '') {
 // string, and the old bare forms ("Quarterly Pest Control") matched nothing:
 // 152 estimate-born visits in 90 days booked with no catalog identity at all
 // (2026-08-25 audit). Every literal here must stay equal to its catalog row.
+// EXACT catalog visit counts only, same contract as the keyed resolver
+// (codex #3485 r9 P2): these labels are catalog-resolvable by name, so a
+// bucketed label would put an off-catalog plan (8 pest visits) onto a
+// catalog row's billing/completion lane by NAME despite the null id. A
+// KNOWN off-catalog count gets the deliberately ambiguous legacy label
+// (fails closed); an UNKNOWN count keeps the historical family default.
 function pestServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Pest Control Service';
-  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Pest Control Service';
+  if (!Number.isFinite(visits) || visits <= 0) return 'Quarterly Pest Control Service';
+  if (visits === 12) return 'Monthly Pest Control Service';
+  if (visits === 6) return 'Bi-Monthly Pest Control Service';
+  if (visits === 4) return 'Quarterly Pest Control Service';
   // Semiannual (2/yr) had NO branch and mislabeled as quarterly — the one
   // cadence where the wrong prefix misstates the plan the customer bought.
-  if (Number.isFinite(visits) && visits === 2) return 'Semiannual Pest Control Service';
-  return 'Quarterly Pest Control Service';
+  if (visits === 2) return 'Semiannual Pest Control Service';
+  return 'Pest Control';
 }
 
 function lawnServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Lawn Care Service';
-  if (Number.isFinite(visits) && visits >= 9) return 'Every 6 Weeks Lawn Care Service';
-  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Lawn Care Service';
-  // Unknown cadence: keep the legacy abbreviation — deliberately ambiguous,
-  // so resolution fails closed instead of guessing a plan row.
+  if (!Number.isFinite(visits) || visits <= 0) return 'Lawn Care';
+  if (visits === 12) return 'Monthly Lawn Care Service';
+  if (visits === 9) return 'Every 6 Weeks Lawn Care Service';
+  if (visits === 6) return 'Bi-Monthly Lawn Care Service';
   return 'Lawn Care';
 }
 
 function mosquitoServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Mosquito Control Service';
-  if (Number.isFinite(visits) && visits >= 9) return 'Seasonal Mosquito Control Service';
+  if (!Number.isFinite(visits) || visits <= 0) return 'Mosquito Treatment';
+  if (visits === 12) return 'Monthly Mosquito Control Service';
+  if (visits === 9) return 'Seasonal Mosquito Control Service';
   return 'Mosquito Treatment';
 }
 
 function treeShrubServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 9) return 'Every 6 Weeks Tree & Shrub Care Service';
-  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Tree & Shrub Care Service';
-  if (Number.isFinite(visits) && visits >= 4) return 'Quarterly Tree & Shrub Care Service';
+  if (!Number.isFinite(visits) || visits <= 0) return 'Tree & Shrub';
+  if (visits === 9) return 'Every 6 Weeks Tree & Shrub Care Service';
+  if (visits === 6) return 'Bi-Monthly Tree & Shrub Care Service';
+  if (visits === 4) return 'Quarterly Tree & Shrub Care Service';
   return 'Tree & Shrub';
 }
 

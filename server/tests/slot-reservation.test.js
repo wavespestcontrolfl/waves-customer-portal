@@ -442,6 +442,21 @@ describe('slot reservation helpers', () => {
       null,
       'Pest Control + Lawn Care',
     )).toBe('Quarterly Pest Control Service');
+    // KNOWN off-catalog counts fail closed to the ambiguous legacy label —
+    // a catalog-resolvable name would put an 8-visit plan onto the 6-visit
+    // row's lane by NAME (codex #3485 r9 P2).
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'pest_control', visitsPerYear: 8 }],
+    }, 'Pest Control')).toBe('Pest Control');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'lawn_care', visitsPerYear: 10 }],
+    }, 'Lawn Care')).toBe('Lawn Care');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'mosquito', visitsPerYear: 10 }],
+    }, 'Mosquito')).toBe('Mosquito Treatment');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'tree_shrub', visitsPerYear: 5 }],
+    }, 'Tree & Shrub')).toBe('Tree & Shrub');
   });
 
   test('service profile labels are capped to scheduled_services service_type length', () => {
