@@ -14678,7 +14678,12 @@ async function adoptedAppointmentCatalogStamp(conn, {
   serviceMode = 'recurring',
   selectedFrequency = '',
 } = {}) {
-  if (!estimate || existingAppointmentRow?.service_id) return null;
+  // No-overwrite guard covers BOTH durable identities: a row whose catalog
+  // FK was cleared (ON DELETE SET NULL) can still carry an authoritative
+  // service_key_snapshot, and completion resolution trusts that snapshot —
+  // adopting a same-family estimate must not move an admin-authored
+  // specialty onto a different billing/completion lane (codex #3485 r8 P1).
+  if (!estimate || existingAppointmentRow?.service_id || existingAppointmentRow?.service_key_snapshot) return null;
   const estimateSlotAvailability = require('../services/estimate-slot-availability');
   if (typeof estimateSlotAvailability.resolveEstimateSlotProfile !== 'function') return null;
   let profile = null;
@@ -14697,8 +14702,12 @@ async function adoptedAppointmentCatalogStamp(conn, {
   // Savepoint-confined inside the resolver — a lookup hiccup cannot poison
   // the accept transaction (#3328 pre-push P1: try/catch alone is NOT
   // fail-open inside a txn).
-  const catalogServiceId = await slotReservation.catalogServiceIdForProfile(conn, profile);
-  return catalogServiceId ? { service_id: catalogServiceId } : null;
+  const catalogLink = await slotReservation.catalogLinkForProfile(conn, profile);
+  // Adopted rows keep their admin-authored label — only the durable
+  // identity evidence is stamped (id + key snapshot), never service_type.
+  return catalogLink
+    ? { service_id: catalogLink.id, ...(catalogLink.service_key ? { service_key_snapshot: catalogLink.service_key } : {}) }
+    : null;
 }
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {

@@ -237,8 +237,11 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
       throw new Error(`unexpected table ${table}`);
     });
     // The insert now rides a transaction that FOR-UPDATE re-reads the
-    // visit's owner (Codex #3109 r27) — serve that read from the sweep's
-    // own rows so ownership assertions still bite.
+    // visit's owner (Codex #3109 r27) AND its service identity (pre-push
+    // P1 — a repoint between the candidate read and the lock must not mint
+    // from stale identity) — serve those reads from the sweep's own rows,
+    // preferring a lockedOverrides map keyed by visit id when the test
+    // wants the locked state to DIFFER from the candidate read.
     db.transaction = jest.fn(async (fn) => {
       const trx = (table) => {
         if (table === 'scheduled_services') {
@@ -247,9 +250,34 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
               forUpdate: jest.fn(() => ({
                 first: jest.fn(async () => {
                   const row = visits.find((v) => v.id === id);
-                  return row ? { customer_id: row.customer_id } : null;
+                  if (!row) return null;
+                  const locked = { ...row, ...((armDb.lockedOverrides || {})[id] || {}) };
+                  return {
+                    customer_id: locked.customer_id,
+                    service_id: locked.service_id || null,
+                    service_type: locked.service_type,
+                    service_key_snapshot: locked.service_key_snapshot || null,
+                    // Candidate fixtures are completed rows by definition;
+                    // an override can flip status to model an un-complete
+                    // landing before the lock.
+                    status: locked.status || 'completed',
+                    completed_at: locked.completed_at ?? null,
+                    actual_end_time: locked.actual_end_time ?? null,
+                    check_out_time: locked.check_out_time ?? null,
+                    scheduled_date: locked.scheduled_date ?? null,
+                  };
                 }),
               })),
+            })),
+          };
+        }
+        if (table === 'services') {
+          return {
+            where: jest.fn(({ id }) => ({
+              first: jest.fn(async () => {
+                const row = (armDb.catalogRows || []).find((r) => r.id === id);
+                return row ? { service_key: row.service_key } : undefined;
+              }),
             })),
           };
         }
@@ -258,6 +286,7 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
       return fn(trx);
     });
   }
+  beforeEach(() => { armDb.lockedOverrides = null; armDb.catalogRows = null; });
 
   test('kept backdated end stamp → started_at is the visit day, renewal a year out from IT', async () => {
     const bondInsert = jest.fn(async () => [1]);
@@ -300,6 +329,63 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
     expect(bondInsert).toHaveBeenCalledWith(expect.objectContaining({
       started_at: '2026-07-19',
       renews_at: '2027-07-19',
+    }));
+  });
+
+  test('a repoint landing before the row lock vetoes the insert (identity re-derived under the lock)', async () => {
+    // The candidate read saw a bond visit; by lock time an admin repointed
+    // it to quarterly pest. The locked re-derivation must skip the insert
+    // (pre-push P1) — the stale label alone must not mint a warranty.
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow()], bondInsert);
+    armDb.lockedOverrides = {
+      'svc-b1': { service_key_snapshot: 'pest_general_quarterly', service_type: 'Quarterly Pest Control Service' },
+    };
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(0);
+    expect(bondInsert).not.toHaveBeenCalled();
+  });
+
+  test('an un-complete landing before the lock vetoes the insert', async () => {
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow()], bondInsert);
+    armDb.lockedOverrides = { 'svc-b1': { status: 'cancelled' } };
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(0);
+    expect(bondInsert).not.toHaveBeenCalled();
+  });
+
+  test('a timing edit landing before the lock dates the bond from the LOCKED timestamps', async () => {
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow({ actual_end_time: '2026-07-01T16:00:00.000Z' })], bondInsert);
+    armDb.lockedOverrides = { 'svc-b1': { actual_end_time: '2026-07-10T16:00:00.000Z' } };
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(1);
+    expect(bondInsert).toHaveBeenCalledWith(expect.objectContaining({
+      started_at: '2026-07-10',
+      renews_at: '2027-07-10',
+    }));
+  });
+
+  test('the locked catalog link drives the inserted term when it disagrees with the candidate read', async () => {
+    const bondInsert = jest.fn(async () => [1]);
+    armDb([visitRow()], bondInsert);
+    armDb.lockedOverrides = { 'svc-b1': { service_id: 'row-10yr' } };
+    armDb.catalogRows = [{ id: 'row-10yr', service_key: 'termite_bond_10yr' }];
+
+    const result = await syncTermiteBonds();
+
+    expect(result.inserted).toBe(1);
+    expect(bondInsert).toHaveBeenCalledWith(expect.objectContaining({
+      term_years: 10,
+      started_at: '2026-07-01',
+      renews_at: '2036-07-01',
     }));
   });
 });

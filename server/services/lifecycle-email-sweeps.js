@@ -26,6 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 // Term)" (admin-schedule.js termite category). Term still parses from the
 // "(N-Year" fragment; names without one default to 1 year.
 const BOND_MATCH = '%Termite Bond%';
+const BOND_KEYS = ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr'];
 const RENEWAL_WINDOW_DAYS = 30;
 const GRACE_DAYS = 7; // still notify up to a week past renews_at (missed runs)
 
@@ -44,6 +45,57 @@ function termYearsFrom(serviceType) {
   return m ? Number(m[1]) : 1;
 }
 
+// Identity-first term derivation (2026-08-25 audit): the label regex above
+// DEFAULTS TO 1 YEAR on any parse miss, so a renamed or merged label would
+// silently mint every bond as 1-year. The visit's durable catalog evidence
+// (service_key_snapshot, then the linked catalog row's service_key) names
+// the term outright; the label regex stays as the legacy fallback for
+// name-only history.
+// Returns null when the visit is provably NOT a bond.
+function termYearsForVisit(v) {
+  // The LINKED catalog row outranks the snapshot — the same precedence
+  // completion identity uses (service_id first), and pre-fix combined
+  // promotions changed service_id without restamping the snapshot, so the
+  // two can disagree on real rows (codex #3485 r10 P1). And it is
+  // authoritative BOTH ways: a resolved link that names a non-bond service
+  // means the visit was repointed — falling through to the stale snapshot
+  // or label would mint a warranty for non-bond work (pre-push P1).
+  const linked = String(v.catalog_service_key || '');
+  if (linked) {
+    const m = linked.match(/^termite_bond_(\d+)yr$/);
+    if (m) return Number(m[1]);
+    // Combined bait+bond accepts link to the BAIT catalog row BY DESIGN (no
+    // combined catalog row exists — see COMBINED_SERVICE_ROUTES) and encode
+    // the bond term only in the label; the label is the term authority for
+    // exactly that route (pre-push P1 follow-up).
+    if (linked === 'termite_bait' && /termite bond/i.test(String(v.service_type || ''))) {
+      return termYearsFrom(v.service_type);
+    }
+    return null;
+  }
+  // Same authority contract for the snapshot tier (pre-push P1): with no
+  // link, a non-bond snapshot is the visit's durable identity — a stale
+  // "Termite Bond" label must not out-vote it. The combined bait+bond
+  // exception applies here too (promotions restamp the snapshot to
+  // 'termite_bait' with the term in the label).
+  const snap = String(v.service_key_snapshot || '');
+  if (snap) {
+    const m = snap.match(/^termite_bond_(\d+)yr$/);
+    if (m) return Number(m[1]);
+    if (snap === 'termite_bait' && /termite bond/i.test(String(v.service_type || ''))) {
+      return termYearsFrom(v.service_type);
+    }
+    return null;
+  }
+  // Label tier: termYearsFrom defaults to 1 on ANY parse miss, so it can
+  // only run when the label actually names a termite bond — a visit
+  // reclassified under the lock (identity cleared, label now
+  // 'Pest Control') must not mint a one-year bond (codex #3485 r20 P2).
+  return /termite\s*bond/i.test(String(v.service_type || ''))
+    ? termYearsFrom(v.service_type)
+    : null;
+}
+
 function displayDate(d) {
   // DATE columns arrive as 'YYYY-MM-DD' (or Date at UTC midnight); parsing
   // those through a TZ-aware formatter shifts them back a day in ET — the
@@ -60,47 +112,77 @@ async function syncTermiteBonds() {
   if (!(await db.schema.hasTable('termite_bonds'))) return { inserted: 0 };
   const visits = await db('scheduled_services')
     .where('scheduled_services.status', 'completed')
-    .where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+    // Candidates by durable identity OR label: a bond visit whose label
+    // drifted from the "%Termite Bond%" shape (rename, merged label) is
+    // still a bond when its snapshot/catalog key says so (2026-08-25 audit).
+    .where(function bondCandidate() {
+      this.where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+        .orWhereIn('scheduled_services.service_key_snapshot', BOND_KEYS)
+        // A visit whose only bond evidence is its LINKED catalog row (valid
+        // service_id, no snapshot, drifted label) must still be a candidate
+        // — otherwise termYearsForVisit never sees it (codex #3485 r1 P2).
+        .orWhereIn('services.service_key', BOND_KEYS);
+    })
+    // The resolved link is authoritative the other way too: a visit whose
+    // service_id names a NON-bond catalog row was repointed, and its stale
+    // snapshot/label must not mint a warranty (pre-push P1). One documented
+    // exception: combined bait+bond accepts link to the termite_bait row by
+    // design with the bond term in the label — those stay candidates when
+    // the label proves the bond.
+    .where(function linkedRowAuthority() {
+      this.whereNull('services.service_key')
+        .orWhereIn('services.service_key', BOND_KEYS)
+        .orWhere(function combinedBaitBond() {
+          this.where('services.service_key', 'termite_bait')
+            .andWhere('scheduled_services.service_type', 'ilike', BOND_MATCH);
+        });
+    })
     // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
     // seeder) — only the establishing anchor visit starts a bond term, or a
     // 1-year bond would get a renewal notice per quarterly child.
     .whereNull('scheduled_services.recurring_parent_id')
     .leftJoin('termite_bonds', 'termite_bonds.scheduled_service_id', 'scheduled_services.id')
     .whereNull('termite_bonds.id')
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
     .select(
       'scheduled_services.id',
       'scheduled_services.customer_id',
       'scheduled_services.service_type',
+      'scheduled_services.service_key_snapshot',
+      'services.service_key as catalog_service_key',
       'scheduled_services.completed_at',
       'scheduled_services.actual_end_time',
       'scheduled_services.check_out_time',
       'scheduled_services.scheduled_date',
     );
+  // Completion timing lives in actual_end_time / check_out_time on the
+  // closeout path (completed_at is often null there). Real timestamps get
+  // the ET-calendar conversion — a visit completed after 8 PM Eastern is
+  // already on the next UTC day. The DATE-only scheduled_date fallback is
+  // already a calendar date: converting it through a timezone would shift
+  // it BACK a day (UTC midnight → 7/8 PM ET the previous evening), so it
+  // is used verbatim.
+  const bondStartDateEt = (row) => {
+    const completionTs = row.actual_end_time || row.check_out_time || row.completed_at;
+    if (completionTs) {
+      const started = new Date(completionTs);
+      return Number.isNaN(started.getTime()) ? null : etDateString(started);
+    }
+    if (row.scheduled_date) {
+      return typeof row.scheduled_date === 'string'
+        ? row.scheduled_date.slice(0, 10)
+        : new Date(row.scheduled_date).toISOString().slice(0, 10);
+    }
+    return null;
+  };
   let inserted = 0;
   for (const v of visits) {
     if (!v.customer_id) continue;
-    // Completion timing lives in actual_end_time / check_out_time on the
-    // closeout path (completed_at is often null there). Real timestamps get
-    // the ET-calendar conversion — a visit completed after 8 PM Eastern is
-    // already on the next UTC day. The DATE-only scheduled_date fallback is
-    // already a calendar date: converting it through a timezone would shift
-    // it BACK a day (UTC midnight → 7/8 PM ET the previous evening), so it
-    // is used verbatim.
-    const completionTs = v.actual_end_time || v.check_out_time || v.completed_at;
-    let startedEt = null;
-    if (completionTs) {
-      const started = new Date(completionTs);
-      if (!Number.isNaN(started.getTime())) startedEt = etDateString(started);
-    } else if (v.scheduled_date) {
-      startedEt = typeof v.scheduled_date === 'string'
-        ? v.scheduled_date.slice(0, 10)
-        : new Date(v.scheduled_date).toISOString().slice(0, 10);
-    }
-    if (!startedEt) continue;
-    const years = termYearsFrom(v.service_type);
-    // Add the term years with UTC-safe date math (Feb 29 normalizes to Mar 1).
-    const [sy, sm, sd] = startedEt.split('-').map(Number);
-    const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
+    // Cheap pre-lock skips (belt-and-braces with the query's filters): a
+    // null term means the durable identity disproved the bond, a null start
+    // means no usable timing. Both re-derive under the lock — the unlocked
+    // values never reach the insert.
+    if (!bondStartDateEt(v) || !termYearsForVisit(v)) continue;
     try {
       // Owner from the LOCKED visit row (Codex #3109 r27): a merge-undo
       // can reverse-repoint the visit between the sweep's unlocked read
@@ -108,15 +190,40 @@ async function syncTermiteBonds() {
       // the bond always binds the visit's CURRENT customer.
       const bondInserted = await db.transaction(async (trx) => {
         const lockedVisit = await trx('scheduled_services')
-          .where({ id: v.id }).forUpdate().first('customer_id');
+          .where({ id: v.id }).forUpdate()
+          .first('customer_id', 'service_id', 'service_type', 'service_key_snapshot',
+            'status', 'completed_at', 'actual_end_time', 'check_out_time', 'scheduled_date');
         if (!lockedVisit || !lockedVisit.customer_id) return false;
+        // Status, identity, AND timing all re-derive from the LOCKED row
+        // (codex #3485 r18 P2): an un-complete or timing edit landing
+        // before the lock must not mint a bond, or date it, from the stale
+        // candidate read.
+        if (lockedVisit.status !== 'completed') return false;
+        const startedEt = bondStartDateEt(lockedVisit);
+        if (!startedEt) return false;
+        // Re-derive the bond identity from the LOCKED row (pre-push P1):
+        // a repoint landing between the unlocked candidate read and this
+        // lock would otherwise mint from the stale identity — the exact
+        // hole the non-bond veto closes on the read side.
+        const lockedCatalogKey = lockedVisit.service_id
+          ? (await trx('services').where({ id: lockedVisit.service_id }).first('service_key'))?.service_key || null
+          : null;
+        const lockedYears = termYearsForVisit({
+          catalog_service_key: lockedCatalogKey,
+          service_key_snapshot: lockedVisit.service_key_snapshot,
+          service_type: lockedVisit.service_type,
+        });
+        if (!lockedYears) return false;
+        // Add the term years with UTC-safe date math (Feb 29 → Mar 1).
+        const [ly, lm, ld] = startedEt.split('-').map(Number);
+        const lockedRenewsEt = new Date(Date.UTC(ly + lockedYears, lm - 1, ld)).toISOString().slice(0, 10);
         await trx('termite_bonds').insert({
         customer_id: lockedVisit.customer_id,
         scheduled_service_id: v.id,
-        service_type: v.service_type,
-        term_years: years,
+        service_type: lockedVisit.service_type,
+        term_years: lockedYears,
         started_at: startedEt,
-        renews_at: renewsEt,
+        renews_at: lockedRenewsEt,
         status: 'active',
         });
         return true;
@@ -245,4 +352,4 @@ async function runDailySweeps() {
   return { bondRenewalsSent: bond.sent };
 }
 
-module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, displayDate } };
+module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };

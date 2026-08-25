@@ -50,6 +50,26 @@ describe('slot reservation helpers', () => {
     jest.clearAllMocks();
   });
 
+  test('an admin-renamed catalog row never changes the visit CLASSIFICATION (codex r20 P1)', () => {
+    const { classifierStableServiceType } = slotReservation._internals;
+    // A WDO row renamed to wording without the classifier's family tokens
+    // would tag the visit 'general' and skip WDO prep automation — keep the
+    // canonical label when the rename changes classification.
+    expect(classifierStableServiceType('Real Estate Report', 'WDO Inspection'))
+      .toBe('WDO Inspection');
+    // A rename that classifies the same is cosmetic — the linked row's name
+    // stays the one source of truth for the label.
+    expect(classifierStableServiceType('Complete WDO Inspection Service', 'WDO Inspection'))
+      .toBe('Complete WDO Inspection Service');
+    // When the canonical fallback classifies 'general', the link name can
+    // only improve — adopt it.
+    expect(classifierStableServiceType('Monthly Pest Control Service', 'Estimate service'))
+      .toBe('Monthly Pest Control Service');
+    // No canonical label at all → link name.
+    expect(classifierStableServiceType('Lawn Dethatching Service', ''))
+      .toBe('Lawn Dethatching Service');
+  });
+
   test('canonicalizes rodent trapping reservations to the trapping service type', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
@@ -59,8 +79,9 @@ describe('slot reservation helpers', () => {
 
   test('one-time pest accepts are not stamped with a recurring cadence prefix', () => {
     // One-time profile carries empty services → visits unknown → would default
-    // to "Quarterly Pest Control". serviceMode one_time must collapse to bare
-    // "Pest Control" instead.
+    // to the quarterly label. serviceMode one_time must collapse to the
+    // one-time catalog row's name instead (exact catalog names since the
+    // 2026-08-25 bridge fix — the bare forms matched no catalog row).
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
       'Pest Control',
@@ -251,7 +272,7 @@ describe('slot reservation helpers', () => {
       expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
         .toBeLessThan(estimateBuilder.forUpdate.mock.invocationCallOrder[0]);
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-        service_type: 'Quarterly Pest Control',
+        service_type: 'Quarterly Pest Control Service',
         notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
         scheduled_date: '2027-05-20',
         window_start: '09:00:00',
@@ -408,26 +429,54 @@ describe('slot reservation helpers', () => {
       estimated_price: 219.6,
       window_end: '10:30:00',
       estimated_duration_minutes: 90,
-      service_type: 'Quarterly Pest Control',
+      service_type: 'Quarterly Pest Control Service',
       notes: 'Gate code in customer profile.\nAccepted service mix: 4x Pest Control + 9x Lawn Care.',
       reservation_expires_at: null,
     }));
   });
 
-  test('canonical service type keeps protocol/default lookups stable', () => {
+  test('canonical service type emits exact catalog names per cadence', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'pest_control', visitsPerYear: 12 }],
-    }, 'Pest Control')).toBe('Monthly Pest Control');
+    }, 'Pest Control')).toBe('Monthly Pest Control Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'pest_control', visitsPerYear: 6 }],
-    }, 'Pest Control')).toBe('Bi-Monthly Pest Control');
+    }, 'Pest Control')).toBe('Bi-Monthly Pest Control Service');
+    // Semiannual (2/yr) previously had NO branch and mislabeled quarterly.
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'pest_control', visitsPerYear: 2 }],
+    }, 'Pest Control')).toBe('Semiannual Pest Control Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'lawn_care', visitsPerYear: 9 }],
+    }, 'Lawn Care')).toBe('Every 6 Weeks Lawn Care Service');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'lawn_care' }],
     }, 'Lawn Care')).toBe('Lawn Care');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'mosquito', visitsPerYear: 9 }],
+    }, 'Mosquito')).toBe('Seasonal Mosquito Control Service');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'tree_shrub', visitsPerYear: 4 }],
+    }, 'Tree & Shrub')).toBe('Quarterly Tree & Shrub Care Service');
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       null,
       'Pest Control + Lawn Care',
-    )).toBe('Quarterly Pest Control');
+    )).toBe('Quarterly Pest Control Service');
+    // KNOWN off-catalog counts fail closed to the ambiguous legacy label —
+    // a catalog-resolvable name would put an 8-visit plan onto the 6-visit
+    // row's lane by NAME (codex #3485 r9 P2).
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'pest_control', visitsPerYear: 8 }],
+    }, 'Pest Control')).toBe('Pest Control');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'lawn_care', visitsPerYear: 10 }],
+    }, 'Lawn Care')).toBe('Lawn Care');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'mosquito', visitsPerYear: 10 }],
+    }, 'Mosquito')).toBe('Mosquito Treatment');
+    expect(slotReservation._internals.canonicalServiceTypeForProfile({
+      services: [{ service: 'tree_shrub', visitsPerYear: 5 }],
+    }, 'Tree & Shrub')).toBe('Tree & Shrub');
   });
 
   test('service profile labels are capped to scheduled_services service_type length', () => {
