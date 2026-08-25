@@ -342,6 +342,21 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
       // no stamp, which merely reverts to today's behavior. Take two and resolve
       // only on exactly one. The DB-backed contract test catches drift at CI
       // time; this is the runtime guard that CI cannot provide.
+      // Cadence profiles resolve by their cadence-specific service_key
+      // EXCLUSIVELY (codex #3485 r13 P1): the shared family keys
+      // (pest_control/lawn_care/mosquito/tree_shrub) intentionally span
+      // multiple cadence rows, so an admin-authored family mapping on ONE
+      // cadence row would otherwise stamp every other cadence with that
+      // row's identity (a 12-visit accept labeled quarterly). One-time and
+      // specialty profiles keep engine-key containment.
+      if (cadenceKey) {
+        const cadenceRows = await sp('services')
+          .where({ service_key: cadenceKey, is_active: true })
+          .limit(2)
+          .select('id', 'name', 'service_key');
+        if (cadenceRows.length === 1) resolved = cadenceRows[0];
+        return;
+      }
       const rows = await sp('services')
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
@@ -351,17 +366,6 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
-        return;
-      }
-      // Cadence-keyed fallback (codex #3485 r3 P1): the shared family key
-      // resolved nothing by containment, but the cadence names exactly one
-      // service_key — resolve it directly, same fail-closed posture.
-      if (!resolved && cadenceKey) {
-        const cadenceRows = await sp('services')
-          .where({ service_key: cadenceKey, is_active: true })
-          .limit(2)
-          .select('id', 'name', 'service_key');
-        if (cadenceRows.length === 1) resolved = cadenceRows[0];
       }
     });
   } catch (err) {

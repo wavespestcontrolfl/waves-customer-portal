@@ -355,6 +355,22 @@ describe('catalogServiceIdForProfile', () => {
       expect(capture.where).toBeUndefined();
     });
 
+    test('cadence profiles resolve by cadence key EXCLUSIVELY — a shared family mapping never wins', async () => {
+      // An admin-authored 'pest_control' engine key on the quarterly row
+      // must not stamp a 12-visit monthly accept (codex #3485 r13 P1).
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-quarterly' }] }) }) }; },
+        where: (cond) => ({ limit: () => ({ select: async () => [{ id: 'svc-monthly', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      const link = await catalogLinkForProfile(conn, {
+        services: [{ service: 'pest_control', visitsPerYear: 12 }],
+      });
+      expect(link).toMatchObject({ id: 'svc-monthly', service_key: 'pest_general_monthly' });
+      expect(containmentQueried).toBe(false);
+    });
+
     test('commercial plans never stamp residential cadence rows', async () => {
       const capture = {};
       expect(await catalogLinkForProfile(
