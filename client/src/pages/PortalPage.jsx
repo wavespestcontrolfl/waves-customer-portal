@@ -29,6 +29,7 @@ import { isNativeApp, nativePlatform } from '../native/platform';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
+import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -7497,6 +7498,68 @@ function PropertyTab({ customer }) {
     </div>
   );
 
+  // Minutes each zone runs on a watering day. With watering days and a single
+  // head type, @waves/irrigation-runtime turns this into the weekly-inches
+  // figure the lawn report and the Monday irrigation check-in balance against
+  // rain — so customers who know their controller (most) but not their inches
+  // (almost none) still get real recommendations.
+  const irrigationMinutesInput = () => (
+    <div>
+      <label style={labelStyle}>Minutes per Zone</label>
+      <div style={{ position: 'relative' }}>
+        <input
+          type="number"
+          inputMode="numeric"
+          min="0"
+          max={MAX_RUN_MINUTES}
+          step="5"
+          value={prefs.irrigationRunMinutes ?? ''}
+          onChange={e => updateField('irrigationRunMinutes', e.target.value === '' ? null : Math.max(0, Math.min(MAX_RUN_MINUTES, Math.round(Number(e.target.value)))))}
+          placeholder="20"
+          aria-label="Minutes each zone runs per watering day"
+          className="waves-focus-ring"
+          style={{ ...inputStyle, paddingRight: 52 }}
+          onFocus={focusBorder}
+          onBlur={blurBorder}
+        />
+        <span style={{
+          position: 'absolute',
+          right: 12,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          color: muted,
+          fontSize: 14,
+          fontWeight: 800,
+        }}>min</span>
+      </div>
+    </div>
+  );
+
+  // Same conversion the server uses — the number shown here is the number
+  // the emails will use, so the customer can sanity-check it while typing.
+  const derivedIrrigation = deriveIrrigationInchesPerWeek({
+    runMinutes: prefs.irrigationRunMinutes,
+    wateringDays: prefs.wateringDays,
+    systemType: prefs.irrigationSystemType,
+  });
+  const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
+  const derivedIrrigationLine = (() => {
+    if (!prefs.irrigationSystem || prefs.irrigationRunMinutes == null) return null;
+    if (derivedIrrigation.inchesPerWeek != null) {
+      const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
+      return explicitInchesEntered
+        ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. Enter Weekly Inches if you know your system's actual output.`;
+    }
+    switch (derivedIrrigation.reason) {
+      case 'missing_days': return 'Pick your watering days below and we can work out your weekly inches.';
+      case 'missing_head_type': return 'Pick a system type below and we can work out your weekly inches.';
+      case 'mixed_head_types': return "Spray and rotor heads put down water at very different rates, so we can't turn minutes into inches for a mixed system — enter Weekly Inches if you know it.";
+      case 'drip_only': return 'Drip waters beds rather than turf — if the lawn gets sprinkler water too, add that head type.';
+      default: return null;
+    }
+  })();
+
   const sqft = (n) => {
     const num = Number(n || 0);
     return num > 0 ? `${num.toLocaleString()} sq ft` : 'Not set';
@@ -7526,9 +7589,10 @@ function PropertyTab({ customer }) {
   const petSummary = petCount > 0 ? `${petCount} pet${petCount === 1 ? '' : 's'} on file` : 'No pets listed';
   const scheduleSummary = `${displayChoice(prefs.preferredDay)}, ${displayChoice(prefs.preferredTime).toLowerCase()}`;
   const irrigationInches = Number(prefs.irrigationInchesPerWeek);
+  const irrigationRunMinutes = Number(prefs.irrigationRunMinutes);
   const irrigationInchesSummary = Number.isFinite(irrigationInches) && irrigationInches > 0
     ? ` · ${irrigationInches.toFixed(2).replace(/\.00$/, '')}" / week`
-    : '';
+    : (Number.isFinite(irrigationRunMinutes) && irrigationRunMinutes > 0 ? ` · ${irrigationRunMinutes} min / zone` : '');
   const irrigationSummary = prefs.irrigationSystem
     ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
     : 'No irrigation system listed';
@@ -7863,8 +7927,14 @@ function PropertyTab({ customer }) {
                 <label style={labelStyle}>Number of Zones</label>
                 <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={100} label="Irrigation zones" />
               </div>
+              {irrigationMinutesInput()}
               {hasLawnCare && irrigationInchesInput()}
             </div>
+            {derivedIrrigationLine && (
+              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
+                {derivedIrrigationLine}
+              </div>
+            )}
             {hasLawnCare && (
               <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
                 Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
@@ -15910,4 +15980,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, PortalGlassContext };

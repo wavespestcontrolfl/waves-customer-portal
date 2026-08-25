@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
@@ -292,12 +293,32 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
+/**
+ * The customer's portal irrigation figure: their explicit inches-per-week
+ * entry, else the figure @waves/irrigation-runtime derives from their minutes
+ * per zone × watering days × head type. One resolver shared by every read of
+ * property_preferences in this file so the report cannot disagree with the
+ * weekly irrigation email (which applies the same two-step rule).
+ */
+function portalIrrigationInches(propertyPrefs) {
+  if (!propertyPrefs) return null;
+  const explicit = numberOrNull(propertyPrefs.irrigation_inches_per_week);
+  if (explicit != null) return explicit;
+  return deriveIrrigationInchesPerWeek({
+    runMinutes: propertyPrefs.irrigation_run_minutes,
+    wateringDays: propertyPrefs.watering_days,
+    systemType: propertyPrefs.irrigation_system_type,
+  }).inchesPerWeek;
+}
+
 function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
-  const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
+  const prefsIrrigationInches = portalIrrigationInches(propertyPrefs);
   // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
   // shows. The customer's own schedule takes priority over turf/assessment readings.
+  // (A figure derived from their runtime entries counts as a portal entry — same
+  // precedence the weekly irrigation email applies; the two surfaces must agree.)
   const irrigationInchesPerWeek = firstNumber(
     prefsIrrigationInches,
     turfIrrigationInches,
@@ -2541,14 +2562,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // other surfaces (waveguard-plan-engine), so it is not emitted here.
       irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
         ?? assessment.irrigation_inches_per_week
-        ?? propertyPrefs?.irrigation_inches_per_week
-        ?? null,
+        ?? portalIrrigationInches(propertyPrefs),
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : (propertyPrefs ? {
-      irrigationInchesPerWeek: propertyPrefs.irrigation_inches_per_week ?? null,
+      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs),
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
@@ -4719,6 +4739,7 @@ module.exports = {
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,
+  portalIrrigationInches,
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,

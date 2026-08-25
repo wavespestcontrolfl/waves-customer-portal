@@ -36,6 +36,12 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const {
+  deriveIrrigationInchesPerWeek,
+  describeRuntimeBasis,
+  normalizeRuntimeInputs,
+  HEAD_LABELS,
+} = require('@waves/irrigation-runtime');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SUPPRESSION_GROUP = 'service_operational';
@@ -104,6 +110,63 @@ function roundHundredth(value) {
 // any other weekday still resolves to the same most-recent completed week
 // (running ON a Sunday reaches back to the previous Sunday — the current week
 // isn't complete until the day ends).
+const PORTAL_IRRIGATION_ASK = 'under Irrigation in your portal';
+const SETUP_CLOSER = "and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.";
+
+function joinList(parts) {
+  if (parts.length <= 1) return parts.join('');
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * The setup_schedule callout, per customer. A customer with days, zones and
+ * per-zone minutes on file read the old static "we have a system on file
+ * but not how much you run it" as "you lost my schedule" (2026-08-17). So:
+ * name what IS on file, then the ONE thing that still blocks the conversion.
+ * `derived` is deriveIrrigationInchesPerWeek's result for their prefs.
+ */
+function buildScheduleAsk({ derived, inputs }) {
+  const have = [];
+  if (inputs.wateringDays.length) have.push(`${inputs.wateringDays.length} watering ${inputs.wateringDays.length === 1 ? 'day' : 'days'}`);
+  if (inputs.runMinutes != null) have.push(`${inputs.runMinutes} minutes per zone`);
+  if (inputs.headTypes.length) have.push(joinList(inputs.headTypes.map((t) => HEAD_LABELS[t] || t)));
+  const haveClause = have.length ? ` — ${joinList(have)} — ` : ' for you, ';
+  const reason = derived?.reason || 'missing_minutes';
+
+  switch (reason) {
+    case 'missing_days':
+      return `We have your sprinkler system on file${haveClause}but not which days it runs. Pick your watering days ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+    case 'missing_head_type':
+    case 'unknown_head_type':
+      return `We have your sprinkler system on file${haveClause}but not what kind of heads it uses. Spray and rotor heads put down water at very different rates, so pick your system type ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+    case 'mixed_head_types':
+      return `Your sprinkler system is on file as ${joinList(inputs.headTypes.map((t) => HEAD_LABELS[t] || t))}, which put down water at very different rates, so we can't turn run time into inches on our own. If you know roughly how many inches your lawn gets each week, enter that ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+    case 'drip_only':
+      return `Your system is on file as drip, which waters beds rather than turf. If the lawn does get sprinkler water, add the head type and minutes per zone (or your weekly inches) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+    case 'missing_minutes':
+    default:
+      if (!have.length) {
+        return `We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+      }
+      return `We have your sprinkler system on file${haveClause}but not how many minutes each zone runs. Add that ${PORTAL_IRRIGATION_ASK} (or your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  }
+}
+
+// Seeded confirm_schedule callout — still exactly right for a technician-
+// recorded reading (20260801200000 seed; the 20260825000001 migration turned
+// the block into {{schedule_note}} so a derived figure can say otherwise).
+const TECH_SCHEDULE_NOTE = "That schedule came from our records rather than from you, so it may be out of date. If it looks right, you're all set — we'll keep checking the numbers every week. If it's changed, update it under Irrigation in your portal, or just reply to this email and tell us how you water.";
+
+/**
+ * Where the confirm_schedule figure came from. A DERIVED figure is the
+ * customer's own entries run through a published head rate — say so, and
+ * say which rate, so the customer can overrule it with a real number.
+ */
+function buildScheduleNote({ scheduleSource, derived, scheduleFmt }) {
+  if (scheduleSource !== 'portal_derived' || !derived) return TECH_SCHEDULE_NOTE;
+  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour). If you know your actual weekly inches, enter them there and we'll use your number instead.`;
+}
+
 function lastCompletedWeekEnding(now = new Date()) {
   const { dayOfWeek } = etParts(now); // Sun=0 … Sat=6
   const back = dayOfWeek === 0 ? 7 : dayOfWeek;
@@ -211,6 +274,11 @@ function buildWeeklyEmailDecision({
   assessmentIrrigationInchesPerWeek = null,
   turfIrrigationType = null,
   irrigationSystem = null,
+  // Runtime the customer entered instead of inches: minutes per zone ×
+  // watering days × head type → inches via @waves/irrigation-runtime.
+  irrigationRunMinutes = null,
+  wateringDays = null,
+  irrigationSystemType = null,
   rainSource = null,
   rainfallInches7d = null,
   et0Inches = null,
@@ -223,6 +291,13 @@ function buildWeeklyEmailDecision({
   // email claiming we have no schedule for them (codex #3138 r1 P2).
   const turfType = String(turfIrrigationType || '').trim().toLowerCase();
   const prefsInches = numberOrNull(irrigationInchesPerWeek);
+  // A figure DERIVED from the customer's own runtime entries. It is still a
+  // portal entry (their minutes, their days, their heads) so it outranks a
+  // tech reading — but their explicit inches number always outranks it: the
+  // head rate is a published typical, not a measurement of their system.
+  const runtimeInputs = normalizeRuntimeInputs({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
+  const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
+  const derivedInches = prefsInches == null ? derived.inchesPerWeek : null;
   // A technician recording irrigation_type 'none' is saying this property
   // does not irrigate. Any tech-sourced inches alongside that are
   // contradictory, and adding them to the balance would tell the customer
@@ -233,16 +308,18 @@ function buildWeeklyEmailDecision({
   const turfInches = techReadingsUsable ? numberOrNull(turfIrrigationInchesPerWeek) : null;
   const assessmentInches = techReadingsUsable ? numberOrNull(assessmentIrrigationInchesPerWeek) : null;
   const effectiveInches = prefsInches != null ? prefsInches
-    : (turfInches != null ? turfInches : assessmentInches);
+    : (derivedInches != null ? derivedInches
+      : (turfInches != null ? turfInches : assessmentInches));
   // …and the same suppression semantics: the portal toggle only zeroes a
   // value the customer did NOT enter — i.e. when the prefs reading is the
   // only one there is. A tech-recorded reading is never suppressed by the
   // customer's toggle.
-  const onlyPrefsReading = turfInches == null && assessmentInches == null && prefsInches != null;
+  const onlyPrefsReading = turfInches == null && assessmentInches == null && (prefsInches != null || derivedInches != null);
   // WHERE the schedule came from decides which copy is truthful, so it is
   // tracked alongside the value itself.
   const scheduleSource = prefsInches != null ? 'portal'
-    : (turfInches != null ? 'turf' : (assessmentInches != null ? 'assessment' : null));
+    : (derivedInches != null ? 'portal_derived'
+      : (turfInches != null ? 'turf' : (assessmentInches != null ? 'assessment' : null)));
 
   const advice = buildIrrigationAdvice({
     grassType,
@@ -286,6 +363,10 @@ function buildWeeklyEmailDecision({
         week_ending: weekEnding,
         rain_last_week: rainSetup,
         target_inches: targetSetup,
+        // setup_schedule's callout ({{schedule_ask}}): what is on file and
+        // the one input still missing. setup_system has no such block, and
+        // an empty optional variable renders nothing.
+        schedule_ask: hasSystem ? buildScheduleAsk({ derived, inputs: runtimeInputs }) : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -359,11 +440,16 @@ function buildWeeklyEmailDecision({
     const diffFmt = formatInches(differenceDisplayNum);
     // Keyed on the measured status only — no forecast rerouting here, since
     // the neutral copy never prescribes an action for the week ahead.
+    // A derived figure is the customer's OWN schedule (their minutes, days
+    // and heads) expressed in inches — never "on file for you" from records.
+    const scheduleClause = scheduleSource === 'portal_derived'
+      ? `your sprinkler schedule as entered in your portal (about ${scheduleFmt}" per week)`
+      : `the ${scheduleFmt}"-per-week watering schedule we have on file for you`;
     const neutralLead = advice.status === 'surplus'
-      ? `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" more than the ${targetFmt}" your ${grassLabel} needs this time of year.`
+      ? `Between the rain near your home last week (${rain}") and ${scheduleClause}, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" more than the ${targetFmt}" your ${grassLabel} needs this time of year.`
       : advice.status === 'deficit'
-        ? `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" short of the ${targetFmt}" your ${grassLabel} needs this time of year.`
-        : `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — right in line with the ${targetFmt}" your ${grassLabel} needs this time of year.`;
+        ? `Between the rain near your home last week (${rain}") and ${scheduleClause}, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" short of the ${targetFmt}" your ${grassLabel} needs this time of year.`
+        : `Between the rain near your home last week (${rain}") and ${scheduleClause}, your lawn got about ${totalFmt}" of water — right in line with the ${targetFmt}" your ${grassLabel} needs this time of year.`;
     return {
       shouldSend: true,
       templateKey: TEMPLATE_CONFIRM_SCHEDULE,
@@ -378,6 +464,7 @@ function buildWeeklyEmailDecision({
         total_inches: totalFmt,
         target_inches: targetFmt,
         summary_line: neutralLead,
+        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt }),
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -601,6 +688,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.longitude',
       'pp.irrigation_inches_per_week',
       'pp.irrigation_system',
+      // Runtime entries — minutes per zone × watering days × head type — the
+      // natural-unit schedule @waves/irrigation-runtime converts to inches
+      // when the inches column itself is blank.
+      'pp.irrigation_run_minutes',
+      'pp.watering_days',
+      'pp.irrigation_system_type',
       // A schedule can also have been recorded by a tech rather than typed by
       // the customer (codex #3138 r1 P2). The lawn report already treats
       // portal → turf profile → assessment as one fallback chain
@@ -736,6 +829,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
         turfIrrigationType: customer.turf_irrigation_type,
         irrigationSystem: customer.irrigation_system,
+        irrigationRunMinutes: customer.irrigation_run_minutes,
+        wateringDays: customer.watering_days,
+        irrigationSystemType: customer.irrigation_system_type,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
@@ -1073,5 +1169,5 @@ module.exports = {
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
   TEMPLATE_CONFIRM_SCHEDULE,
-  _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
+  _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE },
 };

@@ -43,6 +43,9 @@ const prefsSchema = Joi.object({
   irrigationControllerLocation: shortText,
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
+  // Minutes each zone runs on a watering day — the natural-unit schedule
+  // @waves/irrigation-runtime converts to inches (× days × head type).
+  irrigationRunMinutes: Joi.number().integer().min(0).max(240).allow(null),
   irrigationScheduleNotes: longText,
   wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
   // Customers can have multiple sprinkler types on one property. Accept an
@@ -87,7 +90,7 @@ const ALLOWED_FIELDS = [
   'preferred_day', 'preferred_time', 'contact_preference',
   'blackout_start', 'blackout_end',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
-  'irrigation_inches_per_week', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
+  'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_issues',
   'mowing_days', 'mowing_time_of_day', 'mowing_notes',
   'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
@@ -104,6 +107,7 @@ const CUSTOMER_EMAIL_FIELDS = {
   blackout_end: 'Blackout end date',
   irrigation_system: 'Irrigation system',
   irrigation_inches_per_week: 'Irrigation inches per week',
+  irrigation_run_minutes: 'Irrigation minutes per zone',
   watering_days: 'Watering days',
   irrigation_system_type: 'Irrigation system type',
   rain_sensor: 'Rain sensor',
@@ -180,7 +184,7 @@ router.get('/preferences', async (req, res, next) => {
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
-          irrigationInchesPerWeek: null,
+          irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationIssues: '',
           mowingDays: [], mowingTimeOfDay: '', mowingNotes: '',

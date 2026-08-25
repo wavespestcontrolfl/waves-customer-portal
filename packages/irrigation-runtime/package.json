@@ -1,0 +1,7 @@
+{
+  "name": "@waves/irrigation-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single source of truth for turning a customer's sprinkler runtime (minutes per zone × watering days × head type) into inches per week. Imported by BOTH the server (weekly irrigation email + lawn report water balance) and the customer portal preview so the number the customer sees while typing is the number the emails use. Pure CommonJS, no dependencies.",
+  "main": "index.js"
+}
