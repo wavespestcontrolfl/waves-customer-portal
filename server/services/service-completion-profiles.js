@@ -264,7 +264,12 @@ function serviceNameCandidates(serviceType) {
     // rows — the strip alone only bridges label→catalog when the LABEL is
     // the longer form. Migration 20260808080000 already treats
     // `${name} Service` as a live alias in its rollback reference check.
-    if (!/\bservice$/i.test(candidate)) {
+    // The bare legacy spot-treatment label "Termite Foam" must NOT gain
+    // the generic append — "Termite Foam Service" is the renamed DRILL row,
+    // a different service/billing lane; it gets its own spot alias below
+    // (codex #3485 r12 P1).
+    const isLegacySpotFoam = /^termite\s+foam$/i.test(candidate);
+    if (!/\bservice$/i.test(candidate) && !isLegacySpotFoam) {
       const suffixed = `${candidate} Service`;
       const suffixedKey = suffixed.toLowerCase();
       if (!seen.has(suffixedKey)) {
@@ -324,8 +329,14 @@ function serviceNameCandidates(serviceType) {
       foamAlias = 'Termite Foam Service';
     } else if (/^recurring\s+termite\s+foam\s+service$/i.test(candidate)) {
       foamAlias = 'Recurring Foam Treatment';
-    } else if (/^termite\s+foam(\s+service)?$/i.test(candidate)) {
+    } else if (/^termite\s+foam\s+service$/i.test(candidate)) {
+      // Only the RENAMED drill label reverses to the old drill row — the
+      // bare "Termite Foam" is the distinct spot-treatment engine label
+      // (termite_foam → termite_spot_treatment) and must never land on the
+      // drill lane (codex #3485 r12 P1).
       foamAlias = 'Drill-and-Foam Termite';
+    } else if (isLegacySpotFoam) {
+      foamAlias = 'Termite Spot Treatment Service';
     }
     if (foamAlias && !seen.has(foamAlias.toLowerCase())) {
       expanded.push(foamAlias);

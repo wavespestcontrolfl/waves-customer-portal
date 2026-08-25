@@ -444,6 +444,19 @@ describe('service completion profiles', () => {
     expect(profile).toMatchObject({ serviceKey: 'foam_recurring', serviceName: 'Recurring Foam Treatment' });
   });
 
+  test('bare "Termite Foam" (legacy spot label) resolves the SPOT row, never the drill lane', async () => {
+    const spotRow = { service_key: 'termite_spot_treatment', name: 'Termite Spot Treatment Service', category: 'termite', billing_type: 'one_time' };
+    // queue: raw misses, spot alias hits — the generic append (which would
+    // have produced the DRILL row's name) is suppressed for this label.
+    const knex = makeKnex({ serviceResults: [null, spotRow] });
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'Termite Foam',
+    }, knex);
+    expect(profile).toMatchObject({ serviceKey: 'termite_spot_treatment' });
+    expect(knex._whereRawCalls.map((c) => c.bindings[0])).not.toContain('Termite Foam Service');
+  });
+
   // The foam renames are NOT suffix-only, so they get explicit aliases:
   // reserved foam rows carry no service_id by design (20260808070000) and
   // legacy-labeled holds can commit after the rename migration runs.
