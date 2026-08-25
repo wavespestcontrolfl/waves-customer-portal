@@ -429,9 +429,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       : noteGuard ? ERROR_COPY.note_guard_blocked
         : ERROR_COPY.note_compliance_blocked;
 
-  // Custom-reason state: the message is REQUIRED when a text is going out
-  // (it's the front of the SMS), and the assembled body must fit 2
-  // segments. The count comes from the SERVER's own render
+  // Custom-reason state: the message is OPTIONAL (owner ruling 2026-08-24
+  // — a blank box sends the server's standard opener instead of blocking
+  // the move), and the assembled body must fit 2 segments. The count comes
+  // from the SERVER's own render
   // (POST rain-out/custom-preview → previewCustomSms), debounced — the
   // client keeps no render mirrors (codex r9 P1: mirroring
   // gsm-normalize/segment-counter/sms-time-format/substitution meant any
@@ -468,7 +469,6 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     return () => { clearTimeout(timer); controller.abort(); };
   }, [isCustomReason, notify, customAvailable, note, selectedDate, selectedStart, selectedEnd, service.id]);
   const customOverBudget = !!(customSeg && !customSeg.withinCap);
-  const customMissing = !!(isCustomReason && notify && !note.trim());
 
   // Overlap advisory (owner ask 2026-08-12): every selection change —
   // preset OR custom time — re-checks the target against the schedule
@@ -560,7 +560,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const handleCommit = async () => {
-    if (!selected || busy || noteBlocked || customMissing || customOverBudget) return;
+    if (!selected || busy || noteBlocked || customOverBudget) return;
     setBusy(true);
     setError('');
     try {
@@ -870,9 +870,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   onChange={(e) => setNote(e.target.value)}
                   maxLength={NOTE_MAX_CHARS}
                   rows={isCustomReason ? 3 : 2}
-                  aria-label={isCustomReason ? 'Your message (required)' : 'Add a note to the text (optional)'}
+                  aria-label={isCustomReason ? 'Your message (optional)' : 'Add a note to the text (optional)'}
                   placeholder={isCustomReason
-                    ? 'Your message — it opens the text; the new time and reschedule link are added at the end'
+                    ? 'Your message (optional) — it opens the text; left blank, a standard update line is used'
                     : 'Add a note to the text (optional) — added to the end of the message'}
                   style={{
                     width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10,
@@ -917,12 +917,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy || noteBlocked || customMissing || customOverBudget}
+                disabled={!selected || busy || noteBlocked || customOverBudget}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy || noteBlocked || customMissing || customOverBudget ? 'default' : 'pointer',
-                  opacity: !selected || busy || noteBlocked || customMissing || customOverBudget ? 0.5 : 1,
+                  cursor: !selected || busy || noteBlocked || customOverBudget ? 'default' : 'pointer',
+                  opacity: !selected || busy || noteBlocked || customOverBudget ? 0.5 : 1,
                 }}
               >
                 {busy ? 'Moving…' : 'Move appointment'}

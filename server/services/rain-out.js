@@ -74,6 +74,12 @@ function isExtraReason(reasonCode) {
 // flag) and commit() rejects the code, so the kill switch is a plain unset.
 const CUSTOM_REASON = 'custom';
 const CUSTOM_TEMPLATE_KEY = 'rain_out_moved_custom_v1';
+// Owner ruling 2026-08-24: the typed front is OPTIONAL — the template row
+// already carries a complete notice (greeting + move line + reschedule
+// link), so a blank box sends this neutral opener instead of blocking the
+// move. GSM-7 only (a non-GSM char would flip the encoding and shrink the
+// 2-segment budget the cap is tuned for).
+const CUSTOM_DEFAULT_MESSAGE = 'quick update on your upcoming appointment.';
 function customReasonEnabled() {
   return process.env.GATE_QUICKMOVE_CUSTOM_REASON === 'true';
 }
@@ -157,9 +163,12 @@ async function previewCustomSms({ serviceId, customMessage, target }) {
   if (!service) return { ok: false, reason: 'not_found' };
   if (!target?.date || !target.window?.start) return { ok: false, reason: 'bad_target' };
   // Count the message the commit path embeds: sanitizeCustomerNote
-  // collapses whitespace runs. The full guard suite stays at commit — the
-  // preview only answers "how long".
-  const message = String(customMessage == null ? '' : customMessage).replace(/\s+/g, ' ').trim();
+  // collapses whitespace runs, and a blank box falls back to
+  // CUSTOM_DEFAULT_MESSAGE exactly like commit() does — the counter must
+  // measure the body that would actually send. The full guard suite stays
+  // at commit — the preview only answers "how long".
+  const message = String(customMessage == null ? '' : customMessage).replace(/\s+/g, ' ').trim()
+    || CUSTOM_DEFAULT_MESSAGE;
   const { existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
   const url = service.reschedule_token
     ? ((await existingShortUrlFor({
@@ -1281,16 +1290,12 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     if (prebuiltCustomSms?.body) {
       body = prebuiltCustomSms.body;
     } else {
-      if (!customerNote) {
-        logger.warn(`[rain-out] custom move for ${serviceId} has no message — no SMS`);
-        return { sent: false, reason: 'missing_custom_message' };
-      }
       body = await renderCustomMovedBody({
         firstName: customer.first_name,
         serviceType: job.service_type,
         date: chosen.date,
         window: chosen.window,
-        customMessage: customerNote,
+        customMessage: customerNote || CUSTOM_DEFAULT_MESSAGE,
         rescheduleUrl,
         serviceId,
       });
@@ -1505,16 +1510,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   }
   // Custom reason: the dispatcher's message is the SMS's opening line, so
   // it's as stop-specific as the note (route scope would fan one customer's
-  // situation out to strangers — single stop only), it's REQUIRED whenever
-  // a text is going out (the message IS the reason), and the assembled SMS
-  // must fit CUSTOM_SMS_MAX_SEGMENTS. The exact send body is rendered here,
-  // pre-move, through the same renderCustomMovedBody + link the send will
-  // use — reject BEFORE anything moves, never after.
+  // situation out to strangers — single stop only), and the assembled SMS
+  // must fit CUSTOM_SMS_MAX_SEGMENTS. A blank message is allowed (owner
+  // ruling 2026-08-24) — the template already carries the full notice, so
+  // CUSTOM_DEFAULT_MESSAGE fills the front instead of rejecting. The exact
+  // send body is rendered here, pre-move, through the same
+  // renderCustomMovedBody + link the send will use — reject BEFORE anything
+  // moves, never after.
   let prebuiltCustomSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
     if (notifyCustomer) {
-      if (!note) return { ok: false, reason: 'custom_requires_note' };
       // Reuse the visit's EXISTING short code before minting: the
       // reschedule target is deterministic per visit (stable token, codes
       // never expire), and the sheet's live counter estimated against the
@@ -1530,7 +1536,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         serviceType: service.service_type,
         date: target.date,
         window: target.window,
-        customMessage: note,
+        customMessage: note || CUSTOM_DEFAULT_MESSAGE,
         rescheduleUrl: url,
         serviceId,
       });

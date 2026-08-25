@@ -2652,12 +2652,23 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
-    test('gate on: notifying without a message is rejected — the message IS the reason', async () => {
+    test('gate on: blank message sends the standard opener instead of blocking the move (owner ruling 2026-08-24)', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
-      wireSingle();
-      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: null });
-      expect(result).toMatchObject({ ok: false, reason: 'custom_requires_note' });
-      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      mockCustomRender();
+      // null and whitespace-only both sanitize to no note → same default.
+      for (const customerNote of [null, '   ']) {
+        wireSingle(); // each commit consumes the queued service row
+        const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote });
+        expect(result.ok).toBe(true);
+      }
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      for (const call of sendCustomerMessage.mock.calls) {
+        expect(call[0].body).toBe(
+          'Hi Pat - quick update on your upcoming appointment.\n\n'
+          + "We've moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM."
+          + ' New time & other options: https://waves.test/r/tok123',
+        );
+      }
     });
 
     test('gate on: message opens the SMS, move line + link close it, no note append, no weather work', async () => {
@@ -2907,6 +2918,23 @@ describe('rain-out service', () => {
         remaining: 306 - seg.gsmSlotCount,
         encoding: 'GSM_7',
       });
+    });
+
+    test('previewCustomSms: blank message counts the default opener — the body commit() would send', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) })],
+        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
+      });
+      const result = await RainOut.previewCustomSms({
+        serviceId: 'svc-1',
+        customMessage: '   ',
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+      expect(result.ok).toBe(true);
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.custom_message).toBe('quick update on your upcoming appointment.');
     });
 
     test('previewCustomSms: gate off / dead template reject like commit would', async () => {
