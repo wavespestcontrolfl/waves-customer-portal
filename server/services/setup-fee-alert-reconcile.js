@@ -49,11 +49,12 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           if (alertCustomerId && alertCustomerId !== String(customerId)) return;
           const scanCustomerId = alertCustomerId || customerId;
           const deadAway = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
-          const stampedLive = (await trx('invoices')
+          const stampedAll = await trx('invoices')
             .where({ customer_id: scanCustomerId })
             .where('notes', 'like', `%accepted estimate #${sourceEstimateId}%`)
             .forUpdate()
-            .select('id', 'status', 'line_items', 'notes'))
+            .select('id', 'status', 'line_items', 'notes');
+          const stampedLive = stampedAll
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
           // Alert-driven manual invoices may carry no service link (the
           // manual-invoice endpoint's link is optional — Codex PR r4 P1),
@@ -73,16 +74,17 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             ...(staleMeta?.scheduledServiceId ? [String(staleMeta.scheduledServiceId)] : []),
             ...(Array.isArray(staleMeta?.parkedVisitIds) ? staleMeta.parkedVisitIds.map(String) : []),
           ])];
-          const onParkedLive = parkedIds.length
-            ? (await trx('invoices')
+          const onParkedAll = parkedIds.length
+            ? await trx('invoices')
               .where((qb) => {
                 qb.whereIn('scheduled_service_id', parkedIds);
                 if (staleMeta?.serviceRecordId) qb.orWhere({ service_record_id: staleMeta.serviceRecordId });
               })
               .forUpdate()
-              .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id'))
-              .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()))
+              .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id')
             : [];
+          const onParkedLive = onParkedAll
+            .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
           // Notes are provenance, never charge coverage (Codex P0,
           // pre-push round 12) — only a positive parseable base line
           // (invoiceBillsBaseApplication) proves an application billed.
@@ -112,7 +114,16 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 && r.prepaid_method !== AnnualPrepayRenewalsReconcile.ANNUAL_PREPAY_PREPAID_METHOD;
             })
             .map((r) => String(r.id)));
-          const feeProven = [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
+          // A REFUNDED fee-carrying invoice is fee-RESOLUTION evidence,
+          // never a reopened debt (mirrors setup-fee-obligation's rule —
+          // Codex P0, final round): the refund is a deliberate money
+          // action, refund.failed can restore the payment, and there is
+          // no refund-event clock — re-instructing the fee risks double
+          // collection. Application coverage stays live-rows-only.
+          const refundedFee = [...stampedAll, ...onParkedAll].some((r) => (
+            String(r.status || '').toLowerCase() === 'refunded' && invoiceHasPositiveSetupFeeLine(r)));
+          const feeProven = refundedFee
+            || [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
           const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
             String(r.scheduled_service_id || '') === String(visitId)
