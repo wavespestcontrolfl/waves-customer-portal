@@ -624,19 +624,13 @@ class GoogleBusinessService {
         if (!result?.linked) return result;
         // Side effects AFTER the link committed but still under the lock
         // (pre-push P1 r3): manual attribution must not interleave between
-        // the link and its flag flip / thank-you.
+        // the link and its flag flip. NO thank-you enrollment here — like
+        // the payout (pre-push P0), customer-facing copy waits for the human
+        // confirm: a wrong probabilistic link must never text "thanks for
+        // your review" to someone who didn't write it, and a re-match can't
+        // reliably claw back an already-active enrollment (GH codex r2 P1).
+        // manualAttributeGoogleReview enrolls on confirm.
         await this._markCustomerLeftReview(result.match.customerId);
-        // Same attribution side effect as the name-match and manual paths —
-        // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
-        // Payouts are NOT a side effect here: qualifiesGoogleReview excludes
-        // link_source='click_auto' until a human confirms (pre-push P0).
-        const { enrollReviewThankYou } = require('./automation-enroll');
-        await enrollReviewThankYou({
-          customerId: result.match.customerId,
-          locationId: result.live.location_id,
-          starRating: result.live.star_rating,
-          source: 'google_review_click_autolink',
-        });
         return result;
       }, { recordHealth: false });
       if (outcome?.skipped || outcome?.nomatch) return false;

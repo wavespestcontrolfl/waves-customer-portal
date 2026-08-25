@@ -594,12 +594,24 @@ async function getAttributionQueue(options = {}) {
   // Scan by the PERIOD only — the program-start cutoff would hide click_auto
   // rows predating the payout program from their only correction surface
   // (pre-push P1); the payout-driven branches re-apply the cutoff below.
-  const reviews = await conn('google_reviews')
+  const scanned = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .whereNull('missing_since')
     .where('review_created_at', '>=', since.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
+  // Correction rows fetched INDEPENDENTLY of the scan cap: a busy period can
+  // push an older click_auto row past `limit` before eligibility filtering,
+  // dropping it from its only correction surface (GH codex #3483 r2 P2).
+  const clickAutoRows = await conn('google_reviews')
+    .where({ link_source: 'click_auto' })
+    .whereNotNull('customer_id')
+    .whereNull('missing_since')
+    .where('review_created_at', '>=', since.toISOString())
+    .orderBy('review_created_at', 'desc')
+    .limit(limit);
+  const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
+  const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
 
   const reviewIds = reviews.map(row => row.id).filter(Boolean);
   const paidRows = reviewIds.length
@@ -958,7 +970,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // review already attributed, and a months-later "thanks for your review"
   // from that repair would read as noise. (Gate, 4-5-star bar, cross-location
   // once-ever dedupe all live in the shared helper; it never throws.)
-  if (review.customer_id !== customerId) {
+  // Exception: confirming a click AUTO-link with the SAME customer — the
+  // auto-link deliberately defers customer-facing copy to this human
+  // confirmation (GH codex #3483 r2 P1), so the confirm IS the attribution
+  // moment. prior = live pre-write state read under the lock.
+  if (prior?.customer_id !== customerId || prior?.link_source === 'click_auto') {
     const { enrollReviewThankYou } = require('./automation-enroll');
     await enrollReviewThankYou({
       customerId,

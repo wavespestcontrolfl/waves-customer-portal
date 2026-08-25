@@ -80,12 +80,16 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // those rows are not evidence anyone reached the Google form (codex
       // #3264 r2).
       .where('rr.google_review_clicked', true)
-      // Latest observed click, not the first: redirected_at is an atomic
-      // first-click claim that never moves, so a customer who opened the
-      // link days ago and tapped again right before posting correlates by
-      // last_redirected_at (GH codex #3483 r1; legacy rows fall back).
-      .whereRaw('COALESCE(rr.last_redirected_at, rr.redirected_at) >= ?', [windowStart])
-      .whereRaw('COALESCE(rr.last_redirected_at, rr.redirected_at) <= ?', [windowEnd]);
+      // EITHER observed click may qualify: redirected_at is the immutable
+      // first-click claim, last_redirected_at the latest server-observed
+      // tap (GH codex #3483 r1/r2). A row enters the window when either
+      // timestamp lands in it — a pre-review first click must survive a
+      // post-review revisit, and a fresh re-tap must revive a stale first
+      // click. The JS pass below picks the best-qualifying timestamp.
+      .whereRaw(
+        '((rr.redirected_at >= ? AND rr.redirected_at <= ?) OR (rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?))',
+        [windowStart, windowEnd, windowStart, windowEnd],
+      );
     // A click 302s to ONE location's review form — a click for a different
     // GBP than the review's is anti-evidence, not a weaker match; timestamp
     // proximity must not let it outrank the real clicker (codex #3264 r2).
@@ -133,17 +137,33 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     // One entry per customer, nearest click wins. The clicked/location
     // filters repeat JS-side so behavior holds even where the SQL layer is
     // mocked (test harnesses ignore where-clauses — #3235 r6 lesson).
+    // Preference order: a click BEFORE the review always beats one after it
+    // (a post-review revisit must not mask the qualifying earlier tap — GH
+    // codex #3483 r2 P2); among equals, nearest wins.
+    const betterClick = (a, b) => {
+      if (!b) return true;
+      const aBefore = a.clickOffsetMs >= 0;
+      const bBefore = b.clickOffsetMs >= 0;
+      if (aBefore !== bBefore) return aBefore;
+      return Math.abs(a.clickOffsetMs) < Math.abs(b.clickOffsetMs);
+    };
     const byCustomer = new Map();
     for (const row of clicks) {
       if (row.google_review_clicked !== true) continue;
       if (reviewLocationId && row.google_location && row.google_location !== reviewLocationId) continue;
-      // Same latest-click rule as the SQL window (JS-side for mocked layers).
-      const clickedAt = new Date(row.last_redirected_at || row.redirected_at);
-      if (Number.isNaN(clickedAt.getTime())) continue;
-      const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();
-      const prev = byCustomer.get(row.customer_id);
-      if (!prev || Math.abs(clickOffsetMs) < Math.abs(prev.clickOffsetMs)) {
-        byCustomer.set(row.customer_id, { row, clickedAt, clickOffsetMs });
+      // BOTH observed timestamps are candidate clicks (see the SQL window).
+      for (const ts of new Set([row.redirected_at, row.last_redirected_at].filter(Boolean))) {
+        const clickedAt = new Date(ts);
+        if (Number.isNaN(clickedAt.getTime())) continue;
+        // The OR window admits the ROW when either timestamp qualifies —
+        // this clamp keeps the other, out-of-window timestamp from being
+        // picked as the click (also holds under mocked SQL layers).
+        if (clickedAt < windowStart || clickedAt > windowEnd) continue;
+        const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();
+        const candidate = { row, clickedAt, clickOffsetMs };
+        if (betterClick(candidate, byCustomer.get(row.customer_id))) {
+          byCustomer.set(row.customer_id, candidate);
+        }
       }
     }
 

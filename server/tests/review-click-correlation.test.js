@@ -148,15 +148,29 @@ describe('findLikelyReviewers', () => {
     expect(result).toHaveLength(2);
   });
 
-  test('queries a 72h-before / 6h-after window around the review on the LATEST click', async () => {
+  test('queries a 72h-before / 6h-after window over EITHER observed click', async () => {
     const conn = makeConn({ clickRows: [] });
     await findLikelyReviewers({ review_created_at: REVIEW_AT }, { conn });
-    const bounds = conn.captured.whereRaw.filter((args) => String(args[0]).includes('COALESCE(rr.last_redirected_at, rr.redirected_at)'));
-    const gte = bounds.find((args) => String(args[0]).includes('>='));
-    const lte = bounds.find((args) => String(args[0]).includes('<='));
+    const windowClause = conn.captured.whereRaw.find((args) =>
+      String(args[0]).includes('rr.redirected_at') && String(args[0]).includes('rr.last_redirected_at'));
     const reviewMs = Date.parse(REVIEW_AT);
-    expect(gte[1][0].getTime()).toBe(reviewMs - 72 * 3600 * 1000);
-    expect(lte[1][0].getTime()).toBe(reviewMs + 6 * 3600 * 1000);
+    const [start, end, start2, end2] = windowClause[1];
+    expect(start.getTime()).toBe(reviewMs - 72 * 3600 * 1000);
+    expect(end.getTime()).toBe(reviewMs + 6 * 3600 * 1000);
+    expect(start2.getTime()).toBe(start.getTime());
+    expect(end2.getTime()).toBe(end.getTime());
+  });
+
+  test('a qualifying pre-review first click survives a post-review revisit', async () => {
+    const conn = makeConn({
+      clickRows: [clickRow({
+        redirected_at: '2026-08-07T17:50:00.000Z', // 10m before the review
+        last_redirected_at: '2026-08-07T19:00:00.000Z', // revisited 1h after
+      })],
+    });
+    const result = await findLikelyReviewers({ review_created_at: REVIEW_AT, location_id: 'bradenton' }, { conn });
+    expect(result[0].clickedAt).toBe('2026-08-07T17:50:00.000Z');
+    expect(result[0].clickedBeforeReview).toBe(true);
   });
 
   test('a repeat click correlates by last_redirected_at, not the first-click claim', async () => {
