@@ -730,4 +730,19 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
       service_type: 'Termite Bait Station Service',
     })).toBeNull();
   });
+
+  test('with no link, a NON-bond snapshot vetoes a stale bond label', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // Snapshot is the durable identity when the catalog FK is gone; a
+    // leftover "Termite Bond" label must not out-vote it (pre-push P1).
+    expect(termYearsForVisit({
+      service_key_snapshot: 'pest_general_quarterly',
+      service_type: 'Termite Bond (10-Year Term)',
+    })).toBeNull();
+    // The combined bait+bond snapshot keeps its label-derived term.
+    expect(termYearsForVisit({
+      service_key_snapshot: 'termite_bait',
+      service_type: 'Quarterly Termite Bait Station + Termite Bond Service (10-Year Term)',
+    })).toBe(10);
+  });
 });

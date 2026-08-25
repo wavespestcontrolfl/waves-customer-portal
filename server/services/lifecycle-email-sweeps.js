@@ -73,8 +73,20 @@ function termYearsForVisit(v) {
     }
     return null;
   }
-  const m = String(v.service_key_snapshot || '').match(/^termite_bond_(\d+)yr$/);
-  if (m) return Number(m[1]);
+  // Same authority contract for the snapshot tier (pre-push P1): with no
+  // link, a non-bond snapshot is the visit's durable identity — a stale
+  // "Termite Bond" label must not out-vote it. The combined bait+bond
+  // exception applies here too (promotions restamp the snapshot to
+  // 'termite_bait' with the term in the label).
+  const snap = String(v.service_key_snapshot || '');
+  if (snap) {
+    const m = snap.match(/^termite_bond_(\d+)yr$/);
+    if (m) return Number(m[1]);
+    if (snap === 'termite_bait' && /termite bond/i.test(String(v.service_type || ''))) {
+      return termYearsFrom(v.service_type);
+    }
+    return null;
+  }
   return termYearsFrom(v.service_type);
 }
 
