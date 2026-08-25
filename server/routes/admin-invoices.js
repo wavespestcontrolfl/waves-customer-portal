@@ -1435,7 +1435,7 @@ router.post('/:id/unvoid', requireAdmin, async (req, res, next) => {
     if (/Invoice not found/i.test(err.message)) {
       return res.status(404).json({ error: err.message });
     }
-    if (/^Cannot unvoid|^Only a voided invoice|finalized payer statement|resolve it before unvoiding|live payment session|re-check and retry/i.test(err.message)) {
+    if (/^Cannot unvoid|^Only a voided invoice|finalized payer statement|resolve it before unvoiding|live payment session|re-check and retry|could not verify the/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     next(err);

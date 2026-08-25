@@ -194,6 +194,8 @@ describe('POST /:id/unvoid refusal mapping', () => {
   test.each([
     ['not void', 'Only a voided invoice can be unvoided (current status: sent)'],
     ['annual prepay term', 'Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead'],
+    ['unverifiable term link', 'Could not verify the annual prepay term link — refusing to unvoid (boom)'],
+    ['prepay-switch superseded', 'Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied'],
     ['deposit credit returned', "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly"],
     ['finalized payer statement', 'This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one'],
     ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before unvoiding'],
