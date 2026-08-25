@@ -2371,7 +2371,7 @@ describe('completion route wiring (source contracts)', () => {
     // allowances never widen this lane's cap.
     expect(source).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
     expect(source).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
-    expect(source).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\)\) \{/);
+    expect(source).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\) \{/);
     // Autopay-ledger entries name the actual lane.
     expect(source).toMatch(/const completionChargeSource = perApplicationBilling \? 'per_application_completion' : 'appointment_card_completion';/);
     expect(source).not.toMatch(/details: \{ source: 'per_application_completion'/);

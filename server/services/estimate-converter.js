@@ -2030,9 +2030,29 @@ function estimateOperatorSetupFeeWaived(estimateData = {}) {
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
 }
 
+// The one place the setup-fee DOLLAR amount is resolved for charging: the
+// amount the quote froze at disclosure time (estimate_data.setupFeeQuote,
+// stamped by /public/quote/calculate), cents-exact, with the live constant
+// only as the legacy fallback for estimates that predate the freeze. Every
+// invoicing path — the converter's internal draft invoice, public
+// acceptance's invoice/notes, and the acceptedSetupFeeAmount stamp — must
+// price through this resolver so an in-flight quote can never display one
+// fee and charge another after the constant changes.
+function frozenSetupFeeAmount(estimateData = {}) {
+  const raw = Number(normalizeEstimateData(estimateData)?.setupFeeQuote?.amount);
+  return (Number.isFinite(raw) && raw > 0)
+    ? Math.round(raw * 100) / 100
+    : WAVEGUARD_SETUP_FEE;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
+  // Frozen wizard waiver: /public/quote/calculate persists setupFeeQuote on
+  // the draft — amount 0 means the quote DISCLOSED no fee (active member at
+  // quote time), and conversion must not re-add one the customer never saw.
+  const frozenQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
+  if (frozenQuote && !(Number(frozenQuote.amount) > 0)) return false;
   // Existing customers never pay the WaveGuard setup again — mirrors the
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
@@ -5234,6 +5254,10 @@ const EstimateConverter = {
       const setupFeeApplies = billingTerm === 'standard'
         ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
         : false;
+      // Frozen wizard disclosure — single resolver shared with public
+      // acceptance (frozenSetupFeeAmount below), so every charging path
+      // bills exactly what the quote disclosed.
+      const setupFeeAmount = frozenSetupFeeAmount(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
@@ -5262,7 +5286,7 @@ const EstimateConverter = {
               : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99.00 setup fee waived per WaveGuard membership policy.`;
+            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -5571,7 +5595,7 @@ const EstimateConverter = {
             lineItems.push({
               description: 'WaveGuard Membership — one-time setup fee',
               quantity: 1,
-              unit_price: WAVEGUARD_SETUP_FEE,
+              unit_price: setupFeeAmount,
             });
           }
           if (firstApplicationAmount > 0) {
@@ -5594,14 +5618,14 @@ const EstimateConverter = {
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          const invoiceSubtotal = (setupFeeApplies ? WAVEGUARD_SETUP_FEE : 0) + firstApplicationAmount;
+          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
           const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
           const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee plus first application.`
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee plus first application.`
             : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee only.`
                 : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
           let inv = null;
           let appliedDepositCredit = 0;
@@ -6130,6 +6154,7 @@ module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
+module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary
