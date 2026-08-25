@@ -3013,11 +3013,13 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
       ) : null}
       {isAnnualPrepay && acceptResult?.invoiceSettled ? (
         // Prepay auto-charged at accept (GATE_PREPAY_CARD_AND_CHARGE): the
-        // 'confirmed' outcome is a PAID year, not a payer-billed pass-through
-        // — say the payment landed so the customer isn't left expecting an
-        // invoice.
+        // 'confirmed' outcome is a PAID (or ACH-processing) year, not a
+        // payer-billed pass-through — say what the money did so the
+        // customer isn't left expecting an invoice.
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-          Your annual prepay payment{prepayAmountText} went through — your receipt is on the way.
+          {acceptResult?.prepayChargeStatus === 'processing'
+            ? `Your annual prepay bank payment${prepayAmountText} is processing — we'll confirm when it completes.`
+            : `Your annual prepay payment${prepayAmountText} went through — your receipt is on the way.`}
         </div>
       ) : null}
       {recurring && !isNativeApp() ? (
@@ -4143,6 +4145,15 @@ function EstimateViewPageInner() {
   // a stale ack simply earns a fresh quote.
   const [prepayChargeQuote, setPrepayChargeQuote] = useState(null);
   const prepayChargeAckRef = useRef(null);
+  // A quote is scoped to the preference it was minted for (pre-push Codex
+  // P0 r2): switching prepay ↔ pay-per-application (prefSwitch, bond reset,
+  // interior toggle) must drop it, or a stale "Confirm & pay $X" tap would
+  // submit the OTHER preference under a payment authorization the customer
+  // no longer sees. The server re-quotes authoritatively regardless.
+  useEffect(() => {
+    prepayChargeAckRef.current = null;
+    setPrepayChargeQuote(null);
+  }, [paymentPreference]);
   // Seamless single-screen booking (owner 2026-07-12): when the review card
   // owes an Auto Pay card, the Payment Element renders INLINE in the review
   // (one tap saves the card and books). inlineCardIntent holds the pre-minted
@@ -6192,7 +6203,7 @@ function EstimateViewPageInner() {
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 8, lineHeight: 1.5 }}>
                 {Number(prepayChargeQuote.surcharge) > 0
                   ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
-                  : `Charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
+                  : `Charged to your saved payment method${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
               </div>
               <button
                 type="button"
@@ -6259,9 +6270,14 @@ function EstimateViewPageInner() {
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual' ? 'Confirm & pay the 12-month plan' : 'Confirm booking & save card')
               : null}
-            confirmDisabled={inlineAutoPayActive && inlineCardIntent
-              ? !(inlineCardState.ready && inlineCardState.agreed)
-              : false}
+            confirmDisabled={!!prepayChargeQuote
+              // While the exact-total quote card is up, ITS button is the
+              // only confirm — the underlying review CTA stays disabled so
+              // a plain confirm can't race the payment authorization
+              // (pre-push Codex P0 r2).
+              || (inlineAutoPayActive && inlineCardIntent
+                ? !(inlineCardState.ready && inlineCardState.agreed)
+                : false)}
             submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold

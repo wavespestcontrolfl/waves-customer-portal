@@ -9329,8 +9329,30 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       });
       const prepayQuoteBase = Number(annualPrepayDisplayAmount);
       if (prepayChargeMethod && prepayQuoteBase > 0) {
+        // Project account credit EXACTLY like the charge will (pre-push
+        // Codex P0 r2: quote and charge must be the same computeChargeAmount
+        // result to the cent) — chargeInvoiceWithSavedCard auto-applies the
+        // customer's credit balance in-lock when the gate is on, so the
+        // quote projects the same application (mirrors
+        // quoteInvoiceSavedCardCharge). Inspection-credit redemption is
+        // deliberately sequenced AFTER a successful prepay charge (the
+        // credit stays on the account for future invoices) so it cannot
+        // move the amount between this quote and the charge; any residual
+        // drift is refused by the charge's expectedTotal equality check and
+        // degrades to the pay-link fallback, never a surprise amount.
+        let prepayProjectedDue = prepayQuoteBase;
+        if (quoteCustomerId && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          try {
+            const { getBalance, computeApplication } = require('../services/customer-credit');
+            const balance = await getBalance(quoteCustomerId);
+            const projection = computeApplication({ total: prepayQuoteBase, creditApplied: 0, balance: balance || 0 });
+            prepayProjectedDue = Math.max(0, Math.round((prepayQuoteBase - (projection.newCreditApplied || 0)) * 100) / 100);
+          } catch (creditErr) {
+            logger.warn(`[estimate-accept] prepay quote credit projection failed — quoting without credit: ${creditErr.message}`);
+          }
+        }
         const { computeChargeAmount } = require('../services/stripe-pricing');
-        const chargeInfo = computeChargeAmount(prepayQuoteBase, prepayChargeMethod.methodType || 'card', { funding: prepayChargeMethod.funding });
+        const chargeInfo = computeChargeAmount(prepayProjectedDue, prepayChargeMethod.methodType || 'card', { funding: prepayChargeMethod.funding });
         const acknowledged = Number(req.body?.prepayChargeAcknowledgedTotalCents);
         if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents) {
           return res.status(402).json({
@@ -9342,6 +9364,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               total: chargeInfo.totalCents / 100,
               totalCents: chargeInfo.totalCents,
               funding: prepayChargeMethod.funding || null,
+              methodType: prepayChargeMethod.methodType || 'card',
               last4: prepayChargeMethod.last4 || null,
             },
           });
@@ -11298,34 +11321,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
     }
 
-    // Inspection credit: redeem NOW — the bookings committed above, and
-    // the invoice has not been delivered OR charged yet (pre-push P0).
-    // Relying on the hourly sweep here let the customer receive or even pay
-    // the full invoice before the promised $75 existed; redeeming first puts
-    // the credit in the balance so both the prepay auto-charge below
-    // (chargeInvoiceWithSavedCard applies account credit in-lock) and the
-    // send-time auto-apply (sendViaSMSAndEmail →
-    // autoApplyAccountCreditIfEnabled) consume it.
-    // Best-effort per booking — the sweep remains the durable guarantee.
-    if (customerId) {
-      const creditBookingIds = [...new Set([
-        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
-        txResult.standardConversion?.firstScheduledServiceId,
-        txResult.annualPrepayConversion?.firstScheduledServiceId,
-      ].filter(Boolean))];
-      for (const bookingId of creditBookingIds) {
-        try {
-          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
-            customerId,
-            scheduledServiceId: bookingId,
-            createdBy: 'system:inspection_credit_estimate_accept',
-          });
-        } catch (creditErr) {
-          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
-        }
-      }
-    }
-
     // Prepay auto-charge (owner ruling 2026-08-25, GATE_PREPAY_CARD_AND_CHARGE):
     // the card was live-verified and the exact surcharged total quoted AND
     // acknowledged BEFORE the accept committed (prepayChargePlan is only set
@@ -11371,13 +11366,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           const StripeService = require('../services/stripe');
           await StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
-            // Hard cap at the accepted prepay total: any upward drift of the
-            // just-minted invoice refuses instead of charging above what the
-            // customer accepted (a downward drift — more credit — is fine).
+            // EXACT-equality freeze to the acknowledged quote (pre-push
+            // Codex P0 r2): the in-lock computeChargeAmount result must be
+            // the same cents the customer confirmed — any drift (a credit
+            // write racing the quote, an invoice edit) refuses and the
+            // pay-link fallback takes over. Never a different amount.
+            expectedTotal: prepayChargePlan.quote.totalCents / 100,
+            // Belt-and-suspenders ceilings alongside the equality check.
             maxAuthorizedChargeCents: prepayCeilingCents,
-            // Freeze to the ACKNOWLEDGED surcharged total (pre-push Codex
-            // P0): the in-lock computeChargeAmount result may never exceed
-            // the quoted cents the customer confirmed.
             maxAuthorizedTotalCents: prepayChargePlan.quote.totalCents,
             // Serialize against a concurrently-committing pause/opt-out or
             // method switch — enrollment just ran, but the in-lock re-check
@@ -11390,9 +11386,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'paid' };
             invoicePayUrl = null; // nothing left to pay — never advertise a pay link
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
+          } else if (freshStatus === 'processing') {
+            // A saved BANK method (autopay-active customers can be
+            // ACH-enrolled) debits asynchronously — 'processing' is a
+            // successfully INITIATED collection, not a decline (pre-push
+            // Codex P1 r2): no failure alert, no pay link, no invoice
+            // delivery (sendViaSMSAndEmail would refuse a non-collectible
+            // invoice anyway); the existing ACH webhook rails own the
+            // settle/fail outcome from here.
+            prepayAutoCharge = { status: 'processing' };
+            invoicePayUrl = null;
+            logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
           } else {
-            // Charge call returned without throwing but the invoice is not
-            // settled (e.g. parked 'processing' for reconciliation) — treat
+            // Charge call returned without throwing but the invoice is in
+            // an unexpected state (e.g. parked for reconciliation) — treat
             // as declined for flow purposes: alert + keep the pay path
             // (sendViaSMSAndEmail refuses a non-collectible invoice itself).
             prepayAutoCharge = { status: 'declined', reason: `post-charge status ${freshStatus || 'unknown'}` };
@@ -11402,7 +11409,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           logger.warn(`[estimate-accept] prepay auto-charge declined/failed for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
         }
       }
-      if (prepayAutoCharge.status !== 'paid') {
+      if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
         // The booking stands with a card on file but the year isn't
         // collected — surface it instead of the silent unpaid path. Best-effort.
         await require('../services/notification-service').notifyAdmin(
@@ -11411,6 +11418,34 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'is being sent to the customer'} — follow up if it goes unpaid.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
+      }
+    }
+
+    // Inspection credit: redeem the bookings' promised credit AFTER the
+    // prepay auto-charge (its quote deliberately excluded this credit so
+    // quote === charge to the cent — the credit stays on the account for
+    // future invoices when the year was just collected) but BEFORE any
+    // invoice delivery below (pre-push P0: the customer must never receive
+    // or pay the full invoice before the promised credit exists; the
+    // send-time auto-apply — sendViaSMSAndEmail →
+    // autoApplyAccountCreditIfEnabled — consumes it).
+    // Best-effort per booking — the sweep remains the durable guarantee.
+    if (customerId) {
+      const creditBookingIds = [...new Set([
+        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
+        txResult.standardConversion?.firstScheduledServiceId,
+        txResult.annualPrepayConversion?.firstScheduledServiceId,
+      ].filter(Boolean))];
+      for (const bookingId of creditBookingIds) {
+        try {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId,
+            scheduledServiceId: bookingId,
+            createdBy: 'system:inspection_credit_estimate_accept',
+          });
+        } catch (creditErr) {
+          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+        }
       }
     }
 
@@ -11671,12 +11706,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected && prepayAutoCharge?.status !== 'paid') {
-          // Auto-charged accepts skip this SMS (pre-push Codex P1): the
-          // template promises an invoice to pay, which contradicts a year
-          // already collected — the charge path's receipt is the customer's
-          // confirmation. Declined/skipped charges keep the invoice-coming
-          // copy, which is then accurate.
+        } else if (annualPrepaySelected && !['paid', 'processing'].includes(prepayAutoCharge?.status)) {
+          // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
+          // Codex P1): the template promises an invoice to pay, which
+          // contradicts a year already collected/collecting — the charge
+          // path's receipt is the customer's confirmation. Declined/skipped
+          // charges keep the invoice-coming copy, which is then accurate.
           const amountText = annualPrepayQuotedAmount != null ? ` for ${fmtMoney(annualPrepayQuotedAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
@@ -11765,7 +11800,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // auto-charges it. Invoice-mode and prepay accepts keep their delivery;
     // an auto-charged (paid) prepay invoice has nothing to deliver — the
     // charge path already handles the receipt.
-    if (invoiceId && prepayAutoCharge?.status !== 'paid' && (billByInvoice || annualPrepaySelected
+    if (invoiceId && !['paid', 'processing'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
       || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
@@ -11935,7 +11970,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
-        prepayCharged: prepayAutoCharge?.status === 'paid',
+        prepayChargeOutcome: ['paid', 'processing'].includes(prepayAutoCharge?.status) ? prepayAutoCharge.status : null,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -11979,10 +12014,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
-      // Auto-charged prepay is settled money — the success payload must say
-      // "confirmed", never "pay your prepay invoice" (same override the
-      // already-accepted retry path derives from the live invoice status).
-      invoiceSettled: prepayAutoCharge?.status === 'paid',
+      // Auto-charged prepay is settled money (an initiated ACH debit counts
+      // — isInvoiceCollectibleStatus treats 'processing' as settled too) —
+      // the success payload must say "confirmed", never "pay your prepay
+      // invoice" (same override the already-accepted retry path derives
+      // from the live invoice status).
+      invoiceSettled: ['paid', 'processing'].includes(prepayAutoCharge?.status),
+      prepayChargeStatus: ['paid', 'processing'].includes(prepayAutoCharge?.status) ? prepayAutoCharge.status : null,
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -15204,6 +15242,9 @@ function buildAcceptSuccessPayload({
   reservationCommitted = false,
   siteConfirmationHold = false,
   invoiceSettled = false,
+  // 'paid' | 'processing' | null — prepay auto-charge outcome for the
+  // success card's payment copy (GATE_PREPAY_CARD_AND_CHARGE).
+  prepayChargeStatus = null,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -15250,6 +15291,7 @@ function buildAcceptSuccessPayload({
     // settled on retry) from the payer-billed 'confirmed' — the success card
     // keys its "payment went through" copy off this.
     invoiceSettled,
+    prepayChargeStatus,
   };
 }
 
@@ -15555,7 +15597,9 @@ function buildAcceptNotificationPayload({
   bookingUrl = null,
   billingTerm = 'standard',
   annualPrepayAmount = null,
-  prepayCharged = false,
+  // 'paid' | 'processing' | null — the prepay auto-charge outcome
+  // (GATE_PREPAY_CARD_AND_CHARGE); shapes the prepay copy below.
+  prepayChargeOutcome = null,
 } = {}) {
   // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
   // the homeowner gets the report and owes nothing, so never advertise a
@@ -15671,13 +15715,23 @@ function buildAcceptNotificationPayload({
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
     // Auto-charged at accept (GATE_PREPAY_CARD_AND_CHARGE): the year is
-    // collected — no follow-up owed, no pay link to advertise.
-    if (prepayCharged) {
+    // collected (or an ACH debit is processing) — no follow-up owed, no pay
+    // link to advertise.
+    if (prepayChargeOutcome === 'paid') {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved and paid — card on file auto-charged.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay payment went through. Your receipt is on the way.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'processing') {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — bank payment processing on the saved method.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay bank payment is processing. We'll confirm when it completes.`,
         customerLink: '/?tab=billing',
       };
     }
