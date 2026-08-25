@@ -1036,8 +1036,13 @@ describe('slot reservation helpers', () => {
     })).resolves.toEqual({ id: 'scheduled-123', customer_id: 'customer-1' });
 
     // The key is still taken here (unconditional — pg advisory xact locks
-    // stack for the owning txn), and it is the caller's exact key.
-    expect(advisoryCalls()).toEqual([['slot-reserve', 'occupancy:2027-05-20']]);
+    // stack for the owning txn), and it is the caller's exact key. The
+    // shared invoice mint lock follows BEFORE the row FOR UPDATE
+    // (PR #3476: canonical advisory-then-row order with invoice writers).
+    expect(advisoryCalls()).toEqual([
+      ['slot-reserve', 'occupancy:2027-05-20'],
+      ['schedule.invoice.mint', 'scheduled-123'],
+    ]);
     expect(updateBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
       customer_id: 'customer-1',
       reservation_expires_at: null,
@@ -1080,9 +1085,13 @@ describe('slot reservation helpers', () => {
       trx,
     })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
 
-    // Exactly the pre-read date's key was taken — the moved-to date's key
-    // never was — and the commit never proceeded past the re-check.
-    expect(advisoryCalls()).toEqual([['slot-reserve', 'occupancy:2027-05-20']]);
+    // Exactly the pre-read date's key (plus the visit's mint lock, taken
+    // before the row lock per PR #3476) — the moved-to date's key never
+    // was — and the commit never proceeded past the re-check.
+    expect(advisoryCalls()).toEqual([
+      ['slot-reserve', 'occupancy:2027-05-20'],
+      ['schedule.invoice.mint', 'scheduled-123'],
+    ]);
     expect(scheduledBuilders).toHaveLength(2); // probe + update never consumed
   });
 });

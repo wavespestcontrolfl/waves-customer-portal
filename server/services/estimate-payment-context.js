@@ -415,7 +415,10 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // on the standard path, and the card must say so (the warning row
   // renders under the standard section).
   if (term && !termIsDead && !(termCanonicallyCovered === false && setupFeeMissing)) billingTerm = 'prepay_annual';
-  else if (!termIsDead && paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
+  // The persisted preference must not re-select prepay past an uncovered
+  // term with an owed fee (Codex PR r21 P2) — same exclusion as above.
+  else if (!termIsDead && !(termCanonicallyCovered === false && setupFeeMissing)
+    && paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
   // An owed-but-unminted setup fee proves the accept converted onto the
   // standard per-application plan even when no explicit preference was ever
   // stored ("inferred" profiles) — without this the card would render no
