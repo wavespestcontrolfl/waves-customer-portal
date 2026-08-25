@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString } = require('../utils/datetime-et');
 const {
@@ -20,11 +19,10 @@ const DEFAULTS = {
   staleLeadHours: 2,
   highValueEstimateAmount: 1000,
   highValueInvoiceAmount: 1000,
-  // A draft invoice unsent this many days is surfaced as a billing
-  // exception — long enough to skip the office's normal review-and-send
-  // window, short enough that dunning starts only ~2 touches late.
-  staleDraftInvoiceDays: 3,
 };
+// Stale unsent DRAFT invoices are surfaced by the dashboard-alerts
+// `stale_draft_invoices` computed alert (services/dashboard-alerts.js) —
+// the feed the dashboard actually reads. Deliberately NOT duplicated here.
 
 const PRE_ARRIVAL_JOB_STATUSES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route']);
 const DONE_JOB_STATUSES = new Set(['completed', 'cancelled', 'canceled', 'skipped', 'no_show']);
@@ -397,57 +395,7 @@ async function getMoneyCollections() {
     .select('i.*', 'c.first_name', 'c.last_name')
     .orderBy('i.due_date', 'asc')
     .limit(40);
-  // Stale unsent drafts: a draft whose first send never happened is
-  // invisible to dunning, the follow-up sequences, and the unpaid list
-  // above (drafts are excluded on purpose) — nothing chases the money
-  // until a human notices. Surface any billable draft older than the
-  // cutoff so it parks visibly instead of vanishing (owner ruling
-  // 2026-08-24, after a 7-week-old unsent completion draft was caught by
-  // hand). sent_at/sms_sent_at guard: a draft that WAS delivered at some
-  // point is a different problem (status drift), not an unsent one.
-  const draftCutoff = new Date(Date.now() - DEFAULTS.staleDraftInvoiceDays * 86400000);
-  const staleDrafts = await db('invoices as i')
-    .leftJoin('customers as c', 'i.customer_id', 'c.id')
-    .whereNull('i.archived_at')
-    .where('i.status', 'draft')
-    .whereNull('i.sent_at')
-    .whereNull('i.sms_sent_at')
-    // Statement-accrued NET-terms invoices stay draft/unsent BY DESIGN
-    // while attached to an open payer statement (individual delivery is
-    // forbidden — see InvoiceService.send's accrual guard); alerting on
-    // them would instruct a send staff cannot perform (Codex PR r2 P2).
-    .whereNull('i.payer_statement_id')
-    .where('i.total', '>', 0)
-    .where('i.created_at', '<', draftCutoff)
-    .select('i.*', 'c.first_name', 'c.last_name')
-    .orderBy('i.created_at', 'asc')
-    .limit(40)
-    .catch((err) => {
-      // Never a silent [] (Codex P1): a query failure here would read as
-      // "no stale drafts" and quietly disable the monitor — log loudly so
-      // the outage is visible even though the aggregate still renders.
-      logger.error(`[command-center] stale-draft invoice sweep FAILED — stale drafts NOT monitored this load: ${err.message}`);
-      return [];
-    });
-  const staleDraftIssues = staleDrafts.map((row) => {
-    const name = customerName(row);
-    const ageDays = Math.floor((Date.now() - new Date(row.created_at).getTime()) / 86400000);
-    return issue({
-      id: `${row.id}_stale_draft`,
-      type: 'stale_draft_invoice',
-      severity: 'high',
-      label: 'Unsent draft invoice',
-      summary: `${name}'s $${Number(row.total || 0).toFixed(2)} invoice has sat in draft ${ageDays} days — never sent, no follow-ups running.`,
-      sourceRecordType: 'invoice',
-      sourceRecordId: row.id,
-      href: invoiceHref(row),
-      customer: { id: row.customer_id, name, href: customerHref(row.customer_id) },
-      employee: null,
-      occurredAt: row.created_at,
-      metadata: { invoiceNumber: row.invoice_number, status: row.status, total: Number(row.total || 0), ageDays },
-    });
-  });
-  return staleDraftIssues.concat(rows.map((row) => {
+  return rows.map((row) => {
     const name = customerName(row);
     const highValue = Number(row.total || 0) >= DEFAULTS.highValueInvoiceAmount;
     return issue({
@@ -464,7 +412,7 @@ async function getMoneyCollections() {
       occurredAt: row.due_date || row.created_at,
       metadata: { invoiceNumber: row.invoice_number, status: row.status, total: Number(row.total || 0), dueDate: row.due_date },
     });
-  }));
+  });
 }
 
 async function getCustomerIssues() {

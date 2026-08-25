@@ -36,12 +36,14 @@
 //     exists. Resolving = refunded in ANY attachment state (the fee was
 //     collected then deliberately refunded — an operator money action,
 //     and a bounced refund restores the row to paid; never instruct a
-//     re-bill), or canceled/cancelled + attached WITH a setup-fee line
-//     (#3474's canceled-setup-fee parking lane surfaces it). Attachment
-//     alone proves nothing: findFirstApplicationInvoiceForEstimateService
-//     excludes 'void' outright, so a void attached acceptance invoice —
-//     like any other dead row — leaves the fee genuinely unbilled and
-//     the obligation survives it.
+//     re-bill), or canceled/cancelled + a positive setup-fee line +
+//     PROVABLY discoverable by #3474's canceledSetupFee lane (attached
+//     to a same-estimate visit on the completing visit's scheduled
+//     date). Attachment alone proves nothing:
+//     findFirstApplicationInvoiceForEstimateService excludes 'void'
+//     outright and only joins same-date siblings, so a void attached
+//     invoice, or a canceled one on a replaced-and-moved visit, leaves
+//     the fee genuinely unbilled and the obligation survives it.
 // ============================================================
 
 const db = require('../models/db');
@@ -211,23 +213,45 @@ async function findUnmintedSetupFeeObligation({
   const liveStampedFee = stampedRows.find((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase())
     && invoiceContainsSetupFeeLine(r));
   if (liveStampedFee) return { owed: false };
-  const deadSurfaced = stampedRows.find((r) => {
+  // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
+  // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
+  // an operator/webhook money action, not a silent leak — and a
+  // setup-only acceptance invoice is deliberately created with NO
+  // scheduled_service_id (estimate-converter). There is no refund-event
+  // clock, and a bounced refund (refund.failed) restores the row to
+  // paid: instructing a manual re-bill here would risk a double
+  // collection.
+  const refundedFee = stampedRows.find((r) => String(r.status || '').toLowerCase() === 'refunded'
+    && invoiceContainsSetupFeeLine(r));
+  if (refundedFee) return { owed: false };
+  // A CANCELED fee-carrying invoice satisfies only when #3474's
+  // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
+  // round 14): findFirstApplicationInvoiceForEstimateService joins
+  // invoices by scheduled_service_id to a same-estimate visit ON THE
+  // COMPLETING VISIT'S scheduled date. A canceled invoice attached to a
+  // visit that was itself canceled and replaced on another date is
+  // invisible to that lane — the obligation must survive it or the
+  // replacement visit mints bare. Without a completing-visit context
+  // (display callers) the attachment is unprovable → owed.
+  const canceledAttachedFee = stampedRows.find((r) => {
     const status = String(r.status || '').toLowerCase();
-    if (!invoiceContainsSetupFeeLine(r)) return false;
-    // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
-    // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
-    // an operator/webhook money action, not a silent leak — and a
-    // setup-only acceptance invoice is deliberately created with NO
-    // scheduled_service_id (estimate-converter). There is no
-    // refund-event clock, and a bounced refund (refund.failed) restores
-    // the row to paid: instructing a manual re-bill here would risk a
-    // double collection.
-    if (status === 'refunded') return true;
-    const attached = !!(r.scheduled_service_id || r.service_record_id);
-    if (!attached) return false;
-    return status === 'canceled' || status === 'cancelled';
+    return (status === 'canceled' || status === 'cancelled')
+      && r.scheduled_service_id && invoiceContainsSetupFeeLine(r);
   });
-  if (deadSurfaced) return { owed: false };
+  if (canceledAttachedFee && excludeScheduledServiceId) {
+    const attachedRow = await conn('scheduled_services')
+      .where({ id: canceledAttachedFee.scheduled_service_id })
+      .first('scheduled_date', 'source_estimate_id');
+    const completingRow = await conn('scheduled_services')
+      .where({ id: excludeScheduledServiceId })
+      .first('scheduled_date');
+    const { dateOnly } = require('./estimate-first-application-invoice');
+    const discoverable = !!(attachedRow && completingRow
+      && String(attachedRow.source_estimate_id) === String(estimate.id)
+      && dateOnly(attachedRow.scheduled_date)
+      && dateOnly(attachedRow.scheduled_date) === dateOnly(completingRow.scheduled_date));
+    if (discoverable) return { owed: false };
+  }
   // Name only a dead FEE-CARRYING invoice — a dead application-only row
   // never billed the fee, so "never invoiced" is the accurate story.
   const deadInvoice = stampedRows.find((r) => DEAD_STATUSES.has(String(r.status || '').toLowerCase())

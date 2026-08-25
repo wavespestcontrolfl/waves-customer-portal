@@ -141,7 +141,51 @@ test('a REFUNDED application-ONLY invoice never billed the fee — obligation su
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
-test('a CANCELED attached invoice CARRYING the setup-fee line is #3474\'s parking lane — not owed', async () => {
+test('a CANCELED attached fee invoice DISCOVERABLE by #3474\'s lane (same estimate + same date) — not owed', async () => {
+  let ssCall = 0;
+  mockTables = baseTables({
+    invoices: {
+      id: 'inv-1',
+      status: 'canceled',
+      scheduled_service_id: 'ss-1',
+      line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]),
+    },
+    // Call 1 = the attached visit, call 2 = the completing visit — same
+    // estimate, same scheduled date ⇒ the sibling finder sees the row.
+    scheduled_services: () => (++ssCall === 1
+      ? { scheduled_date: '2026-08-20', source_estimate_id: EST_ID }
+      : { scheduled_date: '2026-08-20' }),
+  });
+  expect((await findUnmintedSetupFeeObligation({
+    sourceEstimateId: EST_ID,
+    excludeScheduledServiceId: 'ss-now',
+  })).owed).toBe(false);
+});
+
+test('a CANCELED attached fee invoice on a replaced-and-moved visit (different date) is INVISIBLE to #3474 — obligation survives', async () => {
+  let ssCall = 0;
+  mockTables = baseTables({
+    invoices: {
+      id: 'inv-1',
+      status: 'canceled',
+      scheduled_service_id: 'ss-1',
+      line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]),
+    },
+    scheduled_services: () => {
+      ssCall += 1;
+      if (ssCall === 1) return { scheduled_date: '2026-08-13', source_estimate_id: EST_ID };
+      if (ssCall === 2) return { scheduled_date: '2026-08-20' };
+      return null; // prior-completed probe
+    },
+  });
+  const result = await findUnmintedSetupFeeObligation({
+    sourceEstimateId: EST_ID,
+    excludeScheduledServiceId: 'ss-now',
+  });
+  expect(result.owed).toBe(true);
+});
+
+test('a CANCELED attached fee invoice with NO completing-visit context (display callers) — obligation survives', async () => {
   mockTables = baseTables({
     invoices: {
       id: 'inv-1',
@@ -150,7 +194,7 @@ test('a CANCELED attached invoice CARRYING the setup-fee line is #3474\'s parkin
       line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]),
     },
   });
-  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
 test('a VOID attached invoice is invisible to every completion suppressor — obligation survives', async () => {
