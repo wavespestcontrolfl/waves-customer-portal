@@ -289,19 +289,26 @@ describe('Action Inbox generators', () => {
     expect(alerts.find((a) => a.id === 'autopay_coverage_low')).toBeUndefined();
   });
 
-  test('stale_draft_invoices: warns on billable drafts unsent 3+ days; statement-accrued excluded by predicate', async () => {
-    const capture = primeDb({ invoices: { c: '2' } });
+  test('stale_draft_invoices: warns on billable drafts unsent 3+ days, deep-links the oldest, names the rows', async () => {
+    const capture = primeDb({
+      invoices: [
+        { id: 'inv-old', invoice_number: 'WPC-2026-0100' },
+        { id: 'inv-new', invoice_number: 'WPC-2026-0200' },
+      ],
+    });
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'stale_draft_invoices');
-    expect(item).toMatchObject({ severity: 'warn', count: 2, href: '/admin/invoices' });
+    expect(item).toMatchObject({ severity: 'warn', count: 2, href: '/admin/invoices?invoice=inv-old' });
     expect(item.label).toContain('unsent 3+ days');
+    // The operator must be able to FIND the rows (Codex PR r4 P2).
+    expect(item.label).toContain('WPC-2026-0100');
     // Statement-accrued NET-terms drafts stay unsent BY DESIGN — the
     // predicate must exclude them.
     expect(capture.some((c) => c.table === 'invoices' && c.method === 'whereNull' && c.args[0] === 'payer_statement_id')).toBe(true);
   });
 
   test('stale_draft_invoices: absent when no stale drafts exist', async () => {
-    primeDb({ invoices: { c: '0' } });
+    primeDb({ invoices: [] });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'stale_draft_invoices')).toBeUndefined();
   });

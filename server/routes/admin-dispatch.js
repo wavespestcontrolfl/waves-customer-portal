@@ -8941,6 +8941,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
             .select('id', 'status', 'line_items', 'notes'))
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
+          // Alert-driven manual invoices may carry NO linkage at all (the
+          // manual-invoice endpoint's service link is optional — Codex PR
+          // r4 P1). The EXACT canonical line descriptions the alert
+          // instructs are the durable marker: scan the customer's live
+          // invoices for them so following the instructions retires the
+          // alert. Fee lines count everywhere; a canonical application
+          // line counts toward the PRIMARY visit only.
+          const canonicalLive = (await db('invoices')
+            .where({ customer_id: svc.customer_id })
+            .where((qb) => {
+              qb.whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
+                .orWhereRaw('line_items::text ILIKE ?', ['%first service application%']);
+            })
+            .select('id', 'status', 'line_items', 'notes'))
+            .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
           // EVERY parked visit must have its application billed (Codex
           // P0, pre-push round 15): a cross-visit race parks additional
           // visits into parkedVisitIds, and resolving on the primary
@@ -8964,7 +8979,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // The stamped acceptance invoice can cover only the PRIMARY
           // visit's (first) application; every other parked visit needs
           // its own attached invoice.
-          const feeProven = [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
+          const feeProven = [...stampedLive, ...onParkedLive, ...canonicalLive].some(invoiceHasPositiveSetupFeeLine);
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
           const visitApplicationBilled = (visitId) => onParkedLive.some((r) => (
             String(r.scheduled_service_id || '') === String(visitId)
@@ -8979,7 +8994,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ) && invoiceBillsBaseApplication(r));
           const applicationProven = parkedIds.length > 0 && parkedIds.every((visitId) => (
             visitApplicationBilled(visitId)
-            || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))
+            || (String(visitId) === primaryVisitId
+              && [...stampedLive, ...canonicalLive].some(invoiceBillsBaseApplication))
           ));
           // All four coverage states rewrite the alert (Codex P0,
           // pre-push round 17): once staff bills ONE charge, the original
@@ -9001,14 +9017,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // original both-charges instruction.
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `REOPENED: the invoices that covered this estimate's setup fee and parked application are no longer live. Bill BOTH charges manually: the one-time WaveGuard setup fee plus the parked visit application${parkedIds.length === 1 ? '' : 's'} (${parkedIds.join(', ')}). Use the EXACT line descriptions "WaveGuard Membership — one-time setup fee" and "First service application" so the system recognizes them as billed.`,
+              read_at: null,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, feeCovered: false, applicationCovered: false })]),
             });
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} REOPENED — coverage regressed after resolution/partial coverage`);
           } else if (feeProven) {
             const uncoveredIds = parkedIds.filter((visitId) => !(visitApplicationBilled(visitId)
-              || (String(visitId) === primaryVisitId && stampedLive.some(invoiceBillsBaseApplication))));
+              || (String(visitId) === primaryVisitId
+                && [...stampedLive, ...canonicalLive].some(invoiceBillsBaseApplication))));
             await db('notifications').where({ id: staleAlert.id }).update({
               body: `UPDATE: the one-time setup fee for this estimate is now COVERED by a live invoice — do NOT bill the setup fee again. Still owed: the application charge for parked visit${uncoveredIds.length === 1 ? '' : 's'} ${uncoveredIds.join(', ')} — bill only that, using the EXACT line description "First service application" so the system recognizes it as billed.`,
+              read_at: null,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, feeCovered: true, applicationCovered: false })]),
             });
             logger.warn(`[dispatch] visit ${svc.id}: unminted-setup-fee alert ${staleAlert.id} rewritten — fee covered, application(s) still owed`);
@@ -9448,7 +9467,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation
       && (existingCompletionInvoice || preMintedInvoice)
       && !terminalCompletionInvoice && !recapReviewOnly);
-    if (setupFeeChargeNowBeside
+    // Out-of-band prepayment (cash/Zelle marked prepaid) covers the
+    // APPLICATION amount only — the fee still needs its durable follow-up
+    // (Codex PR r4 P1): without this branch, prepaidCovered suppressed
+    // both the mint AND the alert and the $99 simply vanished.
+    const setupFeePrepaidBeside = !!(unmintedSetupFeeObligation && prepaidCovered
+      && !terminalCompletionInvoice && !recapReviewOnly);
+    if (setupFeeChargeNowBeside || setupFeePrepaidBeside
       || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
         && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
         && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false }))) {
@@ -9558,12 +9583,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             || String(alreadyMeta.scheduledServiceId) === String(svc.id);
           const applicationCoveredBy = liveOnVisitRows.find(invoiceBillsBaseApplication)
             || (currentVisitIsPrimary ? liveStampedRows.find(invoiceBillsBaseApplication) : null) || null;
-          if (feeCoveredBy && applicationCoveredBy) {
+          // Out-of-band prepayment proves the APPLICATION collected (the
+          // amount was compared against the visit charge), never the fee.
+          const applicationCoveredOutOfBand = setupFeePrepaidBeside;
+          if (feeCoveredBy && (applicationCoveredBy || applicationCoveredOutOfBand)) {
             const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
             logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
-                body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }
@@ -9591,6 +9619,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // fee never was — collect that invoice, bill only the fee.
             const appInvLabel = applicationCoveredBy.invoice_number || applicationCoveredBy.id;
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
+          } else if (applicationCoveredOutOfBand) {
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" (so the system recognizes it as billed); do NOT bill the visit charge again.`;
           } else {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, so the system recognizes them as billed and can retire this alert.`;
           }
@@ -9611,6 +9641,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ])];
             await trx('notifications').where({ id: already.id }).update({
               body: alertBody + crossVisitNote,
+              // Newly actionable again — surface in the unread badge.
+              read_at: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;

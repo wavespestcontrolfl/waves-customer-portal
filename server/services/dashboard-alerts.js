@@ -269,7 +269,7 @@ async function computeDashboardAlertsUncached() {
   //     NET-terms drafts (payer_statement_id) stay unsent BY DESIGN.
   try {
     const staleDraftCutoff = new Date(Date.now() - 3 * 86400000);
-    const staleDrafts = await db('invoices')
+    const staleDraftRows = await db('invoices')
       .whereNull('archived_at')
       .where('status', 'draft')
       .whereNull('sent_at')
@@ -277,16 +277,23 @@ async function computeDashboardAlertsUncached() {
       .whereNull('payer_statement_id')
       .where('total', '>', 0)
       .where('created_at', '<', staleDraftCutoff)
-      .count('id as c')
-      .first();
-    const staleDraftCount = parseInt(staleDrafts?.c || 0, 10);
+      .orderBy('created_at', 'asc')
+      .select('id', 'invoice_number');
+    const staleDraftCount = staleDraftRows.length;
     if (staleDraftCount > 0) {
+      // The link must land the operator ON the offending row (Codex PR r4
+      // P2): the invoices page reads ?invoice=<id> but has no status
+      // filter, so an old draft would otherwise stay buried past page
+      // one. Single hit deep-links it; multiple hits name the oldest few
+      // in the label so they are searchable.
+      const named = staleDraftRows.slice(0, 3)
+        .map((r) => r.invoice_number || r.id).join(', ');
       alerts.push({
         id: 'stale_draft_invoices',
         severity: 'warn',
         count: staleDraftCount,
-        label: `${staleDraftCount} draft invoice${staleDraftCount === 1 ? '' : 's'} unsent 3+ days — invisible to dunning`,
-        href: '/admin/invoices',
+        label: `${staleDraftCount} draft invoice${staleDraftCount === 1 ? '' : 's'} unsent 3+ days — invisible to dunning (${named}${staleDraftCount > 3 ? ', …' : ''})`,
+        href: `/admin/invoices?invoice=${encodeURIComponent(staleDraftRows[0].id)}`,
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }

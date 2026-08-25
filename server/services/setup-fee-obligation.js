@@ -70,9 +70,15 @@ const SETUP_FEE_RULE_SAFE_CUTOFF = '2026-07-11T04:00:00Z'; // 2026-07-11 00:00 E
 // pre-push round 4) — but a MANUAL Mark Won accept involves no page
 // view, so there the fee-less snapshot IS the last pricing the customer
 // saw (Codex P0, pre-push round 15).
+// Returns { evidence: 'shown'|'feeless'|null, amount: number|null } —
+// the amount is the FROZEN fee the customer actually accepted (a legacy
+// or discounted snapshot may show something other than the current
+// constant; the obligation must demand the accepted price, and changing
+// WAVEGUARD_SETUP_FEE must never retro-edit outstanding obligations —
+// Codex PR r4 P1).
 function snapshotShowsSetupFee(estimateData) {
   const bundle = estimateData?.sendSnapshot?.pricingBundle;
-  if (!bundle || typeof bundle !== 'object') return null;
+  if (!bundle || typeof bundle !== 'object') return { evidence: null, amount: null };
   // Legacy frozen rows carry no normalized service key ("WaveGuard
   // Membership Setup", price 99) — the SAME textual recognizer the public
   // pricing path uses (isWaveGuardSetupOneTimeItem) must count them as
@@ -83,11 +89,15 @@ function snapshotShowsSetupFee(estimateData) {
     ({ isWaveGuardSetupOneTimeItem: isLegacySetupItem } = require('../routes/estimate-public'));
   } catch { /* route unavailable in some harnesses — service-key check stands */ }
   const isSetupRow = (row) => row?.service === 'waveguard_setup' || isLegacySetupItem(row || {});
-  if (Array.isArray(bundle.firstVisitFees) && bundle.firstVisitFees.some(isSetupRow)) return 'shown';
-  if (Array.isArray(bundle.oneTimeBreakdown?.items)
-    && bundle.oneTimeBreakdown.items.some(isSetupRow)) return 'shown';
-  if (bundle.setupFee && isSetupRow(bundle.setupFee)) return 'shown';
-  return 'feeless';
+  const rowAmount = (row) => {
+    const n = Number(row?.amount ?? row?.price ?? row?.total ?? row?.unit_price);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  };
+  const hit = (Array.isArray(bundle.firstVisitFees) ? bundle.firstVisitFees : []).find(isSetupRow)
+    || (Array.isArray(bundle.oneTimeBreakdown?.items) ? bundle.oneTimeBreakdown.items : []).find(isSetupRow)
+    || (bundle.setupFee && isSetupRow(bundle.setupFee) ? bundle.setupFee : null);
+  if (hit) return { evidence: 'shown', amount: rowAmount(hit) };
+  return { evidence: 'feeless', amount: null };
 }
 
 function parseEstimateData(raw) {
@@ -159,7 +169,7 @@ async function findUnmintedSetupFeeObligation({
   // the repaired page with the fee, but a Mark Won accept involves no
   // page view — the fee-less snapshot is the last pricing the customer
   // saw, and billing an unagreed $99 is never fail-safe.
-  const feeEvidence = snapshotShowsSetupFee(estimateData);
+  const { evidence: feeEvidence, amount: snapshotFeeAmount } = snapshotShowsSetupFee(estimateData);
   if (feeEvidence !== 'shown') {
     if (acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) return { owed: false };
     if (feeEvidence === 'feeless'
@@ -334,7 +344,8 @@ async function findUnmintedSetupFeeObligation({
 
   return {
     owed: true,
-    setupFee: EstimateConverter.WAVEGUARD_SETUP_FEE,
+    // The accepted (frozen) amount wins over the current constant.
+    setupFee: snapshotFeeAmount != null ? snapshotFeeAmount : EstimateConverter.WAVEGUARD_SETUP_FEE,
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
