@@ -913,6 +913,11 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.update(req.params.id, req.body);
+    // Coverage-changing transition (PR #3476): a line-item edit can add or
+    // remove the charge the setup-fee alert tracks — reconcile post-commit.
+    await require('../services/setup-fee-alert-reconcile')
+      .reconcileSetupFeeAlertForInvoice(invoice)
+      .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after edit ${req.params.id}: ${err.message}`));
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
   } catch (err) {

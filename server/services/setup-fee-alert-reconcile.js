@@ -165,4 +165,62 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
   });
 }
 
-module.exports = { reconcileSetupFeeAlert };
+// Post-transition tap for coverage-CHANGING invoice writes (void, refund,
+// cancel, line-item edit — Codex P0, final round): any invoice that is
+// stamped for an estimate or linked to an estimate-sourced visit
+// re-runs the alert reconciliation post-commit, so removed coverage
+// REOPENS the alert instead of leaving it labeled RESOLVED forever.
+// Best-effort by contract: the transition itself already committed.
+async function reconcileSetupFeeAlertForInvoice(invoice) {
+  try {
+    if (!invoice) return;
+    const stamp = String(invoice.notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/);
+    let estimateId = stamp ? stamp[1] : null;
+    let customerId = invoice.customer_id || null;
+    if (!estimateId && invoice.scheduled_service_id) {
+      const ss = await db('scheduled_services')
+        .where({ id: invoice.scheduled_service_id })
+        .first('source_estimate_id', 'customer_id');
+      estimateId = ss?.source_estimate_id || null;
+      customerId = customerId || ss?.customer_id || null;
+    }
+    if (!estimateId || !customerId) return;
+    await reconcileSetupFeeAlert({
+      customerId,
+      sourceEstimateId: estimateId,
+      actorLabel: ` invoice ${invoice.id} transition:`,
+    });
+  } catch (err) {
+    logger.error(`[setup-fee-reconcile] invoice-transition reconcile failed for ${invoice?.id}: ${err.message}`);
+  }
+}
+
+// Daily safety net (billing cron): webhook-driven refund transitions flip
+// invoice rows at many call sites — rather than tapping each, every
+// standing setup-fee alert re-reconciles once a day, so a coverage
+// regression the taps missed reopens within 24h.
+async function sweepSetupFeeAlerts() {
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' LIKE 'unminted_setup_fee_manual_billing:%'")
+    .select('id', 'metadata');
+  for (const row of rows) {
+    try {
+      const meta = typeof row.metadata === 'string'
+        ? JSON.parse(row.metadata)
+        : (row.metadata || {});
+      const estimateId = String(meta?.dedupeKey || '').split(':')[1] || null;
+      const customerId = meta?.customerId || null;
+      if (!estimateId || !customerId) continue;
+      await reconcileSetupFeeAlert({
+        customerId,
+        sourceEstimateId: estimateId,
+        actorLabel: ` daily-sweep alert ${row.id}:`,
+      });
+    } catch (err) {
+      logger.error(`[setup-fee-reconcile] daily sweep failed for alert ${row.id}: ${err.message}`);
+    }
+  }
+}
+
+module.exports = { reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice, sweepSetupFeeAlerts };

@@ -4190,6 +4190,9 @@ const InvoiceService = {
       );
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
+    // Coverage-changing transition (PR #3476): a voided stamped/linked
+    // invoice may have been the setup-fee alert's coverage — reopen it.
+    await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
     return invoice;
   },
 
