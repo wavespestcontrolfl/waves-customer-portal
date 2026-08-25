@@ -283,8 +283,42 @@ describe('POST /batch idempotency (batchKey)', () => {
       const body = await response.json();
       expect(body.skipped_count).toBe(1);
       expect(body.skipped[0].reason).toMatch(/stale send claim/i);
-      // Status restore only — release must NEVER deliver.
-      expect(chain.update).toHaveBeenCalledWith({ status: 'draft', updated_at: 'NOW' });
+      // Status restore only — release must NEVER deliver — and it stamps
+      // the durable uncertainty marker so no LATER automatic sender treats
+      // the released draft as provably unsent.
+      expect(chain.update).toHaveBeenCalledWith({
+        status: 'draft',
+        scheduled_send_error: expect.stringMatching(/stale send claim released/i),
+        updated_at: 'NOW',
+      });
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a keyed retry never auto-sends a draft carrying the stale-release marker (delivery uncertainty survives the release)', async () => {
+    // A prior retry released a crashed 'sending' claim: the row is draft
+    // again, but the crashed worker may have texted before dying. A later
+    // keyed retry with sendImmediately must NOT enter the draft auto-send
+    // branch — manual verification only.
+    db.mockImplementation(() => makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
+      scheduled_send_error: 'stale send claim released — verify delivery before resending',
+    }));
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'],
+        title: 'Quarterly Pest Control',
+        lineItems,
+        sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-000000000005',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].reason).toMatch(/verify whether the customer was texted/i);
+      expect(body.skipped[0].sent).toBeUndefined();
       expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
       expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(InvoiceService.create).not.toHaveBeenCalled();

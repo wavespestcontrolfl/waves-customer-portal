@@ -5289,8 +5289,32 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast(invoiceCreatedSendToast(pInv.invoice_number, res));
       onCreated();
     } catch (err) {
-      setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
-      showToast(`Send failed: ${err.message}`);
+      // A rejected request does not prove the send FAILED: the server may
+      // have delivered and committed 'sent' before the response was lost.
+      // Same ambiguous-send check as the initial create path — keep the
+      // panel (and its Send now button) only when the row is provably
+      // still unsent; anything else re-offers a resend on a delivered row.
+      let persisted = null;
+      try {
+        persisted = await adminFetch(`/admin/invoices/${pInv.id}`);
+      } catch {
+        persisted = null;
+      }
+      const disposition = persistedSendDisposition(persisted);
+      if (disposition === "unsent") {
+        setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+        showToast(`Send failed: ${err.message}`);
+      } else if (disposition === "committed") {
+        showToast(
+          `The send went through for ${pInv.invoice_number} (status: ${persisted.status}) despite a network error`,
+        );
+        onCreated();
+      } else {
+        showToast(
+          `Send state unknown for ${pInv.invoice_number} (${err.message}). Check it in the list before resending.`,
+        );
+        onCreated();
+      }
     }
     setSaving(false);
   };

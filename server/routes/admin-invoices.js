@@ -682,6 +682,11 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
     // stale claim (claimInvoiceForSend stamps updated_at when it takes the
     // claim); a live send finishes in seconds, not minutes.
     const STALE_SEND_CLAIM_MS = 15 * 60 * 1000;
+    // Durable uncertainty marker a stale-claim release stamps on the row:
+    // delivery evidence was lost with the crashed worker, so automatic
+    // senders must treat the draft as possibly-delivered. Cleared by the
+    // next successful send's finalize (scheduled_send_error: null).
+    const STALE_CLAIM_RELEASE_NOTE = 'stale send claim released — verify delivery before resending';
 
     for (const customerId of customerIds) {
       // Shared disposition for a keyed duplicate, whether it surfaced on the
@@ -709,15 +714,32 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (existing.status === 'sending') {
           const claimAgeMs = Date.now() - new Date(existing.updated_at || 0).getTime();
           if (claimAgeMs > STALE_SEND_CLAIM_MS) {
+            // The release stamps a durable uncertainty marker: the crashed
+            // worker may have delivered before dying, so the row must not
+            // look like a provably-unsent draft to ANY later automatic
+            // sender (a later keyed retry's draft branch below included).
+            // The marker clears on the next successful send's finalize.
             const released = await db('invoices')
               .where({ id: existing.id, status: 'sending' })
-              .update({ status: 'draft', updated_at: db.fn.now() });
+              .update({
+                status: 'draft',
+                scheduled_send_error: STALE_CLAIM_RELEASE_NOTE,
+                updated_at: db.fn.now(),
+              });
             entry.reason = released
               ? 'Stale send claim from a crashed batch worker released back to draft — verify whether the customer was texted, then resend manually'
               : 'Send state changed while checking a stale claim — review the invoice before resending';
           } else {
             entry.reason = 'A send for this invoice is in progress right now — not re-sent';
           }
+          skipped.push(entry);
+          return;
+        }
+        // A draft carrying the stale-release marker is NOT provably unsent —
+        // an earlier crashed worker may have delivered. Never auto-send it;
+        // the operator verifies delivery and resends with eyes on it.
+        if (existing.status === 'draft' && existing.scheduled_send_error === STALE_CLAIM_RELEASE_NOTE) {
+          entry.reason = 'This invoice had a crashed send released earlier — verify whether the customer was texted, then resend manually';
           skipped.push(entry);
           return;
         }
@@ -752,7 +774,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'scheduled_send_error');
           if (existing) {
             await settleKeyedDuplicate(existing,
               'This batch key already created an invoice for this customer (retry detected)');
@@ -805,7 +827,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           // stale claim, leave live sends alone.
           const winner = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'scheduled_send_error');
           if (winner) {
             await settleKeyedDuplicate(winner,
               'This batch key already created an invoice for this customer (concurrent retry)');
