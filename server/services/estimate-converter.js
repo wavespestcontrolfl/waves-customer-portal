@@ -711,6 +711,34 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
   return rewrites;
 }
 
+// The UPDATE a combo rewrite applies to the reserved row. The reserve path
+// stamps the STANDALONE cadence id + snapshot; the promotion must move the
+// durable identity with the label — and when the combined catalog row is
+// missing (or the lookup failed and the caller passes null), the standalone
+// identity must be CLEARED, not retained: completion resolution prioritizes
+// id/snapshot over the label, so a combined-labeled visit that kept its
+// standalone identity silently drops the companion completion lane
+// (pre-push P1). Null identity falls back to label resolution, which knows
+// the combined name.
+function combinedRewriteUpdate(combo, catalogRow) {
+  const update = {
+    service_type: combo.route.name,
+    service_id: null,
+    service_key_snapshot: null,
+    updated_at: new Date(),
+  };
+  if (catalogRow) {
+    update.service_id = catalogRow.id;
+    // Snapshot moves with the id, or a later id outage resolves the visit
+    // standalone (codex #3485 r6 P2).
+    update.service_key_snapshot = combo.route.catalogServiceKey;
+    if (catalogRow.default_duration_minutes) {
+      update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+    }
+  }
+  return update;
+}
+
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
   return serviceKeyCountsTowardTier(recurringServiceKey(svc));
@@ -4693,26 +4721,19 @@ const EstimateConverter = {
           }
         }
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
-          const update = { service_type: combo.route.name, updated_at: new Date() };
+          // Identity contract lives in combinedRewriteUpdate (pre-push P1:
+          // a missing row / failed lookup CLEARS the standalone identity).
+          let catalogRow = null;
           try {
-            const catalogRow = await database('services')
+            catalogRow = await database('services')
               .where({ service_key: combo.route.catalogServiceKey })
               .first('id', 'default_duration_minutes');
-            if (catalogRow) {
-              update.service_id = catalogRow.id;
-              // The reserve path stamps the STANDALONE cadence snapshot;
-              // promoting the row to the combined route must move the
-              // durable snapshot with the id and label, or a later id
-              // outage resolves the visit standalone and drops the
-              // companion completion section (codex #3485 r6 P2).
-              update.service_key_snapshot = combo.route.catalogServiceKey;
-              if (catalogRow.default_duration_minutes) {
-                update.estimated_duration_minutes = catalogRow.default_duration_minutes;
-                combo.service.estimatedDurationMinutes = catalogRow.default_duration_minutes;
-              }
-            }
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+          const update = combinedRewriteUpdate(combo, catalogRow);
+          if (update.estimated_duration_minutes) {
+            combo.service.estimatedDurationMinutes = update.estimated_duration_minutes;
           }
           await database('scheduled_services').where({ id: row.id }).update(update);
           // The public accept route registers the 72h/24h reminder BEFORE
@@ -4732,8 +4753,10 @@ const EstimateConverter = {
           // parent OBJECT, not the DB (pre-push P1). reservedStart is the
           // same object reference when ids match.
           row.service_type = combo.route.name;
-          if (update.service_id) row.service_id = update.service_id;
-          if (update.service_key_snapshot) row.service_key_snapshot = update.service_key_snapshot;
+          // Mirror includes the CLEARED identity on the failure path —
+          // follow-up seeding copies these from the parent object.
+          row.service_id = update.service_id;
+          row.service_key_snapshot = update.service_key_snapshot;
           if (update.estimated_duration_minutes) row.estimated_duration_minutes = update.estimated_duration_minutes;
           if (reservedStart && row.id === reservedStart.id) {
             reservedSeedSvc = combo.service;
@@ -6211,6 +6234,7 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
+module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;

@@ -15,6 +15,7 @@ const {
   durationMinutesForRecurringService,
   recurringServiceKey,
   reservedRowComboRewrites,
+  combinedRewriteUpdate,
   supplementalCompanionLines,
 } = require('../services/estimate-converter');
 const { serviceKeyFor, buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
@@ -499,6 +500,36 @@ describe('reservedRowComboRewrites (slot-reserved accepts)', () => {
       { id: 'ss-3', service_type: 'Mosquito Treatment' },
     ], pestTermiteCombo());
     expect(rewrites).toEqual([]);
+  });
+
+  test('the rewrite UPDATE moves id + snapshot when the combined row resolves', () => {
+    const [{ combo }] = reservedRowComboRewrites(
+      [{ id: 'ss-1', service_type: 'Quarterly Pest Control' }], pestTermiteCombo(),
+    );
+    const update = combinedRewriteUpdate(combo, { id: 'svc-combo', default_duration_minutes: 75 });
+    expect(update).toEqual(expect.objectContaining({
+      service_type: 'Quarterly Pest + Termite Bait Station Service',
+      service_id: 'svc-combo',
+      service_key_snapshot: 'pest_termite_bait_quarterly',
+      estimated_duration_minutes: 75,
+    }));
+  });
+
+  test('a missing/failed combined-row lookup CLEARS the standalone identity (never retains it)', () => {
+    // The reserve path stamped the standalone cadence id + snapshot;
+    // keeping them under the combined label would silently drop the
+    // companion completion lane — completion prioritizes id/snapshot over
+    // the label (pre-push P1). Null identity falls back to label
+    // resolution, which knows the combined name.
+    const [{ combo }] = reservedRowComboRewrites(
+      [{ id: 'ss-1', service_type: 'Quarterly Pest Control' }], pestTermiteCombo(),
+    );
+    const update = combinedRewriteUpdate(combo, null);
+    expect(update.service_type).toBe('Quarterly Pest + Termite Bait Station Service');
+    // Explicit keys, explicit nulls — the UPDATE must overwrite, not omit.
+    expect(update).toHaveProperty('service_id', null);
+    expect(update).toHaveProperty('service_key_snapshot', null);
+    expect(update).not.toHaveProperty('estimated_duration_minutes');
   });
 
   test('no combos → no rewrites', () => {
