@@ -176,23 +176,82 @@ test('accepts before the 2026-07-10 fee rule are out of scope', async () => {
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
+test('a same-day accept with NO snapshot is out of scope — the calendar-day proxy must not retro-charge', async () => {
+  // The rule deployed the EVENING of 2026-07-10; a midday accept with no
+  // persisted display evidence may predate it — never demand an unagreed fee.
+  mockTables = baseTables({ estimates: acceptedEstimate({ accepted_at: '2026-07-10T16:00:00Z' }) });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
+test('persisted snapshot SHOWING the fee puts the accept in scope regardless of the date proxy', async () => {
+  mockTables = baseTables({
+    estimates: acceptedEstimate({
+      accepted_at: '2026-07-10T16:00:00Z',
+      estimate_data: JSON.stringify(soloPestEstimateData({
+        sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+      })),
+    }),
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
+});
+
+test('persisted snapshot showing NO fee means the customer never agreed to it — out of scope, any date', async () => {
+  mockTables = baseTables({
+    estimates: acceptedEstimate({
+      accepted_at: '2026-08-01T12:00:00Z',
+      estimate_data: JSON.stringify(soloPestEstimateData({
+        sendSnapshot: { pricingBundle: { firstVisitFees: [], oneTimeBreakdown: { items: [] } } },
+      })),
+    }),
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
 test('no estimate_converted activity row (accept never converted) — not owed', async () => {
   mockTables = baseTables({ activity_log: null });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
-test('a prior completed PLAN visit (is_recurring) flags firstVisitAlreadyCompleted (historic leak, no parking)', async () => {
-  mockTables = baseTables({ scheduled_services: { id: 'ss-prior', is_recurring: true, recurring_parent_id: null } });
+// The detector reads `invoices` twice: first the stamped-acceptance scan
+// (a .select), then — only when a prior completed plan row exists — the
+// billed-evidence probe (a .first). This helper feeds them in order.
+function invoicesInOrder(stampedSpec, billedSpec) {
+  let call = 0;
+  return () => (++call === 1 ? stampedSpec : billedSpec);
+}
+
+test('a prior completed AND BILLED plan visit (is_recurring) flags firstVisitAlreadyCompleted (historic leak, no parking)', async () => {
+  mockTables = baseTables({
+    scheduled_services: { id: 'ss-prior', is_recurring: true, recurring_parent_id: null },
+    invoices: invoicesInOrder(null, { id: 'inv-billed', status: 'sent' }),
+  });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);
   expect(result.firstVisitAlreadyCompleted).toBe(true);
 });
 
-test('a prior completed recurring CHILD (recurring_parent_id) also counts as a plan visit', async () => {
-  mockTables = baseTables({ scheduled_services: { id: 'ss-child', is_recurring: false, recurring_parent_id: 'ss-parent' } });
+test('a prior completed AND BILLED recurring CHILD (recurring_parent_id) also counts as a plan visit', async () => {
+  mockTables = baseTables({
+    scheduled_services: { id: 'ss-child', is_recurring: false, recurring_parent_id: 'ss-parent' },
+    invoices: invoicesInOrder(null, { id: 'inv-billed', status: 'paid' }),
+  });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);
   expect(result.firstVisitAlreadyCompleted).toBe(true);
+});
+
+test('a prior completed plan visit with NO billing evidence (declined/coverage-suppressed) keeps the obligation live', async () => {
+  // Completion status alone proves nothing: inspection_only /
+  // customer_declined outcomes and coverage-suppressed billings mark the
+  // row completed while minting nothing — the next performed application
+  // must still park.
+  mockTables = baseTables({
+    scheduled_services: { id: 'ss-prior', is_recurring: true, recurring_parent_id: null },
+    invoices: null,
+  });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
+  expect(result.firstVisitAlreadyCompleted).toBe(false);
 });
 
 test('a prior completed one-time add-on (non-recurring, even same category) does not release the hold', async () => {

@@ -8901,9 +8901,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           unmintedSetupFeeObligation = obligation;
         } else if (obligation.owed && obligation.firstVisitAlreadyCompleted) {
-          // Historic leak (first visit already billed bare) — log for the
-          // sweep, never park a routine later visit.
-          logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but its first visit already completed — not parking this later visit`);
+          // Historic leak (an earlier plan visit completed AND billed
+          // bare) — log for the sweep, never park a routine later visit.
+          logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — not parking this later visit`);
         }
       } catch (lookupErr) {
         logger.error(`[dispatch] unminted-setup-fee check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);

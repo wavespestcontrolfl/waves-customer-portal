@@ -15,8 +15,10 @@
 // scheduling surfaces consult it to warn before completion.
 //
 // "Owed" here means ALL of:
-//   - the estimate exists, is accepted, and was accepted on/after the
-//     2026-07-10 setup-fee rule (older accepts never promised the fee);
+//   - the estimate exists, is accepted, and the customer actually agreed
+//     to the fee: the persisted send-snapshot shows it, or — with no
+//     snapshot — the accept postdates the end of the rule's go-live day
+//     (older accepts never promised the fee);
 //   - the accepted recurring mix actually carries the fee per the ONE
 //     authority (estimate-converter.shouldIncludeWaveGuardSetupFeeForRecurring
 //     — existing-customer waiver, operator waiver, bundle rule, solo
@@ -42,11 +44,32 @@
 
 const db = require('../models/db');
 
-// The solo-plan setup-fee rule went live 2026-07-10 (see
-// pricingBundleMissingRequiredSetupFee in estimate-public). Accepts older
-// than that never showed the customer the fee — parking them would demand
-// money that was never agreed to.
-const SETUP_FEE_RULE_LIVE = '2026-07-10T00:00:00Z';
+// The solo-plan setup-fee rule went live the EVENING of 2026-07-10 (see
+// pricingBundleMissingRequiredSetupFee in estimate-public). Persisted
+// acceptance-time display evidence outranks any date: the send snapshot's
+// pricing bundle records exactly what the customer was shown. Only when
+// no snapshot exists does the date decide, and then the cutoff is the END
+// of 2026-07-10 ET — a midnight-UTC calendar proxy would sweep in
+// same-day accepts whose estimate predated the evening deploy and demand
+// an unagreed $99 (Codex P0, pre-push round 3). Fail-safe direction:
+// without display evidence, an ambiguous same-day accept is OUT of scope.
+const SETUP_FEE_RULE_SAFE_CUTOFF = '2026-07-11T04:00:00Z'; // 2026-07-11 00:00 ET
+
+// Did the estimate the customer accepted actually SHOW the setup fee?
+// Reads the persisted send-snapshot pricing bundle (the exact payload the
+// estimate page rendered from) using the same service-key recognizers as
+// pricingBundleMissingRequiredSetupFee. Returns true/false on evidence,
+// null when no snapshot bundle exists (verbal/manual estimates).
+function snapshotShowsSetupFee(estimateData) {
+  const bundle = estimateData?.sendSnapshot?.pricingBundle;
+  if (!bundle || typeof bundle !== 'object') return null;
+  if (Array.isArray(bundle.firstVisitFees)
+    && bundle.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) return true;
+  if (Array.isArray(bundle.oneTimeBreakdown?.items)
+    && bundle.oneTimeBreakdown.items.some((row) => row?.service === 'waveguard_setup')) return true;
+  if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return true;
+  return false;
+}
 
 function parseEstimateData(raw) {
   if (typeof raw === 'string') {
@@ -104,13 +127,19 @@ async function findUnmintedSetupFeeObligation({
   if (customerId && String(estimate.customer_id) !== String(customerId)) return { owed: false };
   if (estimate.bill_by_invoice) return { owed: false };
   const acceptedAt = estimate.accepted_at ? new Date(estimate.accepted_at) : null;
-  if (!acceptedAt || Number.isNaN(acceptedAt.getTime())
-    || acceptedAt < new Date(SETUP_FEE_RULE_LIVE)) {
-    return { owed: false };
-  }
+  if (!acceptedAt || Number.isNaN(acceptedAt.getTime())) return { owed: false };
 
   const EstimateConverter = require('./estimate-converter');
   const estimateData = parseEstimateData(estimate.estimate_data);
+  // Display evidence first, date proxy second: a snapshot that shows the
+  // fee puts the accept in scope regardless of date; one that shows NO fee
+  // means the customer never agreed to it — out of scope, period. Without
+  // a snapshot, only accepts after the rule day fully ended qualify.
+  const feeShown = snapshotShowsSetupFee(estimateData);
+  if (feeShown === false) return { owed: false };
+  if (feeShown === null && acceptedAt < new Date(SETUP_FEE_RULE_SAFE_CUTOFF)) {
+    return { owed: false };
+  }
   const recurringServices = EstimateConverter.recurringServicesFromEstimateData(estimateData);
   if (!EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })) {
     return { owed: false };
@@ -185,19 +214,38 @@ async function findUnmintedSetupFeeObligation({
     .first('id');
   if (!converted) return { owed: false };
 
-  // The obligation belongs to the FIRST plan application. Once an earlier
-  // PLAN visit of this estimate has completed (and billed bare, pre-fix),
-  // parking a LATER routine visit would misdirect the office — those
-  // historic leaks are sweep territory, not completion parking. Only
-  // plan rows (is_recurring / recurring_parent_id) count: a completed
-  // one-time add-on / inspection from the same estimate must not release
-  // the hold on the actual first application (Codex P0, round 1).
+  // The obligation resolves to sweep territory only on DURABLE BILLING
+  // EVIDENCE: an earlier PLAN visit of this estimate that completed AND
+  // carries a live invoice (billed bare, pre-fix — parking a LATER
+  // routine visit would misdirect the office). Completion status alone
+  // proves nothing (Codex P0, pre-push round 3): an inspection_only /
+  // customer_declined outcome or a coverage-suppressed billing still
+  // marks the row completed while minting nothing — clearing the
+  // obligation on it would let every later performed application bypass
+  // parking and lose the fee permanently. Only plan rows (is_recurring /
+  // recurring_parent_id) count either way: a completed one-time add-on /
+  // inspection from the same estimate must not release the hold on the
+  // actual first application (Codex P0, round 1).
   let priorQuery = conn('scheduled_services')
     .where({ source_estimate_id: estimate.id })
     .where('status', 'completed');
   if (excludeScheduledServiceId) priorQuery = priorQuery.whereNot('id', excludeScheduledServiceId);
   const priorCompletedRows = await priorQuery.select('id', 'is_recurring', 'recurring_parent_id');
-  const priorCompleted = (priorCompletedRows || []).find(isPlanApplicationRow) || null;
+  const priorPlanRows = (priorCompletedRows || []).filter(isPlanApplicationRow);
+  let priorCompleted = null;
+  if (priorPlanRows.length) {
+    const planIds = priorPlanRows.map((r) => r.id);
+    const priorRecordIds = await conn('service_records')
+      .whereIn('scheduled_service_id', planIds)
+      .pluck('id');
+    priorCompleted = await conn('invoices')
+      .where((qb) => {
+        qb.whereIn('scheduled_service_id', planIds);
+        if (priorRecordIds.length) qb.orWhereIn('service_record_id', priorRecordIds);
+      })
+      .whereNotIn('status', Array.from(DEAD_STATUSES))
+      .first('id') || null;
+  }
 
   return {
     owed: true,
@@ -213,5 +261,7 @@ async function findUnmintedSetupFeeObligation({
 
 module.exports = {
   findUnmintedSetupFeeObligation,
-  _private: { SETUP_FEE_RULE_LIVE, parseEstimateData, isPlanApplicationRow },
+  _private: {
+    SETUP_FEE_RULE_SAFE_CUTOFF, parseEstimateData, isPlanApplicationRow, snapshotShowsSetupFee,
+  },
 };
