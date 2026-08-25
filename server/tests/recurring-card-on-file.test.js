@@ -258,9 +258,13 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
   });
 
   describe('sweepStrandedPrepayAutoCharges', () => {
-    it('no-ops while the prepay gate is off', async () => {
+    it('still scans with the gate OFF (kill switch must drain committed jobs, not strand them)', async () => {
       delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      // The minimal db mock has no whereRaw chain — the scan attempt throws
+      // and degrades to scanned:0; the load-bearing assertion is that the
+      // gate no longer short-circuits before the scan (Codex r6 P0).
       expect(await sweepStrandedPrepayAutoCharges()).toEqual({ scanned: 0 });
+      expect(require('../models/db')).toHaveBeenCalledWith('estimates');
     });
 
     it('degrades to scanned:0 when the scan query fails (never throws into the cron)', async () => {

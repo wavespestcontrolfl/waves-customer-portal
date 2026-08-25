@@ -10829,6 +10829,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               invoice_id: invoiceIdResult,
               stripe_payment_method_id: prepayChargePlan.method.stripePaymentMethodId,
               payment_method_row_id: prepayChargePlan.method.paymentMethodRowId || null,
+              // Fresh captures have no payment_methods row until enrollment
+              // — the SetupIntent context lets the recovery sweep complete
+              // save/consent/enrollment idempotently before charging
+              // (Codex r6 P1).
+              setup_intent_id: recurringCardVerification?.setupIntentId || null,
               method_key: RecurringCards.prepayChargeMethodKey(prepayChargePlan.method.stripePaymentMethodId),
               authorized_total_cents: prepayChargePlan.quote.totalCents,
               authorized_base_cents: prepayChargePlan.quote.baseCents,
@@ -12057,11 +12062,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
-        // Ambiguous rides the 'processing' copy — funds may be moving; the
-        // one thing the messaging must not do is ask anyone to pay.
-        prepayChargeOutcome: ['paid', 'processing'].includes(prepayAutoCharge?.status)
+        // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
+        // have been a CARD, so the copy must stay tender-neutral — never
+        // assert a bank debit; the one thing all three outcomes share is
+        // that nobody is asked to pay.
+        prepayChargeOutcome: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status)
           ? prepayAutoCharge.status
-          : (prepayAutoCharge?.status === 'ambiguous' ? 'processing' : null),
+          : null,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -12111,9 +12118,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // invoice" (same override the already-accepted retry path derives
       // from the live invoice status).
       invoiceSettled: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status),
-      prepayChargeStatus: prepayAutoCharge?.status === 'paid'
-        ? 'paid'
-        : (['processing', 'ambiguous'].includes(prepayAutoCharge?.status) ? 'processing' : null),
+      // 'ambiguous' is preserved (Codex r6 P1) — the client renders
+      // tender-neutral "we're confirming your payment" copy for it, never
+      // a bank-debit assertion.
+      prepayChargeStatus: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status)
+        ? prepayAutoCharge.status
+        : null,
       prepayChargedTotal: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
         ? prepayChargePlan.quote.totalCents / 100
         : null,
@@ -15843,6 +15853,18 @@ function buildAcceptNotificationPayload({
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — bank payment processing on the saved method.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay bank payment is processing. We'll confirm when it completes.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'ambiguous') {
+      // Tender-neutral (Codex r6 P1): the attempt may have been a card and
+      // may already have succeeded — assert nothing beyond "being
+      // confirmed", and never a pay ask (reconciliation owns the outcome).
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — payment outcome pending reconciliation; NO pay link sent.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and we're confirming your annual prepay payment. We'll follow up shortly.`,
         customerLink: '/?tab=billing',
       };
     }

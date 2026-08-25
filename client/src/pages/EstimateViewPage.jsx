@@ -3024,9 +3024,15 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
           {(() => {
             const chargedTotal = Number(acceptResult?.prepayChargedTotal);
             const chargedText = Number.isFinite(chargedTotal) && chargedTotal > 0 ? ` of ${fmtMoney(chargedTotal)}` : '';
-            return acceptResult.prepayChargeStatus === 'processing'
-              ? `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`
-              : `Your annual prepay payment${chargedText} went through — your receipt is on the way.`;
+            if (acceptResult.prepayChargeStatus === 'processing') {
+              return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;
+            }
+            if (acceptResult.prepayChargeStatus === 'ambiguous') {
+              // Tender-neutral — the attempt may have been a card and may
+              // already have succeeded; assert nothing beyond confirmation.
+              return `We're confirming your annual prepay payment${chargedText} — we'll follow up shortly.`;
+            }
+            return `Your annual prepay payment${chargedText} went through — your receipt is on the way.`;
           })()}
         </div>
       ) : null}

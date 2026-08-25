@@ -464,7 +464,12 @@ function prepayChargeMethodKey(stripePaymentMethodId) {
 // claim fences a concurrent in-flow executor, and every outcome resolves
 // the stamp.
 async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStaleMinutes = 60, limit = 20 } = {}) {
-  if (!isPrepayCardAndChargeEnabled()) return { scanned: 0 };
+  // The kill switch stops NEW quoting/charging, but committed jobs must
+  // still drain (pre-push Codex P0 r6): with the gate off, a stranded
+  // pending job resolves through pay-link delivery + an office alert
+  // instead of a charge — never a silently unpaid accepted booking, which
+  // is the exact incident this lane exists to prevent.
+  const chargingOn = isPrepayCardAndChargeEnabled();
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
   let rows = [];
   try {
@@ -565,9 +570,27 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         continue;
       }
       if (invoice.payer_id) { await resolve('skipped', { reason: 'payer_billed' }); continue; }
+      if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id')
         : await db('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id }).first('id', 'customer_id', 'stripe_payment_method_id');
+      // Fresh capture that crashed BEFORE enrollment (pre-push Codex P1
+      // r6): no payment_methods row exists yet, and the setup_intent
+      // webhook backstop skips accepted prepay terms — idempotently
+      // complete the save → prepay consent → enrollment here from the
+      // job's persisted SetupIntent context, then charge the enrolled row.
+      if (!pmRow && job.setup_intent_id && job.stripe_payment_method_id) {
+        const enrollment = await completeRecurringCardEnrollment({
+          customerId: invoice.customer_id,
+          stripePaymentMethodId: job.stripe_payment_method_id,
+          setupIntentId: job.setup_intent_id,
+          estimateId: row.id,
+          consentVariant: 'prepay_card',
+        });
+        if (enrollment?.paymentMethodRowId) {
+          pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id');
+        }
+      }
       // The BOUND method only — a different row (method swapped/removed)
       // was never quoted to the customer.
       if (pmRow && (String(pmRow.customer_id) !== String(invoice.customer_id)
