@@ -1716,9 +1716,38 @@ async function inspectionCreditReportNote(service) {
   return { note: inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '' };
 }
 
+// Best-effort PROJECTION of what redeemInspectionCreditForBooking would
+// mint for a booking made right now — used by the prepay-at-accept charge
+// quote (GATE_PREPAY_CARD_AND_CHARGE) so the exact total shown to the
+// customer already reflects the promised credit (pre-push Codex P0 r5: the
+// credit must exist before the customer pays, and the quote must equal the
+// charge to the cent). Mirrors the redemption's open-offer selection with
+// "now" as the booking moment; a projection miss is safe — the charge's
+// expectedTotal equality check refuses and the pay-link fallback (which
+// auto-applies the real credit at delivery) takes over. Read-only; never
+// throws.
+async function projectRedeemableOfferAmount(customerId, { now = new Date() } = {}) {
+  if (!customerId) return 0;
+  try {
+    const q = db('inspection_credit_offers')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['offered', 'expired'])
+      .where('created_at', '<=', now)
+      .where('expires_at', '>=', now);
+    // Dark = STANDING-PROMISE offers only, matching redemption (r34 P0).
+    if (!gateOn()) q.where({ source_service_key: 'rodent_inspection' });
+    const open = await q.select('amount');
+    return round2(open.reduce((sum, offer) => sum + (Number(offer.amount) || 0), 0));
+  } catch (err) {
+    logger.warn(`[inspection-credit] offer projection failed for customer ${customerId}: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
+  projectRedeemableOfferAmount,
   markBookingForInspectionCredit,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,

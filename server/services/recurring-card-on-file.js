@@ -502,9 +502,18 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           && (!current.claimed_at || new Date(current.claimed_at) < new Date(Date.now() - claimStaleMinutes * 60 * 1000));
         if (current.status !== 'pending' && !claimStale) return; // another worker owns it / already resolved
         if (current.status === 'pending' && current.created_at && new Date(current.created_at) > cutoff) return; // in-flow executor may still be running
-        base.prepayAutoChargeJob = { ...current, status: 'claimed', claimed_at: new Date().toISOString() };
-        await trx('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify(base) });
-        job = base.prepayAutoChargeJob;
+        const claim = { status: 'claimed', claimed_at: new Date().toISOString() };
+        // Atomic JSON-path merge (pre-push Codex P0 r5): the advisory lock
+        // serializes SWEEP workers only — other estimate writers (linkage
+        // invalidation etc.) are not under it, so the update must touch
+        // ONLY the job key, never rewrite the whole blob.
+        await trx('estimates').where({ id: row.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify(claim)],
+          ),
+        });
+        job = { ...current, ...claim };
       });
     } catch (claimErr) {
       logger.warn(`[recurring-cof] prepay sweep claim failed for estimate ${row.id}: ${claimErr.message}`);
@@ -513,12 +522,16 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     if (!job) continue;
     const resolve = async (status, extra = {}) => {
       try {
-        const fresh = await db('estimates').where({ id: row.id }).first('estimate_data');
-        let base = fresh?.estimate_data;
-        if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
-        if (!base || typeof base !== 'object') base = {};
-        base.prepayAutoChargeJob = { ...(base.prepayAutoChargeJob || job), status, resolved_at: new Date().toISOString(), resolved_by: 'sweep', ...extra };
-        await db('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify(base) });
+        // Atomic JSON-path merge — same rationale as the claim above.
+        await db('estimates')
+          .where({ id: row.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+          .update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({ status, resolved_at: new Date().toISOString(), resolved_by: 'sweep', ...extra })],
+            ),
+          });
       } catch (stampErr) {
         logger.warn(`[recurring-cof] prepay sweep stamp update failed for estimate ${row.id}: ${stampErr.message}`);
       }
