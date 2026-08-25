@@ -1491,6 +1491,7 @@ class GoogleBusinessService {
       // next sync then re-claims and re-notifies. Intentional suppression
       // returns a truthy sentinel and commits (stamp kept).
       let gone = [];
+      const reversedCustomerIds = [];
       try {
         await db.transaction(async (trx) => {
           const claimedRows = await trx('google_reviews')
@@ -1573,15 +1574,12 @@ class GoogleBusinessService {
                     .whereNot('google_reviews.id', alRow.id);
                 })
                 .update({ has_left_google_review: false, review_marked_at: null });
-              if (cleared) {
-                try {
-                  await trx('activity_log').insert({
-                    customer_id: alRow.customer_id,
-                    action: 'review_automark_reversed',
-                    description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
-                  });
-                } catch { /* audit only — reversal itself must commit */ }
-              }
+              // Audit rows are inserted AFTER the transaction commits
+              // (pre-push P1): a caught statement error still marks the
+              // whole PostgreSQL transaction aborted, so an in-trx
+              // "best-effort" insert would fail the later notification
+              // query and roll back the entire stamp/unlink/reversal.
+              if (cleared) reversedCustomerIds.push(alRow.customer_id);
             }
           }
 
@@ -1607,6 +1605,18 @@ class GoogleBusinessService {
         return { ok: false, error: `removal-alert transaction rolled back: ${err.message}` };
       }
       if (gone.length === 0) return { ok: true };
+      // Genuinely best-effort audit trail, outside the transaction (matching
+      // the manual-attribution path): the reversal itself is committed, so a
+      // lost audit row costs nothing durable and must never fail the sync.
+      for (const reversedId of reversedCustomerIds) {
+        try {
+          await db('activity_log').insert({
+            customer_id: reversedId,
+            action: 'review_automark_reversed',
+            description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
+          });
+        } catch { /* audit only — the reversal is already committed */ }
+      }
       // Count only — reviewer display names are PII and ride in the admin
       // notification, not the plaintext log.
       logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);

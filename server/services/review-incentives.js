@@ -732,6 +732,35 @@ async function searchAttributionCandidates(options = {}) {
   }
 
   const customers = await query;
+  // The row's currently linked customer is ALWAYS a candidate (pre-push P1):
+  // for a click_auto/manual_no_visit row the correlation module's
+  // linked-customer suppression keeps them out of likelyReviewers, and a
+  // handle reviewer name ("SunshineGal88") matches no customer search — so
+  // the confirm queue's own subject would open with no card and no confirm
+  // button, forcing the admin to retype the displayed name. Strict
+  // active === true, matching the search filter — an inactive customer is
+  // never offered for confirmation (GH codex #3483 r5/r8).
+  if (
+    review.customer_id
+    && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')
+    && !customers.some((c) => String(c.id) === String(review.customer_id))
+  ) {
+    const current = await conn('customers')
+      .where({ id: review.customer_id, active: true })
+      .first(
+        'id',
+        'first_name',
+        'last_name',
+        'phone',
+        'email',
+        'address_line1',
+        'address_line2',
+        'city',
+        'state',
+        'zip',
+      );
+    if (current) customers.unshift(current);
+  }
   const candidates = [];
   for (const customer of customers) {
     const services = await recentServiceCandidatesForCustomer(customer.id, review, conn);
