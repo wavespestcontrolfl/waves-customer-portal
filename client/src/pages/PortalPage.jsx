@@ -29,6 +29,7 @@ import { isNativeApp, nativePlatform } from '../native/platform';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
+import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -7497,6 +7498,80 @@ function PropertyTab({ customer }) {
     </div>
   );
 
+  // Minutes each zone runs on a watering day. With watering days and a single
+  // head type, @waves/irrigation-runtime turns this into the weekly-inches
+  // figure the lawn report and the Monday irrigation check-in balance against
+  // rain — so customers who know their controller (most) but not their inches
+  // (almost none) still get real recommendations.
+  const irrigationMinutesInput = () => (
+    <div>
+      <label style={labelStyle}>Minutes per Zone</label>
+      <div style={{ position: 'relative' }}>
+        <input
+          type="number"
+          inputMode="numeric"
+          min="1"
+          max={MAX_RUN_MINUTES}
+          step="5"
+          value={prefs.irrigationRunMinutes ?? ''}
+          // Zero is not a schedule — the server validates 1–240 and the
+          // runtime treats <= 0 as missing, so 0 (or blank) clears to null.
+          onChange={e => {
+            const n = Math.round(Number(e.target.value));
+            updateField('irrigationRunMinutes', e.target.value === '' || !Number.isFinite(n) || n <= 0 ? null : Math.min(MAX_RUN_MINUTES, n));
+          }}
+          placeholder="20"
+          aria-label="Total minutes each zone runs on a watering day, adding up multiple cycles"
+          className="waves-focus-ring"
+          style={{ ...inputStyle, paddingRight: 52 }}
+          onFocus={focusBorder}
+          onBlur={blurBorder}
+        />
+        <span style={{
+          position: 'absolute',
+          right: 12,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          color: muted,
+          fontSize: 14,
+          fontWeight: 800,
+        }}>min</span>
+      </div>
+    </div>
+  );
+
+  // Same conversion the server uses — the number shown here is the number
+  // the emails will use, so the customer can sanity-check it while typing.
+  const derivedIrrigation = deriveIrrigationInchesPerWeek({
+    runMinutes: prefs.irrigationRunMinutes,
+    wateringDays: prefs.wateringDays,
+    systemType: prefs.irrigationSystemType,
+  });
+  const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
+  const derivedIrrigationLine = (() => {
+    if (!prefs.irrigationSystem || prefs.irrigationRunMinutes == null) return null;
+    if (derivedIrrigation.inchesPerWeek != null) {
+      const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
+      return explicitInchesEntered
+        ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
+    }
+    // An explicit Weekly Inches entry is already authoritative — a decline
+    // prompt asking for what's filled in above would never be satisfiable.
+    if (explicitInchesEntered) return null;
+    switch (derivedIrrigation.reason) {
+      case 'missing_days': return 'Pick your watering days below and we can work out your weekly inches.';
+      case 'missing_head_type': return 'Pick a system type below and we can work out your weekly inches.';
+      // Head-type-neutral: the mix may be any combination (spray+drip,
+      // rotor+drip…) — naming types the customer didn't pick reads as us
+      // corrupting their profile.
+      case 'mixed_head_types': return "Different head types put down water at very different rates, so we can't turn minutes into inches for a mixed system — enter Weekly Inches if you know it.";
+      case 'drip_only': return 'Drip waters beds rather than turf — if the lawn gets sprinkler water too, add that head type.';
+      case 'implausible_total': return 'Those numbers work out to more water each week than any lawn could use — double-check the minutes per zone.';
+      default: return null;
+    }
+  })();
+
   const sqft = (n) => {
     const num = Number(n || 0);
     return num > 0 ? `${num.toLocaleString()} sq ft` : 'Not set';
@@ -7526,9 +7601,10 @@ function PropertyTab({ customer }) {
   const petSummary = petCount > 0 ? `${petCount} pet${petCount === 1 ? '' : 's'} on file` : 'No pets listed';
   const scheduleSummary = `${displayChoice(prefs.preferredDay)}, ${displayChoice(prefs.preferredTime).toLowerCase()}`;
   const irrigationInches = Number(prefs.irrigationInchesPerWeek);
+  const irrigationRunMinutes = Number(prefs.irrigationRunMinutes);
   const irrigationInchesSummary = Number.isFinite(irrigationInches) && irrigationInches > 0
     ? ` · ${irrigationInches.toFixed(2).replace(/\.00$/, '')}" / week`
-    : '';
+    : (Number.isFinite(irrigationRunMinutes) && irrigationRunMinutes > 0 ? ` · ${irrigationRunMinutes} min / zone` : '');
   const irrigationSummary = prefs.irrigationSystem
     ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
     : 'No irrigation system listed';
@@ -7863,8 +7939,16 @@ function PropertyTab({ customer }) {
                 <label style={labelStyle}>Number of Zones</label>
                 <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={100} label="Irrigation zones" />
               </div>
+              {irrigationMinutesInput()}
               {hasLawnCare && irrigationInchesInput()}
             </div>
+            {/* Lawn customers only — the copy references the Weekly Inches
+                field, which is gated on hasLawnCare just above. */}
+            {hasLawnCare && derivedIrrigationLine && (
+              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
+                {derivedIrrigationLine}
+              </div>
+            )}
             {hasLawnCare && (
               <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
                 Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
@@ -7874,12 +7958,20 @@ function PropertyTab({ customer }) {
               <label style={labelStyle}>Watering Days</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
-                  const days = Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [];
+                  // Legacy rows can hold full day names ("Monday") the server
+                  // now rejects — every edit restates the field in canonical
+                  // keys via the runtime's EXACT alias map (a prefix rule
+                  // fabricated days from non-day text), unknowns dropped, so
+                  // a stale value can never 400 the customer's correction.
+                  const CANONICAL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                  const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [])
+                    .map(d => DAY_ALIASES[String(d || '').trim().toLowerCase()])
+                    .filter(Boolean);
                   const active = days.includes(day);
                   return (
                     <button key={day} type="button" aria-pressed={active} onClick={() => {
                       const next = active ? days.filter(d => d !== day) : [...days, day];
-                      updateField('wateringDays', next);
+                      updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                     }} style={{
                       ...PORTAL_BUTTON_BASE,
                       minWidth: 44,
@@ -7904,7 +7996,11 @@ function PropertyTab({ customer }) {
                   value={Array.isArray(prefs.irrigationSystemType)
                     ? prefs.irrigationSystemType
                     : (prefs.irrigationSystemType ? [prefs.irrigationSystemType] : [])}
-                  onChange={v => updateField('irrigationSystemType', v)}
+                  // Legacy rows can hold off-vocabulary types ("bubbler") the
+                  // server now rejects; PillSelector carries prior values
+                  // through, so every edit drops unknowns — the customer's
+                  // selection replaces the stale value instead of 400ing.
+                  onChange={v => updateField('irrigationSystemType', v.map(t => String(t).toLowerCase()).filter(t => ['spray', 'drip', 'rotor'].includes(t)))}
                   options={[
                     { value: 'spray', label: 'In-ground Spray' },
                     { value: 'drip', label: 'Drip' },
@@ -15910,4 +16006,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, PortalGlassContext };

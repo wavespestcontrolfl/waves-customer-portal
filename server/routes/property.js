@@ -43,14 +43,28 @@ const prefsSchema = Joi.object({
   irrigationControllerLocation: shortText,
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
+  // Minutes each zone runs on a watering day — the natural-unit schedule
+  // @waves/irrigation-runtime converts to inches (× days × head type).
+  // 1–240 with null-to-clear: the runtime treats <= 0 as missing, so a
+  // persisted 0 would show in the portal while the email claims no minutes
+  // are on file. Zero is not a schedule — clearing is.
+  irrigationRunMinutes: Joi.number().integer().min(1).max(240).allow(null),
   irrigationScheduleNotes: longText,
-  wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
+  // Same seven keys the pills emit — mirrors mowingDays below. A length-only
+  // check would persist "Monday" with a 200, and @waves/irrigation-runtime
+  // normalizes against the canonical keys, so the day would silently vanish
+  // from the derivation and the email would claim the days are missing.
+  wateringDays: Joi.array().items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')).unique().max(7),
   // Customers can have multiple sprinkler types on one property. Accept an
   // array (current client) or a legacy scalar string for backward compat;
-  // the route normalizes to an array before storage.
+  // the route normalizes to an array before storage. Vocabulary is the three
+  // types the portal pills emit and @waves/irrigation-runtime has rates or
+  // rules for — an unknown type would persist fine and then derail the
+  // derivation into unknown_head_type copy. Legacy rows keep whatever they
+  // hold; only new writes are restricted.
   irrigationSystemType: Joi.alternatives().try(
-    Joi.array().items(Joi.string().max(30)).max(3),
-    Joi.string().max(30).allow('')
+    Joi.array().items(Joi.string().valid('spray', 'drip', 'rotor')).unique().max(3),
+    Joi.string().valid('spray', 'drip', 'rotor', '')
   ).allow(null),
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
@@ -87,7 +101,7 @@ const ALLOWED_FIELDS = [
   'preferred_day', 'preferred_time', 'contact_preference',
   'blackout_start', 'blackout_end',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
-  'irrigation_inches_per_week', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
+  'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_issues',
   'mowing_days', 'mowing_time_of_day', 'mowing_notes',
   'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
@@ -104,6 +118,7 @@ const CUSTOMER_EMAIL_FIELDS = {
   blackout_end: 'Blackout end date',
   irrigation_system: 'Irrigation system',
   irrigation_inches_per_week: 'Irrigation inches per week',
+  irrigation_run_minutes: 'Irrigation minutes per zone',
   watering_days: 'Watering days',
   irrigation_system_type: 'Irrigation system type',
   rain_sensor: 'Rain sensor',
@@ -180,7 +195,7 @@ router.get('/preferences', async (req, res, next) => {
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
-          irrigationInchesPerWeek: null,
+          irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationIssues: '',
           mowingDays: [], mowingTimeOfDay: '', mowingNotes: '',
@@ -465,4 +480,5 @@ module.exports = router;
 module.exports._private = {
   propertyChangeItems,
   displayPrefValue,
+  prefsSchema,
 };

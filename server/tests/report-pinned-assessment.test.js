@@ -29,7 +29,11 @@ const SERVICE = {
 // the same equality filters the resolver builds.
 function makeKnex(rows) {
   return (table) => {
-    expect(table).toBe('lawn_assessments');
+    expect(['lawn_assessments', 'property_preferences']).toContain(table);
+    if (table === 'property_preferences') {
+      const prefsChain = { where: () => prefsChain, orderBy: () => prefsChain, async first() { return null; } };
+      return prefsChain;
+    }
     const chain = {
       __where: {},
       where(criteria) { chain.__where = { ...chain.__where, ...criteria }; return chain; },
@@ -365,8 +369,11 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
       .toEqual({ pin: null, signature: '' });
     // Lawn with no assessment: absence is an answer and must be pinned, with
     // its own key marker distinct from the legacy empty one.
-    expect(await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex))
-      .toEqual({ pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` });
+    const bare = await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex);
+    expect(bare.pin).toBe(PIN_NO_ASSESSMENT);
+    // p3: the no-assessment signature carries the irrigation stamp hash so a
+    // prefs edit re-renders assessment-less lawn reports too.
+    expect(bare.signature).toMatch(new RegExp(`^-la${LAWN_RENDER_STRATEGY}0[0-9a-f]{12}$`));
   });
 
   // Objects cached by the previous UNPINNED path carry the same assessment

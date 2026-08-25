@@ -233,6 +233,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     err.retryable = true;
     throw err;
   }
+  // A render whose property-preferences read FAILED fell back to tech/
+  // assessment irrigation values — an emailed attachment of that payload is
+  // permanent and wrong for a customer with a portal schedule. Unlike a
+  // pending weather week, a retry can fix a blipped read, so defer.
+  if (renderedData?.lawnAssessment?.portalPrefsReadFailed && isDeliveryPin) {
+    const err = new Error('portal irrigation preferences could not be read — deferring pinned render');
+    err.code = 'portal_prefs_read_failed';
+    err.retryable = true;
+    throw err;
+  }
   if (isDeliveryPin) {
     // The delivery forced a fresh render precisely because the cached object
     // may hold an older assessment or recommendation version, so leaving that

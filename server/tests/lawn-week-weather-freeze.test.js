@@ -209,27 +209,33 @@ describe('freeze contract in the render path', () => {
   // close. The strategy marker in the storage key forces one fresh render.
   test('the render-strategy marker was BUMPED so pre-freeze PDFs regenerate', () => {
     const { LAWN_RENDER_STRATEGY } = require('../services/service-report/report-data');
-    // p1 shipped with #3174 (canonical pinning). The freeze changes render
-    // output again, so it must not reuse p1's keys.
+    // p1 shipped with #3174 (canonical pinning); p2 with the weather freeze;
+    // p3 added the portal-irrigation stamp to the signature. Each render-
+    // output change must abandon the previous strategy's keys.
     expect(LAWN_RENDER_STRATEGY).not.toBe('p1');
-    expect(source).toMatch(/LAWN_RENDER_STRATEGY = 'p2'/);
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p2');
+    expect(source).toMatch(/LAWN_RENDER_STRATEGY = 'p3'/);
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
     const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
     const knex = (table) => {
-      expect(table).toBe('lawn_assessments');
+      expect(['lawn_assessments', 'property_preferences']).toContain(table);
       const chain = {
         where: () => chain, orderBy: () => chain,
-        first: async () => ({ id: 'assess-A', customer_id: 'c1', confirmed_by_tech: true, service_record_id: 'svc-1' }),
+        first: async () => (table === 'property_preferences'
+          ? null
+          : { id: 'assess-A', customer_id: 'c1', confirmed_by_tech: true, service_record_id: 'svc-1' }),
       };
       return chain;
     };
     const { signature } = await resolveCanonicalLawnRender(
       { id: 'svc-1', customer_id: 'c1', service_line: 'lawn' }, knex,
     );
-    // Every pre-freeze lawn key carried -lap1…; none can match -lap2….
-    expect(signature.startsWith('-lap2')).toBe(true);
+    // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
+    // -lap2… — none can match -lap3….
+    expect(signature.startsWith('-lap3')).toBe(true);
+    expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });
 

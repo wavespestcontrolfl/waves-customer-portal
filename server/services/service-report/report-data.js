@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
@@ -292,12 +293,39 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
+/**
+ * The customer's portal irrigation figure: their explicit inches-per-week
+ * entry, else the figure @waves/irrigation-runtime derives from their minutes
+ * per zone × watering days × head type. One resolver shared by every read of
+ * property_preferences in this file so the report cannot disagree with the
+ * weekly irrigation email (which applies the same two-step rule).
+ */
+function portalIrrigationInches(propertyPrefs) {
+  if (!propertyPrefs) return null;
+  // Positive entries only — the advice engine and portal UI both treat <= 0
+  // as "no schedule", so a zero falls through to the runtime derivation
+  // (same rule as the weekly email's prefsInches).
+  const explicit = numberOrNull(propertyPrefs.irrigation_inches_per_week);
+  if (explicit != null && explicit > 0) return explicit;
+  // Toggle OFF: the runtime entries describe a system the customer says is
+  // not running — never derive from them (same gate as the weekly email; a
+  // typed value above keeps the existing prefs-only suppression semantics).
+  if (propertyPrefs.irrigation_system === false) return null;
+  return deriveIrrigationInchesPerWeek({
+    runMinutes: propertyPrefs.irrigation_run_minutes,
+    wateringDays: propertyPrefs.watering_days,
+    systemType: propertyPrefs.irrigation_system_type,
+  }).inchesPerWeek;
+}
+
 function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
-  const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
+  const prefsIrrigationInches = portalIrrigationInches(propertyPrefs);
   // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
   // shows. The customer's own schedule takes priority over turf/assessment readings.
+  // (A figure derived from their runtime entries counts as a portal entry — same
+  // precedence the weekly irrigation email applies; the two surfaces must agree.)
   const irrigationInchesPerWeek = firstNumber(
     prefsIrrigationInches,
     turfIrrigationInches,
@@ -1965,20 +1993,45 @@ class PinnedAssessmentUnavailable extends Error {
 // shows a different number — the emailed attachment and the live report
 // disagreeing, which is the whole failure class this lane exists to close.
 // Bumping forces those lawn PDFs through one fresh render.
-const LAWN_RENDER_STRATEGY = 'p2';
+// p3: signature composition gained the portal irrigation stamp (explicit or
+// derived inches + system toggle) — prefs edits must invalidate cached PDFs.
+const LAWN_RENDER_STRATEGY = 'p3';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
 
+  // The rendered water balance reads the customer's portal irrigation state
+  // (explicit inches, or the figure derived from minutes × days × head type,
+  // and the system toggle) — a prefs edit changes the payload, so it must
+  // change the signature or a cached PDF serves the old balance forever. A
+  // failed prefs read stamps random so the cache re-renders instead of
+  // serving stale (same fail-open-to-rerender posture as the outer catch).
+  let irrigationStamp;
+  try {
+    const prefs = await knex('property_preferences')
+      .where({ customer_id: service.customer_id })
+      .first();
+    // updated_at rides the stamp for the same reason the assessment stamp
+    // carries it: an A→B→A edit sequence during a render would otherwise
+    // restore the original stamp while the render read B (TOCTOU) — the
+    // timestamp makes every edit sequence change the signature.
+    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
+  } catch {
+    irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
+  }
+
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
-  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` };
+  if (!assessment?.id) {
+    const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}` };
+  }
 
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
     : JSON.stringify(assessment.recommendations || '');
   const stamp = crypto.createHash('sha1')
-    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
     .digest('hex')
     .slice(0, 12);
   return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };
@@ -2295,10 +2348,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .where({ customer_id: service.customer_id, active: true })
     .first()
     .catch(() => null);
+  // A FAILED prefs read is not a missing row: the cache signature stamps the
+  // portal irrigation state from its own (successful) prefs read, so a render
+  // whose prefs read blipped would fall back to tech/assessment values and
+  // then be stored under the portal-based key — served indefinitely. The
+  // failure marks the render uncacheable below instead.
+  let prefsReadFailed = false;
   const propertyPrefs = await knex('property_preferences')
     .where({ customer_id: service.customer_id })
     .first()
-    .catch(() => null);
+    .catch(() => { prefsReadFailed = true; return null; });
   const trend = historyRows.map((row) => ({
     date: row.service_date,
     overallScore: calculateLawnOverallScore(row),
@@ -2524,7 +2583,17 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     weekWeatherPendingReason,
     // What CACHE sites gate on — the superset. Delivery gates on
     // weekWeatherUnfrozen alone, so a merely-pending week never blocks a send.
-    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason,
+    // …plus a failed property-preferences read: the payload rendered without
+    // the customer's portal irrigation state, but the cache key (computed
+    // from an independent, possibly-successful prefs read) stamps that state
+    // — caching the mismatch would serve the wrong water balance until the
+    // customer's next prefs edit.
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed,
+    // Dedicated flag for DELIVERY: a pinned (emailed) render must not ship a
+    // payload that fell back to tech values because the prefs read blipped —
+    // unlike a pending weather week, a retry can fix this, so pdf-queue
+    // throws retryable on it instead of serving the bytes.
+    portalPrefsReadFailed: prefsReadFailed,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
@@ -2539,16 +2608,19 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // (grass×season target vs. portal irrigation inches + 7-day rainfall) in
       // irrigationAdvice / LawnWaterBalance. The column still exists and is read by
       // other surfaces (waveguard-plan-engine), so it is not emitted here.
-      irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
-        ?? assessment.irrigation_inches_per_week
-        ?? propertyPrefs?.irrigation_inches_per_week
-        ?? null,
+      // Same portal → turf → assessment precedence as buildLawnWaterContext:
+      // this figure renders beside the water balance, and the two must come
+      // from the same source or one report shows a tech reading next to a
+      // balance computed from the customer's own (possibly derived) schedule.
+      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs)
+        ?? numberOrNull(turfProfile.irrigation_inches_per_week)
+        ?? numberOrNull(assessment.irrigation_inches_per_week),
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : (propertyPrefs ? {
-      irrigationInchesPerWeek: propertyPrefs.irrigation_inches_per_week ?? null,
+      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs),
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
@@ -4719,6 +4791,7 @@ module.exports = {
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,
+  portalIrrigationInches,
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
