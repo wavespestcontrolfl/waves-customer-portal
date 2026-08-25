@@ -60,6 +60,15 @@ describe('derived schedule → confirm_schedule with a derived schedule_note', (
     );
   });
 
+  test('a rain-sensor customer\'s derived note discloses that skipped runs are not modeled', () => {
+    const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, rainSensor: true });
+    expect(d.payload.schedule_note).toContain('rain sensor');
+    expect(d.payload.schedule_note).toContain('assumes the full schedule ran');
+    // No sensor → no disclaimer.
+    const plain = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME });
+    expect(plain.payload.schedule_note).not.toContain('rain sensor');
+  });
+
   test('a tech reading keeps the seeded "came from our records" note verbatim', () => {
     const d = buildWeeklyEmailDecision({ ...BASE, turfIrrigationInchesPerWeek: 1, rainfallInches7d: 2.1 });
     expect(d.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);

@@ -6,7 +6,7 @@
  */
 const { __private, up } = require('../models/migrations/20260825000002_irrigation_run_minutes_backfill');
 
-const { parseRunMinutesFromNotes } = __private;
+const { parseRunMinutesFromNotes, noteDaysConsistent } = __private;
 
 describe('parseRunMinutesFromNotes', () => {
   test.each([
@@ -77,6 +77,20 @@ describe('parseRunMinutesFromNotes', () => {
     [null, 'null'],
   ])('declines %j (%s)', (notes) => {
     expect(parseRunMinutesFromNotes(notes)).toBeNull();
+  });
+});
+
+describe('noteDaysConsistent', () => {
+  // A note asserting its own days must agree with the structured
+  // watering_days the derivation multiplies by (GH codex P1 #3478 r17).
+  test('day claims must match the structured days exactly', () => {
+    expect(noteDaysConsistent('Each zone runs 20 min on Tuesday and Thursday', ['Tue', 'Thu'])).toBe(true);
+    expect(noteDaysConsistent('Each zone runs 20 min on Tuesday and Thursday', ['Mon', 'Wed', 'Fri'])).toBe(false);
+    expect(noteDaysConsistent('Each zone runs 20 min on Tue', ['Tue', 'Thu'])).toBe(false);
+    expect(noteDaysConsistent('Each zone runs 20 min on Tuesday', null)).toBe(false);
+    // JSONB-as-string rows and no-claim notes both behave.
+    expect(noteDaysConsistent('Each zone runs 20 min Mon/Wed', '["Mon","Wed"]')).toBe(true);
+    expect(noteDaysConsistent('Each zone runs 20 min', ['Mon', 'Wed', 'Fri'])).toBe(true);
   });
 });
 

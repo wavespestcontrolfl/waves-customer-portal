@@ -111,24 +111,60 @@ function parseRunMinutesFromNotes(notes) {
   return matched;
 }
 
+// Exact day aliases — a self-contained copy of the runtime's map (migrations
+// must not change behavior when a package evolves). Used only to check that
+// a note's OWN day claims agree with the structured watering_days.
+const NOTE_DAY_ALIASES = {
+  mon: 'Mon', monday: 'Mon', tue: 'Tue', tues: 'Tue', tuesday: 'Tue',
+  wed: 'Wed', weds: 'Wed', wednesday: 'Wed', thu: 'Thu', thur: 'Thu', thurs: 'Thu', thursday: 'Thu',
+  fri: 'Fri', friday: 'Fri', sat: 'Sat', saturday: 'Sat', sun: 'Sun', sunday: 'Sun',
+};
+
+function noteDaysConsistent(notes, wateringDays) {
+  const noteDays = new Set((String(notes || '').toLowerCase().match(/[a-z]+/g) || [])
+    .map((t) => NOTE_DAY_ALIASES[t])
+    .filter(Boolean));
+  if (!noteDays.size) return true; // no day claims — nothing to contradict
+  let structured = wateringDays;
+  if (typeof structured === 'string') {
+    try { structured = JSON.parse(structured); } catch { structured = []; }
+  }
+  const structuredDays = new Set((Array.isArray(structured) ? structured : [])
+    .map((d) => NOTE_DAY_ALIASES[String(d || '').trim().toLowerCase()])
+    .filter(Boolean));
+  if (noteDays.size !== structuredDays.size) return false;
+  for (const d of noteDays) if (!structuredDays.has(d)) return false;
+  return true;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('property_preferences'))) return;
   if (!(await knex.schema.hasColumn('property_preferences', 'irrigation_run_minutes'))) return;
   if (!(await knex.schema.hasColumn('property_preferences', 'irrigation_schedule_notes'))) return;
 
+  const hasDaysColumn = await knex.schema.hasColumn('property_preferences', 'watering_days');
   const rows = await knex('property_preferences')
     .whereNull('irrigation_run_minutes')
     .whereNotNull('irrigation_schedule_notes')
-    .select('id', 'irrigation_schedule_notes');
+    .select('id', 'irrigation_schedule_notes', ...(hasDaysColumn ? ['watering_days'] : []));
 
   for (const row of rows) {
     const minutes = parseRunMinutesFromNotes(row.irrigation_schedule_notes);
     if (minutes == null) continue;
-    // Guarded UPDATE: only lands if the column is STILL null, so a customer
-    // entry racing the deploy window is never overwritten.
+    // A note that asserts its own watering days must agree with the
+    // structured watering_days the derivation will multiply by — "20 minutes
+    // on Tuesday and Thursday" beside structured Mon/Wed/Fri would promote
+    // minutes that get counted three days instead of two. Disagreement (or
+    // days in the note with none structured) declines.
+    if (!noteDaysConsistent(row.irrigation_schedule_notes, hasDaysColumn ? row.watering_days : null)) continue;
+    // Guarded UPDATE: only lands if the column is STILL null AND the note is
+    // byte-identical to the one this value was parsed from — a customer
+    // editing either during the deploy window is never overwritten or
+    // promoted from a stale snapshot.
     await knex('property_preferences')
       .where({ id: row.id })
       .whereNull('irrigation_run_minutes')
+      .where({ irrigation_schedule_notes: row.irrigation_schedule_notes })
       .update({ irrigation_run_minutes: minutes });
   }
 };
@@ -138,4 +174,4 @@ exports.down = async function down() {
   // customer-typed values; the column-drop migration is the real rollback.
 };
 
-exports.__private = { parseRunMinutesFromNotes, PER_ZONE_PATTERNS };
+exports.__private = { parseRunMinutesFromNotes, noteDaysConsistent, PER_ZONE_PATTERNS };

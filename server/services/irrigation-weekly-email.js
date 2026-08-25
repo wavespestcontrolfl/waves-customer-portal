@@ -200,9 +200,17 @@ const TECH_SCHEDULE_NOTE = "That schedule came from our records rather than from
  * customer's own entries run through a published head rate — say so, and
  * say which rate, so the customer can overrule it with a real number.
  */
-function buildScheduleNote({ scheduleSource, derived, scheduleFmt }) {
+function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = false }) {
   if (scheduleSource !== 'portal_derived' || !derived) return TECH_SCHEDULE_NOTE;
-  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour). If you know your actual weekly inches, enter them there and we'll use your number instead.`;
+  // A rain sensor can skip programmed runs in a wet week. Which runs it
+  // skipped is unknowable (threshold and hold time are not on file), so the
+  // balance deliberately assumes the full program ran — the note SAYS so,
+  // and the disclosure keeps a sensor-skipped week's "ease back" honest as
+  // an upper bound rather than silently overstating delivered water.
+  const sensorClause = rainSensor
+    ? ' Since you have a rain sensor, some of those runs may have been skipped after rain — this figure assumes the full schedule ran, so read it as the most your system would have applied.'
+    : '';
+  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
 
 function lastCompletedWeekEnding(now = new Date()) {
@@ -317,6 +325,7 @@ function buildWeeklyEmailDecision({
   irrigationRunMinutes = null,
   wateringDays = null,
   irrigationSystemType = null,
+  rainSensor = null,
   rainSource = null,
   rainfallInches7d = null,
   et0Inches = null,
@@ -513,7 +522,7 @@ function buildWeeklyEmailDecision({
         total_inches: totalFmt,
         target_inches: targetFmt,
         summary_line: neutralLead,
-        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt }),
+        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't' }),
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -737,6 +746,10 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.longitude',
       'pp.irrigation_inches_per_week',
       'pp.irrigation_system',
+      // Rain sensor drives only the derived schedule_note disclosure — the
+      // balance itself deliberately assumes the full program ran (which runs
+      // a sensor skipped is unknowable; never impute).
+      'pp.rain_sensor',
       // Runtime entries — minutes per zone × watering days × head type — the
       // natural-unit schedule @waves/irrigation-runtime converts to inches
       // when the inches column itself is blank.
@@ -881,6 +894,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         irrigationRunMinutes: customer.irrigation_run_minutes,
         wateringDays: customer.watering_days,
         irrigationSystemType: customer.irrigation_system_type,
+        rainSensor: customer.rain_sensor === true || customer.rain_sensor === 't',
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
