@@ -519,7 +519,16 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   // one_time_adjustment ("Other one-time services") is intentionally NOT here — it
   // is a real billable charge that dispatch must perform, so it stays visible
   // (negative adjustments are dropped by the discount/amount guards below).
-  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount'];
+  // rodent_guarantee is the payment-only guarantee RIDER (its catalog row
+  // is a duration-zero internal-only billing construct) — never a
+  // dispatchable visit. Letting it into the profile can make it the
+  // PRIMARY (the engine emits it before later services), so a guarantee +
+  // plugging estimate would stamp the field visit with the payment-only
+  // identity and hide the sold plugging work from its completion/report
+  // lane (codex #3485 r21 P1). It stays on the invoice/billing side; the
+  // rodent_guarantee_combo bundle is NOT excluded — it carries real field
+  // work.
+  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee'];
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
     if (item.quoteRequired === true || item.kind === 'discount') continue;

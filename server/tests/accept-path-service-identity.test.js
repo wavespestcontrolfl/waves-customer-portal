@@ -182,6 +182,32 @@ describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
     return services.find((s) => s?.service === 'pest_control') || services[0] || null;
   };
 
+  test('the rodent_guarantee payment-only rider never enters the profile (codex r21 P1)', () => {
+    // The engine emits the guarantee before later services; if it entered
+    // the profile it would become the PRIMARY and stamp the field visit
+    // with a duration-zero internal-only billing identity, hiding the sold
+    // plugging work from its completion lane. It stays on billing only.
+    const estimate = {
+      id: 'est-guarantee',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_guarantee', name: 'Rodent Guarantee', price: 349 },
+              { service: 'plugging', name: 'Lawn Plugging', price: 480 },
+            ],
+            total: 829,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = profile?.services || [];
+    expect(services.some((s) => s?.engineKey === 'rodent_guarantee')).toBe(false);
+    expect(services.some((s) => s?.engineKey === 'plugging')).toBe(true);
+  });
+
   test.each([
     ['german_roach', 'German Roach Cleanout'],
     ['german_roach_initial', 'German Roach Initial'],
