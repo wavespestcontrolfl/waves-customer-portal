@@ -80,9 +80,17 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'dethatching', engine_keys: ['dethatching'] },
   { service_key: 'plugging', engine_keys: ['plugging'] },
   { service_key: 'top_dressing', engine_keys: ['top_dressing'] },
-  // Specialty.
-  { service_key: 'flea_tick', engine_keys: ['flea_knockdown_single', 'flea_package'] },
-  { service_key: 'cockroach_control', engine_keys: ['pest_initial_roach'] },
+  // Specialty. `flea_package` is NOT aliased here: the package is a
+  // two-visit program with a priced follow-up, while the flea_tick row is
+  // a single yard-treatment visit with no required-follow-up policy — one
+  // durable identity cannot carry both treatment contracts (codex #3485
+  // r5 P1). `pest_initial_roach` is likewise NOT seeded: its treatment
+  // count is configuration-dependent (single knockdown vs program) while
+  // cockroach_control's catalog contract is a fixed two-treatment program
+  // with a required 14-day follow-up — stamping the id would put sold
+  // single-visit work on the two-visit obligation lane; label resolution
+  // keeps the status-quo behavior instead.
+  { service_key: 'flea_tick', engine_keys: ['flea_knockdown_single'] },
   { service_key: 'bed_bug_treatment', engine_keys: ['bed_bug', 'bed_bug_chemical', 'bed_bug_heat'] },
   // `palm_injection` is NOT seeded: 20260519000003 archived that row, and
   // only prod carries it admin-reactivated — a seed would target an

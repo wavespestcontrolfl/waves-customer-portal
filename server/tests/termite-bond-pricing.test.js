@@ -624,6 +624,30 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
     expect(bond.service).toBe('termite_bond_5yr');
   });
 
+  test('the same term-less bond row in stored AND raw lists still coalesces to ONE service', () => {
+    // Normalization must run at the merge choke point: rewriting only the
+    // raw lineItems representation split formerly-coalesced duplicates into
+    // a bare-bond visit AND a term-keyed bond visit (codex #3485 r5 P1).
+    const bondRow = { name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 };
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ ...bondRow }] },
+      result: { lineItems: [{ ...bondRow }] },
+    });
+    const bonds = rows.filter((r) => String(r.service).startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service).toBe('termite_bond_5yr');
+  });
+
+  test('the term parses from serviceName/service_name label fields too', () => {
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [{ serviceName: 'Termite Bond (10-Year Term)', service: 'termite_bond', annual: 180, visitsPerYear: 4 }],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_10yr');
+  });
+
   test('a term-less, name-less bond line stays unrewritten (no guessed term)', () => {
     const rows = recurringServicesFromEstimateData({
       result: { lineItems: [{ name: 'Termite Bond', service: 'termite_bond', annual: 240, visitsPerYear: 4 }] },

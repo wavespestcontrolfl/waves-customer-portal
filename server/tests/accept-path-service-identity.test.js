@@ -88,6 +88,12 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   // archive) — a seed would target an archived row in migration-built
   // databases; the label resolves the row by unique name where it is live.
   'palm_injection',
+  // Two-visit program vs one-visit catalog contract — a durable identity
+  // would erase the treatment-count difference (flea package's priced
+  // follow-up; roach knockdown vs cockroach_control's fixed two-treatment
+  // 14-day-follow-up lane). Label resolution keeps status-quo behavior.
+  'flea_package',
+  'pest_initial_roach',
 ];
 
 // Load the knexfile BEFORE deciding to skip — it resolves the Railway

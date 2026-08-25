@@ -1876,12 +1876,33 @@ function coalesceRecurringServiceRows(existing = {}, next = {}) {
   return merged;
 }
 
+// Raw engine bond lines carry service 'termite_bond' + bondTerm — normalize
+// to the term-keyed service so scheduling routes and the catalogServiceKey
+// lookup match term-specific rows. When bondTerm is absent (older
+// snapshots, agent drafts), derive it from ANY supported label field —
+// serviceName/service_name are accepted display sources everywhere else,
+// so they must feed the parser too (codex #3485 r5 P1). A line with
+// neither term source stays unrewritten (no guessed term). Applied at the
+// merge choke point so EVERY input representation (stored
+// recurring.services rows AND raw lineItems) normalizes identically —
+// normalizing only one list split formerly-coalesced duplicates into two
+// scheduled bond visits (codex #3485 r5 P1).
+function normalizeBondTermService(li) {
+  if (!li || typeof li !== 'object' || li.service !== 'termite_bond') return li;
+  const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');
+  const bondTerm = li.bondTerm
+    || (labelText.match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
+    || null;
+  return bondTerm ? { ...li, service: `termite_bond_${bondTerm}` } : li;
+}
+
 function mergeRecurringServiceLists(...lists) {
   const byIdentity = new Map();
   for (const list of lists) {
     if (!Array.isArray(list)) continue;
-    for (const svc of list) {
-      if (!svc || typeof svc !== 'object') continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const svc = normalizeBondTermService(raw);
       const identity = recurringServiceIdentityKey(svc);
       const existing = byIdentity.get(identity);
       byIdentity.set(identity, existing ? coalesceRecurringServiceRows(existing, svc) : { ...svc });
@@ -1941,14 +1962,7 @@ function recurringLinesFromEngineResult(data = {}) {
       // name-only and the warranty defaulted to a 1-year term (2026-08-25
       // audit). A line with neither term source stays unrewritten and keeps
       // today's name-only behavior rather than guessing a term.
-      const bondTerm = li.service === 'termite_bond'
-        ? (li.bondTerm
-          || (String(li.name || li.label || li.displayName || '').match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
-          || null)
-        : null;
-      const base = bondTerm
-        ? { ...li, service: `termite_bond_${bondTerm}` }
-        : li;
+      const base = normalizeBondTermService(li);
       if (base.name || base.label || base.displayName || base.serviceName || base.service_name) return base;
       const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(base)];
       return synthesized ? { ...base, name: synthesized } : base;
