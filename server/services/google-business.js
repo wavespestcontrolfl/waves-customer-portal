@@ -1554,11 +1554,24 @@ class GoogleBusinessService {
               // Ownership predicate IN the write (GH codex r8): a
               // concurrent human mark bumps review_marked_at, the
               // conditional no-ops, and the human's confirmation survives.
-              // Audit entry only when the clear actually happened (GH codex
-              // r9) — a no-op race must not log "review asks resume".
+              // Sole-basis check ALSO in the write (GH codex r10): this
+              // location's lock doesn't serialize an attribution linking
+              // another review to the same customer elsewhere, so the
+              // otherLink pre-read can miss a link committing in the gap —
+              // the subquery re-evaluates at write time and refuses the
+              // clear once any other linked review proves the customer
+              // reviewed. Audit entry only when the clear actually happened
+              // (GH codex r9) — a no-op race must not log "review asks
+              // resume".
               const cleared = await trx('customers')
                 .where({ id: alRow.customer_id })
                 .where({ review_marked_at: cust.review_marked_at })
+                .whereNotExists(function soleBasis() {
+                  this.select(1)
+                    .from('google_reviews')
+                    .where('google_reviews.customer_id', alRow.customer_id)
+                    .whereNot('google_reviews.id', alRow.id);
+                })
                 .update({ has_left_google_review: false, review_marked_at: null });
               if (cleared) {
                 try {
