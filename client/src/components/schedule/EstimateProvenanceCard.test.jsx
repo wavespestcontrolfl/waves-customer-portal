@@ -157,4 +157,42 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.getByText(/Quoted \$24\.00$/)).toBeTruthy();
     expect(screen.queryByText(/application/)).toBeNull();
   });
+
+  it('warns when the setup fee was owed but never invoiced (Mark Won accepts)', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={29.33}
+        currentPrice={88}
+        payment={{
+          billingTerm: 'standard',
+          paymentPreference: null,
+          annualPrepay: null,
+          acceptanceInvoice: null,
+          setupFeeMissing: { setupFee: 99 },
+        }}
+        estimateRef="EST-2026-9901"
+      />,
+    );
+    expect(screen.getByText('Setup fee not invoiced')).toBeTruthy();
+    expect(screen.getByText(/owed but never billed — completion will park for manual billing/)).toBeTruthy();
+    expect(screen.getByText('$99.00')).toBeTruthy();
+  });
+
+  it('shows no setup-fee warning when the context does not flag one', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={29.33}
+        currentPrice={88}
+        payment={{
+          billingTerm: 'standard',
+          paymentPreference: null,
+          annualPrepay: null,
+          acceptanceInvoice: null,
+          setupFeeMissing: null,
+        }}
+        estimateRef="EST-2026-9902"
+      />,
+    );
+    expect(screen.queryByText('Setup fee not invoiced')).toBeNull();
+  });
 });

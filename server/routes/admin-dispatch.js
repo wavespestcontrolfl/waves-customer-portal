@@ -8862,6 +8862,59 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
+    // Never-minted setup fee (owner ruling 2026-08-24, gate
+    // GATE_UNMINTED_SETUP_FEE_PARK): the standard verbal Mark Won accept
+    // skips the acceptance invoice by design (estimate-manual-acceptance),
+    // so a solo-plan first visit reaches completion with NO setup-fee
+    // invoice anywhere — an ordinary completion mint would bill only the
+    // per-application price and the one-time setup fee silently
+    // evaporates. Detect it and PARK the mint for manual billing (alert
+    // block below), the same shape as the canceled-setup-fee parking
+    // (#3474). FAIL CLOSED like the refunded-invoice check above: this
+    // hold is the only thing standing between the completion and the
+    // fee-dropping mint, so a swallowed read failure would re-open the
+    // leak for exactly the visits the gate exists to protect.
+    let unmintedSetupFeeObligation = null;
+    if (!recapReviewOnly && !existingCompletionInvoice && !terminalCompletionInvoice
+      && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
+      try {
+        const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
+        const obligation = await findUnmintedSetupFeeObligation({
+          sourceEstimateId: svc.source_estimate_id,
+          customerId: svc.customer_id,
+          excludeScheduledServiceId: svc.id,
+          // A one-time add-on sourced from the same estimate never owns the
+          // obligation — holding ITS mint would drop the add-on's own
+          // charge. Plan membership is judged on durable recurrence
+          // identity, never service-type text.
+          visitPlanRow: {
+            is_recurring: svc.is_recurring,
+            recurring_parent_id: svc.recurring_parent_id || null,
+          },
+        }, db);
+        if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+          unmintedSetupFeeObligation = obligation;
+        } else if (obligation.owed && obligation.firstVisitAlreadyCompleted) {
+          // Historic leak (first visit already billed bare) — log for the
+          // sweep, never park a routine later visit.
+          logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but its first visit already completed — not parking this later visit`);
+        }
+      } catch (lookupErr) {
+        logger.error(`[dispatch] unminted-setup-fee check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The setup-fee check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The setup-fee check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'unminted_setup_fee_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
+    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -8956,6 +9009,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Refunded invoice on this visit → never mint a replacement (codex
       // #3456); the manual-billing alert below owns the follow-up.
       terminalInvoiceOnVisit: !!terminalCompletionInvoice,
+      // Setup fee owed but never invoiced (Mark Won accept) → never mint
+      // the bare per-application invoice; the parking alert below owns
+      // the follow-up (bill setup + first application by hand).
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -9179,6 +9236,154 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ? 'This visit needs manual billing (its prior invoice was refunded) and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
             : `This visit needs manual billing (its prior invoice was refunded) and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
           code: 'terminal_invoice_manual_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      }
+    }
+    // Unminted setup fee blocked the mint (owner ruling 2026-08-24): the
+    // first visit ran and is owed money, but no acceptance invoice was
+    // ever created (Mark Won accepts skip it by design) — minting the bare
+    // per-application invoice here would silently drop the one-time setup
+    // fee, so nothing was minted and this alert is the ONLY durable
+    // follow-up for BOTH charges. Same fail-closed release/503 shape as
+    // the terminal-invoice alert above; deciding-reason check ensures the
+    // hold is the ONE reason invoicing was skipped (a visit the gate would
+    // decline anyway owes no alert).
+    if (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
+      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
+      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false })) {
+      const feeEstimateRef = unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId;
+      logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} was never invoiced — NO invoice minted; manual billing alert parked`);
+      let setupFeeAlerted = false;
+      let setupFeeAlertError = null;
+      try {
+        const dedupeKey = `unminted_setup_fee_manual_billing:${unmintedSetupFeeObligation.estimateId}`;
+        setupFeeAlerted = true === await db.transaction(async (trx) => {
+          // Same lock discipline as the terminal-invoice alert above: the
+          // shared schedule.invoice.mint advisory locks (own visit + its
+          // estimate/date siblings, globally sorted) serialize this
+          // revalidation against every concurrent invoice writer, then the
+          // dedupe lock makes retries idempotent.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          const { dateOnly } = require('../services/estimate-first-application-invoice');
+          const alertSiblingServiceIds = await trx('scheduled_services')
+            .where({ source_estimate_id: svc.source_estimate_id, customer_id: svc.customer_id })
+            .where('scheduled_date', dateOnly(svc.scheduled_date))
+            .pluck('id');
+          const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
+          for (const lockId of alertMintLockIds) {
+            await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id');
+          // ATOMIC revalidation on THIS transaction, under the mint locks:
+          // 1. An acceptance invoice stamped for the estimate appeared
+          //    (concurrent re-accept / manual mint). It resolves the alert
+          //    ONLY if the application charge is also covered — a
+          //    setup-ONLY acceptance invoice ("$99.00 setup fee only", a
+          //    real converter output) carries no first-application line,
+          //    and the hold above already suppressed the completion mint,
+          //    so skipping the alert here would leave the performed
+          //    application uninvoiced with no follow-up (Codex P0, round
+          //    1). Coverage = a first-application line/notes marker on the
+          //    stamped invoice, or a live invoice on the visit itself.
+          const stampedNow = await trx('invoices')
+            .where({ customer_id: svc.customer_id })
+            .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .first('id', 'invoice_number', 'status', 'notes', 'line_items');
+          const terminalResolvedAway = require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+          const liveStampedNow = stampedNow && !terminalResolvedAway.includes(stampedNow.status)
+            && stampedNow.status !== 'void' ? stampedNow : null;
+          // 2. A live invoice minted onto the visit itself (Charge Now
+          //    racing this alert) covers the VISIT charge only — the alert
+          //    then directs the office to collect it and bill the setup fee
+          //    beside it instead of duplicating the visit charge.
+          const onVisitLockedRows = await trx('invoices')
+            .where((qb) => {
+              qb.orWhere({ service_record_id: record.id });
+              qb.orWhere({ scheduled_service_id: svc.id });
+            })
+            .forUpdate()
+            .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc')
+            .select('id', 'invoice_number', 'status');
+          const liveOnVisit = onVisitLockedRows.find((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void') || null;
+          const stampedCarriesFirstApplication = (inv) => {
+            if (/first (service )?application/i.test(String(inv.notes || ''))) return true;
+            let lines = inv.line_items;
+            if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
+            return Array.isArray(lines)
+              && lines.some((li) => /first (service )?application/i.test(String(li?.description || '')));
+          };
+          if (liveStampedNow && (stampedCarriesFirstApplication(liveStampedNow) || liveOnVisit)) {
+            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
+            logger.warn(`[dispatch] visit ${svc.id}: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} and the application charge is covered — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+            if (already) {
+              await trx('notifications').where({ id: already.id }).update({
+                body: `RESOLVED — no action needed: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} and the obligation is covered. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: liveStampedNow.id, resolvedCovered: true })]),
+              });
+            }
+            return true;
+          }
+          const setupFeeLabel = `$${Number(unmintedSetupFeeObligation.setupFee || 0).toFixed(2)}`;
+          const firstAppLabel = Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '';
+          // A dead acceptance invoice no suppressor can surface
+          // (detector-reported) means "voided without replacement", not
+          // "never minted" — say so.
+          const deadInv = unmintedSetupFeeObligation.deadInvoice || null;
+          const feeHistoryClause = deadInv
+            ? `its WaveGuard setup-fee invoice (${deadInv.invoiceNumber || deadInv.id}, ${deadInv.status}) was voided/canceled and never replaced`
+            : 'its WaveGuard setup fee was never invoiced (the accept skipped the acceptance invoice)';
+          let alertBody;
+          if (liveStampedNow) {
+            // Setup-only acceptance invoice, no invoice on the visit: the
+            // setup fee is covered but the performed application is not —
+            // the hold suppressed the completion mint.
+            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by acceptance invoice ${stampedLabel} (${liveStampedNow.status}), but that invoice carries NO first-application charge and no completion invoice was cut — bill the first application${firstAppLabel} manually; do NOT re-bill the setup fee.`;
+          } else if (liveOnVisit) {
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${liveOnVisit.invoice_number || liveOnVisit.id}, status ${liveOnVisit.status}) already exists on this visit — collect THAT invoice for the visit charge, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the visit charge.`;
+          } else {
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}.`;
+          }
+          if (already) {
+            await trx('notifications').where({ id: already.id }).update({
+              body: alertBody,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {})]),
+            });
+            return true;
+          }
+          const created = await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Completed first visit needs manual billing — setup fee was never invoiced',
+            alertBody,
+            { link: `/admin/customers/${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+          );
+          if (!created) throw new Error('unminted-setup-fee notification insert failed');
+          return true;
+        });
+      } catch (e) {
+        setupFeeAlertError = e;
+      }
+      if (!setupFeeAlerted) {
+        const alertErr = setupFeeAlertError || new Error('unminted-setup-fee notification was not recorded');
+        logger.error(`[dispatch] unminted-setup-fee manual-billing alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'This visit needs manual billing (its setup fee was never invoiced) and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `This visit needs manual billing (its setup fee was never invoiced) and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'unminted_setup_fee_alert_failed',
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         });
@@ -14443,6 +14648,11 @@ function shouldAutoInvoiceCompletion({
   // still bounce — but the route parks a manual-billing alert instead of
   // reusing it. Canceled invoices do not block (nothing can restore them).
   terminalInvoiceOnVisit = false,
+  // Setup fee owed but never invoiced (Mark Won standard accept skipped
+  // the acceptance invoice): suppresses the bare per-application mint —
+  // the route parks a manual-billing alert instructing the office to bill
+  // setup + first application together.
+  unmintedSetupFeeHold = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -14494,6 +14704,11 @@ function shouldAutoInvoiceCompletion({
   // frozen REQUIRED mint must not cut a replacement beside an invoice whose
   // refund can still bounce; the route parks the manual-billing alert.
   if (terminalInvoiceOnVisit) return false;
+  // Unminted setup fee: same altitude as the refunded suppressor — even a
+  // governed REQUIRED mint must not cut the bare per-application invoice
+  // when the one-time setup fee would ride along un-billed; the route
+  // parks the manual-billing alert instead.
+  if (unmintedSetupFeeHold) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every

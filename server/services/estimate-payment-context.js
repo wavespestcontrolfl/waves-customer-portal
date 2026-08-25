@@ -298,6 +298,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   }
 
   let acceptanceInvoice = null;
+  let setupFeeMissing = null;
   if (!term) {
     const inv = await findAcceptanceInvoice(estimate);
     if (inv) {
@@ -311,6 +312,27 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         setupFeeAmount: sumMatchingLines(inv, SETUP_FEE_RE),
         firstApplicationAmount: sumMatchingLines(inv, FIRST_APPLICATION_RE),
       };
+    } else {
+      // No prepay term, no live acceptance invoice — was the setup fee
+      // simply never minted (standard Mark Won accepts skip it)? Surface
+      // it so the card can warn BEFORE the visit completes and parks.
+      // Fail-soft like every read here: unknown degrades to no warning.
+      try {
+        const { findUnmintedSetupFeeObligation } = require('./setup-fee-obligation');
+        // No excludeScheduledServiceId here (unlike the completion caller):
+        // for DISPLAY, a visit that already completed means the leak
+        // already happened — the warning would be stale advice, so
+        // firstVisitAlreadyCompleted should count this visit too.
+        const obligation = await findUnmintedSetupFeeObligation({
+          sourceEstimateId: estimate.id,
+          customerId: estimate.customer_id,
+        });
+        if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+          setupFeeMissing = { setupFee: obligation.setupFee };
+        }
+      } catch (err) {
+        logger.warn('[estimate-payment-context] unminted setup-fee check failed', { error: err.message });
+      }
     }
   }
 
@@ -321,9 +343,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   let billingTerm = null;
   if (term) billingTerm = 'prepay_annual';
   else if (paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
-  else if (paymentPreference || acceptanceInvoice) billingTerm = 'standard';
+  // An owed-but-unminted setup fee proves the accept converted onto the
+  // standard per-application plan even when no explicit preference was ever
+  // stored ("inferred" profiles) — without this the card would render no
+  // billing rows at all and the warning below it would never show.
+  else if (paymentPreference || acceptanceInvoice || setupFeeMissing) billingTerm = 'standard';
 
-  return { billingTerm, paymentPreference, annualPrepay, acceptanceInvoice };
+  return { billingTerm, paymentPreference, annualPrepay, acceptanceInvoice, setupFeeMissing };
 }
 
 module.exports = {

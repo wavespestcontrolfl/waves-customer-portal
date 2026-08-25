@@ -218,6 +218,17 @@ function paymentRows(payment) {
 
   if (payment.billingTerm === 'standard') {
     rows.push({ label: 'Billing', value: 'Per application', sub: null, tone: 'muted' });
+    // Setup fee owed but never invoiced (standard Mark Won accepts skip the
+    // acceptance invoice): warn BEFORE completion — completion billing will
+    // park this visit for manual billing instead of auto-invoicing.
+    if (payment.setupFeeMissing) {
+      rows.push({
+        label: 'Setup fee not invoiced',
+        value: money(payment.setupFeeMissing.setupFee),
+        sub: 'owed but never billed — completion will park for manual billing (setup fee + first application)',
+        tone: 'warn',
+      });
+    }
     const inv = payment.acceptanceInvoice;
     if (inv) {
       const paidSub = inv.paid
@@ -521,17 +532,23 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
 
         {rows.length > 0 && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
-            {rows.map((row, i) => (
-              <div key={`${row.label}-${i}`} style={lineStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK }}>{row.label}</div>
-                  {row.sub && <div style={{ fontSize: 11, color: row.tone === 'paid' ? GREEN : MUTED, marginTop: 1 }}>{row.sub}</div>}
+            {rows.map((row, i) => {
+              // 'warn' rows (e.g. setup fee owed but never invoiced) use the
+              // amber operational-heads-up ink, same as the payer banner.
+              const ink = row.tone === 'paid' ? GREEN : row.tone === 'warn' ? WARN.ink : INK;
+              const subInk = row.tone === 'paid' ? GREEN : row.tone === 'warn' ? WARN.ink : MUTED;
+              return (
+                <div key={`${row.label}-${i}`} style={lineStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>{row.label}</div>
+                    {row.sub && <div style={{ fontSize: 11, color: subInk, marginTop: 1 }}>{row.sub}</div>}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: ink, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                    {row.value}
+                  </div>
                 </div>
-                <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                  {row.value}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

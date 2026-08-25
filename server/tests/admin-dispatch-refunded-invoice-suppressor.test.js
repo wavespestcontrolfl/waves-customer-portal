@@ -184,6 +184,9 @@ describe('shouldAutoInvoiceCompletion: a terminal invoice on the visit suppresse
   test('terminalInvoiceOnVisit → false (no replacement is ever minted)', () => {
     expect(shouldAutoInvoiceCompletion({ ...billable, terminalInvoiceOnVisit: true })).toBe(false);
   });
+  test('unmintedSetupFeeHold → false (the bare per-application mint would drop the setup fee; the route parks instead)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...billable, unmintedSetupFeeHold: true })).toBe(false);
+  });
 });
 
 describe('completion route: terminal invoice → no mint, no pay link, manual-billing alert, report-only SMS (source contract)', () => {
