@@ -44,6 +44,12 @@ const DAY_KEYS = Object.freeze(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const MAX_RUN_MINUTES = 240;
 
+// Same ceiling the portal's explicit weekly-inches field validates against
+// (property.js Joi max(5)). A derived figure above it — 240 min × 7 days on
+// spray is 42"/week — is a data-entry artifact, not a schedule, and must
+// decline rather than flow into customer watering advice.
+const MAX_INCHES_PER_WEEK = 5;
+
 function toArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -95,6 +101,7 @@ function normalizeHeadTypes(value) {
  *   'mixed_head_types'  more than one head type — rates differ too much
  *   'drip_only'         drip does not irrigate turf
  *   'unknown_head_type' a type this table has no published rate for
+ *   'implausible_total' the math exceeds MAX_INCHES_PER_WEEK — entry artifact
  */
 function deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType } = {}) {
   const minutes = positiveInt(runMinutes, MAX_RUN_MINUTES);
@@ -111,6 +118,7 @@ function deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType } 
   if (rate == null) return { ...base, reason: 'unknown_head_type' };
 
   const inches = Math.round(((minutes / 60) * rate * days.length) * 100) / 100;
+  if (inches > MAX_INCHES_PER_WEEK) return { ...base, reason: 'implausible_total' };
   return { ...base, inchesPerWeek: inches, reason: null, headType: heads[0], rateInPerHr: rate };
 }
 
@@ -144,6 +152,7 @@ module.exports = {
   HEAD_LABELS,
   DAY_KEYS,
   MAX_RUN_MINUTES,
+  MAX_INCHES_PER_WEEK,
   deriveIrrigationInchesPerWeek,
   describeRuntimeBasis,
 };

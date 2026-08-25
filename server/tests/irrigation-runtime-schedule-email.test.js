@@ -163,6 +163,14 @@ describe('non-convertible entries → setup_schedule with a specific schedule_as
     expect(text).not.toContain('how long or how often it runs');
   });
 
+  test('implausible derived total (typo minutes) → asks to double-check, never claims a field is missing', () => {
+    // 200 min × 7 days on spray = 35"/week — over the 5" ceiling shared
+    // with the explicit Weekly Inches field (GH codex P1 on #3478 r12).
+    const text = ask({ irrigationRunMinutes: 200, wateringDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], irrigationSystemType: ['spray'] });
+    expect(text).toContain('more water each week than any lawn could use');
+    expect(text).not.toContain('but not');
+  });
+
   test('drip only → beds, not turf', () => {
     expect(ask({ irrigationRunMinutes: 30, wateringDays: ['Mon'], irrigationSystemType: ['drip'] })).toContain('waters beds rather than turf');
   });

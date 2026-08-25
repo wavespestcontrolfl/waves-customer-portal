@@ -148,6 +148,11 @@ function buildScheduleAsk({ derived, inputs }) {
   if (reason === 'unknown_head_type') {
     return `Your sprinkler system is on file${haveClause}but "${joinList(inputs.headTypes)}" isn't a head type we have a watering rate for. Pick In-ground Spray or Rotor ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
   }
+  // Complete inputs whose math exceeds any plausible weekly total (e.g. a
+  // typo like 200 minutes) — asking for a "missing" field would be false.
+  if (reason === 'implausible_total') {
+    return `Your sprinkler schedule is on file${haveClause}but those numbers work out to more water each week than any lawn could use, so we suspect a typo. Double-check the minutes per zone ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  }
 
   // Enumerate EVERY missing input, not the derivation's first failure reason
   // — its checks are sequential, and naming only the first blocker sends the

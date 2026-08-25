@@ -36,6 +36,15 @@ describe('deriveIrrigationInchesPerWeek', () => {
     expect(a.inchesPerWeek).toBe(0.5);
   });
 
+  test('declines totals over the 5" weekly ceiling shared with the explicit-inches field', () => {
+    // 240 min × 7 days × spray would be 42"/week — an entry artifact.
+    const d = deriveIrrigationInchesPerWeek({ runMinutes: 240, wateringDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], systemType: ['spray'] });
+    expect(d.inchesPerWeek).toBeNull();
+    expect(d.reason).toBe('implausible_total');
+    // Just under the ceiling still derives: 100 min × 2 days × 1.5 = 5.00".
+    expect(deriveIrrigationInchesPerWeek({ runMinutes: 100, wateringDays: ['Mon', 'Thu'], systemType: ['spray'] }).inchesPerWeek).toBe(5);
+  });
+
   test('rounds to hundredths', () => {
     const r = deriveIrrigationInchesPerWeek({ runMinutes: 25, wateringDays: ['Mon', 'Wed', 'Fri'], systemType: ['rotor'] });
     // 25/60 × 0.5 × 3 = 0.625 → 0.63
