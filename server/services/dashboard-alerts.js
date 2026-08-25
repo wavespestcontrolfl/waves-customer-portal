@@ -299,6 +299,9 @@ async function computeDashboardAlertsUncached() {
         .map((r) => r.invoice_number || r.id).join(', ');
       alerts.push({
         id: 'stale_draft_invoices',
+        // Collection WORK, not a passive observation — actions rank ahead
+        // of same-severity alerts in the inbox (Codex PR r8 P2).
+        kind: 'action',
         severity: 'warn',
         count: staleDraftCount,
         // Sorted membership so a dismissal re-surfaces when the QUEUE

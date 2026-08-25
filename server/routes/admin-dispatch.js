@@ -8960,8 +8960,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         } else {
           if (obligation.owed && obligation.firstVisitAlreadyCompleted) {
             // Historic leak (an earlier plan visit completed AND billed
-            // bare) — log for the sweep, never park a routine later visit.
-            logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — not parking this later visit`);
+            // bare): never park THIS routine visit — its own application
+            // invoices normally — but the fee still needs a DURABLE
+            // follow-up (Codex PR r8 P1): a log line alone left it
+            // permanently uncollected. Park a FEE-ONLY alert under the
+            // same dedupe key (skipped when any alert already stands);
+            // best-effort — the next series completion retries.
+            logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — parking a fee-only alert, this visit invoices normally`);
+            try {
+              await db.transaction(async (trx) => {
+                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [setupFeeDedupeKey]);
+                const existing = await trx('notifications')
+                  .where({ recipient_type: 'admin' })
+                  .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+                  .first('id');
+                if (existing) return; // reconcile owns the standing alert
+                const histRef = obligation.estimateSlug || obligation.estimateId;
+                const histFee = `$${Number(obligation.setupFee || 0).toFixed(2)}`;
+                const created = await require('../services/notification-service').notifyAdmin(
+                  'billing',
+                  'Setup fee never invoiced — historic first visit billed without it',
+                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.`,
+                  {
+                    link: `/admin/customers/${svc.customer_id}`,
+                    bell: true,
+                    metadata: {
+                      dedupeKey: setupFeeDedupeKey,
+                      customerId: svc.customer_id,
+                      sourceEstimateId: obligation.estimateId,
+                      feeOnly: true,
+                      expectedSetupFeeCents: Math.round(Number(obligation.setupFee || 0) * 100),
+                    },
+                    connection: trx,
+                  },
+                );
+                if (!created) throw new Error('historic fee-only notification insert failed');
+              });
+            } catch (histErr) {
+              logger.error(`[dispatch] historic setup-fee alert FAILED for ${svc.id} (retries on the series' next completion): ${histErr.message}`);
+            }
           }
           await reconcileParkedSetupFeeAlert();
         }

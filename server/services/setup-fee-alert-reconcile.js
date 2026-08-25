@@ -203,7 +203,12 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             || prepaidCoveredIds.has(String(visitId))
             || stampedCoversPrimary(visitId));
           const uncoveredIds = parkedIds.filter((visitId) => !visitCovered(visitId));
-          const applicationProven = parkedIds.length > 0 && uncoveredIds.length === 0;
+          // FEE-ONLY alerts (historic leaks — the applications were billed
+          // long ago) have no parked visits to prove: the fee alone
+          // resolves them (Codex PR r8 P1).
+          const feeOnlyAlert = staleMeta?.feeOnly === true;
+          const applicationProven = feeOnlyAlert
+            || (parkedIds.length > 0 && uncoveredIds.length === 0);
           const priorUncovered = Array.isArray(staleMeta?.uncoveredVisitIds)
             ? staleMeta.uncoveredVisitIds.map(String).sort().join(',')
             : null;

@@ -333,12 +333,12 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         firstApplicationAmount: sumMatchingLines(inv, FIRST_APPLICATION_RE),
       };
     }
-    // Run the detector when NO acceptance invoice exists OR the one found
-    // never billed the fee (Codex PR r2 → pre-push r6 P1): a stamped
-    // "first application only" invoice is legitimate converter output, and
-    // treating its presence as fee coverage would hide the warning for
-    // exactly the leak this card exists to surface.
-    if (!acceptanceInvoice || !(Number(acceptanceInvoice.setupFeeAmount) > 0)) {
+    // The canonical detector ALWAYS decides (Codex PR r8 P1): a partial
+    // fee line ($9.90 on a $99 obligation) or an application-only invoice
+    // must not hide the warning — completion's cents-exact check would
+    // still park, and the card must never contradict completion. A fully
+    // billed fee simply reads not-owed inside the detector.
+    {
       // Was the setup fee simply never minted (standard Mark Won accepts
       // skip it)? Surface it so the card can warn BEFORE the visit
       // completes and parks.
