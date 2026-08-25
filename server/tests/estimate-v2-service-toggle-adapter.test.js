@@ -379,7 +379,7 @@ describe('estimate v2 service toggle adapter', () => {
 
     expect(estimate.summary.specialtyTotal).toBe(350);
     expect(cleanout).toEqual(expect.objectContaining({
-      name: 'German Roach Cleanout — 2 Visit Program',
+      name: 'German Roach Cleanout Service — 2 Visit Program',
       price: 350,
       source: 'german_roach_cleanout_selected',
       pricingModel: 'german_roach_severity_tier_cleanout',
@@ -443,7 +443,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(regularPest.roachAddOn).toBe(0);
     expect(initialRoach).toEqual(expect.objectContaining({
       service: 'pest_initial_roach',
-      label: 'Cockroach Treatment',
+      label: 'Cockroach Treatment Service',
       price: 139,
       roachType: 'regular',
     }));
@@ -472,7 +472,7 @@ describe('estimate v2 service toggle adapter', () => {
     const estimate = generateEstimate(input);
     const roachLine = estimate.lineItems.find((line) => line.service === 'pest_initial_roach');
     expect(roachLine).toEqual(expect.objectContaining({
-      label: 'Cockroach Treatment',
+      label: 'Cockroach Treatment Service',
       price: 289,
       roachType: 'regular',
       standalone: true,

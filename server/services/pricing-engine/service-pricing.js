@@ -5113,7 +5113,7 @@ function priceRodentWireMesh(options = {}) {
 
   return {
     service: 'rodent_wire_mesh',
-    name: 'Rodent Wire Mesh Exclusion',
+    name: 'Rodent Wire Mesh Exclusion Service',
     meshLinearFeet,
     meshSubstrate: substrateKey,
     meshRatePerLinearFoot: substrate.ratePerLinearFoot,
@@ -5164,7 +5164,7 @@ function priceRodentBirdBoxes(options = {}) {
   }
   return {
     service: 'rodent_bird_box',
-    name: 'Roof-entry cover / bird box',
+    name: 'Roof-Entry Cover / Bird Box Service',
     birdBoxType: type,
     birdBoxQuantity: qty,
     birdBoxPrice: price,
@@ -5173,7 +5173,7 @@ function priceRodentBirdBoxes(options = {}) {
     finalPrice: price,
     lineItems: [{
       service: 'rodent_bird_box',
-      name: 'Roof-entry cover / bird box',
+      name: 'Roof-Entry Cover / Bird Box Service',
       count: qty,
       price,
       detail: type === 'standard_bird_box' && qty > 1
@@ -6347,7 +6347,7 @@ function priceGermanRoach(property, options = {}) {
 
   return {
     service: 'german_roach',
-    label: `German Roach Cleanout — ${visits} Visit Program`,
+    label: `German Roach Cleanout Service — ${visits} Visit Program`,
     price,
     source: options.source || 'german_roach_cleanout_selected',
     pricingModel: 'german_roach_severity_tier_cleanout',
@@ -6380,7 +6380,7 @@ function priceGermanRoachInitial(options = {}) {
   const price = Math.round(BASE * urgencyMult * rcDisc);
   return {
     service: 'german_roach_initial',
-    name: 'German Roach Initial (3-Visit)',
+    name: 'German Roach Initial Service (3-Visit)',
     price,
     visits: 3,
   };
@@ -7673,7 +7673,7 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
   const perSf = Math.round(price / Math.max(1, lawnSqFt) * 100) / 100;
   return {
     service: 'plugging',
-    name: 'Lawn Plugging',
+    name: 'Lawn Plugging Service',
     price,
     detail: `${label} | ${lawnSqFt.toLocaleString()} sf | ${totalPlugs.toLocaleString()} plugs | $${perSf}/sf`,
     lawnSqFt, spacing, totalPlugs, trays, perSf, label,
@@ -7712,7 +7712,7 @@ function priceFoamDrill(points = 5, options = {}) {
   const label = foamDrillTierLabel(tier);
   return {
     service: 'foam_drill',
-    name: 'Drill-and-Foam Termite',
+    name: 'Termite Foam Service',
     price,
     detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
     points: pointCount, tier: label, cans: tier.cans,
@@ -7751,7 +7751,7 @@ function priceRecurringFoam(points = 5, options = {}) {
   const tierLabel = foamDrillTierLabel(tier);
   return {
     service: 'foam_recurring',
-    name: `Recurring Foam Treatment (${cadenceLabel})`,
+    name: `Recurring Termite Foam Service (${cadenceLabel})`,
     annual,
     monthly,
     perVisit,
@@ -8222,7 +8222,7 @@ function priceRodentGuarantee(options = {}) {
 
   return {
     service: 'rodent_guarantee',
-    name: `Rodent Guarantee (${tier})`,
+    name: `Rodent Guarantee Service (${tier})`,
     price,
     tier,
     eligible,

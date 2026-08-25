@@ -156,7 +156,7 @@ describe('accept scheduling: bait + bond combine to ONE visit (converter routes)
       { acceptFrequency: 'quarterly' },
     );
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
     expect(remaining.map((r) => r.service)).toEqual(['termite_bond_10yr']);
   });
 });

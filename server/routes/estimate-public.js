@@ -437,7 +437,7 @@ function bookingServiceFor(name) {
   // Bora-Care is checked before termite/pest so a "Bora-Care Wood Treatment" (or
   // "Termite Bora-Care") label routes the /book link + SMS to the Bora-Care visit
   // instead of falling through to the Pest Control bucket.
-  if (n.includes('bora') || n.includes('borate')) return { id: 'bora_care', label: 'Bora-Care Wood Treatment' };
+  if (n.includes('bora') || n.includes('borate')) return { id: 'bora_care', label: 'Bora-Care Wood Treatment Service' };
   if (n.includes('lawn') || n.includes('turf') || n.includes('aeration') || n.includes('seed') || n.includes('weed')) return { id: 'lawn_care', label: 'Lawn Care' };
   if (n.includes('mosquito')) return { id: 'mosquito', label: 'Mosquito Control' };
   if (n.includes('tree') || n.includes('shrub') || n.includes('palm') || n.includes('ornamental')) return { id: 'tree_shrub', label: 'Tree & Shrub Service' };
@@ -567,7 +567,11 @@ function classifyServiceFamilyText(text) {
   // accept adopt a liquid-trenching visit. Mirror
   // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
   // stays the seeder's foam_recurring family (delegated below).
-  const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
+  // The optional "termite" token covers the 2026-08-25 renamed label
+  // ("Recurring Termite Foam Service") — without it a relabeled legacy
+  // visit (null service_id) would classify as one-time termite_foam and
+  // the accept would duplicate the existing foam appointment (codex P1).
+  const isRecurringFoam = /foam\s*recurring|recurring\s*(?:termite\s*)?foam/.test(raw);
   if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
   // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
   // generic termite branch buckets liquid / trenching WITH the bait
@@ -1496,7 +1500,7 @@ function oneTimeInvoiceLabelForCategory(category, fallback = 'One-time service')
     case 'mosquito': return 'One-Time Mosquito Control';
     case 'termite_bait': return 'Termite Bait Installation';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
-    case 'bora_care': return 'Bora-Care Wood Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Treatment';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'One-Time Service';
@@ -3014,7 +3018,7 @@ function recurringServiceDisplayName(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito';
     case 'termite_bait': return 'Termite Bait';
-    case 'foam_recurring': return 'Recurring Foam Treatment';
+    case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
@@ -13481,7 +13485,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       case 'termite_bait': return 'Termite Bait';
       case 'palm_injection': return 'Palm Injection';
       case 'rodent_bait': return 'Rodent Bait Stations';
-      case 'foam_recurring': return 'Recurring Foam Treatment';
+      case 'foam_recurring': return 'Recurring Termite Foam Service';
       default: return svc;
     }
   };
@@ -13941,7 +13945,7 @@ function findInitialRoachItem(_pestTiers, estData) {
         // Label comes from the saved line item, which carries the
         // admin-configured display name (pest_base.initial_roach.display).
         // The fallback covers legacy payloads saved before labels persisted.
-        label: hit.label || hit.name || 'Cockroach Treatment',
+        label: hit.label || hit.name || 'Cockroach Treatment Service',
         // Treatment-visit count for the fee card's sub-line. Absent on
         // payloads saved before the engine emitted `treatments`.
         treatments: Number.isFinite(treatments) && treatments > 0 ? Math.round(treatments) : null,
@@ -15693,9 +15697,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
-    case 'foam_recurring': return 'Recurring Foam Treatment';
+    case 'foam_recurring': return 'Recurring Termite Foam Service';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
-    case 'bora_care': return 'Bora-Care Wood Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'Recurring services';
@@ -16974,7 +16978,7 @@ function foamFrequenciesFromV1Services(services = []) {
   if (!row) return [];
   return [singleCadenceFrequencyFromRow(row, {
     serviceKey: 'foam_recurring',
-    serviceLabel: 'Recurring Foam Treatment',
+    serviceLabel: 'Recurring Termite Foam Service',
     includedProgramLabel: (label) => `${label} foam treatment program`,
     defaultCadence: 'quarterly',
   })];
@@ -20626,7 +20630,7 @@ async function buildPricingBundleInner(estimate) {
       firstVisitFees.push({
         service: 'pest_initial_roach',
         amount: initialRoachItem.price,
-        label: initialRoachItem.label || 'Cockroach Treatment',
+        label: initialRoachItem.label || 'Cockroach Treatment Service',
         ...(initialRoachItem.treatments ? { treatments: initialRoachItem.treatments } : {}),
         waivedWithPrepay: false,
       });
@@ -20918,7 +20922,7 @@ async function buildPricingBundleInner(estimate) {
     engineFirstVisitFees.push({
       service: 'pest_initial_roach',
       amount: Number(engineRoachLine.price) || 0,
-      label: engineRoachLine.label || engineRoachLine.name || 'Cockroach Treatment',
+      label: engineRoachLine.label || engineRoachLine.name || 'Cockroach Treatment Service',
       ...(Number.isFinite(engineRoachTreatments) && engineRoachTreatments > 0
         ? { treatments: Math.round(engineRoachTreatments) }
         : {}),

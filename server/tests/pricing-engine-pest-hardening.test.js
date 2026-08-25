@@ -362,7 +362,7 @@ describe('pest-control pricing hardening', () => {
       setupCharge: 0,
       total: 350,
       visits: 2,
-      label: 'German Roach Cleanout — 2 Visit Program',
+      label: 'German Roach Cleanout Service — 2 Visit Program',
     }));
     expect(priceGermanRoach({ footprint: 800 }, { severity: 'medium' })).toEqual(expect.objectContaining({
       severity: 'moderate',

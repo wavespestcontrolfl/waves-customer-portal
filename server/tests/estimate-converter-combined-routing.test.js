@@ -47,13 +47,13 @@ describe('combineRecurringServicesForScheduling', () => {
       { name: 'Quarterly Pest Control', frequency: 'quarterly' },
       { name: 'Termite Bait Station System', frequency: 'quarterly' },
     ]);
-    expect(termite.combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(termite.combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
 
     const lawn = combineRecurringServicesForScheduling([
       { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly', appsPerYear: 6 },
       { name: 'Tree & Shrub Care Program', frequency: 'bimonthly', visitsPerYear: 6 },
     ]);
-    expect(lawn.combos[0].service.name).toBe('Lawn + Tree & Shrub');
+    expect(lawn.combos[0].service.name).toBe('Lawn + Tree & Shrub Service');
     expect(lawn.remaining).toEqual([]);
   });
 
@@ -77,7 +77,7 @@ describe('combineRecurringServicesForScheduling', () => {
       { acceptFrequency: 'monthly' },
     );
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Lawn + Tree & Shrub');
+    expect(combos[0].service.name).toBe('Lawn + Tree & Shrub Service');
     expect(combos[0].service.frequency).toBe('bimonthly');
   });
 
@@ -240,7 +240,7 @@ describe('combineRecurringServicesForScheduling', () => {
       { name: 'Termite Bait Station System', frequency: 'quarterly' },
     ]);
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
     expect(remaining).toEqual([]);
     expect(standalone).toHaveLength(1);
     expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
@@ -359,7 +359,7 @@ describe('combineRecurringServicesForScheduling', () => {
       { name: 'Termite Bait', service: 'termite_bait' },
     ]);
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
     expect(combos[0].service.frequency).toBe('quarterly');
   });
 
@@ -476,7 +476,7 @@ describe('reservedRowComboRewrites (slot-reserved accepts)', () => {
     const rewrites = reservedRowComboRewrites([row], pestTermiteCombo());
     expect(rewrites).toHaveLength(1);
     expect(rewrites[0].row).toBe(row);
-    expect(rewrites[0].combo.route.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(rewrites[0].combo.route.name).toBe('Quarterly Pest + Termite Bait Station Service');
   });
 
   test('a reserved companion-line row also maps to the combo', () => {
@@ -524,7 +524,7 @@ describe('combined-name downstream keys', () => {
 
   test('explicit duration on a combined synthetic line beats the pest-quarterly default', () => {
     expect(durationMinutesForRecurringService(
-      { name: 'Quarterly Pest + Termite Bait Station', estimatedDurationMinutes: 75 },
+      { name: 'Quarterly Pest + Termite Bait Station Service', estimatedDurationMinutes: 75 },
       'quarterly',
     )).toBe(75);
     // Plain pest quarterly keeps the 60-minute default.

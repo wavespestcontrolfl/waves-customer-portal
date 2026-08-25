@@ -125,8 +125,8 @@ class AppointmentTagger {
     const s = (serviceType || '').toLowerCase();
     if (s.includes('wdo') || s.includes('wood destroying') || s.includes('termite inspection') || s.includes('real estate inspection')) return { tag: 'wdo_inspection', label: 'WDO Inspection' };
     if (s.includes('german') || (s.includes('roach') && s.includes('interior'))) return { tag: 'german_roach', label: 'German Roach Treatment' };
-    if (s.includes('cockroach') || s.includes('roach')) return { tag: 'cockroach', label: 'Cockroach Treatment' };
-    if (s.includes('bed bug')) return { tag: 'bed_bug', label: 'Bed Bug Treatment' };
+    if (s.includes('cockroach') || s.includes('roach')) return { tag: 'cockroach', label: 'Cockroach Treatment Service' };
+    if (s.includes('bed bug')) return { tag: 'bed_bug', label: 'Bed Bug Treatment Service' };
     if (s.includes('flea')) return { tag: 'flea', label: 'Flea Treatment' };
     if (s.includes('fumigat') || s.includes('tent')) return { tag: 'tent_fumigation', label: 'Tent Fumigation' };
     if (s.includes('termite') && !s.includes('inspect') && !s.includes('monitor')) return { tag: 'termite_treatment', label: 'Termite Treatment' };

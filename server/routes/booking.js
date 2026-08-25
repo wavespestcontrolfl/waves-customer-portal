@@ -699,7 +699,9 @@ const BOOKING_FUNNEL_SERVICE_ALIASES = {
   'tree & shrub': 'tree_shrub',
   'termite inspection': 'termite',
   'rodent control': 'rodent',
+  // Both name generations: pre- and post-2026-08-25 catalog rename.
   'bora-care wood treatment': 'bora_care',
+  'bora-care wood treatment service': 'bora_care',
 };
 // Canonical display label per funnel key — the ONLY label shape that ever
 // persists or renders from a client-supplied service value. The raw string
@@ -713,7 +715,7 @@ const BOOKING_FUNNEL_SERVICE_LABELS = {
   tree_shrub: 'Tree & Shrub',
   termite: 'Termite Inspection',
   rodent: 'Rodent Control',
-  bora_care: 'Bora-Care Wood Treatment',
+  bora_care: 'Bora-Care Wood Treatment Service',
 };
 // Normalized funnel service key ('' when the value names no funnel service).
 // Own-property checks only: plain-object lookup would let "__proto__" /

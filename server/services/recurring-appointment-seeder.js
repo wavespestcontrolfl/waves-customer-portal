@@ -204,10 +204,13 @@ function serviceKeyFor(value = {}) {
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
   // Recurring spot-foam termite program. Matches the service key `foam_recurring`
-  // and the "Recurring Foam Treatment" display name, but NOT the one-time
-  // "Drill-and-Foam Termite" line (which has no recurring/foam_recurring token
-  // and falls through to termite_bait below).
-  if (/foam[_\s]*recurring|recurring[_\s]*foam/.test(raw)) return 'foam_recurring';
+  // and the "Recurring Termite Foam Service" display name (plus the legacy
+  // "Recurring Foam Treatment" form on older rows), but NOT the one-time
+  // "Termite Foam Service" line (no recurring token — it falls through to
+  // termite_bait below). The optional "termite" between recurring and foam is
+  // load-bearing: without it the renamed label matches /termite/ first and
+  // the series mis-files into the bait family.
+  if (/foam[_\s]*recurring|recurring[_\s]*(?:termite[_\s]*)?foam/.test(raw)) return 'foam_recurring';
   // Combined services ("Pest & Rodent Control", "Quarterly Pest + Termite
   // Bait Station"): "pest" BEFORE the rodent/termite token = pest-primary —
   // these rows must keep pest cadence defaults and quarterly follow-up

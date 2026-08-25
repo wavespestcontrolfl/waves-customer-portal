@@ -249,7 +249,7 @@ function buildRows() {
   add('german_roach_cleanout', () => rangeRow({
     key: 'german_roach_cleanout',
     oneTimePerkKey: 'german_roach',
-    name: 'German Roach Cleanout',
+    name: 'German Roach Cleanout Service',
     unit: 'per program',
     values: sweepValues(
       ['light', 'moderate', 'heavy'].flatMap((severity) => FOOTPRINTS_SQFT.map((f) => ({ f, severity }))),
@@ -260,7 +260,7 @@ function buildRows() {
 
   add('german_roach_initial', () => rangeRow({
     key: 'german_roach_initial',
-    name: 'German Roach Initial (3-Visit)',
+    name: 'German Roach Initial Service (3-Visit)',
     unit: 'per program',
     // Agent-selectable initial series; the pricer applies the
     // recurring-customer perk INTERNALLY (excluded from the generic pass),
@@ -274,7 +274,7 @@ function buildRows() {
   add('bed_bug_treatment', () => rangeRow({
     key: 'bed_bug_treatment',
     oneTimePerkKey: 'bed_bug',
-    name: 'Bed Bug Treatment',
+    name: 'Bed Bug Treatment Service',
     unit: 'per treatment program',
     // Footprint and story count carry ordinary size/story multipliers on
     // auto-priced homes — not custom-quote territory — so both are swept.
@@ -601,7 +601,7 @@ function buildRows() {
   add('bora_care', () => rangeRow({
     key: 'bora_care',
     oneTimePerkKey: 'bora_care',
-    name: 'Bora-Care Wood Treatment',
+    name: 'Bora-Care Wood Treatment Service',
     unit: 'per job',
     values: sweepValues(
       [
@@ -721,7 +721,7 @@ function buildRows() {
 
   add('lawn_pest_knockdown', () => rangeRow({
     key: 'lawn_pest_knockdown',
-    name: 'Lawn Pest Knockdown',
+    name: 'Lawn Pest Knockdown Service',
     unit: 'per treatment',
     // The canonical lawnPestControl service: a standalone one-time
     // turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs)
@@ -739,7 +739,7 @@ function buildRows() {
   add('dethatching', () => rangeRow({
     key: 'dethatching',
     oneTimePerkKey: 'dethatching',
-    name: 'Lawn Dethatching',
+    name: 'Lawn Dethatching Service',
     unit: 'per job',
     // Bermuda/Zoysia lawns under 10,000 sq ft with recorded thatch depth
     // auto-price; St. Augustine and heavy-cleanup jobs stay review-gated
@@ -776,7 +776,7 @@ function buildRows() {
   add('lawn_plugging', () => rangeRow({
     key: 'lawn_plugging',
     oneTimePerkKey: 'plugging',
-    name: 'Lawn Plugging',
+    name: 'Lawn Plugging Service',
     unit: 'per sq ft',
     decimals: 2,
     // Effective per-sq-ft rate varies with treated area because of the job
@@ -791,7 +791,7 @@ function buildRows() {
   add('top_dressing', () => rangeRow({
     key: 'top_dressing',
     oneTimePerkKey: 'top_dressing',
-    name: 'Lawn Top Dressing',
+    name: 'Lawn Top Dressing Service',
     unit: 'per job',
     // Both pricing modes: estimated area (65% reduction) and exact-area
     // (measured, or recurring-lawn customers) — the live estimate path uses
@@ -842,7 +842,7 @@ function buildRows() {
   add('rodent_wire_mesh', () => rangeRow({
     key: 'rodent_wire_mesh',
     oneTimePerkKey: 'rodent_wire_mesh',
-    name: 'Rodent Wire Mesh Exclusion',
+    name: 'Rodent Wire Mesh Exclusion Service',
     unit: 'per job',
     values: sweepValues(
       [0, 30, 60, 120, 200, 400].flatMap((meshLinearFeet) =>
@@ -880,7 +880,7 @@ function buildRows() {
 
   add('rodent_guarantee', () => rangeRow({
     key: 'rodent_guarantee',
-    name: 'Rodent Guarantee',
+    name: 'Rodent Guarantee Service',
     unit: 'per program',
     // Renewable guarantee premium by property tier; eligibility (completed
     // trapping/exclusion/sanitation) is a customer-state flag, not pricing.
@@ -916,7 +916,7 @@ function buildRows() {
 
   add('recurring_foam', () => rangeRow({
     key: 'recurring_foam',
-    name: 'Recurring Foam Treatment',
+    name: 'Recurring Termite Foam Service',
     unit: 'per application',
     values: sweepValues(
       // 20 points is the configured recurring-foam maximum; larger jobs are
@@ -931,7 +931,7 @@ function buildRows() {
   add('foam_drill', () => rangeRow({
     key: 'foam_drill',
     oneTimePerkKey: 'foam_drill',
-    name: 'Drill-and-Foam Termite Treatment',
+    name: 'Termite Foam Service',
     unit: 'per job',
     // Distinct from the termite_foam spot treatment: this is the tiered
     // drill-and-foam service the estimate path prices via priceFoamDrill.

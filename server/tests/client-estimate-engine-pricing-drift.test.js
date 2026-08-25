@@ -338,7 +338,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     const discountedCleanout = recurringCustomer.oneTime.specItems.find((line) => line.service === 'german_roach');
 
     expect(cleanout).toEqual(expect.objectContaining({
-      name: 'German Roach Cleanout — 2 Visit Program',
+      name: 'German Roach Cleanout Service — 2 Visit Program',
       severity: 'light',
       price: 350,
       visits: 2,

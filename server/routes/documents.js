@@ -779,7 +779,7 @@ router.get('/', authenticate, async (req, res, next) => {
         one_time_lawn_treatment: 'One-Time Lawn Treatment',
         mosquito_event: 'Mosquito Event Spray',
         palm_injection: 'Palm Injection',
-        bed_bug: 'Bed Bug Treatment',
+        bed_bug: 'Bed Bug Treatment Service',
         pre_treatment_termite_certificate: 'Certificate of Compliance',
       };
       const label = typeLabels[p.project_type] || getProjectType(p.project_type)?.label || 'Project';

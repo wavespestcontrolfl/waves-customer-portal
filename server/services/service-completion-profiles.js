@@ -226,6 +226,18 @@ function serviceNameCandidates(serviceType) {
   if (programless && !candidates.some((c) => c.toLowerCase() === programless.toLowerCase())) {
     candidates.push(programless);
   }
+  // Cadence-qualified labels ("Recurring Termite Foam Service (Quarterly)"
+  // from priceRecurringFoam): when the base BEFORE the parenthetical is a
+  // full "… Service" designator, the parenthetical is a cadence qualifier,
+  // not identity — add the bare base as a candidate so it flows through the
+  // whole pipeline (including the rename aliases below). Deliberately NOT
+  // applied to non-Service bases: "German Roach Initial (3-Visit)"'s
+  // qualifier IS identity (codex pre-push P1).
+  const cadenceless = raw.replace(/\s*\([^()]*\)\s*$/, '').trim();
+  if (/\bservice$/i.test(cadenceless)
+    && !candidates.some((c) => c.toLowerCase() === cadenceless.toLowerCase())) {
+    candidates.push(cadenceless);
+  }
 
   const expanded = [];
   const seen = new Set();
@@ -235,6 +247,63 @@ function serviceNameCandidates(serviceType) {
       expanded.push(candidate);
       seen.add(key);
     }
+    // Derived candidates go BACK through the strip too (codex #3484 r10
+    // P1): "German Roach Cleanout Service — 2 Visit Program" derives
+    // "German Roach Cleanout Service", whose stripped form is the rollback
+    // catalog name — computing the strip on the raw label alone missed it.
+    const candSuffixless = candidate.replace(/\s+service$/i, '').trim();
+    if (candSuffixless && !seen.has(candSuffixless.toLowerCase())) {
+      expanded.push(candSuffixless);
+      seen.add(candSuffixless.toLowerCase());
+    }
+    // Mirror of the trailing-" Service" strip above, in the other direction:
+    // the 2026-08-25 catalog renames suffixed every service name with
+    // " Service", while engine lines and older booking labels still carry
+    // the bare form ("Cockroach Treatment", "Bora-Care Wood Treatment").
+    // Without the append candidate those labels stop resolving the renamed
+    // rows — the strip alone only bridges label→catalog when the LABEL is
+    // the longer form. Migration 20260808080000 already treats
+    // `${name} Service` as a live alias in its rollback reference check.
+    // The bare legacy spot-treatment label "Termite Foam" must NOT gain
+    // the generic append — "Termite Foam Service" is the renamed DRILL row,
+    // a different service/billing lane; it gets its own spot alias below
+    // (codex #3485 r12 P1).
+    const isLegacySpotFoam = /^termite\s+foam$/i.test(candidate);
+    if (!/\bservice$/i.test(candidate) && !isLegacySpotFoam) {
+      const suffixed = `${candidate} Service`;
+      const suffixedKey = suffixed.toLowerCase();
+      if (!seen.has(suffixedKey)) {
+        expanded.push(suffixed);
+        seen.add(suffixedKey);
+      }
+      // Names with a trailing qualifier keep it AFTER the designator —
+      // "German Roach Initial (3-Visit)" was renamed to "German Roach
+      // Initial Service (3-Visit)", the same shape migration 20260507000002
+      // used (' Service' inserted before a trailing parenthetical), so the
+      // bridge must produce that form too, not just the plain-append one.
+      const parenMatch = /^(.*\S)\s+(\([^()]*\))$/.exec(candidate);
+      if (parenMatch && !/\bservice$/i.test(parenMatch[1])) {
+        const inserted = `${parenMatch[1]} Service ${parenMatch[2]}`;
+        const insertedKey = inserted.toLowerCase();
+        if (!seen.has(insertedKey)) {
+          expanded.push(inserted);
+          seen.add(insertedKey);
+        }
+      }
+    }
+    // Reverse of the paren-insert, for the migration's documented rollback:
+    // after down() the catalog says "X (Y)" again while deployed code still
+    // labels visits "X Service (Y)" — the trailing-" Service" strip can't
+    // reach a mid-name designator (codex #3484 P1).
+    const parenServiceMatch = /^(.*\S)\s+Service\s+(\([^()]*\))$/i.exec(candidate);
+    if (parenServiceMatch) {
+      const stripped = `${parenServiceMatch[1]} ${parenServiceMatch[2]}`;
+      const strippedKey = stripped.toLowerCase();
+      if (!seen.has(strippedKey)) {
+        expanded.push(stripped);
+        seen.add(strippedKey);
+      }
+    }
     if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
       const alias = 'Pest & Rodent Control';
       const aliasKey = alias.toLowerCase();
@@ -242,6 +311,36 @@ function serviceNameCandidates(serviceType) {
         expanded.push(alias);
         seen.add(aliasKey);
       }
+    }
+    // The 2026-08-25 foam renames are NOT suffix-only, so the append
+    // candidate above can't bridge them. Reserved foam rows carry no
+    // service_id by design (20260808070000), and a hold labeled with the
+    // old form can commit after the rename migration relabels open visits
+    // — these aliases keep every legacy foam label resolving forever.
+    // BOTH directions: forward (legacy label → renamed catalog row) for the
+    // deployed state, and reverse (renamed label → legacy catalog row) for
+    // the migration's documented down() — deployed code keeps emitting the
+    // new labels while the catalog is restored to the old names, and
+    // reserved foam rows carry no service_id (codex #3484 P1).
+    let foamAlias = null;
+    if (/^recurring\s+foam\s+treatment(\s*\(.*\))?$/i.test(candidate)) {
+      foamAlias = 'Recurring Termite Foam Service';
+    } else if (/^drill[\s-]*(?:and[\s-]*)?foam\s+termite(\s+treatment)?$/i.test(candidate)) {
+      foamAlias = 'Termite Foam Service';
+    } else if (/^recurring\s+termite\s+foam\s+service$/i.test(candidate)) {
+      foamAlias = 'Recurring Foam Treatment';
+    } else if (/^termite\s+foam\s+service$/i.test(candidate)) {
+      // Only the RENAMED drill label reverses to the old drill row — the
+      // bare "Termite Foam" is the distinct spot-treatment engine label
+      // (termite_foam → termite_spot_treatment) and must never land on the
+      // drill lane (codex #3485 r12 P1).
+      foamAlias = 'Drill-and-Foam Termite';
+    } else if (isLegacySpotFoam) {
+      foamAlias = 'Termite Spot Treatment Service';
+    }
+    if (foamAlias && !seen.has(foamAlias.toLowerCase())) {
+      expanded.push(foamAlias);
+      seen.add(foamAlias.toLowerCase());
     }
   }
   return expanded;
@@ -546,6 +645,10 @@ function resolveCompletionDeliveryPosture({
 
 module.exports = {
   resolveCompletionProfileForScheduledService,
+  // Rename-bridge candidate expansion (append/strip " Service", paren
+  // insert/strip, foam legacy aliases) — the ONE place label→catalog
+  // bridging lives; call-booking resolution reuses it (codex #3484 P1).
+  serviceNameCandidates,
   resolveCompletionProfileForServiceId,
   serializeProfile,
   resolveCompletionDeliveryPosture,

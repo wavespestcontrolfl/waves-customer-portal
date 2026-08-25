@@ -713,7 +713,7 @@ router.get('/services/suggestions', async (req, res, next) => {
       return res.json({
         services: [
           'General Pest Control', 'Termite Control', 'Rodent Control',
-          'Mosquito Control', 'Bed Bug Treatment', 'Lawn Care',
+          'Mosquito Control', 'Bed Bug Treatment Service', 'Lawn Care',
           'Ant Control', 'Cockroach Control', 'Flea & Tick Treatment',
           'Wildlife Removal', 'Fumigation', 'Crawl Space Treatment',
         ],

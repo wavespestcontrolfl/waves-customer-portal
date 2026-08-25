@@ -19,21 +19,28 @@ const SERVICE_TYPE_MAP = [
   { match: /general\s*pest/i,                               type: 'General Pest Control' },
   { match: /pest\s*control.*service/i,                      type: 'Pest Control Service' },
   { match: /pest\s*control/i,                               type: 'Pest Control' },
-  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment' },
+  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment Service' },
   { match: /german\s*roach/i,                               type: 'German Roach Treatment' },
-  { match: /bed\s*bug/i,                                    type: 'Bed Bug Treatment' },
+  { match: /bed\s*bug/i,                                    type: 'Bed Bug Treatment Service' },
   { match: /ant\s*(control|treatment|extermination)/i,      type: 'Ant Treatment' },
   { match: /flea.*tick|tick.*flea/i,                        type: 'Flea & Tick Treatment' },
   { match: /stinging|wasp|hornet|yellow\s*jacket/i,         type: 'Stinging Insect Removal' },
 
   // Rodent
+  // Wire mesh must precede the generic exclusion pattern or the renamed
+  // catalog identity collapses to 'Rodent Exclusion' (codex #3484 P2).
+  { match: /wire\s*mesh/i,                                  type: 'Rodent Wire Mesh Exclusion Service' },
   { match: /rodent.*exclusion/i,                            type: 'Rodent Exclusion' },
   { match: /rodent.*control|rat|mouse|mice/i,               type: 'Rodent Control' },
 
   // Termite
   { match: /wdo|wood\s*destroy|real\s*estate.*inspect/i,    type: 'WDO Inspection' },
   { match: /termite.*inspect/i,                             type: 'Termite Inspection' },
-  { match: /termite.*treat|bora.?care|termidor/i,           type: 'Termite Treatment' },
+  // Renamed catalog identities must survive normalization (codex #3484 P2)
+  // — without their own entries the generic termite/rodent patterns
+  // collapsed them to family labels on /api/schedule and reschedule texts.
+  { match: /bora.?care/i,                                   type: 'Bora-Care Wood Treatment Service' },
+  { match: /termite.*treat|termidor/i,                      type: 'Termite Treatment' },
   { match: /termite.*bait|advance|trelona/i,                type: 'Termite Bait Monitoring' },
   { match: /termite/i,                                      type: 'Termite Service' },
 
@@ -42,8 +49,8 @@ const SERVICE_TYPE_MAP = [
   { match: /lawn\s*care/i,                                  type: 'Lawn Care' },
   { match: /fertil/i,                                       type: 'Lawn Fertilization' },
   { match: /weed\s*control/i,                               type: 'Weed Control' },
-  { match: /dethatch/i,                                     type: 'Dethatching Service' },
-  { match: /top\s*dress/i,                                  type: 'Top Dressing' },
+  { match: /dethatch/i,                                     type: 'Lawn Dethatching Service' },
+  { match: /top\s*dress/i,                                  type: 'Lawn Top Dressing Service' },
   { match: /aerat/i,                                        type: 'Lawn Aeration' },
   { match: /sod/i,                                          type: 'Sod Installation' },
 
@@ -101,6 +108,16 @@ function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
   const cleaned = stripServiceSuffixes(raw);
+
+  // Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
+  // entry: collapsing them would drop the cadence the schedule shows
+  // ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
+  // renamed forms carry a termite token that would otherwise collapse to
+  // the generic "Termite Service" (codex #3484 P2). Same token family as
+  // detectServiceCategory's foamTermiteToken, plus the renamed forms.
+  if (/foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i.test(cleaned)) {
+    return cleaned;
+  }
 
   // Match against known patterns
   for (const mapping of SERVICE_TYPE_MAP) {

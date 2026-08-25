@@ -1188,7 +1188,7 @@ function generateEstimate(input) {
       // Distinct display name: persistence compacts lines to service + name,
       // so without this a lawn-pest row renders as generic one_time_lawn (and
       // a mixed weed + pest quote loses which row is which).
-      lineItems.push({ ...result, name: 'Lawn Pest Knockdown' });
+      lineItems.push({ ...result, name: 'Lawn Pest Knockdown Service' });
     }
   }
 

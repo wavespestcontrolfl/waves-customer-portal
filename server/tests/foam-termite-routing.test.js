@@ -46,6 +46,16 @@ describe('foam names route termite', () => {
     // generic "Termite Treatment" would drop the cadence the schedule shows.
     expect(normalizeServiceType('Recurring Foam Treatment (Quarterly)')).toBe('Recurring Foam Treatment (Quarterly)');
     expect(normalizeServiceType('Foam Drill')).toBe('Foam Drill');
+    // The 2026-08-25 renamed forms carry a termite token — the foam
+    // pass-through must fire BEFORE the generic /termite/ map entry, or
+    // the schedule collapses them to "Termite Service" (codex #3484 P2).
+    expect(normalizeServiceType('Recurring Termite Foam Service (Quarterly)')).toBe('Recurring Termite Foam Service (Quarterly)');
+    expect(normalizeServiceType('Termite Foam Service')).toBe('Termite Foam Service');
+  });
+
+  test('renamed pest specialty labels normalize to their catalog forms', () => {
+    expect(normalizeServiceType('Cockroach Treatment')).toBe('Cockroach Treatment Service');
+    expect(normalizeServiceType('Bed Bug Treatment Service')).toBe('Bed Bug Treatment Service');
   });
 
   test('non-termite lines are unaffected by the foam token', () => {

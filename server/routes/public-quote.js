@@ -270,7 +270,7 @@ const RECURRING_LINE_LABELS = {
   mosquito: 'Mosquito & No-See-Um Control',
   tree_shrub: 'Tree & Shrub Care',
   palm_injection: 'Palm Tree Injections',
-  foam_recurring: 'Recurring Foam Treatment',
+  foam_recurring: 'Recurring Termite Foam Service',
   termite_bait: 'Termite Bait Monitoring',
   termite_bond: 'Termite Bond',
   trap_only_retainer: 'Rodent Trapping Retainer',
@@ -421,7 +421,7 @@ function normalizePublicQuotePestFrequency(value) {
 function publicQuoteRoachDisplayName(roachType) {
   const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
   if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment';
+  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment Service';
 }
 
 function publicQuotePestLabel(pest = {}) {
@@ -520,7 +520,10 @@ function compactServiceInterestPart(value) {
   };
   return labels[key]
     || compactRoachInterestPart(key)
-    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+    // Generic tail-compactors: the 2026-08-25 catalog renames suffixed
+    // every service name with " Service", which pushed common combos past
+    // the 32-char gate and silently dropped parts (codex #3484 P2).
+    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '').replace(/\s+Service$/, '');
 }
 
 // Compact form of the roach add-on suffix. The customer-facing name is
@@ -536,7 +539,7 @@ function compactRoachInterestPart(normalizedKey) {
   const candidates = [
     ...Object.entries(display).map(([scaleKey, cfg]) => [scaleKey, cfg?.name]),
     ['german', 'German Cockroach Treatment'],
-    ['regular', 'Cockroach Treatment'],
+    ['regular', 'Cockroach Treatment Service'],
   ];
   for (const [scaleKey, name] of candidates) {
     if (typeof name !== 'string') continue;
@@ -594,11 +597,11 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.trenching ? 'Termite Trenching' : null,
     services.preSlab ? 'Pre-Slab Termite Treatment' : null,
     services.oneTimeLawn ? 'One-Time Lawn Treatment' : null,
-    services.dethatching ? 'Lawn Dethatching' : null,
-    services.plugging ? 'Lawn Plugging' : null,
-    services.topDressing ? 'Lawn Top Dressing' : null,
+    services.dethatching ? 'Lawn Dethatching Service' : null,
+    services.plugging ? 'Lawn Plugging Service' : null,
+    services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
-    services.bedBug ? 'Bed Bug Treatment' : null,
+    services.bedBug ? 'Bed Bug Treatment Service' : null,
   ].filter(Boolean).join(' + ');
 }
 

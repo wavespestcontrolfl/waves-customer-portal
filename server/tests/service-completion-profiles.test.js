@@ -344,6 +344,156 @@ describe('service completion profiles', () => {
     });
   });
 
+  // 2026-08-25 catalog renames: every service name gained a " Service"
+  // suffix, while engine lines and older booking labels still carry the
+  // bare form. The resolver appends a " Service" candidate (mirror of the
+  // long-standing strip) so those labels keep resolving the renamed rows.
+  test('a bare label resolves the suffix-renamed catalog row via the appended " Service" candidate', async () => {
+    const renamedRow = {
+      service_key: 'cockroach_control',
+      name: 'Cockroach Treatment Service',
+      category: 'pest_control',
+      billing_type: 'one_time',
+    };
+    // exact-name queue: 'Cockroach Treatment' misses, appended candidate hits.
+    const knex = makeKnex({ serviceResults: [null, renamedRow] });
+
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'Cockroach Treatment',
+    }, knex);
+
+    expect(profile).toMatchObject({
+      serviceKey: 'cockroach_control',
+      serviceName: 'Cockroach Treatment Service',
+    });
+    expect(knex._whereRawCalls).toContainEqual({
+      table: 'services',
+      sql: 'lower(name) = lower(?)',
+      bindings: ['Cockroach Treatment Service'],
+    });
+  });
+
+  // Names with a trailing qualifier were renamed with " Service" BEFORE the
+  // parenthetical (the 20260507000002 shape) — the bridge must produce that
+  // form, not just the plain append (codex pre-push P1, 2026-08-25).
+  test('a parenthetical-qualified label resolves the "X Service (Y)" renamed row', async () => {
+    const renamedRow = {
+      service_key: 'german_roach_initial',
+      name: 'German Roach Initial Service (3-Visit)',
+      category: 'pest_control',
+      billing_type: 'one_time',
+    };
+    // queue: raw misses, plain append misses, paren-inserted candidate hits.
+    const knex = makeKnex({ serviceResults: [null, null, renamedRow] });
+
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'German Roach Initial (3-Visit)',
+    }, knex);
+
+    expect(profile).toMatchObject({
+      serviceKey: 'german_roach_initial',
+      serviceName: 'German Roach Initial Service (3-Visit)',
+    });
+    expect(knex._whereRawCalls).toContainEqual({
+      table: 'services',
+      sql: 'lower(name) = lower(?)',
+      bindings: ['German Roach Initial Service (3-Visit)'],
+    });
+  });
+
+  // Rollback direction (migration down()): deployed code still emits the
+  // RENAMED labels while the catalog is restored to the old names — every
+  // rename shape must resolve backwards too (codex #3484 P1).
+  test('renamed labels resolve the RESTORED old-name rows after a migration rollback', async () => {
+    const cases = [
+      // suffix rename: handled by the long-standing strip
+      ['Cockroach Treatment Service', { service_key: 'cockroach_control', name: 'Cockroach Treatment', category: 'pest_control', billing_type: 'one_time' }, [null]],
+      // paren-insert rename: needs the mid-name " Service" strip
+      ['German Roach Initial Service (3-Visit)', { service_key: 'german_roach_initial', name: 'German Roach Initial (3-Visit)', category: 'pest_control', billing_type: 'one_time' }, [null, null]],
+      // foam renames: explicit reverse aliases
+      ['Recurring Termite Foam Service', { service_key: 'foam_recurring', name: 'Recurring Foam Treatment', category: 'termite', billing_type: 'recurring' }, [null, null]],
+      ['Termite Foam Service', { service_key: 'foam_drill', name: 'Drill-and-Foam Termite', category: 'termite', billing_type: 'one_time' }, [null, null]],
+    ];
+    for (const [label, oldRow, misses] of cases) {
+      const knex = makeKnex({ serviceResults: [...misses, oldRow] });
+      const profile = await resolveCompletionProfileForScheduledService({
+        id: 'svc-1',
+        service_type: label,
+      }, knex);
+      expect(profile).toMatchObject({ serviceKey: oldRow.service_key, serviceName: oldRow.name });
+    }
+  });
+
+  test('a cadence-qualified renamed foam label resolves both current and rollback rows', async () => {
+    // Forward: base-name candidate resolves the renamed catalog row.
+    const renamedRow = { service_key: 'foam_recurring', name: 'Recurring Termite Foam Service', category: 'termite', billing_type: 'recurring' };
+    let knex = makeKnex({ serviceResults: [null, renamedRow] });
+    let profile = await resolveCompletionProfileForScheduledService(
+      { id: 'svc-1', service_type: 'Recurring Termite Foam Service (Quarterly)' }, knex,
+    );
+    expect(profile).toMatchObject({ serviceKey: 'foam_recurring', serviceName: 'Recurring Termite Foam Service' });
+
+    // Rollback: same label resolves the restored old-name row via the alias.
+    const oldRow = { service_key: 'foam_recurring', name: 'Recurring Foam Treatment', category: 'termite', billing_type: 'recurring' };
+    knex = makeKnex({ serviceResults: [null, null, null, oldRow] });
+    profile = await resolveCompletionProfileForScheduledService(
+      { id: 'svc-1', service_type: 'Recurring Termite Foam Service (Quarterly)' }, knex,
+    );
+    expect(profile).toMatchObject({ serviceKey: 'foam_recurring', serviceName: 'Recurring Foam Treatment' });
+  });
+
+  test('bare "Termite Foam" (legacy spot label) resolves the SPOT row, never the drill lane', async () => {
+    const spotRow = { service_key: 'termite_spot_treatment', name: 'Termite Spot Treatment Service', category: 'termite', billing_type: 'one_time' };
+    // queue: raw misses, spot alias hits — the generic append (which would
+    // have produced the DRILL row's name) is suppressed for this label.
+    const knex = makeKnex({ serviceResults: [null, spotRow] });
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'Termite Foam',
+    }, knex);
+    expect(profile).toMatchObject({ serviceKey: 'termite_spot_treatment' });
+    expect(knex._whereRawCalls.map((c) => c.bindings[0])).not.toContain('Termite Foam Service');
+  });
+
+  // The foam renames are NOT suffix-only, so they get explicit aliases:
+  // reserved foam rows carry no service_id by design (20260808070000) and
+  // legacy-labeled holds can commit after the rename migration runs.
+  test('legacy foam labels resolve the renamed foam rows via explicit aliases', async () => {
+    const cases = [
+      ['Recurring Foam Treatment', {
+        service_key: 'foam_recurring',
+        name: 'Recurring Termite Foam Service',
+        category: 'termite',
+        billing_type: 'recurring',
+      }],
+      ['Drill-and-Foam Termite', {
+        service_key: 'foam_drill',
+        name: 'Termite Foam Service',
+        category: 'termite',
+        billing_type: 'one_time',
+      }],
+    ];
+    for (const [legacyLabel, renamedRow] of cases) {
+      // queue: raw misses, appended " Service" candidate misses, alias hits.
+      const knex = makeKnex({ serviceResults: [null, null, renamedRow] });
+      const profile = await resolveCompletionProfileForScheduledService({
+        id: 'svc-1',
+        service_type: legacyLabel,
+      }, knex);
+      expect(profile).toMatchObject({
+        serviceKey: renamedRow.service_key,
+        serviceName: renamedRow.name,
+      });
+      expect(knex._whereRawCalls).toContainEqual({
+        table: 'services',
+        sql: 'lower(name) = lower(?)',
+        bindings: [renamedRow.name],
+      });
+    }
+  });
+
   // Strict resolution (the pre-visit brief hashes the resolved companion
   // list): every swallow point on the resolution path must rethrow under
   // { strict: true } — swallowed-to-default it resolves companions: []
