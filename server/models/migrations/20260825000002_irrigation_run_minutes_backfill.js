@@ -56,9 +56,13 @@ function parseRunMinutesFromNotes(notes) {
   // (2) a duration in any OTHER unit ("zone 3 runs 1 hour", "half an hour")
   // is a conflicting figure the minutes scan cannot see;
   if (/\b(?:\d+(?:\.\d+)?|an?|one|two|half)\s*(?:hour|hr)s?\b/i.test(text)) return null;
-  // (3) multiple runs per day ("twice a day", "2x daily", "3 times per day")
-  // multiply the real weekly volume beyond minutes × days.
-  if (/\b(?:twice|thrice|\d+\s*(?:x|times))\s*(?:a|per|each)?\s*(?:day|daily|morning|night|evening)\b/i.test(text)) return null;
+  // (3) ANY repetition vocabulary, regardless of surrounding phrasing —
+  // "twice each watering day", "two cycles", "2x", "runs again in the
+  // evening" all multiply the real volume beyond minutes × days. Declining
+  // on the word alone is deliberately overbroad: the fail-closed cost is a
+  // promotable row staying NULL for the email ask, never a wrong figure
+  // driving watering advice.
+  if (/\b(?:twice|thrice|(?:two|three|four|\d+)\s*(?:x|times)|\d+x|cycles?|start\s+times?|(?:second|2nd)\s+run|runs?\s+again|repeats?)\b/i.test(text)) return null;
 
   if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
   return matched;

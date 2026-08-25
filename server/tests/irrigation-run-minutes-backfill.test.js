@@ -40,6 +40,10 @@ describe('parseRunMinutesFromNotes', () => {
     ['Each zone runs 20min twice a day', 'multiple daily runs'],
     ['20 min per zone, 2x daily', 'multiple daily runs'],
     ['Each zone runs 15 minutes 3 times per day', 'multiple daily runs'],
+    ['Each zone runs 20 min twice each watering day', 'multiple daily runs'],
+    ['20 min per zone, two cycles', 'multiple daily runs'],
+    ['Each zone runs 20min, runs again in the evening', 'multiple daily runs'],
+    ['Each zone runs 20 min, second run at 6pm', 'multiple daily runs'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],
