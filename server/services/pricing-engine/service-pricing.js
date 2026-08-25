@@ -6347,7 +6347,7 @@ function priceGermanRoach(property, options = {}) {
 
   return {
     service: 'german_roach',
-    label: `German Roach Cleanout — ${visits} Visit Program`,
+    label: `German Roach Cleanout Service — ${visits} Visit Program`,
     price,
     source: options.source || 'german_roach_cleanout_selected',
     pricingModel: 'german_roach_severity_tier_cleanout',

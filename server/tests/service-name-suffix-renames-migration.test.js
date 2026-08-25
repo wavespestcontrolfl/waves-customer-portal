@@ -48,6 +48,12 @@ function seedDb() {
       // below — reached in the LATER bed_bug rename pass.
       { id: 'v-bb', service_type: 'Bed Bug Treatment', status: 'pending', service_id: 'svc-bb' },
       { id: 'v-lts', service_type: 'Lawn + Tree & Shrub', status: 'pending', service_id: 'svc-lts' },
+      // Cadence-qualified foam snapshot from the prior engine output — the
+      // qualifier must survive the swap (codex r6 P2).
+      { id: 'v-foamq', service_type: 'Recurring Foam Treatment (Quarterly)', status: 'pending', service_id: 'svc-foamr' },
+      // `rescheduled` is a pending-rebook state that can revive — it joins
+      // the fanout (codex r6 P2), unlike the truly terminal v-skip above.
+      { id: 'v-resched', service_type: ROACH_OLD, status: 'rescheduled', service_id: 'svc-roach' },
     ],
     self_booked_appointments: [
       { id: 'sb-1', service_type: ROACH_OLD, status: 'confirmed' },
@@ -150,7 +156,13 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const rowMatch = (r) => (
       inClauses.every((c) => c.vals.includes(r[c.col]))
       && notInClauses.every((c) => !c.vals.includes(r[c.col]))
-      && filters.every((cond) => Object.entries(cond).every(([k, v]) => r[k] === v))
+      && filters.every((cond) => Object.entries(cond).every(([k, v]) => {
+        if (k === 'label_or_qualified') {
+          const s = String(r[v.col || 'service_type'] || '');
+          return s === v.exact || s.startsWith(v.prefix);
+        }
+        return r[k] === v;
+      }))
       && rawWheres.every((rw) => String(r.updated_at) === String(rw.bindings[0]))
     );
     const q = {
@@ -159,6 +171,13 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
       whereRaw(sql, bindings) {
+        if (/(?:service_type|service_name) = \? OR (?:service_type|service_name) LIKE \?/.test(sql)) {
+          const col = sql.includes('service_name') ? 'service_name' : 'service_type';
+          const [exact, like] = bindings;
+          const prefix = String(like).replace(/%$/, '');
+          filters.push({ label_or_qualified: { col, exact, prefix } });
+          return q;
+        }
         if (!/updated_at::text\s*=\s*\?/.test(sql)) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
         rawWheres.push({ sql, bindings });
         return q;
@@ -263,9 +282,13 @@ describe('20260825000010 service name suffix renames', () => {
     expect(visit(db, 'v-open-2').service_type).toBe(ROACH_NEW);
     expect(visit(db, 'v-done').service_type).toBe(ROACH_OLD);
     expect(visit(db, 'v-skip').service_type).toBe(ROACH_OLD);
+    // Rescheduled visits can revive — they join the fanout (codex r6 P2).
+    expect(visit(db, 'v-resched').service_type).toBe(ROACH_NEW);
+    // Cadence-qualified labels swap with the qualifier intact (codex r6 P2).
+    expect(visit(db, 'v-foamq').service_type).toBe('Recurring Termite Foam Service (Quarterly)');
 
     const state = JSON.parse(stateRow(db).value);
-    expect(state.renames.cockroach_control.visitIds.sort()).toEqual(['v-open-1', 'v-open-2']);
+    expect(state.renames.cockroach_control.visitIds.sort()).toEqual(['v-open-1', 'v-open-2', 'v-resched']);
   });
 
   test('up() relabels the linked self-booking, add-ons under OPEN parents only, and profile snapshots', async () => {
@@ -359,6 +382,8 @@ describe('20260825000010 service name suffix renames', () => {
     expect(svc(db, 'rodent_guarantee').name).toBe('Rodent Guarantee Plan (Adam)');
     expect(visit(db, 'v-open-1').service_type).toBe(ROACH_OLD);
     expect(visit(db, 'v-open-2').service_type).toBe(ROACH_OLD);
+    // Qualified label restores with its qualifier intact.
+    expect(visit(db, 'v-foamq').service_type).toBe('Recurring Foam Treatment (Quarterly)');
     expect(db.self_booked_appointments[0].service_type).toBe(ROACH_OLD);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(ROACH_OLD);
     const items = JSON.parse(invoiceById(db, 'inv-draft').line_items);
@@ -439,6 +464,8 @@ describe('20260825000010 service name suffix renames', () => {
       '../routes/public-quote.js',
       '../services/estimate-converter.js',
       '../services/booking-abandon-recovery.js',
+      '../services/pricing-engine/v1-legacy-mapper.js',
+      '../../client/src/lib/estimateEngine.js',
     ];
     // rodent_guarantee_combo keeps its own bundle label by design (it must
     // NOT resolve the payment-only guarantee row — see #3485).
@@ -454,6 +481,19 @@ describe('20260825000010 service name suffix renames', () => {
         expect({ file: rel, from, offending: hits }).toEqual({ file: rel, from, offending: [] });
       }
     }
+  });
+
+  test('down() on a mixed-status merged reminder reverts only the open component', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    // rem-merged carries both renamed components (roach via v-open-1, bed
+    // bug via the sibling sweep from v-bb). Complete the BED BUG visit:
+    // its component stays renamed, but the roach component (open visit)
+    // must still revert even though the whole-string no longer equals the
+    // roach pass's recorded `written` value (codex pre-push P1).
+    visit(db, 'v-bb').status = 'completed';
+    await migration.down(fakeKnex(db));
+    expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_OLD} & Bed Bug Treatment Service`);
   });
 
   test('up() survives absent companion tables', async () => {

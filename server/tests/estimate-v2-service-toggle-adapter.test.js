@@ -379,7 +379,7 @@ describe('estimate v2 service toggle adapter', () => {
 
     expect(estimate.summary.specialtyTotal).toBe(350);
     expect(cleanout).toEqual(expect.objectContaining({
-      name: 'German Roach Cleanout — 2 Visit Program',
+      name: 'German Roach Cleanout Service — 2 Visit Program',
       price: 350,
       source: 'german_roach_cleanout_selected',
       pricingModel: 'german_roach_severity_tier_cleanout',
