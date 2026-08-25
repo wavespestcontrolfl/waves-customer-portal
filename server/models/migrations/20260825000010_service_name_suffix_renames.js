@@ -660,14 +660,12 @@ exports.down = async function down(knex) {
       const linkedVisitIds = [...new Set(
         Object.values(invoiceRecs).map((r) => r && r.scheduled_service_id).filter(Boolean)
       )];
-      const terminalVisitIds = new Set(
-        linkedVisitIds.length && (await knex.schema.hasTable('scheduled_services'))
-          ? (await knex('scheduled_services')
-            .whereIn('id', linkedVisitIds)
-            .whereIn('status', TERMINAL_VISIT_STATUSES)
-            .select('id')).map((v) => v.id)
-          : []
-      );
+      // Same FOR UPDATE posture as the self-booking/add-on reversals
+      // (codex #3484 r11 P2): an unlocked read can see a visit as open
+      // while its completion commits, leaving the completed report on the
+      // new label with its invoice restored to the old one — the lock
+      // serializes the reversal behind that completion.
+      const terminalVisitIds = await terminalVisitIdSet(linkedVisitIds);
       const invoices = await knex('invoices')
         .whereIn('id', invoiceIds)
         .whereIn('status', ['draft', 'scheduled'])
