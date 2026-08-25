@@ -14,11 +14,11 @@
  * Overlap (probeSlotOverlap) reuses the shared occupancy mechanism
  * (scheduling/occupancy.js — tech-blind findConflictingVisits under the
  * date-wide advisory lock) exactly as routes/booking.js createSelfBooking
- * does. It is behind GATE_ADMIN_SLOT_OVERLAP_GUARD (default OFF, only the
- * string 'true' enables — fail-closed parse); the hour rules above are NOT
- * gated. A hit is ADVISORY (owner ruling 2026-08-25 — staff-side saves
- * never block on schedule conflicts): the probe returns the conflicts for
- * the caller to surface via slotOverlapWarning; it never throws.
+ * does. It runs unconditionally: a hit is ADVISORY (owner ruling 2026-08-25
+ * — staff-side saves never block on schedule conflicts), so the probe
+ * returns the conflicts for the caller to surface via slotOverlapWarning
+ * and never throws. (The former GATE_ADMIN_SLOT_OVERLAP_GUARD dark gate was
+ * removed on PR #3486 once the probe stopped blocking.)
  */
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./occupancy');
 const { DAY_START_HOUR } = require('./find-time');
@@ -91,21 +91,16 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
   return { window_start: minutesToHHMM(startMin), window_end: minutesToHHMM(endMin) };
 }
 
-// Kill switch: unset (or any value other than the exact string 'true') = OFF.
-function adminSlotOverlapGuardEnabled() {
-  return process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD === 'true';
-}
-
 /**
  * Rung 1 for a writer that will insert/move rows on SEVERAL dates in one
  * trx (series create / re-seed): every date's occupancy lock, deduped and
  * sorted via occupancy.js acquireOccupancyLocks — taken up front, before any
- * row lock. No-op when the gate is off. Returns the locked date set so the
- * writer can fail CLOSED on a date it derives later that was not pre-locked.
+ * row lock. Returns the locked date set so the writer can fail CLOSED on a
+ * date it derives later that was not pre-locked.
  */
 async function acquireAdminSlotLocks({ trx, dates = [] } = {}) {
   const locked = new Set();
-  if (!adminSlotOverlapGuardEnabled() || !trx) return locked;
+  if (!trx) return locked;
   const clean = (dates || []).filter(Boolean).map((d) => String(d).split('T')[0]);
   await acquireOccupancyLocks(trx, clean);
   for (const d of clean) locked.add(d);
@@ -119,16 +114,16 @@ function slotOverlapWarning(date) {
 }
 
 /**
- * Gate-guarded overlap probe for admin writes. Takes the date-wide occupancy
- * lock on `trx` first (rung 1 of occupancy.js's ORDERING CONTRACT — callers
- * must invoke this before any other lock in the transaction), then runs the
- * tech-blind findConflictingVisits probe. A hit is ADVISORY (owner ruling
- * 2026-08-25 — staff-side saves never block on schedule conflicts): the
- * conflicting rows are RETURNED for the caller to surface via
- * slotOverlapWarning; nothing throws. No-op ([]) when the gate is off.
+ * Shared overlap probe for admin writes — unconditional (owner directive on
+ * PR #3486: it can only warn, never block, so there is nothing left to dark-
+ * ship behind a gate; the former GATE_ADMIN_SLOT_OVERLAP_GUARD is removed).
+ * Takes the date-wide occupancy lock on `trx` first (rung 1 of occupancy.js's
+ * ORDERING CONTRACT — callers must invoke this before any other lock in the
+ * transaction), then runs the tech-blind findConflictingVisits probe. A hit
+ * is ADVISORY: the conflicting rows are RETURNED for the caller to surface
+ * via slotOverlapWarning; nothing throws.
  */
 async function probeSlotOverlap({ trx, date, windowStart, windowEnd, excludeServiceIds = [] } = {}) {
-  if (!adminSlotOverlapGuardEnabled()) return [];
   if (!trx || !date || !windowStart || !windowEnd) return [];
   const dateStr = String(date).split('T')[0];
   await acquireOccupancyLock(trx, dateStr);
@@ -155,7 +150,6 @@ module.exports = {
   probeSlotOverlap,
   slotOverlapWarning,
   acquireAdminSlotLocks,
-  adminSlotOverlapGuardEnabled,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
   _internals: { parseHHMM, minutesToHHMM },

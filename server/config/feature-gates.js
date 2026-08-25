@@ -43,7 +43,6 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
- *   GATE_ADMIN_SLOT_OVERLAP_GUARD=true (admin schedule writes 409 SLOT_CONFLICT on a time overlap — occupancy.js probe)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -1606,13 +1605,6 @@ const gates = {
   // nothing fills, parks, or renders. Kill switch: unset the var.
   callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
 
-  // Admin slot-overlap guard (2026-08-23): schedule create / edit / bulk
-  // move refuse (409 SLOT_CONFLICT) a window that overlaps a non-cancelled
-  // visit, via the shared occupancy.js probe under the date-wide lock.
-  // Fail-closed ==='true' in EVERY environment; read at call time by
-  // scheduling/window-rules.js so a flip needs no redeploy. The on-the-hour
-  // / 8am window rules are NOT gated. Kill switch: unset.
-  adminSlotOverlapGuard: process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

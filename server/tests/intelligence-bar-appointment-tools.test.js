@@ -55,11 +55,17 @@ function chain(overrides = {}) {
   Object.assign(builder, {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    // The always-on advisory occupancy probe (findConflictingVisits) runs on
+    // every timed create/move — the base chain answers it with "no conflicts"
+    // so a plain chain() can serve as the probe slot in a queue.
+    whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    orWhereRaw: jest.fn().mockReturnThis(),
     whereILike: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
@@ -121,7 +127,7 @@ describe('create_appointment', () => {
     const insertChain = chain();
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
-      scheduled_services: [insertChain],
+      scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
     const result = await executeTool('create_appointment', {
@@ -142,7 +148,7 @@ describe('create_appointment', () => {
   test('registers the durable reminder row with the insert — registration only, no confirmation SMS', async () => {
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
-      scheduled_services: [chain()],
+      scheduled_services: [chain(), chain()], // first chain: the always-on advisory probe (clean)
     });
 
     const result = await executeTool('create_appointment', {
@@ -215,7 +221,7 @@ describe('create_appointment', () => {
       const insertChain = chain();
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
-        scheduled_services: [insertChain],
+        scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
       });
       const result = await executeTool('create_appointment', {
         customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
@@ -263,7 +269,7 @@ describe('create_appointment', () => {
     const insertChain = chain();
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
-      scheduled_services: [insertChain],
+      scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
     const result = await executeTool('create_appointment', {
@@ -299,7 +305,7 @@ describe('create_appointment', () => {
     const insertChain = chain();
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
-      scheduled_services: [insertChain],
+      scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
     const result = await executeTool('create_appointment', {
@@ -336,7 +342,7 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
     const insertChain = chain();
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
-      scheduled_services: [insertChain],
+      scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
     const result = await executeTool('create_appointment', {
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM',
@@ -345,8 +351,7 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '11:00' });
   });
 
-  test('GATE_ADMIN_SLOT_OVERLAP_GUARD=true: an overlapping visit BOOKS with an advisory warning (owner ruling 2026-08-25 — never a block)', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  test('an overlapping visit BOOKS with an advisory warning (owner ruling 2026-08-25 — never a block)', async () => {
     try {
       const probe = chain({
         whereNotIn: jest.fn().mockReturnThis(),
@@ -363,9 +368,7 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
       expect(result.warning).toMatch(/2099-01-15/);
       expect(insertChain.insert).toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    }
+    } finally { /* no env to restore — the probe is always on */ }
   });
 });
 
@@ -409,6 +412,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
@@ -451,6 +455,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, status: 'en_route', technician_id: 'tech-1' }) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       job_status_history: [historyChain],
@@ -505,6 +510,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, status: 'on_site', technician_id: 'tech-1' }) }),
+        chain(), // always-on advisory probe (clean)
         chain(),
       ],
       job_status_history: [historyChain],
@@ -551,6 +557,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
@@ -573,6 +580,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
@@ -616,6 +624,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
@@ -663,6 +672,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
@@ -720,6 +730,7 @@ describe('reschedule_appointment', () => {
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        chain(), // always-on advisory probe (clean)
         updateChain,
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
@@ -767,7 +778,7 @@ describe('reschedule_appointment — shared admin window rules', () => {
   });
 });
 
-describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_OVERLAP_GUARD)', () => {
+describe('reschedule_appointment — always-on advisory slot-overlap probe', () => {
   // The move used to be a bare non-transactional CAS update, so the gated
   // occupancy guard could not fence it and the IB could park a visit on an
   // occupied slot. The update now runs inside db.transaction with rung 1
@@ -781,10 +792,8 @@ describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_O
     orderBy: jest.fn().mockResolvedValue([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]),
   });
 
-  afterEach(() => { delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD; });
 
   test('gate ON: an overlapping visit MOVES with an advisory warning (owner ruling 2026-08-25 — never a block)', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     wireDb({
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), probeHit(), updateChain],
@@ -800,7 +809,6 @@ describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_O
   });
 
   test('gate ON: a clear slot moves normally and the probe excludes the moving visit', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     const probeMiss = chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
     wireDb({
@@ -817,10 +825,11 @@ describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_O
     expect(probeMiss.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
   });
 
-  test('gate OFF: no probe runs and the move proceeds (a queued probe chain would be consumed)', async () => {
+  test('the probe always runs (no gate): a clean slot moves with no warning key', async () => {
     const updateChain = chain();
+    const probe = chain();
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), updateChain],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), probe, updateChain],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
       reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
@@ -828,6 +837,8 @@ describe('reschedule_appointment — gated slot-overlap guard (GATE_ADMIN_SLOT_O
       appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM',
     });
     expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(result.warning).toBeUndefined();
+    expect(probe.orderBy).toHaveBeenCalled();
     expect(updateChain.update).toHaveBeenCalled();
   });
 });
@@ -845,10 +856,8 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
   };
   const customersQ = () => [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })];
 
-  afterEach(() => { delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD; });
 
   test('gate ON: a DATE-ONLY move of a null-end row onto an occupied slot still PROBES (derived block) and moves with a warning', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     const probeHit = chain({
       whereNotIn: jest.fn().mockReturnThis(),
@@ -866,7 +875,6 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
   });
 
   test('gate ON: the probed block is the DERIVED 09:00-10:00 span, and the persisted end stays null', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
     const updateChain = chain();
     const probeMiss = chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
     wireDb({
@@ -888,7 +896,7 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
     // the block this move computed is stale) → the tool's retry error.
     const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), updateChain],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), chain(), updateChain],
       customers: customersQ(),
     });
     const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
@@ -903,7 +911,7 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
   test('unchanged duration → the move lands normally', async () => {
     const updateChain = chain();
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), updateChain],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), chain(), updateChain],
       customers: customersQ(),
       reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
@@ -915,7 +923,7 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
   test('a row with a real stored span does NOT pin the duration column (it never read it)', async () => {
     const updateChain = chain();
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...nullEndAppt, window_end: '10:00:00' }) }), updateChain],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...nullEndAppt, window_end: '10:00:00' }) }), chain(), updateChain],
       customers: customersQ(),
       reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });

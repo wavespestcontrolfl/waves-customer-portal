@@ -1671,8 +1671,7 @@ async function createAppointment(input) {
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
-    // 6) and the insert's row locks; mirrors the lead-booking route. Gated
-    // (GATE_ADMIN_SLOT_OVERLAP_GUARD): a no-op while the gate is off. A hit
+    // 6) and the insert's row locks; mirrors the lead-booking route. A hit
     // is advisory (owner ruling 2026-08-25 — staff-side saves never block
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
@@ -1882,15 +1881,14 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  // The move runs in a transaction so the gated occupancy guard can fence it
+  // The move runs in a transaction so the occupancy probe can fence it
   // (a bare advisory xact lock outside a trx fences nothing). Rung 1 of
   // scheduling/occupancy.js's ORDERING CONTRACT — the date-wide lock + the
   // tech-blind probe — is taken FIRST, before the row write, exactly as the
-  // create path above does; the moving visit excludes itself. The gate
-  // (GATE_ADMIN_SLOT_OVERLAP_GUARD) makes it a no-op while off, so the CAS
-  // semantics are unchanged there. A conflict is advisory (owner ruling
-  // 2026-08-25 — staff-side saves never block on schedule conflicts): the
-  // move commits and the tool result carries a warning.
+  // create path above does; the moving visit excludes itself. A conflict is
+  // advisory (owner ruling 2026-08-25 — staff-side saves never block on
+  // schedule conflicts): the move commits and the tool result carries a
+  // warning.
   let updatedRows = 0;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {

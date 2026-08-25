@@ -9,7 +9,6 @@ const {
   assertAdminAppointmentWindow,
   probeSlotOverlap,
   slotOverlapWarning,
-  adminSlotOverlapGuardEnabled,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
 } = require('../services/scheduling/window-rules');
@@ -72,35 +71,19 @@ describe('assertAdminAppointmentWindow', () => {
   });
 });
 
-describe('probeSlotOverlap gate', () => {
-  const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = saved;
-  });
-
-  test('only the exact string "true" enables the guard (fail-closed parse)', () => {
-    for (const v of [undefined, '', '1', 'TRUE', 'yes', 'on', ' true']) {
-      if (v === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-      else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = v;
-      expect(adminSlotOverlapGuardEnabled()).toBe(false);
-    }
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
-    expect(adminSlotOverlapGuardEnabled()).toBe(true);
-  });
-
-  test('gate off: no lock, no probe, resolves empty', async () => {
-    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
+describe('probeSlotOverlap (unconditional advisory probe)', () => {
+  test('a missing window or trx resolves empty without locking', async () => {
     const trx = jest.fn();
     trx.raw = jest.fn();
-    await expect(probeSlotOverlap({ trx, date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00' }))
+    await expect(probeSlotOverlap({ trx, date: '2099-01-15', windowStart: '09:00' }))
+      .resolves.toEqual([]);
+    await expect(probeSlotOverlap({ date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00' }))
       .resolves.toEqual([]);
     expect(trx).not.toHaveBeenCalled();
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
-  test('gate on: a clash is RETURNED (advisory — never thrown), mapped without customer data', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  test('a clash is RETURNED (advisory — never thrown), mapped without customer data', async () => {
     const row = {
       id: 'svc-other', customer_id: 'cust-9', scheduled_date: '2099-01-15',
       window_start: '09:30:00', window_end: '10:30:00', status: 'confirmed',
@@ -133,15 +116,9 @@ describe('probeSlotOverlap gate', () => {
 });
 
 describe('acquireAdminSlotLocks (rung 1 for multi-date writers)', () => {
-  const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = saved;
-  });
   const { acquireAdminSlotLocks } = require('../services/scheduling/window-rules');
 
-  test('gate ON: every date locked once, in ascending order (occupancy.js acquireOccupancyLocks), set returned', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  test('every date locked once, in ascending order (occupancy.js acquireOccupancyLocks), set returned', async () => {
     const trx = jest.fn();
     trx.raw = jest.fn().mockResolvedValue({});
     const locked = await acquireAdminSlotLocks({
@@ -153,11 +130,7 @@ describe('acquireAdminSlotLocks (rung 1 for multi-date writers)', () => {
     ]);
   });
 
-  test('gate OFF: nothing locked, empty set', async () => {
-    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    const trx = jest.fn();
-    trx.raw = jest.fn();
-    expect((await acquireAdminSlotLocks({ trx, dates: ['2099-01-15'] })).size).toBe(0);
-    expect(trx.raw).not.toHaveBeenCalled();
+  test('no trx: nothing locked, empty set', async () => {
+    expect((await acquireAdminSlotLocks({ dates: ['2099-01-15'] })).size).toBe(0);
   });
 });

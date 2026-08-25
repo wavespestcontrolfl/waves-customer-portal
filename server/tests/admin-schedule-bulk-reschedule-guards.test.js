@@ -82,10 +82,20 @@ const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
-    where: jest.fn().mockReturnThis(),
+    where: jest.fn(function where(arg) {
+      if (typeof arg === 'function') arg.call(builder, builder);
+      return builder;
+    }),
     whereIn: jest.fn().mockReturnThis(),
+    // The always-on advisory occupancy probe (findConflictingVisits) runs on
+    // every timed move — the base chain answers it with "no conflicts" so a
+    // plain chain() can serve as the probe slot in a queue.
+    whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    orWhereRaw: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue(),
@@ -185,6 +195,7 @@ test('a live en_route row moves WITH the lifecycle rewind and gets an admin_bulk
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route', technician_id: 'tech-1' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     job_status_history: [historyChain],
@@ -249,6 +260,7 @@ test('a pending row moves WITHOUT lifecycle fields', async () => {
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -297,6 +309,7 @@ test('the validated date is what gets persisted, not the raw payload', async () 
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -322,6 +335,7 @@ test('a row that changes status between the read and the write is skipped, not r
   const trx = wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route', technician_id: 'tech-1' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     job_status_history: [chain()],
@@ -411,6 +425,7 @@ test('a move to today with a still-future window still moves (guard passes)', as
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -457,6 +472,7 @@ test('a start-only move to today validates against the DERIVED end and persists 
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '08:00:00', window_end: '09:00:00' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -486,6 +502,7 @@ test('a start-only move preserves a longer stored duration in the derived end', 
     scheduled_services: [
       // 90-minute stored window — the derived end must carry the same span.
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '08:00:00', window_end: '09:30:00' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -511,6 +528,7 @@ test('an explicit windowStart+windowEnd pair is persisted as given (no derivatio
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -542,6 +560,7 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   const trx = wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'confirmed' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
   });
@@ -677,6 +696,7 @@ test('an end-only edit after the stored start still persists (the span guard pas
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -718,8 +738,9 @@ test('a start-only move whose derived end would cross midnight lands in failed[]
 });
 
 // ---------------------------------------------------------------------------
-// Shared admin window rules (scheduling/window-rules.js) + the gated
-// occupancy overlap guard (GATE_ADMIN_SLOT_OVERLAP_GUARD).
+// Shared admin window rules (scheduling/window-rules.js) + the always-on
+// advisory occupancy overlap probe (probeSlotOverlap — the former
+// GATE_ADMIN_SLOT_OVERLAP_GUARD dark gate was removed on PR #3486).
 // ---------------------------------------------------------------------------
 
 test('a 06:30 windowStart lands in failed[] with the shared validator\'s reason — never persisted', async () => {
@@ -758,13 +779,7 @@ test('a pre-8am on-the-hour windowStart is refused the same way', async () => {
   expect(body.failed[0].reason).toMatch(/before 08:00/);
 });
 
-describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
-  const saved = process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    else process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = saved;
-  });
-
+describe('always-on advisory occupancy probe', () => {
   // The occupancy probe's query builder (findConflictingVisits) — resolves
   // to the given rows when awaited.
   function probeChain(rows) {
@@ -776,8 +791,7 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
     return c;
   }
 
-  test('gate ON: an overlapping non-cancelled visit MOVES with an advisory overlap note (owner ruling 2026-08-25 — never a block)', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  test('an overlapping non-cancelled visit MOVES with an advisory overlap note (owner ruling 2026-08-25 — never a block)', async () => {
     const updateChain = chain();
     const probe = probeChain([{
       id: 'svc-other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00',
@@ -810,8 +824,7 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
     expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
   });
 
-  test('gate ON: no overlap → the move persists', async () => {
-    process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
+  test('no overlap → the move persists with no warnings', async () => {
     const updateChain = chain();
     wireTrx({
       scheduled_services: [
@@ -827,27 +840,8 @@ describe('GATE_ADMIN_SLOT_OVERLAP_GUARD', () => {
       payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
     });
     expect(body.updated).toEqual(['svc-1']);
+    expect(body.overlapWarnings).toEqual([]);
     expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '10:00', window_end: '11:00' });
-  });
-
-  test('gate OFF (default): no probe runs and the move persists even where the probe would have found a clash', async () => {
-    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-    const updateChain = chain();
-    const trx = wireTrx({
-      scheduled_services: [
-        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
-        updateChain,
-      ],
-      reschedule_log: [chain()],
-    });
-    const { body } = await bulk({
-      action: 'reschedule',
-      serviceIds: ['svc-1'],
-      payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
-    });
-    expect(body.updated).toEqual(['svc-1']);
-    expect(body.failed).toEqual([]);
-    expect(trx.raw.mock.calls.some(([, bindings]) => bindings?.includes('occupancy:2099-01-15'))).toBe(false);
   });
 });
 
@@ -884,6 +878,7 @@ test('a start-only move on an end-less row uses estimated_duration_minutes (120)
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 120 }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -904,6 +899,7 @@ test('a DATE-ONLY move of a 19:00 end-less 120-min row is refused (effective 19:
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '19:00:00', window_end: null, estimated_duration_minutes: 60 }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
     reschedule_log: [chain()],
@@ -912,25 +908,20 @@ test('a DATE-ONLY move of a 19:00 end-less 120-min row is refused (effective 19:
   expect(body.updated).toEqual(['svc-1']);
 });
 
-test('gate ON: a DATE-ONLY move of an end-less row probes its DERIVED end (never skipped)', async () => {
-  process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD = 'true';
-  try {
-    const probe = chain({ whereNotIn: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
-    const updateChain = chain();
-    wireTrx({
-      scheduled_services: [
-        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '10:00:00', window_end: null, estimated_duration_minutes: 120 }) }),
-        probe,
-        updateChain,
-      ],
-      reschedule_log: [chain()],
-    });
-    const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
-    expect(body.updated).toEqual(['svc-1']);
-    // The probe ran with the derived 10:00-12:00 block (bindings: [end, 60, start]).
-    const rawCall = probe.whereRaw.mock.calls.find(([sql]) => /window_start </.test(sql));
-    expect(rawCall[1]).toEqual(['12:00', 60, '10:00']);
-  } finally {
-    delete process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD;
-  }
+test('a DATE-ONLY move of an end-less row probes its DERIVED end (never skipped)', async () => {
+  const probe = chain({ whereNotIn: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([]) });
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '10:00:00', window_end: null, estimated_duration_minutes: 120 }) }),
+      probe,
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.updated).toEqual(['svc-1']);
+  // The probe ran with the derived 10:00-12:00 block (bindings: [end, 60, start]).
+  const rawCall = probe.whereRaw.mock.calls.find(([sql]) => /window_start </.test(sql));
+  expect(rawCall[1]).toEqual(['12:00', 60, '10:00']);
 });

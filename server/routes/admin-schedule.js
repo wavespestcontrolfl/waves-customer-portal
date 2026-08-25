@@ -11,7 +11,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
-  assertAdminAppointmentWindow, probeSlotOverlap, adminSlotOverlapGuardEnabled, slotOverlapWarning,
+  assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
@@ -5165,12 +5165,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             await db.transaction(async (trx) => {
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
-              // tech-day fence below — so take it up front when the overlap
-              // guard is on; the probe itself (probeSlotOverlap, which
-              // re-takes the reentrant lock) runs once the window is final.
-              if (adminSlotOverlapGuardEnabled()) {
-                await acquireOccupancyLock(trx, bulkTargetDate);
-              }
+              // tech-day fence below — so take it up front; the probe itself
+              // (probeSlotOverlap, which re-takes the reentrant lock) runs
+              // once the window is final.
+              await acquireOccupancyLock(trx, bulkTargetDate);
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
               // Terminal rows are one-way (#2717 pattern — see the cancel

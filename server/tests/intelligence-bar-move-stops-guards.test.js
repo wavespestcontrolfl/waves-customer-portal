@@ -42,10 +42,15 @@ function chain(overrides = {}) {
   Object.assign(builder, {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    // The always-on advisory occupancy probe (findConflictingVisits) runs on
+    // every timed stop move — the base chain answers it with "no conflicts".
+    whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    orWhereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue(),
@@ -136,14 +141,17 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
     ]),
   });
   const updates = [chain(), chain()];
+  // Per moved stop: the always-on advisory occupancy probe runs first, then
+  // the CAS update — interleave clean probe chains into the sequence.
+  const svcSeq = [chain(), updates[0], chain(), updates[1]];
   const logInserts = [chain(), chain()];
   const historyChain = chain();
-  let updateIdx = 0;
+  let svcIdx = 0;
   let logIdx = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
       if (listChain.select.mock.calls.length === 0) return listChain;
-      return updates[updateIdx++];
+      return svcSeq[svcIdx++];
     }
     if (table === 'reschedule_log') return logInserts[logIdx++];
     if (table === 'job_status_history') return historyChain;
@@ -284,7 +292,8 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
   const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
   const okUpdate = chain();
   const logChain = chain();
-  const svcChains = [staleUpdate, staleReread, okUpdate];
+  // A clean advisory-probe chain precedes each stop's CAS update.
+  const svcChains = [chain(), staleUpdate, staleReread, chain(), okUpdate];
   let svcIdx = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
@@ -313,13 +322,43 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
   expect(logChain.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_service_id: 'svc-ok' }));
 });
 
+test('a stop landing on an occupied block MOVES with an advisory warning naming the date (owner ruling 2026-08-25 — never a block)', async () => {
+  const listChain = chain({
+    select: jest.fn().mockResolvedValue([stop('svc-1', 'confirmed')]),
+  });
+  const probeHit = chain({
+    orderBy: jest.fn().mockResolvedValue([{ id: 'svc-other', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed' }]),
+  });
+  const updateChain = chain();
+  const svcChains = [probeHit, updateChain];
+  let svcIdx = 0;
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      if (listChain.select.mock.calls.length === 0) return listChain;
+      return svcChains[svcIdx++];
+    }
+    if (table === 'reschedule_log') return chain();
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-1'], new_date: '2099-01-15', confirmed: true,
+  });
+
+  expect(result).toMatchObject({ success: true, moved_count: 1 });
+  expect(result.warning).toMatch(/2099-01-15/);
+  expect(result.overlap_ids).toEqual(['svc-1']);
+  expect(updateChain.update).toHaveBeenCalled();
+});
+
 test('every stop conflicting away concurrently yields the all-skipped error with the conflict bucket', async () => {
   const listChain = chain({
     select: jest.fn().mockResolvedValue([stop('svc-stale', 'confirmed')]),
   });
   const staleUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
   const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
-  const svcChains = [staleUpdate, staleReread];
+  // A clean advisory-probe chain precedes the CAS update.
+  const svcChains = [chain(), staleUpdate, staleReread];
   let svcIdx = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
