@@ -252,7 +252,9 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'pest_control',
     companionKey: 'termite_bait',
     catalogServiceKey: 'pest_termite_bait_quarterly',
-    name: 'Quarterly Pest + Termite Bait Station',
+    // Exact catalog name (renamed 20260825000010) — the visit label and the
+    // catalog row must agree for name-fallback resolution and invoice parity.
+    name: 'Quarterly Pest + Termite Bait Station Service',
     // Termite bait station checks are quarterly (termite_active_bait_*);
     // the v1 mapper persists "Termite Bait" with no frequency/visits.
     companionDefaultPattern: 'quarterly',
@@ -298,7 +300,8 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'lawn_care',
     companionKey: 'tree_shrub',
     catalogServiceKey: 'lawn_tree_shrub_combo',
-    name: 'Lawn + Tree & Shrub',
+    // Exact catalog name (renamed 20260825000010).
+    name: 'Lawn + Tree & Shrub Service',
     // Pattern equality is NOT enough here: the bimonthly bucket spans 6–11
     // visits/year, so a 9-app lawn and a 6-visit T&S program would pattern
     // as equal. Lawn tiers (6/9/12 apps) and the T&S visit mandate (4x/6x)
