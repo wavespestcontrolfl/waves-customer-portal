@@ -617,11 +617,15 @@ class GoogleBusinessService {
           // removal-reconcile stamp that committed before the lock was free
           // must win at the atomic write. Zero rows = a manual link stands
           // or the review is gone; either way the unlinked bell is noise.
+          // One Date for the link stamp AND the flag mark below: the
+          // reversal ownership check compares them for equality — a LATER
+          // human mark bumps review_marked_at past auto_linked_at and wins.
+          const markTime = new Date();
           const updated = await trx('google_reviews')
             .where({ id: live.id })
             .whereNull('customer_id')
             .whereNull('missing_since')
-            .update({ customer_id: match.customerId, link_source: 'click_auto' });
+            .update({ customer_id: match.customerId, link_source: 'click_auto', auto_linked_at: markTime });
           if (!updated) return { handled: true };
           // Suppression flip in the SAME transaction (pre-push P1): a
           // linked review with a still-false flag would keep asking the
@@ -635,7 +639,7 @@ class GoogleBusinessService {
             .where(function alreadyFlagged() {
               this.where('has_left_google_review', false).orWhereNull('has_left_google_review');
             })
-            .update({ has_left_google_review: true, review_marked_at: new Date() });
+            .update({ has_left_google_review: true, review_marked_at: markTime });
           return { linked: true, match, live };
         });
         if (!result?.linked) return result;
@@ -1509,13 +1513,22 @@ class GoogleBusinessService {
             .whereIn('id', gone.map(r => r.id))
             .where({ link_source: 'click_auto' })
             .whereNotNull('customer_id')
-            .select('id', 'customer_id');
+            .select('id', 'customer_id', 'auto_linked_at');
           for (const alRow of autoLinked) {
             const otherLink = await trx('google_reviews')
               .where({ customer_id: alRow.customer_id })
               .whereNot('id', alRow.id)
               .first('id');
-            if (!otherLink) {
+            // Ownership check (GH codex r6): a review_marked_at LATER than
+            // this auto-link's own stamp means a human independently
+            // confirmed the customer reviewed — that flag is not ours to
+            // clear.
+            const cust = await trx('customers')
+              .where({ id: alRow.customer_id })
+              .first('review_marked_at');
+            const ownedByAutoLink = alRow.auto_linked_at && cust?.review_marked_at
+              && new Date(cust.review_marked_at) <= new Date(alRow.auto_linked_at);
+            if (!otherLink && ownedByAutoLink) {
               await trx('customers')
                 .where({ id: alRow.customer_id })
                 .update({ has_left_google_review: false, review_marked_at: null });

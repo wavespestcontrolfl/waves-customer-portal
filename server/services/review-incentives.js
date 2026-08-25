@@ -897,7 +897,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // NOW, not who it pointed at when the request loaded.
   const prior = await conn('google_reviews')
     .where({ id: review.id })
-    .first('customer_id', 'link_source');
+    .first('customer_id', 'link_source', 'auto_linked_at');
 
   // Re-validate the payout-policy exemption against the LIVE row (pre-push
   // P1): payoutEligible was derived from a pre-lock snapshot, and its
@@ -994,7 +994,16 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         .where({ customer_id: prior.customer_id })
         .whereNot('id', review.id)
         .first('id');
-      if (!otherLink) {
+      // Ownership check (GH codex r6): a review_marked_at LATER than the
+      // auto-link's own stamp means a human independently confirmed this
+      // customer reviewed (Customer 360 re-confirm bumps the stamp) — that
+      // flag is not the auto-link's to clear.
+      const priorCust = await trx('customers')
+        .where({ id: prior.customer_id })
+        .first('review_marked_at');
+      const ownedByAutoLink = prior.auto_linked_at && priorCust?.review_marked_at
+        && new Date(priorCust.review_marked_at) <= new Date(prior.auto_linked_at);
+      if (!otherLink && ownedByAutoLink) {
         await trx('customers')
           .where({ id: prior.customer_id })
           .update({ has_left_google_review: false, review_marked_at: null });

@@ -163,20 +163,18 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // first click pairs with google_location (frozen at first click), the
       // latest with last_google_location. A legacy latest-click without a
       // paired location stays annotated null, never borrowed.
-      // Pair TRUST (GH codex #3483 r5): legacy /go overwrote
+      // Pair TRUST (GH codex #3483 r5/r6): ONLY the latest pair is trusted
+      // for auto-linking — it is stamped atomically at the successful
+      // redirect, so timestamp and location were provably observed
+      // together. First-click pairs are NEVER trusted: legacy /go overwrote
       // google_location on every revisit while redirected_at stayed at the
-      // first click, so a pre-migration first-click pair may name a
-      // location that timestamp never routed to. The latest pair is stamped
-      // atomically (trustworthy by construction); the first pair is trusted
-      // only when a post-migration click corroborates the stored location.
-      // Trust gates AUTO-LINK confidence only — suggestions still list.
+      // first click, and history can make a corrupted pair look
+      // corroborated. Trust gates AUTO-LINK confidence only — suggestions
+      // still list both pairs. Latest pair FIRST so a same-timestamp row
+      // (the common single-click case) keeps the trusted candidate.
       const pairs = [
-        {
-          ts: row.redirected_at,
-          loc: row.google_location || null,
-          trusted: Boolean(row.last_google_location && row.last_google_location === row.google_location),
-        },
         { ts: row.last_redirected_at, loc: row.last_google_location || null, trusted: Boolean(row.last_google_location) },
+        { ts: row.redirected_at, loc: row.google_location || null, trusted: false },
       ];
       const seenTs = new Set();
       for (const { ts, loc, trusted } of pairs) {
