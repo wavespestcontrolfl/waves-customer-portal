@@ -171,34 +171,45 @@ async function findUnmintedSetupFeeObligation({
   // "accepted estimate #<id>" into the invoice notes — invoices carry no
   // estimate_id column, so the stamp is the deterministic linkage (same
   // convention as estimate-payment-context / buildAlreadyAcceptedSuccessPayload).
-  // A LIVE stamped invoice satisfies the obligation. A dead one
-  // (void/refunded/canceled) satisfies it ONLY when it genuinely
-  // resolves the fee (Codex P0 pre-push r2, P1 PR r2 — attachment alone
-  // proves nothing, findFirstApplicationInvoiceForEstimateService
-  // excludes 'void' outright):
-  //   - refunded, ANY attachment → the fee was collected then
+  // A stamped invoice satisfies the obligation only when it actually
+  // BILLED the fee (invoiceContainsSetupFeeLine — round-5 P0: stamped
+  // "first application only" invoices are legitimate converter output):
+  //   - LIVE + fee line → minted, done;
+  //   - refunded + fee line, ANY attachment → the fee was collected then
   //     deliberately refunded; never instruct a re-bill (see below);
-  //   - canceled/cancelled + attached + carries a setup-fee line →
-  //     #3474's canceledSetupFee parking lane surfaces it.
-  // Every other dead row — void (any attachment), canceled without a fee
-  // line, or canceled unattached — leaves the fee genuinely unbilled, so
-  // the obligation survives it (Codex P0, round 1) and the alert names
-  // the dead invoice so the office can distinguish "voided without
-  // replacement" from "never minted".
+  //   - canceled/cancelled + attached + fee line → #3474's
+  //     canceledSetupFee parking lane surfaces it.
+  // Everything else — application-only rows in any status, void rows
+  // (attachment proves nothing, findFirstApplicationInvoiceForEstimate
+  // Service excludes 'void' outright), canceled fee rows unattached —
+  // leaves the fee genuinely unbilled, so the obligation survives it
+  // (Codex P0, round 1) and the alert names a dead fee-carrying invoice
+  // so the office can distinguish "voided without replacement" from
+  // "never minted".
   const DEAD_STATUSES = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
   const { invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
     .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
     .select('id', 'invoice_number', 'status', 'scheduled_service_id', 'service_record_id', 'line_items', 'notes');
-  const liveStamped = stampedRows.find((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase()));
-  if (liveStamped) return { owed: false };
+  // Every clearing path requires the invoice to have ACTUALLY BILLED the
+  // fee (Codex P0, pre-push round 5): the converter legitimately mints
+  // stamped "first application only" invoices (waived-then-changed data,
+  // office edits, fee-less prior mints), and clearing on the stamp alone
+  // would let completion proceed unparked while the $99 was never billed.
+  // An application-only live stamped invoice leaves the obligation OWED —
+  // the completion hold then suppresses the duplicate application mint
+  // and the alert's revalidation directs staff to bill only the fee.
+  const liveStampedFee = stampedRows.find((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase())
+    && invoiceContainsSetupFeeLine(r));
+  if (liveStampedFee) return { owed: false };
   const deadSurfaced = stampedRows.find((r) => {
     const status = String(r.status || '').toLowerCase();
-    // REFUNDED satisfies regardless of attachment (Codex PR r2 P1): a
-    // refunded invoice was COLLECTED and then deliberately refunded — an
-    // operator/webhook money action, not a silent leak — and a setup-only
-    // acceptance invoice is deliberately created with NO
+    if (!invoiceContainsSetupFeeLine(r)) return false;
+    // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
+    // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
+    // an operator/webhook money action, not a silent leak — and a
+    // setup-only acceptance invoice is deliberately created with NO
     // scheduled_service_id (estimate-converter). There is no
     // refund-event clock, and a bounced refund (refund.failed) restores
     // the row to paid: instructing a manual re-bill here would risk a
@@ -206,10 +217,13 @@ async function findUnmintedSetupFeeObligation({
     if (status === 'refunded') return true;
     const attached = !!(r.scheduled_service_id || r.service_record_id);
     if (!attached) return false;
-    return (status === 'canceled' || status === 'cancelled') && invoiceContainsSetupFeeLine(r);
+    return status === 'canceled' || status === 'cancelled';
   });
   if (deadSurfaced) return { owed: false };
-  const deadInvoice = stampedRows[0] || null;
+  // Name only a dead FEE-CARRYING invoice — a dead application-only row
+  // never billed the fee, so "never invoiced" is the accurate story.
+  const deadInvoice = stampedRows.find((r) => DEAD_STATUSES.has(String(r.status || '').toLowerCase())
+    && invoiceContainsSetupFeeLine(r)) || null;
 
   // Converter provenance: the accept actually ran the conversion (tier
   // flip, activity row) and still minted nothing. Accepts that never

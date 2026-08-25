@@ -91,26 +91,45 @@ test('owed: accepted solo-pest estimate with no term, no stamped invoice, conver
   expect(result.firstVisitAlreadyCompleted).toBe(false);
 });
 
-test('a LIVE stamped acceptance invoice means minted — not owed', async () => {
-  mockTables = baseTables({ invoices: { id: 'inv-1', status: 'sent' } });
+const FEE_LINE = JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]);
+const APP_ONLY_LINE = JSON.stringify([{ description: 'First Service Application', amount: 88 }]);
+
+test('a LIVE stamped invoice CARRYING the setup fee means minted — not owed', async () => {
+  mockTables = baseTables({ invoices: { id: 'inv-1', status: 'sent', line_items: FEE_LINE } });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
-test('a REFUNDED stamped invoice attached to a visit is the refunded suppressor\'s lane — not owed', async () => {
+test('a LIVE stamped application-ONLY invoice never billed the fee — obligation survives', async () => {
+  // Stamped "first application only" invoices are legitimate converter
+  // output; clearing on the stamp alone would lose the $99 permanently.
+  mockTables = baseTables({ invoices: { id: 'inv-1', status: 'sent', line_items: APP_ONLY_LINE } });
+  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
+  expect(result.owed).toBe(true);
+  expect(result.deadInvoice).toBe(null);
+});
+
+test('a REFUNDED fee-carrying invoice attached to a visit resolves — not owed', async () => {
   mockTables = baseTables({
-    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: 'ss-1' },
+    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: 'ss-1', line_items: FEE_LINE },
   });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
-test('a REFUNDED stamped invoice with NO attachment (setup-only acceptance mint) also resolves — never instruct a re-bill', async () => {
+test('a REFUNDED fee-carrying invoice with NO attachment (setup-only acceptance mint) also resolves — never instruct a re-bill', async () => {
   // The fee was collected then deliberately refunded; a bounced refund
   // restores the row to paid — a manual re-bill instruction risks double
   // collection.
   mockTables = baseTables({
-    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: null, service_record_id: null },
+    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: null, service_record_id: null, line_items: FEE_LINE },
   });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
+test('a REFUNDED application-ONLY invoice never billed the fee — obligation survives', async () => {
+  mockTables = baseTables({
+    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: 'ss-1', line_items: APP_ONLY_LINE },
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
 test('a CANCELED attached invoice CARRYING the setup-fee line is #3474\'s parking lane — not owed', async () => {
@@ -130,7 +149,7 @@ test('a VOID attached invoice is invisible to every completion suppressor — ob
   // and the terminal lookup handles only 'refunded' — attachment alone is
   // not proof another lane will park it.
   mockTables = baseTables({
-    invoices: { id: 'inv-1', invoice_number: 'WPC-2026-0101', status: 'void', scheduled_service_id: 'ss-1' },
+    invoices: { id: 'inv-1', invoice_number: 'WPC-2026-0101', status: 'void', scheduled_service_id: 'ss-1', line_items: FEE_LINE },
   });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);
@@ -155,7 +174,7 @@ test('a CANCELED attached invoice WITHOUT a setup-fee line remints normally else
 
 test('a dead UNATTACHED stamped invoice leaves the fee unbilled — owed, dead invoice named', async () => {
   mockTables = baseTables({
-    invoices: { id: 'inv-1', invoice_number: 'WPC-2026-0100', status: 'canceled' },
+    invoices: { id: 'inv-1', invoice_number: 'WPC-2026-0100', status: 'canceled', line_items: FEE_LINE },
   });
   const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
   expect(result.owed).toBe(true);

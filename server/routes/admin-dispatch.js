@@ -9343,9 +9343,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             return Array.isArray(lines)
               && lines.some((li) => /first (service )?application/i.test(String(li?.description || '')));
           };
-          if (liveStampedNow && (stampedCarriesFirstApplication(liveStampedNow) || liveOnVisit)) {
+          // The stamped invoice resolves the alert only when it BILLED
+          // the setup fee (Codex P0, pre-push round 5 — stamped
+          // "first application only" invoices are legitimate converter
+          // output) AND the application charge is also covered.
+          const { invoiceContainsSetupFeeLine } = require('../services/estimate-first-application-invoice');
+          const stampedCoversFee = !!(liveStampedNow && invoiceContainsSetupFeeLine(liveStampedNow));
+          if (liveStampedNow && stampedCoversFee && (stampedCarriesFirstApplication(liveStampedNow) || liveOnVisit)) {
             const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
-            logger.warn(`[dispatch] visit ${svc.id}: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} and the application charge is covered — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+            logger.warn(`[dispatch] visit ${svc.id}: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} covering the setup fee, and the application charge is covered — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 body: `RESOLVED — no action needed: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} and the obligation is covered. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
@@ -9364,12 +9370,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ? `its WaveGuard setup-fee invoice (${deadInv.invoiceNumber || deadInv.id}, ${deadInv.status}) was voided/canceled and never replaced`
             : 'its WaveGuard setup fee was never invoiced (the accept skipped the acceptance invoice)';
           let alertBody;
-          if (liveStampedNow) {
+          if (liveStampedNow && stampedCoversFee) {
             // Setup-only acceptance invoice, no invoice on the visit: the
             // setup fee is covered but the performed application is not —
             // the hold suppressed the completion mint.
             const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by acceptance invoice ${stampedLabel} (${liveStampedNow.status}), but that invoice carries NO first-application charge and no completion invoice was cut — bill the first application${firstAppLabel} manually; do NOT re-bill the setup fee.`;
+          } else if (liveStampedNow) {
+            // Application-only stamped invoice (fee never billed): the
+            // application charge is covered by that invoice — collect it,
+            // bill only the fee beside it.
+            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. Acceptance invoice ${stampedLabel} (${liveStampedNow.status}) covers the first application only — collect THAT invoice for the visit charge, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the application charge.`;
           } else if (liveOnVisit) {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${liveOnVisit.invoice_number || liveOnVisit.id}, status ${liveOnVisit.status}) already exists on this visit — collect THAT invoice for the visit charge, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the visit charge.`;
           } else {
