@@ -1498,6 +1498,37 @@ class GoogleBusinessService {
           gone = candidates.filter(r => claimedIds.has(r.id));
           if (gone.length === 0) return;
 
+          // Unconfirmed click auto-links whose review just vanished (GH
+          // codex #3483 r5): every correction surface excludes missing_since
+          // rows, so the auto-owned suppression flag would strand forever.
+          // Reverse it in the SAME transaction as the stamp — sole-basis
+          // only (another linked review still proves they reviewed); a
+          // 'manual'/'manual_no_visit' link was human-confirmed and keeps
+          // its flag like any other removed attributed review.
+          const autoLinked = await trx('google_reviews')
+            .whereIn('id', gone.map(r => r.id))
+            .where({ link_source: 'click_auto' })
+            .whereNotNull('customer_id')
+            .select('id', 'customer_id');
+          for (const alRow of autoLinked) {
+            const otherLink = await trx('google_reviews')
+              .where({ customer_id: alRow.customer_id })
+              .whereNot('id', alRow.id)
+              .first('id');
+            if (!otherLink) {
+              await trx('customers')
+                .where({ id: alRow.customer_id })
+                .update({ has_left_google_review: false, review_marked_at: null });
+              try {
+                await trx('activity_log').insert({
+                  customer_id: alRow.customer_id,
+                  action: 'review_automark_reversed',
+                  description: 'Auto-linked Google review was removed from Google before confirmation — "already left a Google review" cleared; review asks resume.',
+                });
+              } catch { /* audit only — reversal itself must commit */ }
+            }
+          }
+
           const names = gone.slice(0, 15)
             .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
             .join(', ');

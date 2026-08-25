@@ -125,6 +125,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         'c.state',
         'c.zip',
         'c.has_left_google_review',
+        'c.active',
       );
     if (!clicks.length) return [];
 
@@ -224,6 +225,8 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
           ? pairLoc === review.location_id
           : null,
         alreadyFlagged: row.has_left_google_review === true,
+        // false only when the customer row explicitly carries active=false.
+        customerActive: row.active !== false,
       }));
   } catch (err) {
     // ID-only logging (AGENTS.md) — no names in plaintext logs.
@@ -277,6 +280,10 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // correction would clear a flag the auto-link never set (GH codex #3483
     // r1 P2). Their review stays a manual-queue question.
     if (only.alreadyFlagged) return null;
+    // Inactive customer: the confirmation UI's candidate search only offers
+    // active customers, so this link could never be human-confirmed and
+    // would sit click_auto forever (GH codex #3483 r5) — manual queue.
+    if (only.customerActive === false) return null;
     if (only.locationMatch !== true) return null;
     if (!only.clickedBeforeReview) return null;
     if (only.clickOffsetMs > AUTO_LINK_MAX_BEFORE_MS) return null;
