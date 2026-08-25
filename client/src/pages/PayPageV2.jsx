@@ -1533,7 +1533,7 @@ export default function PayPageV2() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetch(`${API_BASE}/pay/${token}`, { signal: controller.signal })
+    fetchWithNetworkRetry(`${API_BASE}/pay/${token}`, { signal: controller.signal })
       .then((r) => {
         if (!r.ok) {
           const loadError = new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
@@ -1753,7 +1753,12 @@ export default function PayPageV2() {
     if (setupPostedRef.current === setupKey) return;
     setupPostedRef.current = setupKey;
     setPaymentState('setup');
-    fetch(`${API_BASE}/pay/${token}/setup`, {
+    // fetchWithNetworkRetry: Safari's "Load failed" network aborts kept
+    // stranding real customers at this exact call (4 live abandonments
+    // 2026-07-28 → 2026-08-25). /setup is safe to retry — the server
+    // serializes on a row lock, reuses a requires_payment_method PI, and
+    // mints under a Stripe idempotency key; no money moves here.
+    fetchWithNetworkRetry(`${API_BASE}/pay/${token}/setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // Echo the version this render came from — the server refuses to mint
