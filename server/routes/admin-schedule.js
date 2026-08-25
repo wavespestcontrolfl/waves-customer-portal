@@ -8337,6 +8337,9 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
           note: svc.prepaid_note || null,
         }),
       });
+      // Settled at the visit — complete any active payment plan on the SAME
+      // trx so the paid invoice doesn't stay plan-locked.
+      await require('../services/payment-plans').completeActivePlansForInvoice(paidInvoice.id, trx);
       return { invoice: paidInvoice, newlyPaid: true };
     });
   } catch (e) {
@@ -8654,6 +8657,11 @@ router.post('/:id/invoice', async (req, res, next) => {
             note: svc.prepaid_note || null,
           }),
         });
+        if (paidByPrepayment) {
+          // The prepaid credit fully settled the invoice — complete any
+          // active payment plan on the SAME trx.
+          await require('../services/payment-plans').completeActivePlansForInvoice(lockedInvoice.id, trx);
+        }
         return { invoice: creditedInvoice, prepaidCredit: Number(prepaidCredit) };
       });
     };

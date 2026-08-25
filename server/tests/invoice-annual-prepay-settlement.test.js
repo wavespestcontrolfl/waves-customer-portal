@@ -18,6 +18,7 @@ function chain({ first, returning, rows } = {}) {
   q.whereNotIn = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.forUpdate = jest.fn(() => q);
+  q.whereExists = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.update = jest.fn((u) => { q._update = u; return { returning: async () => (returning === undefined ? [] : returning) }; });
   q.insert = jest.fn(async () => [1]);
@@ -55,20 +56,36 @@ describe('settleInvoiceAsAnnualPrepayCovered (full coverage only)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    // completeActivePlansForInvoice reuses a caller trx as-is — without this
+    // it would open a nested transaction and desync the queued db() slots.
+    db.isTransaction = true;
     db.fn = { now: () => 'NOW' };
+  });
+  afterEach(() => {
+    // Scoped to this describe: the reopen suite below keys real behavior off
+    // conn.isTransaction (in-trx re-arm deferral) and must not inherit it.
+    delete db.isTransaction;
   });
 
   test('no add-ons → prepaid, dedicated marker set, paid_at stamped, NO payments row', async () => {
     const inv = invoice();
     const updateChain = chain({ first: inv, returning: [{ ...inv, status: 'prepaid' }] });
+    const plansChain = chain();
     db.mockReturnValueOnce(chain({ first: inv }))      // initial fetch
       .mockReturnValueOnce(chain({ first: undefined })) // pre-txn payments check
       .mockReturnValueOnce(chain({ first: inv }))       // locked fetch
       .mockReturnValueOnce(chain({ first: undefined })) // in-txn payments check
-      .mockReturnValueOnce(updateChain);                // update
+      .mockReturnValueOnce(updateChain)                 // update
+      .mockReturnValueOnce(chain({ first: { status: 'prepaid' } })) // helper's FOR UPDATE settlement recheck
+      .mockReturnValueOnce(plansChain)                  // payment-plan completion (same trx)
+      .mockReturnValueOnce(chain());                    // plan-owned dunning-stop release (same trx)
     const res = await InvoiceService.settleInvoiceAsAnnualPrepayCovered('inv-1', 'term-1');
     expect(res).toMatchObject({ settled: true });
     expect(res.invoice.status).toBe('prepaid');
+    // The settlement closes the invoice — any active payment plan completes
+    // on the SAME transaction (a prepaid invoice must not stay plan-locked).
+    expect(plansChain.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
+    expect(plansChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
     expect(updateChain._update).toMatchObject({
       status: 'prepaid', annual_prepay_covered_term_id: 'term-1', prepaid_at: 'NOW', paid_at: 'NOW',
     });

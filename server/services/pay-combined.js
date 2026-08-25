@@ -812,6 +812,9 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
           continue;
         }
         if (isAnchor) anchorPaymentRow = existing;
+        // Idempotent retry must also recover a missed plan completion
+        // (codex r4 P1): the invoice is already paid/prepaid under this PI.
+        await require('./payment-plans').completeActivePlansForInvoice(invoice.id, trx);
         settledInvoiceIds.push(invoice.id);
         continue;
       }
@@ -848,6 +851,11 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
       if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
       await trx('invoices').where({ id: invoice.id }).update(invoiceUpdates);
+      if (invoiceStatus === 'paid') {
+        // Settled — complete any active payment plan on the SAME trx so a
+        // combined-payment anchor/member never stays plan-locked (codex r4 P1).
+        await require('./payment-plans').completeActivePlansForInvoice(invoice.id, trx);
+      }
 
       const shareCents = entry.cents + (isAnchor ? surchargeCents : 0);
       const existing = rowForInvoice(invoice.id);

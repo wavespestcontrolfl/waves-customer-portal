@@ -2148,6 +2148,11 @@ const StripeService = {
             // prepaid transition (return, don't throw — a throw would roll back
             // the apply AND the PI clearing, stranding the invoice) and skip the
             // card charge. Settled below, after the transaction commits.
+            // Complete any active plan IN THIS TRX (codex r10 P1): no Stripe
+            // charge happens here, so no webhook retry exists to repair a
+            // post-commit failure. (Defensive: applyAccountCreditToInvoice
+            // skips under an active plan, so coverage normally implies none.)
+            await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
             coveredByCredit = true;
             return;
           }
@@ -2279,6 +2284,16 @@ const StripeService = {
             total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
+
+        // Plan completion rides the SAME settlement transaction (codex r8
+        // P1): the post-commit best-effort call can crash or fail and leave
+        // a paid invoice carrying an active plan (edit/credit-locked, with
+        // no retry path). In-trx, the helper's invoice lock is reentrant
+        // and its settled gate sees this transaction's own paid flip.
+        // 'processing' (ACH) settles later via the webhook's own completion.
+        if (status === 'paid') {
+          await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+        }
 
         [paymentRecord] = await trx('payments').insert({
           customer_id: invoice.customer_id,
@@ -2577,6 +2592,7 @@ const StripeService = {
       } catch (e) {
         logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
       }
+      await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
       try {
         const fresh = await db('invoices').where({ id: invoiceId }).first();
         if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
@@ -2596,6 +2612,7 @@ const StripeService = {
       } catch (err) {
         logger.error(`[invoice-followups] stopOnPayment failed for card-on-file invoice ${invoiceId}: ${err.message}`);
       }
+      await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'card_on_file');
       try {
         await require('./annual-prepay-renewals').syncTermForInvoicePayment({
           id: invoiceId,
@@ -3373,6 +3390,9 @@ const StripeService = {
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            // Same-trx plan completion — no webhook retry exists for a
+            // credit-only settlement (codex r10 P1; defensive, see above).
+            await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
             coveredByCredit = true;
             return;
           }
@@ -3759,6 +3779,7 @@ const StripeService = {
         } catch (e) {
           logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
         }
+        await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
         try {
           const fresh = await db('invoices').where({ id: invoiceId }).first();
           if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
@@ -5417,6 +5438,11 @@ const StripeService = {
           .update(invoiceUpdates);
         if (!invoiceRowsUpdated) {
           throw new Error('Invoice has a different active payment');
+        }
+        if (invoiceStatus === 'paid') {
+          // Settled synchronously (webhook may be delayed/absent) — complete
+          // any active payment plan on the SAME trx (codex r3 P1).
+          await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
         }
 
         const paymentPayload = {

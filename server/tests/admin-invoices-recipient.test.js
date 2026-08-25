@@ -42,6 +42,7 @@ describe('admin invoice payment plan follow-up handling', () => {
     query.where.mockReturnValue(query);
     query.whereIn.mockReturnValue(query);
     const database = jest.fn(() => query);
+    database.raw = jest.fn((sql, bindings) => ({ __raw: sql, __bindings: bindings }));
 
     const result = await stopInvoiceFollowupsForPaymentPlan('inv-1', {
       paymentPlanId: 'plan-1',
@@ -52,10 +53,16 @@ describe('admin invoice payment plan follow-up handling', () => {
     expect(result).toBe(1);
     expect(database).toHaveBeenCalledWith('invoice_followup_sequences');
     expect(query.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
-    expect(query.whereIn).toHaveBeenCalledWith('status', ['active', 'paused', 'autopay_hold']);
+    // Status filtering is a grouped where: live shapes OR a stale
+    // plan-owned stop (stopped_reason LIKE payment_plan_created:%) that
+    // must be restamped to the new plan.
+    expect(query.where).toHaveBeenCalledWith(expect.any(Function));
+    // The stamp is a raw SQL concat carrying the row's PRE-PLAN status
+    // (`payment_plan_created:<id>:prev=<status>`) so cancel can restore it.
+    expect(database.raw).toHaveBeenCalledWith('? || status', ['payment_plan_created:plan-1:prev=']);
     expect(query.update).toHaveBeenCalledWith({
       status: 'stopped',
-      stopped_reason: 'payment_plan_created:plan-1',
+      stopped_reason: { __raw: '? || status', __bindings: ['payment_plan_created:plan-1:prev='] },
       stopped_by_admin_id: 'admin-1',
       next_touch_at: null,
     });

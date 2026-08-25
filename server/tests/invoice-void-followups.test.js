@@ -56,7 +56,8 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
-      .mockReturnValueOnce(noPayment());
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain()); // payment_plans cancel (active plan → cancelled by system:invoice_void)
 
     await InvoiceService.voidInvoice('inv-1');
 
@@ -87,7 +88,8 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain({ returning: [voided] }))
-      .mockReturnValueOnce(noPayment());
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain()); // payment_plans cancel
 
     await InvoiceService.voidInvoice('inv-1');
 
@@ -100,7 +102,8 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
-      .mockReturnValueOnce(noPayment());
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain()); // payment_plans cancel (active plan → cancelled by system:invoice_void)
     mockRestoreDepositCredit.mockRejectedValueOnce(new Error('ledger unavailable'));
 
     await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow('ledger unavailable');

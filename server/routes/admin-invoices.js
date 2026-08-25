@@ -10,6 +10,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
+const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -252,13 +253,109 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
   if (!invoiceId) return 0;
   return database('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', ['active', 'paused', 'autopay_hold'])
+    .where(function planStoppableSequences() {
+      // Live shapes, plus a sequence left 'stopped' by a PRIOR payment plan
+      // (codex r12 P1): a settled plan's stop survives (stopOnPayment skips
+      // stopped rows), and without restamping it to the NEW plan's reason the
+      // replacement plan's cancel would fail the ownership check and leave
+      // reminders off. ALL 'completed' rows are included too (codex PR r2+r3
+      // P1s): a completed sequence — whether plan-settled (stamp retained) or
+      // naturally exhausted (no stamp, every touch sent) — is invisible to
+      // both hasActiveSequence and isDunningStopped, so without restamping it
+      // 'stopped' here the legacy late-payment path keeps sending reminders
+      // under the new plan. Admin stops with unrelated reasons keep their
+      // stamp (only 'stopped' rows check the plan-owned reason).
+      this.whereIn('status', ['active', 'paused', 'autopay_hold', 'completed'])
+        .orWhere(function planOwnedStoppedRow() {
+          this.where('status', 'stopped')
+            .where('stopped_reason', 'like', 'payment_plan_created:%');
+        });
+    })
     .update({
       status: 'stopped',
-      stopped_reason: paymentPlanFollowupStopReason(paymentPlanId),
+      // The stamp carries the PRE-PLAN status (`:prev=<status>`) so cancel
+      // can restore it faithfully (codex PR r8 P1): a pause saved with an
+      // EMPTY reason left no other durable trace, and cancel used to
+      // reactivate reminders the admin had explicitly held. `status` here
+      // reads the row's pre-update value (SQL UPDATE semantics).
+      stopped_reason: database.raw('? || status', [`${paymentPlanFollowupStopReason(paymentPlanId)}:prev=`]),
       stopped_by_admin_id: adminId || null,
       next_touch_at: null,
     });
+}
+
+/**
+ * Re-arm dunning for a cancelled payment plan, INSIDE the cancel transaction
+ * (codex r6 P1: a post-commit read raced concurrent plan creation — a fresh
+ * plan's stop could be resumed under a live plan). The invoice row is locked
+ * by the caller, which serializes against plan creation's own locked trx.
+ * Resumes ONLY a plan-owned sequence: stopped_reason carries this plan's
+ * payment_plan_created:<id> stamp, in either the in-trx 'stopped' shape or
+ * the post-commit pauseSequence 'paused'/payment_plan_created shape (the
+ * stamp survives the pause). Returns 'schedule' when no sequence exists so
+ * the caller arms one post-commit via scheduleForInvoice.
+ */
+async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
+  // FOR UPDATE (codex PR r6 P2): pauseSequence/stopSequence write this row
+  // without taking the invoice lock, so a non-locking read here could
+  // observe the plan-owned state, lose the race to a concurrent admin
+  // pause/stop, and then resumeSequence would steamroll that fresh control
+  // back to 'active'. Locking the row serializes: their write either
+  // committed first (we see and honor it) or waits until this trx commits.
+  const seq = await trx('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId })
+    .forUpdate()
+    .first('id', 'status', 'stopped_reason', 'paused_reason', 'is_autopay_held');
+  if (!seq) return 'schedule';
+  // The stamp is either the bare legacy form (`payment_plan_created:<id>`)
+  // or the current form carrying the pre-plan status
+  // (`payment_plan_created:<id>:prev=<status>`).
+  const stampBase = paymentPlanFollowupStopReason(planId);
+  const stamp = String(seq.stopped_reason || '');
+  const stampMatches = stamp === stampBase || stamp.startsWith(`${stampBase}:prev=`);
+  const planOwned = stampMatches
+    && (seq.status === 'stopped'
+      || (seq.status === 'paused' && seq.paused_reason === 'payment_plan_created'));
+  if (!planOwned) return 'untouched';
+  const prePlanStatus = stamp.startsWith(`${stampBase}:prev=`)
+    ? stamp.slice(`${stampBase}:prev=`.length)
+    : null;
+  // A pre-plan ADMIN pause is restored FIRST (codex PR r9 P1): pauseSequence
+  // leaves is_autopay_held set, so an autopay-held sequence the admin then
+  // explicitly paused must come back as PAUSED — restoring the hold instead
+  // would let a later autopay-failure release resume reminders despite the
+  // explicit hold. The prev=paused stamp (and, for legacy bare stamps, a
+  // non-plan paused_reason) identifies it; the is_autopay_held flag rides
+  // along untouched, reproducing the exact pre-plan shape.
+  if (seq.paused_reason !== 'payment_plan_created'
+    && (prePlanStatus === 'paused' || seq.paused_reason)) {
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      status: 'paused',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+      updated_at: new Date(),
+    });
+    return 'restored_pause';
+  }
+  // Autopay customers re-enter the HOLD, not the active cadence (codex PR r1
+  // P1): resumeSequence would set status 'active' with a due time and the
+  // next cron would dun a customer whose card is on autopay — the existing
+  // failure-threshold release flow (releaseFromAutopayHold) owns when a held
+  // sequence starts reminding.
+  if (seq.is_autopay_held) {
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      status: 'autopay_hold',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+      updated_at: new Date(),
+    });
+    return 'held';
+  }
+  const FollowUpsSvc = require('../services/invoice-followups');
+  await FollowUpsSvc.resumeSequence(invoiceId, trx);
+  return 'resumed';
 }
 
 function cleanOptionalText(value, max = 120) {
@@ -1783,6 +1880,10 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
         });
       }
       await trx('payments').insert(paymentRow);
+      // The invoice is settled — an active payment plan has nothing left to
+      // collect. Complete it on the SAME trx so a paid invoice never keeps
+      // an `active` plan that blocks edits / credit reversal.
+      await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
       return row;
     });
 
@@ -2083,6 +2184,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         };
         if (waiveSetupFee) updates.setup_fee_waived = true;
         await trx('invoices').where({ id }).update(updates);
+        // Fully credit-covered — any active payment plan is done collecting.
+        await PaymentPlans.completeActivePlansForInvoice(id, trx);
 
         // No payments-ledger row here. Revenue is recognized when cash is
         // RECEIVED — a cash-backed prepayment books its payment row at credit
@@ -2385,6 +2488,16 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
           const e = new Error('Invoice no longer exists');
           e.statusCode = 409; throw e;
         }
+        // Re-assert collectibility on the LOCKED row: a record-payment /
+        // apply-credit / webhook settlement can commit while this request
+        // waits on the lock, and inserting a fresh 'active' plan on a
+        // just-settled invoice would edit-lock it all over again with
+        // nothing left to collect (codex r1 P1).
+        try {
+          assertInvoiceCollectible(lockedInvoice.status);
+        } catch (err) {
+          err.statusCode = 409; throw err;
+        }
         const lockedAmountDue = invoiceAmountDue(lockedInvoice);
         const lockedTotalBalance = Math.min(totalBalance, lockedAmountDue);
         if (!(lockedTotalBalance > 0)) {
@@ -2442,23 +2555,39 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     // which carries the locked-row customer_id the plan was inserted with.
     const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
-    const emailResult = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
-      customerId: planCustomerId,
-      paymentPlanId: paymentPlan.id,
-      paymentMethodId,
-      plan: paymentPlan,
-      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
-    }).catch((err) => ({ ok: false, error: err.message }));
+    // Confirmation-vs-cancel coordination (codex PR r3/r4/r6): the ACTIVE
+    // check runs under the invoice row lock (the cancel trx's first lock)
+    // in its own SHORT transaction that commits BEFORE the provider call —
+    // holding a row lock across a slow SendGrid request would block
+    // settlement, cancellation, edits, and webhook processing for this
+    // invoice. A cancel therefore either committed before the check (we
+    // see it and suppress) or serializes after it; the residual
+    // commit-to-dispatch window is the irreducible provider-boundary race
+    // — the durable idempotencyKey keeps retries single, and a cancel
+    // landing in that window owns its own messaging. Fail closed: an
+    // unreadable status suppresses the confirmation.
+    const planStillActive = await db.transaction(async (trx) => {
+      await trx('invoices').where({ id }).forUpdate().first();
+      const planNow = await trx('payment_plans')
+        .where({ id: paymentPlan.id })
+        .first('status');
+      return !!(planNow && planNow.status === 'active');
+    }).catch(() => false);
+    const emailResult = planStillActive
+      ? await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+        customerId: planCustomerId,
+        paymentPlanId: paymentPlan.id,
+        paymentMethodId,
+        plan: paymentPlan,
+        idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
+      }).catch((err) => ({ ok: false, error: err.message }))
+      : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
 
-    try {
-      const FollowUps = require('../services/invoice-followups');
-      await FollowUps.pauseSequence(invoice.id, {
-        reason: 'payment_plan_created',
-        adminId: req.user?.id || req.technicianId || null,
-      });
-    } catch (err) {
-      logger.warn(`[admin-invoices:payment-plan] follow-up pause failed: ${err.message}`);
-    }
+    // NOTE: no post-commit pauseSequence here (codex r9 P1). The in-trx
+    // stopInvoiceFollowupsForPaymentPlan above already stopped the sequence
+    // with this plan's stamped reason; an unconditional pause after the
+    // email could land AFTER a concurrent cancel's transactional re-arm and
+    // disable dunning with no active plan left.
 
     await db('activity_log').insert({
       customer_id: planCustomerId,
@@ -2479,6 +2608,168 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] payment-plan failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// POST /:id/payment-plan/cancel — cancel the invoice's active payment plan.
+// Plans are record-only (no collector yet), but an `active` row blocks invoice
+// edits, credit reversal and auto-credit — this is the only admin exit.
+router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const reason = cleanOptionalText(body.reason, 300);
+    // Expected plan id from the UI (codex r10 P1): a delayed/retried cancel
+    // for plan A must never cancel a REPLACEMENT plan B created since. When
+    // provided, both the locked lookup and the idempotent-retry probe are
+    // conditioned on this exact plan.
+    const expectedPlanId = cleanOptionalText(body.paymentPlanId || body.payment_plan_id, 64);
+    if (!expectedPlanId) {
+      // Required (codex r12 P1): without it a delayed/duplicate cancel could
+      // select whichever plan is active NOW — possibly a replacement plan.
+      return res.status(400).json({ error: 'paymentPlanId is required — cancel names the exact plan being cancelled' });
+    }
+    const cancelledBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        if (!invoice) {
+          const e = new Error('Invoice not found'); e.statusCode = 404; throw e;
+        }
+        const plan = await trx('payment_plans')
+          .where({ invoice_id: id, status: 'active', id: expectedPlanId })
+          .forUpdate()
+          .first();
+        if (!plan) {
+          // Idempotent retry (codex r3 P1): the plan may already be cancelled
+          // from a previous call whose post-commit follow-up re-arm failed.
+          // Surface that plan so the re-arm below runs again instead of 409ing
+          // the operator into a permanently reminder-less invoice.
+          const lastCancelled = await trx('payment_plans')
+            .where({ invoice_id: id, status: 'cancelled', id: expectedPlanId })
+            .orderBy('cancelled_at', 'desc')
+            .first();
+          if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
+          const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
+        }
+        // An ACH payment in flight blocks cancellation (codex PR r7 P1):
+        // 'processing' is terminal to resumeSequence, so cancelling now
+        // leaves the plan-owned stop un-rearmed — and if the ACH later
+        // FAILS and the invoice reopens, no active plan remains while the
+        // stale stop suppresses reminders forever. Wait for the payment to
+        // resolve: success completes the plan, failure reopens the invoice
+        // and the cancel then re-arms normally. Mirrors voidInvoice's
+        // processing refusal.
+        if (String(invoice.status || '') === 'processing') {
+          const e = new Error('A payment is processing on this invoice — wait for it to settle (the plan completes) or fail (then cancel), and retry.');
+          e.statusCode = 409;
+          throw e;
+        }
+        // Settlement may have won the race (codex PR r4 P2): the paid flip
+        // committed, but the webhook's post-commit plan completion hasn't
+        // run yet. Cancelling now would strand the plan-owned sequence
+        // 'stopped' forever — resumeSequence no-ops on a terminal invoice
+        // and the completion helper then finds no active plan — so a later
+        // dispute reopen would find isDunningStopped() true with no plan.
+        // Complete the plan (and release its sequence) instead: the same
+        // transition settlement itself owed, decided under the invoice lock.
+        if (['paid', 'prepaid'].includes(String(invoice.status || ''))) {
+          await PaymentPlans.completeActivePlansForInvoice(id, trx);
+          const settled = await trx('payment_plans').where({ id: plan.id }).first();
+          return {
+            invoice,
+            plan: settled || plan,
+            completedInsteadOfCancelled: true,
+            rearm: 'untouched',
+          };
+        }
+        const now = new Date();
+        const [cancelled] = await trx('payment_plans')
+          .where({ id: plan.id, status: 'active' })
+          .update({ status: 'cancelled', cancelled_at: now, cancelled_by: cancelledBy, updated_at: now })
+          .returning('*');
+        if (!cancelled) {
+          const e = new Error('Payment plan changed before it could be cancelled'); e.statusCode = 409; throw e;
+        }
+        return { invoice, plan: cancelled, rearm: await rearmFollowupsForCancelledPlan(trx, id, cancelled.id) };
+      });
+    } catch (err) {
+      if (err?.statusCode === 404 || err?.statusCode === 409) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const { invoice, plan, alreadyCancelled, completedInsteadOfCancelled, rearm } = outcome;
+
+    if (completedInsteadOfCancelled) {
+      // Settlement won the race — the plan was completed, not cancelled, and
+      // dunning stays released (the invoice is paid). Tell the operator what
+      // actually happened instead of confirming a cancel that didn't occur.
+      return res.json({
+        ok: true,
+        paymentPlan: plan,
+        completedInsteadOfCancelled: true,
+        message: 'This invoice settled while cancelling — the payment plan was completed (not cancelled). No reminders are armed on a paid invoice.',
+      });
+    }
+
+    // No sequence row existed at cancel time (decided under the invoice lock):
+    // arm one now via the existing mechanism, exactly like reverse-prepaid —
+    // scheduleForInvoice takes its own invoice lock and re-verifies
+    // schedulability, and a concurrent plan creation serializes on that same
+    // lock (its in-trx stop runs before or after this whole arm).
+    if (rearm === 'schedule') {
+      try {
+        const FollowUpsSvc = require('../services/invoice-followups');
+        await FollowUpsSvc.scheduleForInvoice(id);
+      } catch (err) {
+        // Do NOT acknowledge success (codex r11 P1): the plan is already
+        // cancelled, so a 200 here would hide that the reopened invoice has
+        // no dunning armed and nothing would ever retry. A 502 makes the
+        // operator retry; the idempotent already-cancelled path re-runs this
+        // re-arm on that retry.
+        logger.error(`[admin-invoices:payment-plan-cancel] plan ${plan.id} cancelled but follow-up scheduling failed: ${err.message}`);
+        return res.status(502).json({
+          error: 'The payment plan was cancelled, but re-arming invoice reminders failed — retry the cancel to arm them',
+          paymentPlan: plan,
+          alreadyCancelled: true,
+        });
+      }
+    }
+
+    // Idempotent by lookup, not by the alreadyCancelled flag (codex PR r8
+    // P2): a 502 on the re-arm leg committed the cancellation without its
+    // audit line, and the successful retry then arrived as alreadyCancelled
+    // — skipping the insert left that cancellation permanently absent from
+    // activity_log. Best-effort like the insert itself.
+    try {
+      const existingAudit = await db('activity_log')
+        .where({ action: 'payment_plan_cancelled' })
+        .whereRaw("metadata::jsonb ->> 'payment_plan_id' = ?", [String(plan.id)])
+        .first('id');
+      if (!existingAudit) {
+        await db('activity_log').insert({
+          customer_id: plan.customer_id || invoice.customer_id,
+          action: 'payment_plan_cancelled',
+          description: `Payment plan cancelled for invoice ${invoice.invoice_number || invoice.id}`
+            + `${reason ? ` — ${reason}` : ''} — ${cancelledBy}`,
+          metadata: {
+            invoice_id: invoice.id,
+            payment_plan_id: plan.id,
+            reason,
+          },
+        });
+      }
+    } catch (err) {
+      logger.warn(`[admin-invoices:payment-plan-cancel] activity_log insert failed: ${err.message}`);
+    }
+
+    res.json({ ok: true, paymentPlan: plan, ...(alreadyCancelled ? { alreadyCancelled: true } : {}) });
+  } catch (err) {
+    logger.error(`[admin-invoices] payment-plan cancel failed: ${err.message}`);
     next(err);
   }
 });

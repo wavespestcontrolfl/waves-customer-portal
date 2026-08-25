@@ -338,6 +338,16 @@ async function scheduleForInvoice(invoiceId) {
       return existing;
     }
 
+    // Never arm dunning under an active payment plan (codex r7 P1). Plan
+    // creation stops sequences inside its own invoice-locked transaction —
+    // this check runs under the SAME lock, so whichever writer commits first
+    // the invariant holds (plan first → we refuse here; we commit first → the
+    // plan's stop catches the fresh row).
+    const activePlan = await trx('payment_plans')
+      .where({ invoice_id: invoiceId, status: 'active' })
+      .first('id');
+    if (activePlan) return null;
+
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
     const onAutopay = await customerOnAutopay(customer, { db: trx });
 
@@ -1151,20 +1161,48 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
   });
 }
 
-async function resumeSequence(invoiceId) {
-  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+async function resumeSequence(invoiceId, dbc = db) {
+  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq) return;
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    updated_at: db.fn.now(),
+  // A shifted anchor (delivered-invoice due-date edit while paused) wins so
+  // the re-armed step lands on the same timeline fireStep progression uses.
+  const nextTouchAt = computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index);
+  if (!nextTouchAt) {
+    // Sequence exhausted — step_index is past the last configured step, so
+    // there is nothing to schedule. 'active' with a null due time is a dead
+    // state: runPending can never select it, yet hasActiveSequence sees it
+    // as live and suppresses the legacy late-payment checker — a reopened
+    // invoice would never be reminded again. Restore terminal 'completed'
+    // (clearing any plan-owned stamp: this is a natural completion now) so
+    // the legacy checker owns the invoice again.
+    await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: dbc.fn.now(),
+      status: 'completed',
+      paused_reason: null,
+      paused_until: null,
+      paused_by_admin_id: null,
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+    });
+    return;
+  }
+  await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: dbc.fn.now(),
     status: 'active',
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,
-    // A shifted anchor (delivered-invoice due-date edit while paused) wins so
-    // the re-armed step lands on the same timeline fireStep progression uses.
-    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
+    // A re-armed row must carry NO stale stop stamp (codex PR r9 P1): a
+    // lingering payment_plan_created:* on an active row would let a later
+    // settlement cleanup claim an unrelated administrative pause as
+    // plan-owned and flip it 'completed', re-arming dunning a dispute
+    // reopen was supposed to leave alone.
+    stopped_reason: null,
+    stopped_by_admin_id: null,
+    next_touch_at: nextTouchAt,
   });
 }
 

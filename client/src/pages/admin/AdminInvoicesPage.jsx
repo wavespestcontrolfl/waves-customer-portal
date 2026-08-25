@@ -743,6 +743,7 @@ function InvoiceList({
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
+  const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
@@ -895,6 +896,37 @@ function InvoiceList({
       onRefresh();
     } catch (err) {
       showToast(`Reverse failed: ${err.message}`);
+    }
+  };
+
+  const handleCancelPaymentPlan = async (id, planId) => {
+    if (
+      !confirm(
+        "Cancel this payment plan? The invoice reopens for normal collection and editing.",
+      )
+    )
+      return;
+    setCancellingPlanInvoiceId(id);
+    try {
+      const res = await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ paymentPlanId: planId }),
+      });
+      // Settlement can win the cancel race — the server then COMPLETES the
+      // plan instead. Surface what actually happened; a "cancelled" toast
+      // would misrepresent the collection state.
+      showToast(
+        res?.completedInsteadOfCancelled
+          ? res.message ||
+              "Invoice settled while cancelling — the plan was completed, not cancelled"
+          : "Payment plan cancelled",
+      );
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Cancel plan failed: ${err.message}`);
+    } finally {
+      setCancellingPlanInvoiceId(null);
     }
   };
 
@@ -1587,6 +1619,23 @@ function InvoiceList({
                               title="Create a payment plan and send the confirmation email"
                             >
                               Payment plan
+                            </button>
+                          )}
+                          {isAdminUser && inv.active_payment_plan && (
+                            <button
+                              onClick={() =>
+                                handleCancelPaymentPlan(
+                                  inv.id,
+                                  inv.active_payment_plan.id,
+                                )
+                              }
+                              disabled={cancellingPlanInvoiceId === inv.id}
+                              style={sBtn(D.card, D.text, isMobile)}
+                              title="Cancel the active payment plan — the invoice reopens for normal collection and editing"
+                            >
+                              {cancellingPlanInvoiceId === inv.id
+                                ? "Cancelling…"
+                                : "Cancel plan"}
                             </button>
                           )}
                           {inv.status !== "void" && (

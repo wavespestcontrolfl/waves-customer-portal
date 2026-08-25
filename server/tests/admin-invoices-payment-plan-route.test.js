@@ -33,6 +33,8 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 }));
 jest.mock('../services/invoice-followups', () => ({
   pauseSequence: jest.fn(async () => undefined),
+  resumeSequence: jest.fn(async () => undefined),
+  scheduleForInvoice: jest.fn(async () => undefined),
 }));
 
 const express = require('express');
@@ -56,7 +58,7 @@ const CREATED_PLAN = { id: 'plan-1', total_balance: '100.00', customer_id: 'cust
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'andWhere', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
+  ['where', 'whereIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);
@@ -93,6 +95,10 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...LOCKED_INVOICE })) });
     trxPlans = makeRecorder({
       insert: jest.fn(() => ({ returning: jest.fn(async () => [CREATED_PLAN]) })),
+      // first() with no args = pre-existing-plan probes (none);
+      // first('status') = the confirmation-email fence's under-lock re-read
+      // of the created plan (still active → email allowed).
+      first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'active' } : null)),
     });
     trxFollowups = makeRecorder();
     trx = jest.fn((table) => {
@@ -101,9 +107,16 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       if (table === 'invoice_followup_sequences') return trxFollowups;
       throw new Error(`unexpected trx table ${table}`);
     });
+    trx.isTransaction = true; // real knex trx flag — completeActivePlansForInvoice reuses a caller trx as-is
+    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, __bindings: bindings }));
 
     const invoicesQB = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
-    const plansQB = makeRecorder({ first: jest.fn(async () => null) });
+    // first() with no args = the pre-existing-active-plan check (none);
+    // first('status') = the post-commit confirmation-email fence re-reading
+    // the created plan (still active → email allowed).
+    const plansQB = makeRecorder({
+      first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'active' } : null)),
+    });
     const activityQB = makeRecorder();
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoicesQB;
@@ -134,11 +147,12 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       // the plan — a plan without a stopped sequence keeps dunning customers.
       expect(trx).toHaveBeenCalledWith('invoice_followup_sequences');
       expect(trxFollowups.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
-      expect(trxFollowups.whereIn).toHaveBeenCalledWith('status', ['active', 'paused', 'autopay_hold']);
+      expect(trxFollowups.where).toHaveBeenCalledWith(expect.any(Function));
       expect(trxFollowups.update).toHaveBeenCalledWith(
         expect.objectContaining({
           status: 'stopped',
-          stopped_reason: 'payment_plan_created:plan-1',
+          // Raw SQL concat stamping the pre-plan status for cancel restore.
+          stopped_reason: { __raw: '? || status', __bindings: ['payment_plan_created:plan-1:prev='] },
           stopped_by_admin_id: 'admin-1',
         }),
       );
@@ -174,6 +188,43 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     });
   });
 
+  test('P2: a plan cancelled between commit and the post-commit email gets NO confirmation (fence re-reads under the invoice lock)', async () => {
+    const email = require('../services/payment-lifecycle-email');
+    // The fence's under-lock first('status') sees the concurrent cancel's
+    // committed write.
+    trxPlans.first = jest.fn(async (...args) => (args[0] === 'status' ? { status: 'cancelled' } : null));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(email.sendPaymentPlanConfirmed).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a settlement that lands while waiting on the lock is a 409, not a fresh active plan on a paid invoice', async () => {
+    trxInvoices.first.mockResolvedValue({ ...LOCKED_INVOICE, status: 'paid' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(409);
+      expect(trxPlans.insert).not.toHaveBeenCalled();
+    });
+  });
+
   test('a vanished invoice at lock time is a 409, not a plan attributed from a stale snapshot', async () => {
     trxInvoices.first.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
@@ -206,6 +257,245 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
       // The error propagates out of db.transaction — the route must not
       // report a created plan whose dunning stop never committed.
       expect(res.status).toBeGreaterThanOrEqual(500);
+    });
+  });
+});
+
+describe('POST /:id/payment-plan/cancel', () => {
+  let trx;
+  let trxInvoices;
+  let trxPlans;
+  let trxFollowupsSeq;
+
+  const ACTIVE_PLAN = { id: 'plan-1', customer_id: 'cust-1', status: 'active' };
+  const CANCELLED_PLAN = { ...ACTIVE_PLAN, status: 'cancelled' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
+    trxPlans = makeRecorder({
+      first: jest.fn(async () => ({ ...ACTIVE_PLAN })),
+      update: jest.fn(() => ({ returning: jest.fn(async () => [CANCELLED_PLAN]) })),
+    });
+    trxFollowupsSeq = makeRecorder({
+      // The sequence THIS plan stopped — the only kind cancel may re-arm.
+      first: jest.fn(async () => ({ id: 'seq-1', status: 'stopped', stopped_reason: 'payment_plan_created:plan-1' })),
+    });
+    trx = jest.fn((table) => {
+      if (table === 'invoices') return trxInvoices;
+      if (table === 'payment_plans') return trxPlans;
+      if (table === 'invoice_followup_sequences') return trxFollowupsSeq;
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    const activityQB = makeRecorder();
+    db.mockImplementation((table) => {
+      if (table === 'activity_log') return activityQB;
+      throw new Error(`unexpected table ${table}`);
+    });
+    db.followupsQB = trxFollowupsSeq;
+    db.transaction.mockImplementation(async (cb) => cb(trx));
+  });
+
+  test('cancels the active plan under row locks and stamps cancelled_at/by', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1', reason: 'created in error' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.paymentPlan.status).toBe('cancelled');
+      // Both rows locked in the transaction before the flip.
+      expect(trxInvoices.forUpdate).toHaveBeenCalled();
+      expect(trxPlans.forUpdate).toHaveBeenCalled();
+      // The UPDATE re-asserts status='active' so a concurrent completion
+      // (invoice paid mid-request) can't be silently overwritten.
+      expect(trxPlans.where).toHaveBeenCalledWith({ id: 'plan-1', status: 'active' });
+      expect(trxPlans.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'cancelled',
+        cancelled_by: 'admin-1',
+        cancelled_at: expect.any(Date),
+      }));
+      // Cancelling returns the invoice to normal collection — the dunning
+      // sequence the plan stopped must be re-armed, or "reopens for
+      // collection" is a lie (codex r1 P1).
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1', expect.anything());
+    });
+  });
+
+  test('the plan-owned PAUSED shape (create route pauses post-commit) is re-armed too (codex r5 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({
+      id: 'seq-1',
+      status: 'paused',
+      paused_reason: 'payment_plan_created',
+      stopped_reason: 'payment_plan_created:plan-1',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1', expect.anything());
+    });
+  });
+
+  test('no sequence row at cancel time → the existing scheduling mechanism arms one (codex r6 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+      expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
+  test('a scheduling failure after cancel is NOT acknowledged as success (codex r11 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue(null); // no sequence → schedule path
+    const FollowUps = require('../services/invoice-followups');
+    FollowUps.scheduleForInvoice.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      expect(body.error).toMatch(/retry the cancel/i);
+    });
+  });
+
+  test('an autopay-held sequence returns to autopay_hold, never the active cadence (codex PR r1 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({
+      id: 'seq-1',
+      status: 'stopped',
+      stopped_reason: 'payment_plan_created:plan-1',
+      is_autopay_held: true,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      // The failure-threshold release flow owns when a held sequence starts
+      // reminding — resumeSequence would dun an autopay customer.
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+      expect(db.followupsQB.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'autopay_hold',
+        stopped_reason: null,
+        next_touch_at: null,
+      }));
+    });
+  });
+
+  test('a sequence an admin stopped for an UNRELATED reason stays stopped after cancel (codex r2 P1)', async () => {
+    db.followupsQB.first.mockResolvedValue({ id: 'seq-1', status: 'stopped', stopped_reason: 'admin_stop' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+    });
+  });
+
+  test('retrying after a committed cancel re-arms the sequence instead of 409ing (idempotent)', async () => {
+    // First lookup (active) → none; second lookup (latest cancelled) → the plan.
+    trxPlans.first
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...CANCELLED_PLAN, cancelled_at: new Date() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      // No second cancel write — but the re-arm runs again for the retry.
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'cancelled', id: 'plan-1' });
+      expect(trxPlans.update).not.toHaveBeenCalled();
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).toHaveBeenCalledWith('inv-1', expect.anything());
+    });
+  });
+
+  test('a stale cancel naming plan A never cancels replacement plan B (codex r10 P1)', async () => {
+    // Active lookup conditioned on the expected id finds nothing (B is
+    // active, A is cancelled); the retry probe returns A → alreadyCancelled.
+    trxPlans.first
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...CANCELLED_PLAN, cancelled_at: new Date() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.alreadyCancelled).toBe(true);
+      // Both probes were conditioned on the EXPECTED plan id.
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active', id: 'plan-1' });
+      expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'cancelled', id: 'plan-1' });
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('400 when paymentPlanId is missing — cancel must name the exact plan (codex r12 P1)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('409 when the invoice has no active plan', async () => {
+    trxPlans.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(409);
+      expect(trxPlans.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('404 when the invoice does not exist', async () => {
+    trxInvoices.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(404);
+      expect(trxPlans.update).not.toHaveBeenCalled();
     });
   });
 });
