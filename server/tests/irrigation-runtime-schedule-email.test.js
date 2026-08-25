@@ -147,6 +147,13 @@ describe('non-convertible entries → setup_schedule with a specific schedule_as
     expect(text).toContain('enter that under Irrigation in your portal');
   });
 
+  test('legacy unknown head type with complete inputs → names the type, never claims run time is missing', () => {
+    const text = ask({ irrigationRunMinutes: 20, wateringDays: ['Mon', 'Wed'], irrigationSystemType: ['bubbler'] });
+    expect(text).toContain('"bubbler" isn\'t a head type we have a watering rate for');
+    expect(text).toContain('20 minutes per zone');
+    expect(text).not.toContain('how long or how often it runs');
+  });
+
   test('drip only → beds, not turf', () => {
     expect(ask({ irrigationRunMinutes: 30, wateringDays: ['Mon'], irrigationSystemType: ['drip'] })).toContain('waters beds rather than turf');
   });

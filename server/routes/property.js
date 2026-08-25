@@ -47,13 +47,21 @@ const prefsSchema = Joi.object({
   // @waves/irrigation-runtime converts to inches (× days × head type).
   irrigationRunMinutes: Joi.number().integer().min(0).max(240).allow(null),
   irrigationScheduleNotes: longText,
-  wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
+  // Same seven keys the pills emit — mirrors mowingDays below. A length-only
+  // check would persist "Monday" with a 200, and @waves/irrigation-runtime
+  // normalizes against the canonical keys, so the day would silently vanish
+  // from the derivation and the email would claim the days are missing.
+  wateringDays: Joi.array().items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')).unique().max(7),
   // Customers can have multiple sprinkler types on one property. Accept an
   // array (current client) or a legacy scalar string for backward compat;
-  // the route normalizes to an array before storage.
+  // the route normalizes to an array before storage. Vocabulary is the three
+  // types the portal pills emit and @waves/irrigation-runtime has rates or
+  // rules for — an unknown type would persist fine and then derail the
+  // derivation into unknown_head_type copy. Legacy rows keep whatever they
+  // hold; only new writes are restricted.
   irrigationSystemType: Joi.alternatives().try(
-    Joi.array().items(Joi.string().max(30)).max(3),
-    Joi.string().max(30).allow('')
+    Joi.array().items(Joi.string().valid('spray', 'drip', 'rotor')).unique().max(3),
+    Joi.string().valid('spray', 'drip', 'rotor', '')
   ).allow(null),
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
@@ -469,4 +477,5 @@ module.exports = router;
 module.exports._private = {
   propertyChangeItems,
   displayPrefValue,
+  prefsSchema,
 };

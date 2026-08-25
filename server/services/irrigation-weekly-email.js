@@ -141,6 +141,13 @@ function buildScheduleAsk({ derived, inputs }) {
   if (reason === 'drip_only') {
     return `Your system is on file as drip, which waters beds rather than turf. If the lawn does get sprinkler water, add the head type and minutes per zone (or your weekly inches) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
   }
+  // Legacy rows can hold a head type outside the spray/drip/rotor vocabulary
+  // (new writes are restricted at the route). Complete inputs + an unknown
+  // type must not fall through to "we don't know how long it runs" — every
+  // other input may be on file.
+  if (reason === 'unknown_head_type') {
+    return `Your sprinkler system is on file${haveClause}but "${joinList(inputs.headTypes)}" isn't a head type we have a watering rate for. Pick In-ground Spray or Rotor ${PORTAL_IRRIGATION_ASK} (or enter your weekly inches, if you know them) ${SETUP_CLOSER}`;
+  }
 
   // Enumerate EVERY missing input, not the derivation's first failure reason
   // — its checks are sequential, and naming only the first blocker sends the

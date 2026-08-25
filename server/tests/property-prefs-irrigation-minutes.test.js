@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const propertyRouter = require('../routes/property');
 
-const { propertyChangeItems } = propertyRouter._private;
+const { propertyChangeItems, prefsSchema } = propertyRouter._private;
 
 describe('property preferences — irrigation minutes per zone', () => {
   test('a minutes change produces an account-updated change item', () => {
@@ -34,5 +34,24 @@ describe('property preferences — irrigation minutes per zone', () => {
     expect(src).toMatch(/irrigationRunMinutes: Joi\.number\(\)\.integer\(\)\.min\(0\)\.max\(240\)\.allow\(null\)/);
     expect(src).toMatch(/'irrigation_run_minutes'/); // ALLOWED_FIELDS
     expect(src).toMatch(/irrigationRunMinutes: null/); // GET defaults
+  });
+
+  // The derivation normalizes against canonical vocabularies — a persisted
+  // value outside them silently vanishes from the conversion and the email
+  // then claims the input is missing (GH codex P1 on #3478 r3). Writes must
+  // therefore reject anything but the exact keys the portal pills emit.
+  test('wateringDays accepts only the seven canonical pill keys, unique', () => {
+    expect(prefsSchema.validate({ wateringDays: ['Mon', 'Wed'] }).error).toBeUndefined();
+    expect(prefsSchema.validate({ wateringDays: ['Monday'] }).error).toBeTruthy();
+    expect(prefsSchema.validate({ wateringDays: ['Mon', 'Mon'] }).error).toBeTruthy();
+  });
+
+  test('irrigationSystemType accepts only spray/drip/rotor (array or legacy scalar)', () => {
+    expect(prefsSchema.validate({ irrigationSystemType: ['spray', 'rotor'] }).error).toBeUndefined();
+    expect(prefsSchema.validate({ irrigationSystemType: 'rotor' }).error).toBeUndefined();
+    expect(prefsSchema.validate({ irrigationSystemType: '' }).error).toBeUndefined();
+    expect(prefsSchema.validate({ irrigationSystemType: null }).error).toBeUndefined();
+    expect(prefsSchema.validate({ irrigationSystemType: ['bubbler'] }).error).toBeTruthy();
+    expect(prefsSchema.validate({ irrigationSystemType: ['spray', 'spray'] }).error).toBeTruthy();
   });
 });
