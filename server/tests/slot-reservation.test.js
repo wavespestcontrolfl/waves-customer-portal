@@ -65,13 +65,13 @@ describe('slot reservation helpers', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
       'Pest Control',
-    )).toBe('One-Time Pest Control Service');
+    )).toBe('Pest Control');
     // Already-mislabeled fallback ("Quarterly Pest Control") must NOT survive a
     // one-time canonicalization.
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },
       'Quarterly Pest Control',
-    )).toBe('One-Time Pest Control Service');
+    )).toBe('Pest Control');
     // Re-mislabel guard: a null profile at commit must still honor an explicit
     // one-time serviceMode rather than re-deriving the cadence from the
     // (possibly stale) fallback.
@@ -79,7 +79,7 @@ describe('slot reservation helpers', () => {
       null,
       'Quarterly Pest Control',
       { serviceMode: 'one_time' },
-    )).toBe('One-Time Pest Control Service');
+    )).toBe('Pest Control');
   });
 
   // Shared builder factories for the reserveSlot transaction mocks. The txn
@@ -297,7 +297,7 @@ describe('slot reservation helpers', () => {
       });
 
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-        service_type: 'One-Time Pest Control Service',
+        service_type: 'Pest Control',
         is_recurring: false,
       }));
     } finally {

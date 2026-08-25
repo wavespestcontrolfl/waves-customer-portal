@@ -79,7 +79,11 @@ async function syncTermiteBonds() {
     // still a bond when its snapshot/catalog key says so (2026-08-25 audit).
     .where(function bondCandidate() {
       this.where('scheduled_services.service_type', 'ilike', BOND_MATCH)
-        .orWhereIn('scheduled_services.service_key_snapshot', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr']);
+        .orWhereIn('scheduled_services.service_key_snapshot', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr'])
+        // A visit whose only bond evidence is its LINKED catalog row (valid
+        // service_id, no snapshot, drifted label) must still be a candidate
+        // — otherwise termYearsForVisit never sees it (codex #3485 r1 P2).
+        .orWhereIn('services.service_key', ['termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr']);
     })
     // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
     // seeder) — only the establishing anchor visit starts a bond term, or a

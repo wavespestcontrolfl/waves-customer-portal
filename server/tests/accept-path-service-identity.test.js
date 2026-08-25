@@ -21,18 +21,24 @@ const { ENGINE_KEY_SEEDS } = require('../models/migrations/20260810000002_servic
 
 const {
   ENGINE_KEY_SEEDS: EXPANSION_SEEDS,
-  WASP_ALIAS_TARGET,
+  ALIAS_APPENDS,
 } = require('../models/migrations/20260825000011_engine_key_coverage_expansion');
 
-const { catalogServiceIdForProfile } = _internals;
+const { catalogLinkForProfile } = _internals;
+// id-only view used throughout this suite — the link {id, name, service_key}
+// is the single resolver surface since #3485 (the wrapper was removed).
+const catalogServiceIdForProfile = async (conn, profile) => {
+  const link = await catalogLinkForProfile(conn, profile);
+  return link ? link.id : null;
+};
 
 // The 2026-08-25 coverage expansion seeds ride on top of the original four
-// rows; the wasp append joins bee_wasp_removal's alias array. The combined
-// view is what the LIVE catalog carries after both migrations.
+// rows; the alias appends (wasp, pre_slab_termidor) join their parent
+// rows' arrays. The combined view is what the LIVE catalog carries after
+// both migrations.
+const appendsFor = (key) => ALIAS_APPENDS.filter((t) => t.service_key === key).map((t) => t.append);
 const COMBINED_SEEDS = [
-  ...ENGINE_KEY_SEEDS.map((s) => (s.service_key === WASP_ALIAS_TARGET.service_key
-    ? { ...s, engine_keys: [...s.engine_keys, WASP_ALIAS_TARGET.append] }
-    : s)),
+  ...ENGINE_KEY_SEEDS.map((s) => ({ ...s, engine_keys: [...s.engine_keys, ...appendsFor(s.service_key)] })),
   ...EXPANSION_SEEDS,
 ];
 
@@ -60,6 +66,12 @@ const ENGINE_KEYS_REACHING_ACCEPT = [
 const KNOWN_UNMAPPED_ENGINE_KEYS = [
   // ONE key for four sanitation tier rows — no tier discriminator on the line.
   'rodent_sanitation',
+  // Shared raw key: the engine reuses one_time_lawn for the distinct
+  // "Lawn Pest Knockdown" identity, so it cannot name one catalog row.
+  'one_time_lawn',
+  // Exclusion + bait + guarantee bundle — mapping it to the payment-only
+  // guarantee row would hide the sold field work from completion.
+  'rodent_guarantee_combo',
   // Retainers are billing plans with no schedulable catalog rows by design
   // (estimate-converter.js: deliberately NO branch), and their surcharge/
   // callback riders bill on the parent line.
@@ -115,6 +127,13 @@ describe('accept-path engine-key mapping (static)', () => {
     // The legacy v1 'wasp' key (service-pricing.js:7842) is the third alias —
     // missed by the original seed, appended by 20260825000011.
     expect(owner('wasp')).toBe('bee_wasp_removal');
+  });
+
+  test('legacy pre_slab_termidor stays on the certificate lane', () => {
+    // It wraps pricePreSlabTermiticide — same FDACS-certificate service, so
+    // it must resolve termite_slab_pretreat, never termite_pretreatment.
+    const owner = (key) => COMBINED_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
+    expect(owner('pre_slab_termidor')).toBe('termite_slab_pretreat');
   });
 });
 

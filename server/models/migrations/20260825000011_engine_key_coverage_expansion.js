@@ -32,10 +32,16 @@
 
 const ENGINE_KEY_SEEDS = [
   // One-time family rows (labels were ambiguous abbreviations that failed
-  // closed — the id makes them unambiguous).
+  // closed — the id makes them unambiguous). `one_time_lawn` is DELIBERATELY
+  // absent: the engine reuses that raw key for the distinct "Lawn Pest
+  // Knockdown" identity (estimate-engine wraps priceOneTimeLawn), so the key
+  // cannot name one catalog row (codex #3485 r1 P1).
   { service_key: 'one_time_pest_control', engine_keys: ['one_time_pest'] },
-  { service_key: 'lawn_care_one_time', engine_keys: ['one_time_lawn'] },
   { service_key: 'mosquito_one_time', engine_keys: ['one_time_mosquito'] },
+  // Standalone recurring termite bait — 1:1 with the termite_bait row; the
+  // reserved-path label is an admin-editable name, so the link is the only
+  // durable identity (codex #3485 r1 P1).
+  { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
   // Foam pair — the one-time line previously mis-resolved to the BAIT row
   // via short-name fallback (grade-D in the 2026-08-25 audit).
   { service_key: 'foam_drill', engine_keys: ['foam_drill'] },
@@ -44,7 +50,11 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'bora_care', engine_keys: ['bora_care'] },
   { service_key: 'termite_trenching', engine_keys: ['trenching'] },
   { service_key: 'termite_spot_treatment', engine_keys: ['termite_foam'] },
-  { service_key: 'termite_pretreatment', engine_keys: ['pre_slab_termidor'] },
+  // pre_slab_termidor is NOT seeded here — it is the legacy alias of the
+  // pre-slab line (a wrapper around pricePreSlabTermiticide) and belongs on
+  // termite_slab_pretreat's certificate lane, appended below (codex #3485
+  // r1 P1 — stamping termite_pretreatment would bypass the FDACS/FBC
+  // certificate workflow for identical pre-slab work).
   // Inspections.
   { service_key: 'wdo_inspection', engine_keys: ['wdo_inspection'] },
   { service_key: 'rodent_inspection', engine_keys: ['rodent_inspection'] },
@@ -55,7 +65,11 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'rodent_exclusion_only', engine_keys: ['rodent_exclusion', 'exclusion', 'exclusion_v2'] },
   { service_key: 'rodent_wire_mesh', engine_keys: ['rodent_wire_mesh'] },
   { service_key: 'rodent_bird_box', engine_keys: ['rodent_bird_box'] },
-  { service_key: 'rodent_guarantee', engine_keys: ['rodent_guarantee', 'rodent_guarantee_combo'] },
+  // NOT rodent_guarantee_combo: the combo line is exclusion + bait stations
+  // + guarantee and needs a field visit, while this row is a duration-zero
+  // internal-only billing construct — stamping it would hide the sold work
+  // from the tech completion flow (codex #3485 r1 P1).
+  { service_key: 'rodent_guarantee', engine_keys: ['rodent_guarantee'] },
   { service_key: 'rodent_bait_setup', engine_keys: ['rodent_bait_setup'] },
   // Lawn one-time projects.
   { service_key: 'dethatching', engine_keys: ['dethatching'] },
@@ -68,14 +82,25 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'palm_injection', engine_keys: ['palm_injection'] },
 ];
 
-// The legacy v1 `wasp` key is the third alias of the stinging-insect line
-// (service-pricing.js:7842) — same real service as stinging_insect /
-// stinging_insect_v2, missed by the 20260810000002 seed.
-const WASP_ALIAS_TARGET = {
-  service_key: 'bee_wasp_removal',
-  shipped: ['stinging_insect', 'stinging_insect_v2'],
-  append: 'wasp',
-};
+// Additive alias appends onto rows the PARENT migration already stamped —
+// guarded on the exact shipped array (compare-and-set in the UPDATE
+// predicate) so an admin-customized value is never rewritten.
+//   - `wasp`: the legacy v1 third alias of the stinging-insect line
+//     (service-pricing.js:7842), missed by the 20260810000002 seed.
+//   - `pre_slab_termidor`: the legacy wrapper key around
+//     pricePreSlabTermiticide — same certificate-lane service.
+const ALIAS_APPENDS = [
+  {
+    service_key: 'bee_wasp_removal',
+    shipped: ['stinging_insect', 'stinging_insect_v2'],
+    append: 'wasp',
+  },
+  {
+    service_key: 'termite_slab_pretreat',
+    shipped: ['pre_slab_termiticide'],
+    append: 'pre_slab_termidor',
+  },
+];
 
 const STATE_KEY = 'migration.20260825000011.state';
 
@@ -99,40 +124,52 @@ exports.up = async function up(knex) {
   // Ownership is RECORDED, not inferred: value equality cannot prove up()
   // wrote a mapping (an admin who pre-stamped the identical array would be
   // clobbered by a value-guarded rollback — the exact trap the parent
-  // migration documents). down() reverses only the rows recorded here.
-  const state = { stampedKeys: [], waspAppended: false };
+  // migration documents). Rows are recorded by {service_key, id} so a
+  // delete-and-recreate of the same key can never read as ownership
+  // (codex #3485 r1 P2).
+  const state = { stamped: [], appended: [] };
 
   for (const seed of ENGINE_KEY_SEEDS) {
     // Read-modify-write: only stamp rows that exist and are still unstamped,
-    // so an admin edit (or a re-run) is never clobbered.
-    const count = await knex('services')
+    // so an admin edit (or a re-run) is never clobbered. whereNull rides on
+    // the id-scoped UPDATE too, so a concurrent admin stamp between read and
+    // write hits zero rows and is never claimed.
+    const row = await knex('services')
       .where({ service_key: seed.service_key })
       .whereNull('engine_keys')
+      .first('id');
+    if (!row) continue;
+    const count = await knex('services')
+      .where({ id: row.id })
+      .whereNull('engine_keys')
       .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
-    if (count) state.stampedKeys.push(seed.service_key);
+    if (count) state.stamped.push({ service_key: seed.service_key, id: row.id });
   }
 
-  // Additive alias append, guarded on the exact shipped array so an
-  // admin-customized value is never rewritten.
-  const row = await knex('services')
-    .where({ service_key: WASP_ALIAS_TARGET.service_key })
-    .first('id', 'engine_keys');
-  if (row) {
+  for (const target of ALIAS_APPENDS) {
+    const row = await knex('services')
+      .where({ service_key: target.service_key })
+      .first('id', 'engine_keys');
+    if (!row) continue;
     const current = Array.isArray(row.engine_keys)
       ? row.engine_keys
       : (() => { try { return JSON.parse(row.engine_keys); } catch { return null; } })();
     const isShipped = Array.isArray(current)
-      && current.length === WASP_ALIAS_TARGET.shipped.length
-      && WASP_ALIAS_TARGET.shipped.every((k, i) => current[i] === k);
-    if (isShipped) {
-      const count = await knex('services')
-        .where({ id: row.id })
-        .update({
-          engine_keys: JSON.stringify([...current, WASP_ALIAS_TARGET.append]),
-          updated_at: knex.fn.now(),
-        });
-      state.waspAppended = count > 0;
-    }
+      && current.length === target.shipped.length
+      && target.shipped.every((k, i) => current[i] === k);
+    if (!isShipped) continue;
+    // Compare-and-set: the expected current value rides in the UPDATE
+    // predicate, so an admin edit landing between the SELECT and this
+    // UPDATE hits zero rows instead of being overwritten (codex #3485 r1
+    // P2).
+    const count = await knex('services')
+      .where({ id: row.id })
+      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(target.shipped)])
+      .update({
+        engine_keys: JSON.stringify([...target.shipped, target.append]),
+        updated_at: knex.fn.now(),
+      });
+    if (count) state.appended.push({ service_key: target.service_key, id: row.id });
   }
 
   await saveState(knex, state);
@@ -148,40 +185,26 @@ exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (!state) return;
 
-  const stamped = new Set(Array.isArray(state.stampedKeys) ? state.stampedKeys : []);
-  for (const seed of ENGINE_KEY_SEEDS) {
-    if (!stamped.has(seed.service_key)) continue;
-    const row = await knex('services').where({ service_key: seed.service_key }).first('id', 'engine_keys');
-    if (!row) continue;
-    const current = Array.isArray(row.engine_keys)
-      ? row.engine_keys
-      : (() => { try { return JSON.parse(row.engine_keys); } catch { return null; } })();
-    const isSeeded = Array.isArray(current)
-      && current.length === seed.engine_keys.length
-      && seed.engine_keys.every((k, i) => current[i] === k);
-    if (isSeeded) {
-      await knex('services').where({ id: row.id })
-        .update({ engine_keys: null, updated_at: knex.fn.now() });
-    }
+  const seedsByKey = new Map(ENGINE_KEY_SEEDS.map((s) => [s.service_key, s]));
+  for (const rec of (Array.isArray(state.stamped) ? state.stamped : [])) {
+    const seed = rec && seedsByKey.get(rec.service_key);
+    if (!seed || !rec.id) continue;
+    // Ownership binds to the recorded ROW id — a same-key row recreated by
+    // an admin after a delete is a different row and is never touched.
+    await knex('services')
+      .where({ id: rec.id, service_key: rec.service_key })
+      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(seed.engine_keys)])
+      .update({ engine_keys: null, updated_at: knex.fn.now() });
   }
 
-  const row = state.waspAppended
-    ? await knex('services')
-      .where({ service_key: WASP_ALIAS_TARGET.service_key })
-      .first('id', 'engine_keys')
-    : null;
-  if (row) {
-    const current = Array.isArray(row.engine_keys)
-      ? row.engine_keys
-      : (() => { try { return JSON.parse(row.engine_keys); } catch { return null; } })();
-    const appended = [...WASP_ALIAS_TARGET.shipped, WASP_ALIAS_TARGET.append];
-    const isAppended = Array.isArray(current)
-      && current.length === appended.length
-      && appended.every((k, i) => current[i] === k);
-    if (isAppended) {
-      await knex('services').where({ id: row.id })
-        .update({ engine_keys: JSON.stringify(WASP_ALIAS_TARGET.shipped), updated_at: knex.fn.now() });
-    }
+  const appendsByKey = new Map(ALIAS_APPENDS.map((t) => [t.service_key, t]));
+  for (const rec of (Array.isArray(state.appended) ? state.appended : [])) {
+    const target = rec && appendsByKey.get(rec.service_key);
+    if (!target || !rec.id) continue;
+    await knex('services')
+      .where({ id: rec.id, service_key: rec.service_key })
+      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify([...target.shipped, target.append])])
+      .update({ engine_keys: JSON.stringify(target.shipped), updated_at: knex.fn.now() });
   }
 
   if (await knex.schema.hasTable('system_settings')) {
@@ -192,4 +215,4 @@ exports.down = async function down(knex) {
 // Consumed by accept-path-service-identity.test.js (same contract as the
 // parent migration's export).
 exports.ENGINE_KEY_SEEDS = ENGINE_KEY_SEEDS;
-exports.WASP_ALIAS_TARGET = WASP_ALIAS_TARGET;
+exports.ALIAS_APPENDS = ALIAS_APPENDS;

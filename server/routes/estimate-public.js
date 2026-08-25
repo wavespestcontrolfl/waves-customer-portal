@@ -14655,8 +14655,12 @@ async function adoptedAppointmentCatalogStamp(conn, {
   // Savepoint-confined inside the resolver — a lookup hiccup cannot poison
   // the accept transaction (#3328 pre-push P1: try/catch alone is NOT
   // fail-open inside a txn).
-  const catalogServiceId = await slotReservation.catalogServiceIdForProfile(conn, profile);
-  return catalogServiceId ? { service_id: catalogServiceId } : null;
+  const catalogLink = await slotReservation.catalogLinkForProfile(conn, profile);
+  // Adopted rows keep their admin-authored label — only the durable
+  // identity evidence is stamped (id + key snapshot), never service_type.
+  return catalogLink
+    ? { service_id: catalogLink.id, ...(catalogLink.service_key ? { service_key_snapshot: catalogLink.service_key } : {}) }
+    : null;
 }
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {

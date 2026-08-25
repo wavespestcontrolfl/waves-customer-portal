@@ -187,11 +187,22 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   // profile at commit can't re-derive the cadence prefix from a stale fallback.
   const isOneTime = opts.serviceMode === 'one_time' || serviceProfile?.serviceMode === 'one_time';
 
-  if (key === 'pest_control') return isOneTime ? 'One-Time Pest Control Service' : pestServiceTypeFromVisits(primary?.visitsPerYear);
-  if (key === 'lawn_care') return isOneTime ? 'One-Time Lawn Care Service' : lawnServiceTypeFromVisits(primary?.visitsPerYear);
-  if (key === 'mosquito') return isOneTime ? 'One-Time Mosquito Control Service' : mosquitoServiceTypeFromVisits(primary?.visitsPerYear);
+  // One-time branches deliberately keep the LEGACY ambiguous labels: the
+  // category collapses every pest/lawn specialty into one key, so a
+  // canonical one-time name here would resolve the generic one-time row
+  // for work that is actually a specialty (a "Lawn Pest Knockdown" line
+  // carries the shared one_time_lawn key — codex #3485 r1 P1). Canonical
+  // one-time names come ONLY from the engine-key catalog link, which
+  // resolves the specific row or nothing.
+  if (key === 'pest_control') return isOneTime ? 'Pest Control' : pestServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'lawn_care') return isOneTime ? 'Lawn Care' : lawnServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'mosquito') return isOneTime ? 'Mosquito Treatment' : mosquitoServiceTypeFromVisits(primary?.visitsPerYear);
   if (key === 'tree_shrub') return treeShrubServiceTypeFromVisits(primary?.visitsPerYear);
-  if (key === 'termite_bait') return 'Termite Bait Station Service';
+  // Legacy short-name form: the catalog row's NAME is admin-editable (prod
+  // already diverges from the migration-shipped value), so the fallback
+  // keeps the unique "Termite Bait" short-name lookup that already worked;
+  // the canonical name comes from the engine-key link (codex #3485 r1 P1).
+  if (key === 'termite_bait') return 'Termite Bait';
   if (key === 'foam_recurring') return 'Recurring Termite Foam Service';
   if (key === 'foam_drill') return 'Termite Foam Service';
   if (key === 'palm_injection') return 'Palm Injection';
@@ -286,12 +297,6 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   return resolved;
 }
 
-// Back-compat id-only view of catalogLinkForProfile (external callers —
-// estimate-public's adopted-appointment stamp — key off the id alone).
-async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
-  const link = await catalogLinkForProfile(conn, serviceProfile);
-  return link ? link.id : null;
-}
 
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
   const label = String(serviceProfile?.serviceLabel || fallback || '')
@@ -1321,7 +1326,6 @@ module.exports = {
   // appointment path (estimate-public adoptedAppointmentCatalogStamp) reuses
   // it so identity has exactly one resolver — never re-implement the
   // engine-key containment lookup.
-  catalogServiceIdForProfile,
   catalogLinkForProfile,
   _internals: {
     parseSlotId,
@@ -1329,7 +1333,6 @@ module.exports = {
     cappedServiceType,
     canonicalServiceTypeForProfile,
     notesWithServiceMix,
-    catalogServiceIdForProfile,
     catalogLinkForProfile,
   },
 };
