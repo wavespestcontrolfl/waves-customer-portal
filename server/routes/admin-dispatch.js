@@ -8890,6 +8890,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // refunded invoice that BILLED the fee reads not-owed.
     let unmintedSetupFeeObligation = null;
     let terminalSetupFeeNote = '';
+    let setupFeeReconcileAfterCommit = false;
     if (!recapReviewOnly
       && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
       try {
@@ -9491,6 +9492,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Out-of-band prepayment proves the APPLICATION collected (the
           // amount was compared against the visit charge), never the fee.
           const applicationCoveredOutOfBand = setupFeePrepaidBeside;
+          // Resolution may only speak for the WHOLE estate of parked
+          // visits (Codex P0): with other visits persisted on the alert,
+          // this transaction can prove only the CURRENT one — leave the
+          // alert untouched and hand the full per-visit picture to the
+          // shared reconciler after commit.
+          const otherParkedIds = [...new Set([
+            ...(Array.isArray(alreadyMeta?.parkedVisitIds) ? alreadyMeta.parkedVisitIds.map(String) : []),
+            ...(alreadyMeta?.scheduledServiceId ? [String(alreadyMeta.scheduledServiceId)] : []),
+          ])].filter((id) => id !== String(svc.id));
+          if (feeCoveredBy && (applicationCoveredBy || applicationCoveredOutOfBand) && otherParkedIds.length) {
+            setupFeeReconcileAfterCommit = true;
+            return true;
+          }
           if (feeCoveredBy && (applicationCoveredBy || applicationCoveredOutOfBand)) {
             const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
             logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
@@ -9583,6 +9597,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         });
+      }
+      if (setupFeeReconcileAfterCommit) {
+        // Multi-visit resolution deferred from the alert transaction
+        // (Codex P0): the shared reconciler proves EVERY parked visit
+        // under its own locks. Best-effort — the daily sweep is the net.
+        await require('../services/setup-fee-alert-reconcile')
+          .reconcileSetupFeeAlert({
+            customerId: svc.customer_id,
+            sourceEstimateId: svc.source_estimate_id,
+            actorLabel: ` visit ${svc.id} post-commit:`,
+          })
+          .catch((err) => logger.error(`[dispatch] post-commit setup-fee reconcile failed for ${svc.id}: ${err.message}`));
       }
     }
     // Membership dues suppressed a PRICED recurring visit: log + park a

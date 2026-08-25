@@ -184,12 +184,19 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // cross-visit race can park several visits, and staff may bill
           // them one at a time — every rewritten instruction lists ONLY
           // the still-uncovered visits, never a covered one.
-          const stampedAppCents = stampedLive.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
+          // ONE invoice covers ONE visit (Codex P0): an invoice attached
+          // to a secondary parked visit already counts there via
+          // visitApplicationBilled — only UNATTACHED acceptance invoices
+          // may provide the primary-visit fallback, or a single charge
+          // resolves two applications and loses AR.
+          const attachedRowIds = new Set(onParkedAll.map((r) => String(r.id)));
+          const stampedUnattached = stampedLive.filter((r) => !attachedRowIds.has(String(r.id)));
+          const stampedAppCents = stampedUnattached.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
           const stampedCoversPrimary = (visitId) => {
             if (String(visitId) !== primaryVisitId) return false;
             const expect = expectedAppCents(visitId);
             return expect === null
-              ? stampedLive.some(invoiceBillsBaseApplication)
+              ? stampedUnattached.some(invoiceBillsBaseApplication)
               : stampedAppCents >= expect;
           };
           const visitCovered = (visitId) => (visitApplicationBilled(visitId)
