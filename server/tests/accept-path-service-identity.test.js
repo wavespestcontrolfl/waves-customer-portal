@@ -22,6 +22,7 @@ const { ENGINE_KEY_SEEDS } = require('../models/migrations/20260810000002_servic
 const {
   ENGINE_KEY_SEEDS: EXPANSION_SEEDS,
   ALIAS_APPENDS,
+  CONDITIONAL_SEEDS,
 } = require('../models/migrations/20260825000011_engine_key_coverage_expansion');
 
 const { catalogLinkForProfile } = _internals;
@@ -40,6 +41,10 @@ const appendsFor = (key) => ALIAS_APPENDS.filter((t) => t.service_key === key).m
 const COMBINED_SEEDS = [
   ...ENGINE_KEY_SEEDS.map((s) => ({ ...s, engine_keys: [...s.engine_keys, ...appendsFor(s.service_key)] })),
   ...EXPANSION_SEEDS,
+  // Conditional seeds land on whichever candidate row the environment has —
+  // represented here by their preferred candidate; the DB-backed tests below
+  // assert resolution on the LIVE catalog regardless of which row won.
+  ...CONDITIONAL_SEEDS.map((s) => ({ service_key: s.service_key_candidates[0], engine_keys: s.engine_keys })),
 ];
 
 const ALL_SEEDED_KEYS = COMBINED_SEEDS.flatMap((s) => s.engine_keys);
@@ -258,6 +263,67 @@ describe('catalogServiceIdForProfile', () => {
     expect(await catalogServiceIdForProfile(
       makeConn(() => []), { services: [{ service: 'not_a_real_key' }] },
     )).toBeNull();
+  });
+
+  // Cadence families share one engine key across per-cadence rows, so
+  // containment can never resolve them; the resolver falls back to the
+  // cadence-specific service_key — environment-proof where the label
+  // whitelist is not (fresh DBs carry different NAMES for the same rows,
+  // e.g. "Mosquito Control Service (Monthly)" — codex #3485 r3 P1).
+  describe('cadence-keyed fallback', () => {
+    const makeCadenceConn = (keyRows, capture = {}) => {
+      const builder = () => ({
+        whereRaw: () => ({ andWhere: () => ({ limit: () => ({ select: async () => [] }) }) }),
+        where: (cond) => {
+          capture.where = cond;
+          return { limit: () => ({ select: async () => keyRows }) };
+        },
+      });
+      builder.transaction = async (cb) => cb(builder);
+      return builder;
+    };
+
+    test('a 12-visit mosquito profile resolves mosquito_monthly by service_key', async () => {
+      const capture = {};
+      const row = { id: 'svc-mm', name: 'Mosquito Control Service (Monthly)', service_key: 'mosquito_monthly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'mosquito', visitsPerYear: 12 }] },
+      );
+      expect(link).toEqual(row);
+      expect(capture.where).toEqual({ service_key: 'mosquito_monthly', is_active: true });
+    });
+
+    test('a quarterly pest profile resolves pest_general_quarterly', async () => {
+      const capture = {};
+      const row = { id: 'svc-pq', name: 'Quarterly Pest Control Service', service_key: 'pest_general_quarterly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'pest_control', visitsPerYear: 4 }] },
+      );
+      expect(link).toEqual(row);
+    });
+
+    test('one_time mode and unknown cadence never trigger the keyed lookup', async () => {
+      const capture = {};
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { serviceMode: 'one_time', services: [{ service: 'pest_control', visitsPerYear: 4 }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { services: [{ service: 'pest_control' }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+    });
+
+    test('an ambiguous cadence key FAILS CLOSED', async () => {
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'a' }, { id: 'b' }]),
+        { services: [{ service: 'mosquito', visitsPerYear: 12 }] },
+      )).toBeNull();
+    });
   });
 
   test('FAILS OPEN when the lookup throws (pre-migration deploy)', async () => {

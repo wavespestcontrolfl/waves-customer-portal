@@ -499,7 +499,20 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   let primaryCategory = null;
   if (showOneTimeOption && typeof serviceCategoryForOneTimeChoice === 'function') {
     primaryCategory = serviceCategoryForOneTimeChoice(estData) || null;
-    if (primaryCategory) add(primaryCategory, labelForCategory(primaryCategory) || 'One-time service');
+    // The synthetic primary must carry the RAW one-time engine key: the
+    // priced choice row is deliberately skipped below, and a category-only
+    // primary queries the unkeyed family ('pest_control'/'mosquito') so the
+    // toggled accept keeps null identity and misses the one-time completion
+    // invoice / card-hold charge (codex #3485 r3 P1). Lawn stays keyless —
+    // one_time_lawn is a shared identity (see the engine-key migration).
+    const ONE_TIME_CHOICE_ENGINE_KEYS = { pest_control: 'one_time_pest', mosquito: 'one_time_mosquito' };
+    if (primaryCategory) {
+      add(
+        primaryCategory,
+        labelForCategory(primaryCategory) || 'One-time service',
+        ONE_TIME_CHOICE_ENGINE_KEYS[primaryCategory] || null,
+      );
+    }
   }
 
   // Setup fees and discounts carry no dispatchable service. A positive

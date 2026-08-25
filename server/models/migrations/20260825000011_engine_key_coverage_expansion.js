@@ -36,7 +36,12 @@ const ENGINE_KEY_SEEDS = [
   // absent: the engine reuses that raw key for the distinct "Lawn Pest
   // Knockdown" identity (estimate-engine wraps priceOneTimeLawn), so the key
   // cannot name one catalog row (codex #3485 r1 P1).
-  { service_key: 'one_time_pest_control', engine_keys: ['one_time_pest'] },
+  // `one_time_pest` is seeded CONDITIONALLY below: prod carries the
+  // admin-created one_time_pest_control row, while migration-built
+  // databases carry its documented twin pest_initial_cleanout
+  // (20260401000105:151) — creating a parallel row would put two
+  // conflicting one-time pest identities in the same catalog (codex
+  // #3485 r3 P1), so the key lands on whichever row the environment has.
   { service_key: 'mosquito_one_time', engine_keys: ['one_time_mosquito'] },
   // Standalone recurring termite bait — 1:1 with the termite_bait row; the
   // reserved-path label is an admin-editable name, so the link is the only
@@ -82,6 +87,15 @@ const ENGINE_KEY_SEEDS = [
   { service_key: 'palm_injection', engine_keys: ['palm_injection'] },
 ];
 
+// Seeds whose target row differs per environment: candidates in preference
+// order, first existing + unstamped row wins. Never creates rows.
+const CONDITIONAL_SEEDS = [
+  {
+    engine_keys: ['one_time_pest'],
+    service_key_candidates: ['one_time_pest_control', 'pest_initial_cleanout'],
+  },
+];
+
 // Additive alias appends onto rows the PARENT migration already stamped —
 // guarded on the exact shipped array (compare-and-set in the UPDATE
 // predicate) so an admin-customized value is never rewritten.
@@ -117,58 +131,10 @@ async function loadState(knex) {
   try { return JSON.parse(row.value); } catch { return null; }
 }
 
-// The one-time general pest row exists in PROD as an admin-created row but
-// no migration ever creates it — on a migration-built database (dev, CI,
-// preview) the one_time_pest seed would silently skip and accepted one-time
-// pest visits would keep booking with no identity there (codex #3485 r2
-// P2). Create it when absent, mirroring the prod definition verbatim
-// (read-only prod snapshot 2026-08-25); in prod the guard finds the
-// existing row and inserts nothing.
-const ONE_TIME_PEST_ROW = {
-  service_key: 'one_time_pest_control',
-  name: 'One-Time Pest Control Service',
-  short_name: 'One-Time Pest',
-  description: 'Heavy-duty initial treatment for new customers with active infestations. Includes interior flush, crack & crevice, exterior barrier.',
-  category: 'pest_control',
-  billing_type: 'one_time',
-  is_waveguard: false,
-  default_duration_minutes: 60,
-  min_duration_minutes: 60,
-  max_duration_minutes: 120,
-  scheduling_buffer_minutes: 0,
-  requires_follow_up: true,
-  follow_up_interval_days: 14,
-  pricing_type: 'variable',
-  base_price: 250.0,
-  is_taxable: false,
-  tax_service_key: 'pest_control',
-  requires_license: true,
-  license_category: 'GHP',
-  min_tech_skill_level: 1,
-  customer_visible: true,
-  booking_enabled: true,
-  sort_order: 3,
-  icon: '🏠',
-  color: '#ef4444',
-  is_active: true,
-  is_archived: false,
-};
-
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
 
-  const existingOneTimePest = await knex('services')
-    .where({ service_key: ONE_TIME_PEST_ROW.service_key })
-    .first('id');
-  let createdOneTimePestId = null;
-  if (!existingOneTimePest) {
-    await knex('services').insert(ONE_TIME_PEST_ROW);
-    const created = await knex('services')
-      .where({ service_key: ONE_TIME_PEST_ROW.service_key })
-      .first('id');
-    createdOneTimePestId = created ? created.id : null;
-  }
 
   // Ownership is RECORDED, not inferred: value equality cannot prove up()
   // wrote a mapping (an admin who pre-stamped the identical array would be
@@ -176,7 +142,7 @@ exports.up = async function up(knex) {
   // migration documents). Rows are recorded by {service_key, id} so a
   // delete-and-recreate of the same key can never read as ownership
   // (codex #3485 r1 P2).
-  const state = { stamped: [], appended: [], createdOneTimePestId };
+  const state = { stamped: [], appended: [] };
 
   for (const seed of ENGINE_KEY_SEEDS) {
     // Read-modify-write: only stamp rows that exist and are still unstamped,
@@ -193,6 +159,22 @@ exports.up = async function up(knex) {
       .whereNull('engine_keys')
       .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
     if (count) state.stamped.push({ service_key: seed.service_key, id: row.id });
+  }
+
+  for (const seed of CONDITIONAL_SEEDS) {
+    for (const candidateKey of seed.service_key_candidates) {
+      const row = await knex('services')
+        .where({ service_key: candidateKey })
+        .whereNull('engine_keys')
+        .first('id');
+      if (!row) continue;
+      const count = await knex('services')
+        .where({ id: row.id })
+        .whereNull('engine_keys')
+        .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
+      if (count) state.stamped.push({ service_key: candidateKey, id: row.id, engine_keys: seed.engine_keys });
+      break;
+    }
   }
 
   for (const target of ALIAS_APPENDS) {
@@ -236,7 +218,11 @@ exports.down = async function down(knex) {
 
   const seedsByKey = new Map(ENGINE_KEY_SEEDS.map((s) => [s.service_key, s]));
   for (const rec of (Array.isArray(state.stamped) ? state.stamped : [])) {
-    const seed = rec && seedsByKey.get(rec.service_key);
+    // Conditional seeds record their engine_keys inline (their target key
+    // varies per environment); fixed seeds resolve through the seed table.
+    const seed = rec && (Array.isArray(rec.engine_keys)
+      ? { engine_keys: rec.engine_keys }
+      : seedsByKey.get(rec.service_key));
     if (!seed || !rec.id) continue;
     // Ownership binds to the recorded ROW id — a same-key row recreated by
     // an admin after a delete is a different row and is never touched.
@@ -256,24 +242,6 @@ exports.down = async function down(knex) {
       .update({ engine_keys: JSON.stringify(target.shipped), updated_at: knex.fn.now() });
   }
 
-  // Remove the row up() created ONLY while nothing references it (same
-  // reference-check posture as 20260809000000's down): a visit or record
-  // pointing at it means the identity is live data — leave it.
-  if (state.createdOneTimePestId) {
-    let refs = 0;
-    for (const [table, col] of [['scheduled_services', 'service_id'], ['service_records', 'service_id'], ['scheduled_service_addons', 'service_id']]) {
-      if (await knex.schema.hasTable(table)) {
-        const row = await knex(table).where({ [col]: state.createdOneTimePestId }).first('id');
-        if (row) refs += 1;
-      }
-    }
-    if (refs === 0) {
-      await knex('services')
-        .where({ id: state.createdOneTimePestId, service_key: ONE_TIME_PEST_ROW.service_key })
-        .del();
-    }
-  }
-
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }
@@ -283,3 +251,4 @@ exports.down = async function down(knex) {
 // parent migration's export).
 exports.ENGINE_KEY_SEEDS = ENGINE_KEY_SEEDS;
 exports.ALIAS_APPENDS = ALIAS_APPENDS;
+exports.CONDITIONAL_SEEDS = CONDITIONAL_SEEDS;

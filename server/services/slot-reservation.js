@@ -245,6 +245,45 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // transaction is aborted" and take down estimate acceptance itself: the exact
 // opposite of the fail-open contract this helper promises. The savepoint
 // confines any failure to this read.
+// Cadence families share ONE engine key across their per-cadence catalog
+// rows, so containment can never resolve them — but the cadence rows have
+// stable service_keys, and (category × visits/yr) names exactly one. Keyed
+// resolution is environment-proof where the label whitelist is not: the
+// rows' NAMES are admin-editable and already diverge between prod and
+// migration-built databases (codex #3485 r3 P1, monthly mosquito). Only
+// finite visit counts map; an unknown cadence stays unlinked (fail open).
+function cadenceCatalogKeyForProfile(primary, isOneTime) {
+  if (isOneTime || !primary) return null;
+  const visits = Number(primary.visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return null;
+  const key = String(primary.service || '');
+  if (key === 'pest_control') {
+    if (visits >= 12) return 'pest_general_monthly';
+    if (visits >= 6) return 'pest_general_bimonthly';
+    if (visits >= 4) return 'pest_general_quarterly';
+    if (visits === 2) return 'pest_general_semiannual';
+    return null;
+  }
+  if (key === 'lawn_care') {
+    if (visits >= 12) return 'lawn_care_monthly';
+    if (visits >= 9) return 'lawn_care_6week';
+    if (visits >= 6) return 'lawn_care_recurring';
+    return null;
+  }
+  if (key === 'mosquito') {
+    if (visits >= 12) return 'mosquito_monthly';
+    if (visits >= 9) return 'mosquito_seasonal';
+    return null;
+  }
+  if (key === 'tree_shrub') {
+    if (visits >= 9) return 'tree_shrub_6week';
+    if (visits >= 6) return 'tree_shrub_program';
+    if (visits >= 4) return 'tree_shrub_quarterly';
+    return null;
+  }
+  return null;
+}
+
 async function catalogLinkForProfile(conn, serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
@@ -259,6 +298,8 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   // leaving it null and failing open.
   const engineKey = String(primary?.engineKey || primary?.service || '').trim();
   if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
+  const isOneTime = serviceProfile?.serviceMode === 'one_time';
+  const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
@@ -284,6 +325,17 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
+        return;
+      }
+      // Cadence-keyed fallback (codex #3485 r3 P1): the shared family key
+      // resolved nothing by containment, but the cadence names exactly one
+      // service_key — resolve it directly, same fail-closed posture.
+      if (!resolved && cadenceKey) {
+        const cadenceRows = await sp('services')
+          .where({ service_key: cadenceKey, is_active: true })
+          .limit(2)
+          .select('id', 'name', 'service_key');
+        if (cadenceRows.length === 1) resolved = cadenceRows[0];
       }
     });
   } catch (err) {
