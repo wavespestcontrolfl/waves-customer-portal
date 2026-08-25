@@ -103,6 +103,16 @@ test('a REFUNDED stamped invoice attached to a visit is the refunded suppressor\
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
+test('a REFUNDED stamped invoice with NO attachment (setup-only acceptance mint) also resolves — never instruct a re-bill', async () => {
+  // The fee was collected then deliberately refunded; a bounced refund
+  // restores the row to paid — a manual re-bill instruction risks double
+  // collection.
+  mockTables = baseTables({
+    invoices: { id: 'inv-1', status: 'refunded', scheduled_service_id: null, service_record_id: null },
+  });
+  expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
+});
+
 test('a CANCELED attached invoice CARRYING the setup-fee line is #3474\'s parking lane — not owed', async () => {
   mockTables = baseTables({
     invoices: {

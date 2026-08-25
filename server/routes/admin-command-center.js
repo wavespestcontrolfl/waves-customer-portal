@@ -411,6 +411,11 @@ async function getMoneyCollections() {
     .where('i.status', 'draft')
     .whereNull('i.sent_at')
     .whereNull('i.sms_sent_at')
+    // Statement-accrued NET-terms invoices stay draft/unsent BY DESIGN
+    // while attached to an open payer statement (individual delivery is
+    // forbidden — see InvoiceService.send's accrual guard); alerting on
+    // them would instruct a send staff cannot perform (Codex PR r2 P2).
+    .whereNull('i.payer_statement_id')
     .where('i.total', '>', 0)
     .where('i.created_at', '<', draftCutoff)
     .select('i.*', 'c.first_name', 'c.last_name')

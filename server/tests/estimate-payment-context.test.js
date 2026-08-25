@@ -375,7 +375,25 @@ describe('buildEstimatePaymentContext', () => {
     const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-8' });
     expect(ctx.billingTerm).toBe('standard');
     expect(ctx.acceptanceInvoice).toBe(null);
-    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99 });
+    // parkingEnabled mirrors the server gate so the card describes what
+    // completion will ACTUALLY do (gate unset in tests → false).
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false });
+  });
+
+  it('reports parkingEnabled true while the completion parking gate is on', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: null,
+      invoices: null,
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+    process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
+    try {
+      const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-8b' });
+      expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: true });
+    } finally {
+      delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+    }
   });
 
   it('suppresses the setup-fee warning once the first visit already completed (stale advice)', async () => {

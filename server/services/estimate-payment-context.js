@@ -323,12 +323,32 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         // for DISPLAY, a visit that already completed means the leak
         // already happened — the warning would be stale advice, so
         // firstVisitAlreadyCompleted should count this visit too.
+        // Qualify against the DISPLAYED visit (Codex PR r2 P2): a
+        // non-recurring add-on sharing the estimate never parks —
+        // completion passes the row's recurrence identity, so the card
+        // must judge the same row or it warns about a visit that will
+        // invoice normally. No visit in scope (estimate-only surfaces)
+        // → estimate-level warning stands.
+        let visitPlanRow = null;
+        if (scheduledServiceId) {
+          visitPlanRow = await db('scheduled_services')
+            .where({ id: scheduledServiceId })
+            .first('is_recurring', 'recurring_parent_id') || null;
+        }
         const obligation = await findUnmintedSetupFeeObligation({
           sourceEstimateId: estimate.id,
           customerId: estimate.customer_id,
+          visitPlanRow,
         });
         if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
-          setupFeeMissing = { setupFee: obligation.setupFee };
+          setupFeeMissing = {
+            setupFee: obligation.setupFee,
+            // The card's copy must describe what completion will ACTUALLY
+            // do (Codex PR r2 P2): parking only happens while the gate is
+            // on; while off, completion mints the bare per-application
+            // invoice and the fee must be billed by hand.
+            parkingEnabled: process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true',
+          };
         }
       } catch (err) {
         logger.warn('[estimate-payment-context] unminted setup-fee check failed', { error: err.message });

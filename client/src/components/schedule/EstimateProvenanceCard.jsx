@@ -219,13 +219,17 @@ function paymentRows(payment) {
   if (payment.billingTerm === 'standard') {
     rows.push({ label: 'Billing', value: 'Per application', sub: null, tone: 'muted' });
     // Setup fee owed but never invoiced (standard Mark Won accepts skip the
-    // acceptance invoice): warn BEFORE completion — completion billing will
-    // park this visit for manual billing instead of auto-invoicing.
+    // acceptance invoice): warn BEFORE completion. The sub describes what
+    // completion will ACTUALLY do — parking only happens while the server
+    // gate is on; while off, completion mints the bare per-application
+    // invoice and the fee must be billed by hand.
     if (payment.setupFeeMissing) {
       rows.push({
         label: 'Setup fee not invoiced',
         value: money(payment.setupFeeMissing.setupFee),
-        sub: 'owed but never billed — completion will park for manual billing (setup fee + first application)',
+        sub: payment.setupFeeMissing.parkingEnabled
+          ? 'owed but never billed — completion will park for manual billing (setup fee + first application)'
+          : 'owed but never billed — completion will NOT hold it; bill the setup fee manually',
         tone: 'warn',
       });
     }

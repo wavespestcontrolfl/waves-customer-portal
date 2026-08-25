@@ -8874,8 +8874,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // hold is the only thing standing between the completion and the
     // fee-dropping mint, so a swallowed read failure would re-open the
     // leak for exactly the visits the gate exists to protect.
+    // Runs even when a pre-completion Charge Now invoice already exists on
+    // the visit (Codex PR r2 P1): that invoice carries only the application
+    // charge, so the setup fee is STILL unbilled — the completion reuses
+    // the invoice unheld (see unmintedSetupFeeHold below) and the alert
+    // block parks a bill-the-fee-beside-it instruction instead of a mint
+    // hold. Terminal (refunded) invoices keep their own alert lane.
     let unmintedSetupFeeObligation = null;
-    if (!recapReviewOnly && !existingCompletionInvoice && !terminalCompletionInvoice
+    if (!recapReviewOnly && !terminalCompletionInvoice
       && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
       try {
         const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
@@ -9011,8 +9017,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       terminalInvoiceOnVisit: !!terminalCompletionInvoice,
       // Setup fee owed but never invoiced (Mark Won accept) → never mint
       // the bare per-application invoice; the parking alert below owns
-      // the follow-up (bill setup + first application by hand).
-      unmintedSetupFeeHold: !!unmintedSetupFeeObligation,
+      // the follow-up (bill setup + first application by hand). NOT held
+      // when a Charge Now invoice already exists on the visit — the
+      // completion must keep reusing that invoice exactly as before; the
+      // alert then requests only the still-unbilled fee (Codex PR r2 P1).
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -9250,11 +9259,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the terminal-invoice alert above; deciding-reason check ensures the
     // hold is the ONE reason invoicing was skipped (a visit the gate would
     // decline anyway owes no alert).
-    if (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
-      && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
-      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false })) {
+    // Two ways in (Codex PR r2 P1): the mint-hold path (nothing minted —
+    // deciding-reason check keeps a visit the gate would decline anyway
+    // from alerting), and the Charge Now path (a pre-completion invoice
+    // already exists on the visit carrying only the application charge —
+    // the completion reused it unheld above, and the alert's liveOnVisit
+    // branch directs staff to collect it and bill the fee BESIDE it).
+    const setupFeeChargeNowBeside = !!(unmintedSetupFeeObligation && existingCompletionInvoice
+      && !terminalCompletionInvoice && !recapReviewOnly && !preMintedInvoice);
+    if (setupFeeChargeNowBeside
+      || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
+        && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
+        && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false }))) {
       const feeEstimateRef = unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId;
-      logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} was never invoiced — NO invoice minted; manual billing alert parked`);
+      logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} was never invoiced — ${setupFeeChargeNowBeside ? 'a pre-completion invoice covers only the application charge' : 'NO invoice minted'}; manual billing alert parked`);
       let setupFeeAlerted = false;
       let setupFeeAlertError = null;
       try {

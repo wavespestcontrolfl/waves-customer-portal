@@ -28,15 +28,16 @@
 //     'estimate_converted' row) — the provenance that the acceptance
 //     reached the invoicing decision at all;
 //   - NO LIVE invoice stamped "accepted estimate #<id>" exists, and no
-//     dead (void/refunded/canceled) stamped invoice that a completion
-//     suppressor can actually SURFACE exists. Surfaced = refunded (the
-//     completion terminal lookup parks refunded rows) or
-//     canceled/cancelled WITH a setup-fee line (#3474's
-//     canceled-setup-fee parking lane). Attachment alone proves nothing:
-//     findFirstApplicationInvoiceForEstimateService excludes 'void'
-//     outright and the terminal lookup handles only 'refunded', so a
-//     void attached acceptance invoice — like any dead UNATTACHED one —
-//     leaves the fee genuinely unbilled and the obligation survives it.
+//     dead (void/refunded/canceled) stamped invoice that resolves it
+//     exists. Resolving = refunded in ANY attachment state (the fee was
+//     collected then deliberately refunded — an operator money action,
+//     and a bounced refund restores the row to paid; never instruct a
+//     re-bill), or canceled/cancelled + attached WITH a setup-fee line
+//     (#3474's canceled-setup-fee parking lane surfaces it). Attachment
+//     alone proves nothing: findFirstApplicationInvoiceForEstimateService
+//     excludes 'void' outright, so a void attached acceptance invoice —
+//     like any other dead row — leaves the fee genuinely unbilled and
+//     the obligation survives it.
 // ============================================================
 
 const db = require('../models/db');
@@ -136,18 +137,18 @@ async function findUnmintedSetupFeeObligation({
   // estimate_id column, so the stamp is the deterministic linkage (same
   // convention as estimate-payment-context / buildAlreadyAcceptedSuccessPayload).
   // A LIVE stamped invoice satisfies the obligation. A dead one
-  // (void/refunded/canceled) satisfies it ONLY when a completion
-  // suppressor can actually surface it (Codex P0, pre-push round 2 —
-  // attachment alone proves nothing, findFirstApplicationInvoice
-  // ForEstimateService excludes 'void' outright and the terminal lookup
-  // handles only 'refunded'):
-  //   - refunded + attached → the refunded-invoice suppressor parks it;
+  // (void/refunded/canceled) satisfies it ONLY when it genuinely
+  // resolves the fee (Codex P0 pre-push r2, P1 PR r2 — attachment alone
+  // proves nothing, findFirstApplicationInvoiceForEstimateService
+  // excludes 'void' outright):
+  //   - refunded, ANY attachment → the fee was collected then
+  //     deliberately refunded; never instruct a re-bill (see below);
   //   - canceled/cancelled + attached + carries a setup-fee line →
-  //     #3474's canceledSetupFee parking lane.
+  //     #3474's canceledSetupFee parking lane surfaces it.
   // Every other dead row — void (any attachment), canceled without a fee
-  // line, or unattached — leaves the fee genuinely unbilled, so the
-  // obligation survives it (Codex P0, round 1) and the alert names the
-  // dead invoice so the office can distinguish "voided without
+  // line, or canceled unattached — leaves the fee genuinely unbilled, so
+  // the obligation survives it (Codex P0, round 1) and the alert names
+  // the dead invoice so the office can distinguish "voided without
   // replacement" from "never minted".
   const DEAD_STATUSES = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
   const { invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
@@ -159,9 +160,17 @@ async function findUnmintedSetupFeeObligation({
   if (liveStamped) return { owed: false };
   const deadSurfaced = stampedRows.find((r) => {
     const status = String(r.status || '').toLowerCase();
+    // REFUNDED satisfies regardless of attachment (Codex PR r2 P1): a
+    // refunded invoice was COLLECTED and then deliberately refunded — an
+    // operator/webhook money action, not a silent leak — and a setup-only
+    // acceptance invoice is deliberately created with NO
+    // scheduled_service_id (estimate-converter). There is no
+    // refund-event clock, and a bounced refund (refund.failed) restores
+    // the row to paid: instructing a manual re-bill here would risk a
+    // double collection.
+    if (status === 'refunded') return true;
     const attached = !!(r.scheduled_service_id || r.service_record_id);
     if (!attached) return false;
-    if (status === 'refunded') return true;
     return (status === 'canceled' || status === 'cancelled') && invoiceContainsSetupFeeLine(r);
   });
   if (deadSurfaced) return { owed: false };
