@@ -361,6 +361,31 @@ describe('buildEstimatePaymentContext', () => {
     expect(invoiceChain.where).toHaveBeenCalledWith('notes', 'like', '%selected pay per application%');
   });
 
+  it('runs the detector beside an application-ONLY acceptance invoice — its presence is not fee coverage', async () => {
+    // A stamped "first application only" invoice is legitimate converter
+    // output (Codex pre-push r6 P1): the card must still warn that the
+    // setup fee was never billed.
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'pay_at_visit' },
+      annual_prepay_terms: null,
+      invoices: {
+        id: 'inv-7',
+        title: 'First Service Application',
+        status: 'sent',
+        total: '135.67',
+        notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+        line_items: JSON.stringify([
+          { description: 'First service application', quantity: 1, unit_price: 135.67 },
+        ]),
+      },
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-7' });
+    expect(ctx.acceptanceInvoice).toMatchObject({ id: 'inv-7', firstApplicationAmount: 135.67 });
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false });
+  });
+
   it('flags an owed-but-unminted setup fee and forces the standard term so the card can warn', async () => {
     // The incident's exact shape: no stored payment preference ("inferred"), no
     // acceptance invoice anywhere — without the setupFeeMissing fallback the

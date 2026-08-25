@@ -312,10 +312,16 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         setupFeeAmount: sumMatchingLines(inv, SETUP_FEE_RE),
         firstApplicationAmount: sumMatchingLines(inv, FIRST_APPLICATION_RE),
       };
-    } else {
-      // No prepay term, no live acceptance invoice — was the setup fee
-      // simply never minted (standard Mark Won accepts skip it)? Surface
-      // it so the card can warn BEFORE the visit completes and parks.
+    }
+    // Run the detector when NO acceptance invoice exists OR the one found
+    // never billed the fee (Codex PR r2 → pre-push r6 P1): a stamped
+    // "first application only" invoice is legitimate converter output, and
+    // treating its presence as fee coverage would hide the warning for
+    // exactly the leak this card exists to surface.
+    if (!acceptanceInvoice || !(Number(acceptanceInvoice.setupFeeAmount) > 0)) {
+      // Was the setup fee simply never minted (standard Mark Won accepts
+      // skip it)? Surface it so the card can warn BEFORE the visit
+      // completes and parks.
       // Fail-soft like every read here: unknown degrades to no warning.
       try {
         const { findUnmintedSetupFeeObligation } = require('./setup-fee-obligation');

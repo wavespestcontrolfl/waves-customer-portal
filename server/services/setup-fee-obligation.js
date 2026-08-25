@@ -187,7 +187,7 @@ async function findUnmintedSetupFeeObligation({
   // so the office can distinguish "voided without replacement" from
   // "never minted".
   const DEAD_STATUSES = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
-  const { invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
+  const { invoiceContainsSetupFeeLine, invoiceContainsNonSetupCharge } = require('./estimate-first-application-invoice');
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
     .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
@@ -258,13 +258,18 @@ async function findUnmintedSetupFeeObligation({
     const priorRecordIds = await conn('service_records')
       .whereIn('scheduled_service_id', planIds)
       .pluck('id');
-    priorCompleted = await conn('invoices')
+    const priorBilledRows = await conn('invoices')
       .where((qb) => {
         qb.whereIn('scheduled_service_id', planIds);
         if (priorRecordIds.length) qb.orWhereIn('service_record_id', priorRecordIds);
       })
       .whereNotIn('status', Array.from(DEAD_STATUSES))
-      .first('id') || null;
+      .select('id', 'line_items', 'notes');
+    // The evidence must be the plan APPLICATION being billed, not any
+    // invoice that happens to hang off the visit (Codex P0, pre-push
+    // round 6) — a setup-only or otherwise fee-marked attached invoice
+    // proves nothing about the application and must not clear the guard.
+    priorCompleted = (priorBilledRows || []).find(invoiceContainsNonSetupCharge) || null;
   }
 
   return {

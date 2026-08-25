@@ -9334,7 +9334,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .forUpdate()
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc')
-            .select('id', 'invoice_number', 'status');
+            .select('id', 'invoice_number', 'status', 'line_items', 'notes');
           const liveOnVisit = onVisitLockedRows.find((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void') || null;
           const stampedCarriesFirstApplication = (inv) => {
             if (/first (service )?application/i.test(String(inv.notes || ''))) return true;
@@ -9343,19 +9343,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             return Array.isArray(lines)
               && lines.some((li) => /first (service )?application/i.test(String(li?.description || '')));
           };
-          // The stamped invoice resolves the alert only when it BILLED
-          // the setup fee (Codex P0, pre-push round 5 — stamped
-          // "first application only" invoices are legitimate converter
-          // output) AND the application charge is also covered.
-          const { invoiceContainsSetupFeeLine } = require('../services/estimate-first-application-invoice');
-          const stampedCoversFee = !!(liveStampedNow && invoiceContainsSetupFeeLine(liveStampedNow));
-          if (liveStampedNow && stampedCoversFee && (stampedCarriesFirstApplication(liveStampedNow) || liveOnVisit)) {
-            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
-            logger.warn(`[dispatch] visit ${svc.id}: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} covering the setup fee, and the application charge is covered — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
+          // Coverage is judged per CHARGE, from the invoices' actual line
+          // items (Codex P0, pre-push rounds 5–6): a stamped or on-visit
+          // invoice counts toward the setup fee only when it billed the
+          // fee, and toward the application only when it carries a
+          // non-setup charge (or a first-application marker). Presence of
+          // some invoice proves neither — a setup-only invoice must not
+          // resolve the application, and a fee-carrying one must never be
+          // instructed to bill the fee again.
+          const {
+            invoiceContainsSetupFeeLine, invoiceContainsNonSetupCharge,
+          } = require('../services/estimate-first-application-invoice');
+          const feeCoveredBy = (liveStampedNow && invoiceContainsSetupFeeLine(liveStampedNow) && liveStampedNow)
+            || (liveOnVisit && invoiceContainsSetupFeeLine(liveOnVisit) && liveOnVisit) || null;
+          const applicationCoveredBy = (liveOnVisit && invoiceContainsNonSetupCharge(liveOnVisit) && liveOnVisit)
+            || (liveStampedNow && (stampedCarriesFirstApplication(liveStampedNow) || invoiceContainsNonSetupCharge(liveStampedNow)) && liveStampedNow) || null;
+          if (feeCoveredBy && applicationCoveredBy) {
+            const feeLabel2 = feeCoveredBy.invoice_number || feeCoveredBy.id;
+            logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
-                body: `RESOLVED — no action needed: acceptance invoice ${stampedLabel} (${liveStampedNow.status}) now exists for estimate ${feeEstimateRef} and the obligation is covered. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
-                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: liveStampedNow.id, resolvedCovered: true })]),
+                body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }
             return true;
@@ -9370,20 +9379,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ? `its WaveGuard setup-fee invoice (${deadInv.invoiceNumber || deadInv.id}, ${deadInv.status}) was voided/canceled and never replaced`
             : 'its WaveGuard setup fee was never invoiced (the accept skipped the acceptance invoice)';
           let alertBody;
-          if (liveStampedNow && stampedCoversFee) {
-            // Setup-only acceptance invoice, no invoice on the visit: the
-            // setup fee is covered but the performed application is not —
-            // the hold suppressed the completion mint.
-            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by acceptance invoice ${stampedLabel} (${liveStampedNow.status}), but that invoice carries NO first-application charge and no completion invoice was cut — bill the first application${firstAppLabel} manually; do NOT re-bill the setup fee.`;
-          } else if (liveStampedNow) {
-            // Application-only stamped invoice (fee never billed): the
-            // application charge is covered by that invoice — collect it,
-            // bill only the fee beside it.
-            const stampedLabel = liveStampedNow.invoice_number || liveStampedNow.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. Acceptance invoice ${stampedLabel} (${liveStampedNow.status}) covers the first application only — collect THAT invoice for the visit charge, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the application charge.`;
-          } else if (liveOnVisit) {
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${liveOnVisit.invoice_number || liveOnVisit.id}, status ${liveOnVisit.status}) already exists on this visit — collect THAT invoice for the visit charge, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the visit charge.`;
+          if (feeCoveredBy) {
+            // The setup fee is billed (setup-only acceptance invoice) but
+            // the performed application is not — the hold suppressed the
+            // completion mint.
+            const feeInvLabel = feeCoveredBy.invoice_number || feeCoveredBy.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually; do NOT re-bill the setup fee.`;
+          } else if (applicationCoveredBy) {
+            // The application charge is billed (Charge Now invoice on the
+            // visit, or an application-only acceptance invoice) but the
+            // fee never was — collect that invoice, bill only the fee.
+            const appInvLabel = applicationCoveredBy.invoice_number || applicationCoveredBy.id;
+            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it; do NOT duplicate the visit charge.`;
           } else {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}.`;
           }
