@@ -625,6 +625,10 @@ function resolveCompletionDeliveryPosture({
 
 module.exports = {
   resolveCompletionProfileForScheduledService,
+  // Rename-bridge candidate expansion (append/strip " Service", paren
+  // insert/strip, foam legacy aliases) — the ONE place label→catalog
+  // bridging lives; call-booking resolution reuses it (codex #3484 P1).
+  serviceNameCandidates,
   resolveCompletionProfileForServiceId,
   serializeProfile,
   resolveCompletionDeliveryPosture,

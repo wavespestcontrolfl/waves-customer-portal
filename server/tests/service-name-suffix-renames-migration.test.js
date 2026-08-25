@@ -96,6 +96,17 @@ function seedDb() {
           { description: ROACH_OLD, category: ROACH_OLD, quantity: 1, unit_price: 350, amount: 350 },
         ]),
       },
+      // Invoice-mode formatted title ("<label> — one-time service") — the
+      // segment swap must reach it, format preserved (codex r9 P2).
+      {
+        id: 'inv-fmt',
+        scheduled_service_id: 'v-open-1',
+        status: 'draft',
+        title: `${ROACH_OLD} — one-time service`,
+        service_type: ROACH_OLD,
+        updated_at: 'inv-t0',
+        line_items: JSON.stringify([{ description: ROACH_OLD, amount: 350 }]),
+      },
       {
         id: 'inv-sent',
         scheduled_service_id: 'v-open-2',
@@ -341,6 +352,8 @@ describe('20260825000010 service name suffix renames', () => {
 
     expect(invoiceById(db, 'inv-sent').title).toBe(ROACH_OLD);
     expect(invoiceById(db, 'inv-frozen').title).toBe(ROACH_OLD);
+    // Formatted invoice-mode title: the label swaps as a bounded segment.
+    expect(invoiceById(db, 'inv-fmt').title).toBe(`${ROACH_NEW} — one-time service`);
   });
 
   test('up() relabels reminder components in merged labels; unrelated reminders untouched', async () => {

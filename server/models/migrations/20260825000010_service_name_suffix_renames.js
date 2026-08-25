@@ -97,13 +97,28 @@ function parseLineItems(raw) {
 // line-item description/category strings. AMOUNTS ARE NEVER TOUCHED. Returns
 // null when nothing matches; otherwise { patch, changed } naming each field /
 // item-index touched, so rollback owns EXACTLY those.
+// Invoice TITLES are formatted ("<label> — one-time service", multi-service
+// " + "-joined) — swap the renamed label as a bounded SEGMENT, preserving
+// the surrounding format (codex #3484 r9 P2). Falls back to the exact/
+// qualified prefix swap for plain titles.
+function swapRenamedTitle(value, fromName, toName) {
+  const whole = swapRenamedPrefix(value, fromName, toName);
+  if (whole) return whole;
+  if (typeof value !== 'string' || !value) return null;
+  const escaped = fromName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundary = '(?:\\s+\\+\\s+|\\s+—\\s+|,\\s+and\\s+|,\\s+|\\s+&\\s+)';
+  const re = new RegExp(`(^|${boundary})${escaped}(\\s*\\([^()]*\\))?(?=$|${boundary})`, 'g');
+  const next = value.replace(re, (m, pre, qualifier) => pre + toName + (qualifier || ''));
+  return next === value ? null : next;
+}
+
 function relabelInvoiceSnapshot(inv, fromName, toName) {
   // Exact label OR its cadence-qualified form, qualifier preserved — same
   // matching contract as the visit/reminder relabels (codex pre-push P1).
   const swap = (v) => swapRenamedPrefix(v, fromName, toName);
   const patch = {};
   const changed = { title: false, service_type: false, items: [] };
-  const nextTitle = swap(inv.title);
+  const nextTitle = swapRenamedTitle(inv.title, fromName, toName);
   if (nextTitle) { patch.title = nextTitle; changed.title = true; }
   const nextServiceType = swap(inv.service_type);
   if (nextServiceType) { patch.service_type = nextServiceType; changed.service_type = true; }
@@ -132,7 +147,7 @@ function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
   const swap = (v) => swapRenamedPrefix(v, fromName, toName);
   const patch = {};
   if (changed.title) {
-    const t = swap(inv.title);
+    const t = swapRenamedTitle(inv.title, fromName, toName);
     if (t) patch.title = t;
   }
   if (changed.service_type) {

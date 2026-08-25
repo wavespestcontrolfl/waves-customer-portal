@@ -315,20 +315,17 @@ function findServiceByName(services, value) {
     || normalizeServiceText(s.short_name) === candidate
     || normalizeServiceText(s.service_key) === candidate
   )) || null;
-  const exact = match(text);
-  if (exact) return exact;
-  // Suffix bridge, both directions (2026-08-25 catalog renames): legacy
-  // extraction labels ("Bed Bug Treatment" from extraction-compat's stable
-  // legacy map) must keep anchoring the renamed "… Service" rows, and a
-  // renamed label must resolve a restored old-name row after a migration
-  // rollback — mirror of serviceNameCandidates' append/strip pair.
-  const suffixText = normalizeServiceText(`${value} Service`);
-  if (suffixText && suffixText !== text) {
-    const suffixed = match(suffixText);
-    if (suffixed) return suffixed;
+  // Rename bridging reuses the completion resolver's candidate expansion —
+  // append/strip " Service", the paren insert/strip, AND the non-suffix
+  // foam aliases — so a pre-migration extraction replayed after the rename
+  // ("Drill-and-Foam Termite", "German Roach Initial (3-Visit)") still
+  // anchors the renamed rows, and renamed labels anchor restored old-name
+  // rows after a rollback (codex #3484 P1; never re-implement this list).
+  const { serviceNameCandidates } = require('./service-completion-profiles');
+  for (const candidate of serviceNameCandidates(value)) {
+    const hit = match(normalizeServiceText(candidate));
+    if (hit) return hit;
   }
-  const stripped = text.replace(/\s+service$/, '');
-  if (stripped && stripped !== text) return match(stripped);
   return null;
 }
 
