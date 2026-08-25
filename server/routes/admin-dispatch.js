@@ -8898,12 +8898,50 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             recurring_parent_id: svc.recurring_parent_id || null,
           },
         }, db);
+        const setupFeeDedupeKey = `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`;
         if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
-          unmintedSetupFeeObligation = obligation;
+          // One parked visit per estimate (Codex P0, pre-push round 8):
+          // the fee obligation stays owed while a parked visit sits
+          // unbilled, so a LATER plan visit would also qualify — but
+          // parking it too would collapse two unbilled applications into
+          // one singular estimate-wide instruction. The FIRST parked
+          // visit's alert owns the setup fee + its own application; every
+          // later visit mints its application charge normally.
+          const priorParkedAlert = await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+            .first('id', 'metadata');
+          const parkedVisitId = priorParkedAlert && (typeof priorParkedAlert.metadata === 'string'
+            ? (() => { try { return JSON.parse(priorParkedAlert.metadata)?.scheduledServiceId; } catch { return null; } })()
+            : priorParkedAlert.metadata?.scheduledServiceId);
+          if (priorParkedAlert && String(parkedVisitId || '') !== String(svc.id)) {
+            logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} already has a parked setup-fee alert on visit ${parkedVisitId || '?'} — this application mints normally, the parked alert keeps the fee`);
+          } else {
+            unmintedSetupFeeObligation = obligation;
+          }
         } else if (obligation.owed && obligation.firstVisitAlreadyCompleted) {
           // Historic leak (an earlier plan visit completed AND billed
           // bare) — log for the sweep, never park a routine later visit.
           logger.warn(`[dispatch] visit ${svc.id}: estimate ${obligation.estimateSlug || obligation.estimateId} owes an un-invoiced setup fee but an earlier plan visit already completed and billed — not parking this later visit`);
+        } else if (!obligation.owed) {
+          // Stale-alert reconciliation (Codex P0, pre-push round 8): once
+          // coverage appears through any later path (a manual acceptance
+          // invoice, a re-accept), the detector reads not-owed and the
+          // alert's in-transaction revalidation never runs again — an
+          // unresolved parked instruction would keep telling staff to
+          // bill charges that are now covered. Rewrite it resolved here.
+          const staleAlert = await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [setupFeeDedupeKey])
+            .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
+            .first('id');
+          if (staleAlert) {
+            await db('notifications').where({ id: staleAlert.id }).update({
+              body: `RESOLVED — no action needed: the setup-fee obligation for this estimate is no longer owed (coverage was found on a later check). The earlier manual-billing instruction no longer applies; verify the customer's invoices before billing anything, and do NOT bill again on this alert.`,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
+            });
+            logger.warn(`[dispatch] visit ${svc.id}: stale unminted-setup-fee alert ${staleAlert.id} rewritten as resolved — obligation no longer owed`);
+          }
         }
       } catch (lookupErr) {
         logger.error(`[dispatch] unminted-setup-fee check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
@@ -9306,7 +9344,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const already = await trx('notifications')
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-            .first('id');
+            .first('id', 'metadata');
+          // Pre-lock check missed a concurrent park (narrow race): when
+          // the standing alert belongs to a DIFFERENT visit, this visit's
+          // application is also unbilled — never rewrite the body to a
+          // singular instruction without saying so (Codex P0, round 8).
+          const alreadyMeta = already && (typeof already.metadata === 'string'
+            ? (() => { try { return JSON.parse(already.metadata); } catch { return null; } })()
+            : already.metadata);
+          const crossVisitNote = already && alreadyMeta?.scheduledServiceId
+            && String(alreadyMeta.scheduledServiceId) !== String(svc.id)
+            ? ' NOTE: MORE THAN ONE completed visit for this estimate is unbilled — verify EACH completed visit has its application charge billed, and bill the setup fee only ONCE.'
+            : '';
           // ATOMIC revalidation on THIS transaction, under the mint locks:
           // 1. An acceptance invoice stamped for the estimate appeared
           //    (concurrent re-accept / manual mint). It resolves the alert
@@ -9401,7 +9450,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           if (already) {
             await trx('notifications').where({ id: already.id }).update({
-              body: alertBody,
+              body: alertBody + crossVisitNote,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {})]),
             });
             return true;
