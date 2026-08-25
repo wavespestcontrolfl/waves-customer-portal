@@ -263,6 +263,13 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // finite visit counts map; an unknown cadence stays unlinked (fail open).
 function cadenceCatalogKeyForProfile(primary, isOneTime) {
   if (isOneTime || !primary) return null;
+  // Commercial plans collapse to the residential categories in the slot
+  // profile (commercial_pest → 'pest_control'), but they must never stamp
+  // a residential cadence row's identity — no commercial catalog rows
+  // exist, so they stay unlinked (codex #3485 r10 P1).
+  const rawIdentity = [primary.engineKey, primary.key, primary.serviceKey, primary.service_key, primary.name, primary.label, primary.displayName]
+    .filter(Boolean).join(' ');
+  if (/commercial/i.test(rawIdentity)) return null;
   const visits = Number(primary.visitsPerYear);
   if (!Number.isFinite(visits) || visits <= 0) return null;
   // EXACT catalog visit counts only (codex #3485 r8 P2): bucketing would

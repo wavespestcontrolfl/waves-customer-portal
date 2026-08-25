@@ -51,7 +51,11 @@ function termYearsFrom(serviceType) {
 // the term outright; the label regex stays as the legacy fallback for
 // name-only history.
 function termYearsForVisit(v) {
-  for (const key of [v.service_key_snapshot, v.catalog_service_key]) {
+  // The LINKED catalog row outranks the snapshot — the same precedence
+  // completion identity uses (service_id first), and pre-fix combined
+  // promotions changed service_id without restamping the snapshot, so the
+  // two can disagree on real rows (codex #3485 r10 P1).
+  for (const key of [v.catalog_service_key, v.service_key_snapshot]) {
     const m = String(key || '').match(/^termite_bond_(\d+)yr$/);
     if (m) return Number(m[1]);
   }

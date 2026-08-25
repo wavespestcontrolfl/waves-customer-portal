@@ -1894,7 +1894,7 @@ function normalizeBondTermService(li) {
   // `service` left alias-keyed stored rows deduplicating separately from
   // raw rows and scheduling two bond visits (codex #3485 r8 P1). Every
   // present alias field is rewritten so identity resolution agrees.
-  const keyFields = ['service', 'serviceKey', 'service_key'].filter((f) => li[f] !== undefined);
+  const keyFields = ['service', 'serviceKey', 'service_key', 'key'].filter((f) => li[f] !== undefined);
   const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
   if (!isBareBond) return li;
   const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');

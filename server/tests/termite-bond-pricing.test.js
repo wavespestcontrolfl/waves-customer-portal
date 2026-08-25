@@ -672,16 +672,19 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
 
   test('termYearsForVisit prefers durable identity over the label regex', () => {
     const { termYearsForVisit } = sweepPrivate;
-    // Snapshot key wins even against a contradicting label.
+    // The LINKED catalog row wins — same precedence as completion identity
+    // (service_id first); pre-fix combined promotions could leave a stale
+    // snapshot disagreeing with the id (codex #3485 r10 P1).
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bond_5yr',
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (1-Year Term)',
+    })).toBe(5);
+    // Snapshot second, still ahead of the label regex.
     expect(termYearsForVisit({
       service_key_snapshot: 'termite_bond_10yr',
       service_type: 'Termite Bond (1-Year Term)',
     })).toBe(10);
-    // Linked catalog row second.
-    expect(termYearsForVisit({
-      catalog_service_key: 'termite_bond_5yr',
-      service_type: 'Termite Bond',
-    })).toBe(5);
     // Label regex stays the legacy fallback…
     expect(termYearsForVisit({ service_type: 'Termite Bond (10-Year Term)' })).toBe(10);
     // …and the historical 1-year default only applies when NOTHING names a term.

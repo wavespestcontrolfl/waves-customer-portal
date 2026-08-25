@@ -352,6 +352,15 @@ describe('catalogServiceIdForProfile', () => {
       expect(capture.where).toBeUndefined();
     });
 
+    test('commercial plans never stamp residential cadence rows', async () => {
+      const capture = {};
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { services: [{ service: 'pest_control', engineKey: 'commercial_pest', visitsPerYear: 4, name: 'Commercial Pest Control' }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+    });
+
     test('an ambiguous cadence key FAILS CLOSED', async () => {
       expect(await catalogLinkForProfile(
         makeCadenceConn([{ id: 'a' }, { id: 'b' }]),
