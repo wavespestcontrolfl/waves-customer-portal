@@ -949,6 +949,43 @@ const InvoiceService = {
       }
     }
 
+    // CHOKE-POINT serialization (Codex P0, PR #3476): EVERY create that
+    // links a scheduled visit or carries the accepted-estimate stamp
+    // holds the shared advisory locks — route-level wrapping alone left
+    // direct writers (converter accept mints, public acceptance) able to
+    // commit between an alert transaction's coverage scans and its
+    // instruction write. Canonical order: mint lock → setup-fee lock.
+    // Re-acquisition inside an already-locked caller transaction is a
+    // no-op; unwrapped linked/stamped creates get their own transaction
+    // (the best-effort tax/discount catches then abort with it — accepted
+    // for linked money writes; plain unlinked creates keep the
+    // untransacted path).
+    if (!createArgs._setupFeeLocksHandled) {
+      const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+      if (scheduledServiceId || stampedEstimateIdInNotes) {
+        const takeLocks = async (conn) => {
+          if (scheduledServiceId) {
+            const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+            await acquireScheduledInvoiceMintLock(conn, scheduledServiceId);
+          }
+          if (stampedEstimateIdInNotes) {
+            await conn.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
+          }
+        };
+        if (database && database.isTransaction) {
+          await takeLocks(database);
+        } else if (typeof (database || db).transaction === 'function') {
+          const baseDb = database || db;
+          return baseDb.transaction(async (trx) => {
+            await takeLocks(trx);
+            return InvoiceService.create({ ...createArgs, _setupFeeLocksHandled: true, database: trx });
+          });
+        }
+        // else: a harness db without transaction support — locks are
+        // unavailable there by construction; production knex always
+        // provides transaction().
+      }
+    }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);

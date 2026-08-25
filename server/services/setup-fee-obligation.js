@@ -357,35 +357,50 @@ async function findUnmintedSetupFeeObligation({
   const priorCompletedRows = await priorQuery.select('id', 'is_recurring', 'recurring_parent_id');
   const priorPlanRows = (priorCompletedRows || []).filter(isPlanApplicationRow);
   let priorCompleted = null;
+  let billedPriorPlanVisitIds = [];
   if (priorPlanRows.length) {
     const planIds = priorPlanRows.map((r) => r.id);
-    const priorRecordIds = await conn('service_records')
+    const priorRecords = await conn('service_records')
       .whereIn('scheduled_service_id', planIds)
-      .pluck('id');
+      .select('id', 'scheduled_service_id');
+    const priorRecordToVisit = new Map(priorRecords.map((r) => [String(r.id), String(r.scheduled_service_id)]));
+    const priorRecordIds = priorRecords.map((r) => r.id);
     const priorBilledRows = await conn('invoices')
       .where((qb) => {
         qb.whereIn('scheduled_service_id', planIds);
         if (priorRecordIds.length) qb.orWhereIn('service_record_id', priorRecordIds);
       })
       .whereNotIn('status', Array.from(DEAD_STATUSES))
-      .select('id', 'line_items', 'notes');
+      .select('id', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id');
     // The evidence must be the plan APPLICATION being billed, not any
     // invoice that happens to hang off the visit (Codex P0, pre-push
     // round 6) — a setup-only or otherwise fee-marked attached invoice
     // proves nothing about the application and must not clear the guard.
     // Only the durable base-application identity counts (round 18 —
-    // linkage alone is insufficient money evidence).
-    priorCompleted = (priorBilledRows || []).find(invoiceBillsBaseApplication) || null;
+    // linkage alone is insufficient money evidence). The EXACT billed
+    // visit ids ride the result (final-round P0): the historic fee-only
+    // alert persists them, and its reconciliation revalidates ONLY those
+    // — a completed inspection_only/declined visit that never billed is
+    // never re-listed as owed.
+    billedPriorPlanVisitIds = planIds.map(String).filter((visitId) => (priorBilledRows || []).some((r) => (
+      (String(r.scheduled_service_id || '') === visitId
+        || priorRecordToVisit.get(String(r.service_record_id || '')) === visitId)
+      && invoiceBillsBaseApplication(r))));
+    priorCompleted = billedPriorPlanVisitIds.length ? { id: billedPriorPlanVisitIds[0] } : null;
   }
 
   return {
     owed: true,
-    // The accepted (frozen) amount wins over the current constant, and
-    // covered/refunded cents are already credited — this is the REMAINDER.
-    setupFee: Math.round(remainingFeeCents) / 100,
+    // setupFee = the FULL frozen obligation (Codex P0: consumers like the
+    // completion alert subtract live coverage themselves — returning the
+    // remainder here deducted partial coverage twice). The remainder is
+    // exposed separately for display consumers.
+    setupFee: authoritativeFee,
+    setupFeeRemainingCents: Math.round(remainingFeeCents),
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
+    billedPriorPlanVisitIds,
     deadInvoice: deadInvoice
       ? { id: deadInvoice.id, invoiceNumber: deadInvoice.invoice_number || null, status: String(deadInvoice.status || '') }
       : null,

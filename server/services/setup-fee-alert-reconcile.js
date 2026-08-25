@@ -66,6 +66,35 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
       logger.warn(`[setup-fee-reconcile]${actorLabel} parked set grew mid-lock — deferring to the next reconcile`);
       return;
     }
+    // Canonical prepay coverage FIRST (Codex P0): a covered annual-prepay
+    // term WAIVES the fee and covers the visits — every registered alert
+    // resolves as no-action instead of instructing waived charges.
+    const AnnualPrepayCoverage = require('./annual-prepay-renewals');
+    const coveredTermStanding = await AnnualPrepayCoverage.coveredTermsAsOf(trx, null)
+      .where('t.source_estimate_id', sourceEstimateId)
+      .first('t.id');
+    if (coveredTermStanding) {
+      const allRegistered = await trx('notifications')
+        .where({ recipient_type: 'admin' })
+        .where(function coveredKeys() {
+          this.whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .orWhereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey]);
+        })
+        .select('id', 'metadata');
+      for (const row of allRegistered) {
+        const m = typeof row.metadata === 'string'
+          ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+          : row.metadata;
+        if (m?.resolvedCovered === true && m?.setupFeeResolved !== false) continue;
+        await trx('notifications').where({ id: row.id }).update({
+          body: `RESOLVED — no action needed: an annual-prepay term now covers this estimate; the setup fee is waived by that plan and the visits are covered. Do NOT bill on this alert.`,
+          read_at: trx.fn.now(),
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true, setupFeeResolved: true })]),
+        });
+        logger.warn(`[setup-fee-reconcile]${actorLabel} alert ${row.id} resolved — covered annual-prepay term stands`);
+      }
+      return;
+    }
           // RESOLVED rows are reconciled too (Codex P0, pre-push round
           // 18): if the fee's covering invoice is later voided while the
           // application invoice stays live, the resolved alert is the
@@ -354,10 +383,13 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           const feeOnlyAlert = staleMeta?.feeOnly === true;
           let feeOnlyUncoveredIds = [];
           if (feeOnlyAlert) {
-            const histPlanRows = await trx('scheduled_services')
-              .where({ source_estimate_id: sourceEstimateId, customer_id: scanCustomerId, status: 'completed' })
-              .select('id', 'is_recurring');
-            const histPlanIds = histPlanRows.filter((r) => r.is_recurring).map((r) => String(r.id));
+            // ONLY the persisted billed visits are revalidated (Codex P0):
+            // a completed inspection_only/declined visit never billed an
+            // application and must never be instructed. Legacy alerts
+            // without the list skip application revalidation entirely.
+            const histPlanIds = Array.isArray(staleMeta?.historicVisitIds)
+              ? staleMeta.historicVisitIds.map(String)
+              : [];
             if (histPlanIds.length) {
               const histRecords = await trx('service_records')
                 .whereIn('scheduled_service_id', histPlanIds)
@@ -373,13 +405,31 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 .forUpdate()
                 .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id'))
                 .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
+              // Full out-of-band prepayment covers a historic visit too
+              // (Codex P0) — same predicate as the parked-visit path:
+              // cents vs the row's own price, never the annual stamp.
+              const histPrepaidRows = await trx('scheduled_services')
+                .whereIn('id', histPlanIds)
+                .where({ customer_id: scanCustomerId })
+                .select('id', 'prepaid_amount', 'prepaid_method', 'estimated_price');
+              const histCents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
+              const histPrepaidOk = new Set(histPrepaidRows
+                .filter((r) => {
+                  const paid = histCents(r.prepaid_amount);
+                  const priceDue = histCents(r.estimated_price);
+                  return paid !== null && paid > 0 && priceDue !== null && priceDue > 0
+                    && paid >= priceDue
+                    && r.prepaid_method !== AnnualPrepayRenewalsReconcile.ANNUAL_PREPAY_PREPAID_METHOD;
+                })
+                .map((r) => String(r.id)));
               // Record-linked invoices map back to their visit (Codex P0):
               // an application invoice attached only through its service
               // record is coverage for that visit, not perpetual debt.
-              feeOnlyUncoveredIds = histPlanIds.filter((visitId) => !histBilled.some((r) => (
-                (String(r.scheduled_service_id || '') === String(visitId)
-                  || recordToVisit.get(String(r.service_record_id || '')) === String(visitId))
-                && invoiceBillsBaseApplication(r))));
+              feeOnlyUncoveredIds = histPlanIds.filter((visitId) => !histPrepaidOk.has(String(visitId))
+                && !histBilled.some((r) => (
+                  (String(r.scheduled_service_id || '') === String(visitId)
+                    || recordToVisit.get(String(r.service_record_id || '')) === String(visitId))
+                  && invoiceBillsBaseApplication(r))));
             }
           }
           const applicationProven = feeOnlyAlert

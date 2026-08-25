@@ -373,7 +373,10 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         });
         if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           setupFeeMissing = {
-            setupFee: obligation.setupFee,
+            // Display the REMAINDER when partial coverage stands.
+            setupFee: Number.isFinite(Number(obligation.setupFeeRemainingCents))
+              ? Number(obligation.setupFeeRemainingCents) / 100
+              : obligation.setupFee,
             // The card's copy must match what completion will DO: with a
             // live application-only acceptance invoice standing, only the
             // FEE is parked — never "setup fee + first application"

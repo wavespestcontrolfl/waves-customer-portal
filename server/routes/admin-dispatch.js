@@ -8990,6 +8990,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                       sourceEstimateId: obligation.estimateId,
                       feeOnly: true,
                       expectedSetupFeeCents: Math.round(Number(obligation.setupFee || 0) * 100),
+                      // The EXACT billed visits that justified this alert
+                      // (Codex P0): reconciliation revalidates only these.
+                      historicVisitIds: obligation.billedPriorPlanVisitIds || [],
                     },
                     connection: trx,
                   },
@@ -9238,6 +9241,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const alertMintLockIds = Array.from(new Set([String(svc.id), ...alertSiblingServiceIds.map(String)])).sort();
           for (const lockId of alertMintLockIds) {
             await acquireScheduledInvoiceMintLock(trx, lockId);
+          }
+          // Canonical order: mint locks → setup-fee dedupe lock →
+          // terminal dedupe lock (Codex P0): when this alert registers a
+          // fee clause, a stamped manual invoice serialized on the
+          // setup-fee key must not commit between the fee scan and this
+          // insert.
+          if (unmintedSetupFeeObligation && svc.source_estimate_id) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${svc.source_estimate_id}`]);
           }
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
           const already = await trx('notifications')

@@ -378,6 +378,7 @@ test('a prior completed AND BILLED plan visit (is_recurring) flags firstVisitAlr
     invoices: invoicesInOrder(null, {
     id: 'inv-billed',
     status: 'sent',
+    scheduled_service_id: 'ss-prior',
     line_items: JSON.stringify([{ client_id: 'scheduled_ss-prior_primary', description: 'Quarterly Pest Control', amount: 88 }]),
   }),
   });
@@ -392,6 +393,7 @@ test('a prior completed AND BILLED recurring CHILD (is_recurring, seeder-stamped
     invoices: invoicesInOrder(null, {
     id: 'inv-billed',
     status: 'paid',
+    scheduled_service_id: 'ss-child',
     line_items: JSON.stringify([{ client_id: 'scheduled_ss-child_primary', description: 'Quarterly Pest Control', amount: 88 }]),
   }),
   });
