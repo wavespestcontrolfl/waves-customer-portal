@@ -271,18 +271,22 @@ async function computeDashboardAlertsUncached() {
     const staleDraftCutoff = new Date(Date.now() - 3 * 86400000);
     const staleDraftRows = await db('invoices as i')
       .leftJoin('scheduled_services as ss', 'i.scheduled_service_id', 'ss.id')
+      .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
       .whereNull('i.archived_at')
       .where('i.status', 'draft')
       .whereNull('i.sent_at')
       .whereNull('i.sms_sent_at')
       .whereNull('i.payer_statement_id')
       // Card-lane ANCHOR invoices are deliberately draft/unsent until
-      // their visit completes (recurring card-on-file accepts attach the
-      // acceptance invoice to a FUTURE visit; completion auto-charges it)
-      // — a draft attached to a not-yet-completed visit is held BY
-      // DESIGN, not forgotten (Codex PR r5 P2).
+      // their visit completes — keyed to the PERSISTED lane marker
+      // (estimate_data.recurringCardLaneAccepted, stamped at accept), not
+      // visit status alone: an ordinary payable acceptance invoice
+      // attached to a future visit must still surface when it was never
+      // sent (Codex PR r5 P2 → r11 P2).
       .where(function anchorHoldExcluded() {
-        this.whereNull('i.scheduled_service_id').orWhere('ss.status', 'completed');
+        this.whereNull('i.scheduled_service_id')
+          .orWhere('ss.status', 'completed')
+          .orWhereRaw("COALESCE(e.estimate_data::jsonb->>'recurringCardLaneAccepted', 'false') <> 'true'");
       })
       .where('i.total', '>', 0)
       .where('i.created_at', '<', staleDraftCutoff)

@@ -748,7 +748,18 @@ function InvoiceList({
     adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
       .then((row) => {
         if (cancelled || !row?.id) return;
-        setDeepLinkedInvoice(row);
+        // getById nests customer fields — flatten to the list-row shape
+        // so the deep-linked row renders name/contact like every other
+        // row (Codex PR r11 P2).
+        const flat = {
+          ...row,
+          first_name: row.first_name ?? row.customer?.first_name ?? null,
+          last_name: row.last_name ?? row.customer?.last_name ?? null,
+          phone: row.phone ?? row.customer?.phone ?? null,
+          email: row.email ?? row.customer?.email ?? null,
+          card_on_file: row.card_on_file ?? row.customer?.card_on_file ?? null,
+        };
+        setDeepLinkedInvoice(flat);
         setExpanded(row.id);
       })
       .catch(() => setExpanded(null));

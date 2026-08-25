@@ -4449,7 +4449,14 @@ const InvoiceService = {
           .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
           .select("id", "invoice_number", "line_items");
         if (liveOnVisit.length > 0) {
-          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some(lineIsBaseApplication);
+          // Identity + the positive-amount billing-evidence layer (Codex
+          // PR r11 P1): a zero/credited legacy "First application" line
+          // must not read as billed and strip the restore.
+          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => {
+            const qty = li?.quantity != null ? Number(li.quantity) : 1;
+            const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+            return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li);
+          });
           const unreadable = liveOnVisit.some((inv) => parseInvoiceLineItems(inv.line_items).length === 0);
           if (unreadable) {
             logger.warn(`[invoice] switch-supersede restore deferred for ${row.invoice_number || row.id}: live invoice on the visit has unreadable lines — manual review`);

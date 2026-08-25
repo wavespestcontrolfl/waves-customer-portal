@@ -374,6 +374,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           setupFeeMissing = {
             setupFee: obligation.setupFee,
+            // The card's copy must match what completion will DO: with a
+            // live application-only acceptance invoice standing, only the
+            // FEE is parked — never "setup fee + first application"
+            // (Codex PR r11 P2).
+            applicationCovered: !!(acceptanceInvoice
+              && Number(acceptanceInvoice.firstApplicationAmount) > 0
+              && !INVOICE_DEAD_STATUSES.includes(String(acceptanceInvoice.status || '').toLowerCase())),
             // The card's copy must describe what completion will ACTUALLY
             // do (Codex PR r2 P2): parking only happens while the gate is
             // on; while off, completion mints the bare per-application

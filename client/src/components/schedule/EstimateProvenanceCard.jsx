@@ -233,7 +233,9 @@ function paymentRows(payment) {
         label: 'Setup fee not invoiced',
         value: money(payment.setupFeeMissing.setupFee),
         sub: payment.setupFeeMissing.parkingEnabled
-          ? 'owed but never billed — completion will park for manual billing (setup fee + first application)'
+          ? (payment.setupFeeMissing.applicationCovered
+            ? 'owed but never billed — completion will park a FEE-ONLY follow-up (the application is already invoiced; do not re-bill it)'
+            : 'owed but never billed — completion will park for manual billing (setup fee + first application)')
           : 'owed but never billed — completion will NOT hold it; bill the setup fee manually',
         tone: 'warn',
       });

@@ -383,7 +383,9 @@ describe('buildEstimatePaymentContext', () => {
 
     const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-7' });
     expect(ctx.acceptanceInvoice).toMatchObject({ id: 'inv-7', firstApplicationAmount: 135.67 });
-    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false });
+    // The live application-only invoice marks the application covered —
+    // the card then promises a FEE-ONLY park (Codex PR r11 P2).
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false, applicationCovered: true });
   });
 
   it('flags an owed-but-unminted setup fee and forces the standard term so the card can warn', async () => {
@@ -402,7 +404,7 @@ describe('buildEstimatePaymentContext', () => {
     expect(ctx.acceptanceInvoice).toBe(null);
     // parkingEnabled mirrors the server gate so the card describes what
     // completion will ACTUALLY do (gate unset in tests → false).
-    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false });
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false, applicationCovered: false });
   });
 
   it('reports parkingEnabled true while the completion parking gate is on', async () => {
@@ -415,7 +417,7 @@ describe('buildEstimatePaymentContext', () => {
     process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
     try {
       const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-8b' });
-      expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: true });
+      expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: true, applicationCovered: false });
     } finally {
       delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
     }
