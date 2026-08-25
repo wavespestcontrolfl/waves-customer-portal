@@ -457,14 +457,24 @@ function prepayChargeMethodKey(stripePaymentMethodId) {
 // never sit silently unpaid. Idempotent: the charge service's durable
 // claim fences a concurrent in-flow executor, and every outcome resolves
 // the stamp.
-async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, limit = 20 } = {}) {
+async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStaleMinutes = 60, limit = 20 } = {}) {
   if (!isPrepayCardAndChargeEnabled()) return { scanned: 0 };
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
   let rows = [];
   try {
+    // 'pending' stamps are unstarted recoveries; a 'claimed' stamp older
+    // than claimStaleMinutes is a recovery worker that died mid-flight —
+    // safe to re-attempt because the charge service's durable attempt
+    // claim (stripe_invoice_charge_attempts) fences any still-active or
+    // ambiguous charge underneath it.
     rows = await db('estimates')
       .where({ status: 'accepted' })
-      .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = ?", ['pending'])
+      .whereRaw(
+        "((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'pending'"
+        + " OR ((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'claimed'"
+        + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'claimed_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute')))",
+        [claimStaleMinutes],
+      )
       .limit(limit)
       .select('id', 'estimate_data');
   } catch (err) {
@@ -473,11 +483,34 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, limit = 2
   }
   let resumed = 0;
   for (const row of rows) {
-    let data = row.estimate_data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { continue; } }
-    const job = data?.prepayAutoChargeJob;
-    if (!job || job.status !== 'pending' || !job.invoice_id) continue;
-    if (job.created_at && new Date(job.created_at) > cutoff) continue; // in-flow executor may still be running
+    // ATOMIC per-estimate claim (pre-push Codex P0 r4): two pods selecting
+    // the same stamp must not both proceed — the second would treat the
+    // first's in-flight charge (STRIPE_CHARGE_IN_PROGRESS) as a failure and
+    // open a pay-link rail beside a charge that may still settle. The
+    // advisory xact lock serializes claimers; the re-read inside the lock
+    // makes claim-if-still-pending atomic.
+    let job = null;
+    try {
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 42))', [`prepay-job:${row.id}`]);
+        const fresh = await trx('estimates').where({ id: row.id }).first('estimate_data');
+        let base = fresh?.estimate_data;
+        if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+        const current = base?.prepayAutoChargeJob;
+        if (!current || !current.invoice_id) return;
+        const claimStale = current.status === 'claimed'
+          && (!current.claimed_at || new Date(current.claimed_at) < new Date(Date.now() - claimStaleMinutes * 60 * 1000));
+        if (current.status !== 'pending' && !claimStale) return; // another worker owns it / already resolved
+        if (current.status === 'pending' && current.created_at && new Date(current.created_at) > cutoff) return; // in-flow executor may still be running
+        base.prepayAutoChargeJob = { ...current, status: 'claimed', claimed_at: new Date().toISOString() };
+        await trx('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify(base) });
+        job = base.prepayAutoChargeJob;
+      });
+    } catch (claimErr) {
+      logger.warn(`[recurring-cof] prepay sweep claim failed for estimate ${row.id}: ${claimErr.message}`);
+      continue;
+    }
+    if (!job) continue;
     const resolve = async (status, extra = {}) => {
       try {
         const fresh = await db('estimates').where({ id: row.id }).first('estimate_data');
@@ -490,11 +523,28 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, limit = 2
         logger.warn(`[recurring-cof] prepay sweep stamp update failed for estimate ${row.id}: ${stampErr.message}`);
       }
     };
+    const alertUncollected = async (title, body) => require('./notification-service').notifyAdmin(
+      'billing', title, body,
+      { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
+    ).catch(() => {});
     try {
       const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
-      const settled = ['paid', 'prepaid', 'processing', 'refunded', 'canceled', 'cancelled', 'void', 'voided'].includes(String(invoice.status || '').toLowerCase());
-      if (settled) { await resolve('paid', { reason: 'already_settled' }); continue; }
+      const invStatus = String(invoice.status || '').toLowerCase();
+      // Terminal classification (pre-push Codex P1 r4): only paid/prepaid
+      // means the year was collected; 'processing' is an initiated ACH
+      // debit; refunded/canceled/void mean NO collected prepay — record the
+      // real outcome and hand it to the office, never mark it paid.
+      if (['paid', 'prepaid'].includes(invStatus)) { await resolve('paid', { reason: 'already_settled' }); continue; }
+      if (invStatus === 'processing') { await resolve('processing', { reason: 'already_initiated' }); continue; }
+      if (['refunded', 'canceled', 'cancelled', 'void', 'voided'].includes(invStatus)) {
+        await resolve('skipped', { reason: `invoice_${invStatus}` });
+        await alertUncollected(
+          'Annual prepay accept — invoice terminal without collection',
+          `The accepted prepay invoice is ${invStatus}; the authorized auto-charge never collected the year. Review the account and re-bill if the plan stands.`,
+        );
+        continue;
+      }
       if (invoice.payer_id) { await resolve('skipped', { reason: 'payer_billed' }); continue; }
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id')
@@ -519,21 +569,27 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, limit = 2
       }
       throw new Error(pmRow ? 'no authorized total on job' : 'bound method not found');
     } catch (err) {
-      // Charge can't complete under the frozen authorization — fall back to
-      // the delivered pay link + office alert (never silent, never a
-      // different amount/method than quoted).
+      // An ACTIVE or AMBIGUOUS charge attempt means money may already be
+      // moving — NEVER open the pay-link rail beside it (pre-push Codex P0
+      // r4). Leave the stamp claimed; the next sweep pass re-reads the
+      // invoice after the attempt/reconciliation resolves.
+      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code) || err.reconciliationRequired) {
+        logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${err.code || 'reconciliation pending'}`);
+        continue;
+      }
+      // A DETERMINISTIC failure (decline, guard refusal, missing method) —
+      // no funds moved; fall back to the delivered pay link + office alert
+      // (never silent, never a different amount/method than quoted).
       logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
       try {
         await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
-      await require('./notification-service').notifyAdmin(
-        'billing',
+      await alertUncollected(
         'Annual prepay accepted — stranded auto-charge could not complete',
         `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). The pay link was sent — follow up if it goes unpaid.`,
-        { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id, reason: err.message } },
-      ).catch(() => {});
+      );
       await resolve('delivered_fallback', { reason: err.message });
     }
   }
