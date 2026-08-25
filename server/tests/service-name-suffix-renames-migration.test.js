@@ -380,6 +380,22 @@ describe('20260825000010 service name suffix renames', () => {
     expect(stateRow(db)).toBeUndefined();
   });
 
+  test('up() → up() → down() still restores everything the FIRST run changed', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    // Second run finds the catalog already renamed — its empty ownership
+    // must MERGE with (not erase) the first run's record.
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'cockroach_control').name).toBe(ROACH_OLD);
+    expect(svc(db, 'foam_drill').name).toBe(FOAM_OLD);
+    expect(visit(db, 'v-open-1').service_type).toBe(ROACH_OLD);
+    expect(db.self_booked_appointments[0].service_type).toBe(ROACH_OLD);
+    expect(JSON.parse(db.pricing_config[0].data).initial_roach.display.regular.name).toBe(ROACH_OLD);
+    expect(db.protocol_template_service_types.map((r) => r.service_type).sort())
+      .toEqual([ROACH_OLD, ROACH_NEW].sort());
+  });
+
   test('down() with no ownership record restores nothing', async () => {
     const db = seedDb();
     // Simulate a completed rename with no state row.

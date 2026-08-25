@@ -403,6 +403,29 @@ describe('service completion profiles', () => {
     });
   });
 
+  // Rollback direction (migration down()): deployed code still emits the
+  // RENAMED labels while the catalog is restored to the old names — every
+  // rename shape must resolve backwards too (codex #3484 P1).
+  test('renamed labels resolve the RESTORED old-name rows after a migration rollback', async () => {
+    const cases = [
+      // suffix rename: handled by the long-standing strip
+      ['Cockroach Treatment Service', { service_key: 'cockroach_control', name: 'Cockroach Treatment', category: 'pest_control', billing_type: 'one_time' }, [null]],
+      // paren-insert rename: needs the mid-name " Service" strip
+      ['German Roach Initial Service (3-Visit)', { service_key: 'german_roach_initial', name: 'German Roach Initial (3-Visit)', category: 'pest_control', billing_type: 'one_time' }, [null, null]],
+      // foam renames: explicit reverse aliases
+      ['Recurring Termite Foam Service', { service_key: 'foam_recurring', name: 'Recurring Foam Treatment', category: 'termite', billing_type: 'recurring' }, [null, null]],
+      ['Termite Foam Service', { service_key: 'foam_drill', name: 'Drill-and-Foam Termite', category: 'termite', billing_type: 'one_time' }, [null, null]],
+    ];
+    for (const [label, oldRow, misses] of cases) {
+      const knex = makeKnex({ serviceResults: [...misses, oldRow] });
+      const profile = await resolveCompletionProfileForScheduledService({
+        id: 'svc-1',
+        service_type: label,
+      }, knex);
+      expect(profile).toMatchObject({ serviceKey: oldRow.service_key, serviceName: oldRow.name });
+    }
+  });
+
   // The foam renames are NOT suffix-only, so they get explicit aliases:
   // reserved foam rows carry no service_id by design (20260808070000) and
   // legacy-labeled holds can commit after the rename migration runs.

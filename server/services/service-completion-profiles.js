@@ -265,6 +265,19 @@ function serviceNameCandidates(serviceType) {
         }
       }
     }
+    // Reverse of the paren-insert, for the migration's documented rollback:
+    // after down() the catalog says "X (Y)" again while deployed code still
+    // labels visits "X Service (Y)" — the trailing-" Service" strip can't
+    // reach a mid-name designator (codex #3484 P1).
+    const parenServiceMatch = /^(.*\S)\s+Service\s+(\([^()]*\))$/i.exec(candidate);
+    if (parenServiceMatch) {
+      const stripped = `${parenServiceMatch[1]} ${parenServiceMatch[2]}`;
+      const strippedKey = stripped.toLowerCase();
+      if (!seen.has(strippedKey)) {
+        expanded.push(stripped);
+        seen.add(strippedKey);
+      }
+    }
     if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
       const alias = 'Pest & Rodent Control';
       const aliasKey = alias.toLowerCase();
@@ -278,11 +291,20 @@ function serviceNameCandidates(serviceType) {
     // service_id by design (20260808070000), and a hold labeled with the
     // old form can commit after the rename migration relabels open visits
     // — these aliases keep every legacy foam label resolving forever.
+    // BOTH directions: forward (legacy label → renamed catalog row) for the
+    // deployed state, and reverse (renamed label → legacy catalog row) for
+    // the migration's documented down() — deployed code keeps emitting the
+    // new labels while the catalog is restored to the old names, and
+    // reserved foam rows carry no service_id (codex #3484 P1).
     let foamAlias = null;
     if (/^recurring\s+foam\s+treatment(\s*\(.*\))?$/i.test(candidate)) {
       foamAlias = 'Recurring Termite Foam Service';
     } else if (/^drill[\s-]*(?:and[\s-]*)?foam\s+termite(\s+treatment)?$/i.test(candidate)) {
       foamAlias = 'Termite Foam Service';
+    } else if (/^recurring\s+termite\s+foam\s+service$/i.test(candidate)) {
+      foamAlias = 'Recurring Foam Treatment';
+    } else if (/^termite\s+foam(\s+service)?$/i.test(candidate)) {
+      foamAlias = 'Drill-and-Foam Termite';
     }
     if (foamAlias && !seen.has(foamAlias.toLowerCase())) {
       expanded.push(foamAlias);

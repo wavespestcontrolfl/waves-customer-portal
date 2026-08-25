@@ -428,6 +428,31 @@ async function renameRoachDisplayNames(knex, fromName, toName) {
   return changed;
 }
 
+// A repeated up() (manual re-run, partial-failure retry) finds the catalog
+// already renamed, so its fresh records say renamed:false with empty
+// snapshot lists — writing those over the first run's record would erase
+// rollback ownership (codex pre-push P1). Per rename key the run that
+// actually renamed the row wins (a rename can only succeed once); the
+// roach-display variant list is unioned.
+function mergeOwnershipState(prior, next) {
+  if (!prior || typeof prior !== 'object') return next;
+  const merged = { renames: {}, roachDisplayChanged: [] };
+  const keys = new Set([
+    ...Object.keys(prior.renames || {}),
+    ...Object.keys(next.renames || {}),
+  ]);
+  for (const key of keys) {
+    const a = (prior.renames || {})[key];
+    const b = (next.renames || {})[key];
+    merged.renames[key] = (b && b.renamed) ? b : (a && a.renamed) ? a : (b || a);
+  }
+  merged.roachDisplayChanged = [...new Set([
+    ...(Array.isArray(prior.roachDisplayChanged) ? prior.roachDisplayChanged : []),
+    ...(Array.isArray(next.roachDisplayChanged) ? next.roachDisplayChanged : []),
+  ])];
+  return merged;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   const state = { renames: {} };
@@ -435,7 +460,8 @@ exports.up = async function up(knex) {
     state.renames[serviceKey] = await fanOutRename(knex, serviceKey, fromName, toName);
   }
   state.roachDisplayChanged = await renameRoachDisplayNames(knex, ROACH_DISPLAY_FROM, ROACH_DISPLAY_TO);
-  await saveState(knex, state);
+  const prior = await loadState(knex);
+  await saveState(knex, mergeOwnershipState(prior, state));
 };
 
 exports.down = async function down(knex) {
