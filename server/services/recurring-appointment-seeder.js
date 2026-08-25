@@ -105,7 +105,12 @@ function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDat
     const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
     if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
   }
-  return dateStr;
+  // Exhausted: no clear in-season date within the bounded search (an
+  // extended blackout can eat all of it). Returning the original off-season
+  // date would violate the Feb–Oct contract — null lets callers skip the
+  // candidate or report a placement shortfall like every other exhausted
+  // nudge.
+  return null;
 }
 
 const DEFAULT_ONE_YEAR_COUNTS = {
