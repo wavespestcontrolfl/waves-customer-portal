@@ -7132,6 +7132,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 { statusCode: 409, isOperational: true, code: 'CADENCE_REWRITE_SHORTFALL' },
               );
             }
+            // Boosters are all-or-nothing too: a FUTURE pending booster whose
+            // nudge exhausted has no target, and committing the edited
+            // cadence would silently leave it on its blacked-out date. Stale
+            // (past-dated) boosters are deliberately left alone by the
+            // planner's future-only floor and don't count against the save.
+            const unplacedFutureBoosters = pendingBoosters.filter((b) => {
+              const cur = normalizeDateOnly(b.scheduled_date) || '';
+              return cur > etDateString() && !boosterTargets.has(b.id);
+            });
+            if (unplacedFutureBoosters.length > 0) {
+              throw Object.assign(
+                new Error(`This cadence change cannot place ${unplacedFutureBoosters.length} pending booster visit(s) — they fall on blackout days or closed weekdays past the bounded nudge. Adjust the days-off/blackout settings before saving.`),
+                { statusCode: 409, isOperational: true, code: 'CADENCE_REWRITE_SHORTFALL' },
+              );
+            }
             const rewriteProbeExcludeIds = [parent.id, ...pendingRewriteIds];
             for (const child of pendingChildren) {
               const nextDateStr = childTargets.get(child.id);
@@ -7612,6 +7627,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               ongoingSeries: true,
               occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId] },
             });
+            // An EXHAUSTED plan (zero upcoming) flipped to ongoing with zero
+            // placeable top-ups is a dead state: auto-extend only fires from
+            // a visit COMPLETION, and this plan has no future event to ever
+            // refill it. Reject the save (trx rolls back the flag flip) —
+            // mirror of the alert-action convert_ongoing zero-placement
+            // failure. A plan that still has upcoming visits tolerates a
+            // shortfall: its next completion re-runs the extension.
+            if (liveNow === 0 && visitCountResult.added.length === 0) {
+              throw Object.assign(
+                new Error('Cannot switch this plan to Ongoing — no upcoming visit exists and no top-up date could be placed (every candidate is blacked out, on a configured day off, or already booked). Adjust the days-off/blackout settings or schedule a visit manually, then retry.'),
+                { statusCode: 409, isOperational: true, code: 'NO_PLACEABLE_DATE' },
+              );
+            }
             recurringCreated += visitCountResult.added.length;
             for (const child of visitCountResult.added) {
               spawnedRecurringChildren.push(child);
@@ -14159,26 +14187,18 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       }
     }
 
-    // Partial placement: the visits that DID fit commit (they are real,
-    // wanted work), but the alert must stay open — resolving it on a
-    // shortfall dismisses the banner while the plan is still short. The
-    // operator sees created + shortfall and can retry after adjusting the
-    // days-off/blackout settings (the loops dedupe against existing dates,
-    // so a retry only adds the missing visits). Zero-placement throws above.
+    // Partial placement is ALL-OR-NOTHING (codex P0: committing a partial
+    // and leaving the alert open overbooks on retry — the UI resubmits the
+    // FULL count, so 1-of-4 placed + a retry mints 5 billable visits). A
+    // shortfall throws, the trx rolls back every partial insert, and the
+    // alert stays exactly as it was; the operator adjusts the days-off/
+    // blackout settings (or picks a smaller count) and retries from a clean
+    // slate. Zero-placement throws above with its own message.
     if (created < owed) {
-      logger.warn(`[recurring-alerts] ${action} on parent=${parentId} placed ${created} of ${owed} visit(s) — alert left OPEN (remaining candidates blacked out, on closed weekdays, or booked)`);
-      outcome = {
-        status: 200,
-        body: {
-          success: true,
-          action,
-          created,
-          shortfall: owed - created,
-          alertResolved: false,
-          warning: `Placed ${created} of ${owed} visit(s) — the rest fall on blackout days, closed weekdays, or booked slots. The alert stays open; adjust the days-off/blackout settings or schedule the remaining visits manually.`,
-        },
-      };
-      return;
+      throw Object.assign(
+        new Error(`Only ${created} of ${owed} requested visit(s) could be placed — the rest fall on blackout days, closed weekdays, or booked slots. Nothing was scheduled; adjust the days-off/blackout settings or request fewer visits, then retry.`),
+        { statusCode: 409, isOperational: true, code: 'EXTENSION_SHORTFALL' },
+      );
     }
     // Resolve/insert the alert row in the SAME transaction — the resolution
     // IS the idempotency claim a concurrent click's in-lock re-read checks.

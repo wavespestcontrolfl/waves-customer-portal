@@ -907,10 +907,11 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.insertedVisits[0].scheduled_date > '2098-10-15').toBe(true);
   });
 
-  test('P1: a PARTIAL extension commits its visits but leaves the alert OPEN with the shortfall reported', async () => {
+  test('P0: a PARTIAL extension throws (all-or-nothing) — the alert stays unresolved and no shortfall can overbook a retry', async () => {
     // Only the first placeable candidate is free; every later day clashes.
-    // The one visit that fits must commit, but resolving the alert would
-    // dismiss the banner while the plan is still short.
+    // Committing the partial and leaving the alert open would overbook on
+    // retry (the UI resubmits the FULL count) — the action must throw so
+    // the trx rolls the partial insert back and the retry starts clean.
     let allowed = null;
     const { state, handler } = alertActionScenario({
       seriesRows: [
@@ -923,10 +924,9 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
         return d !== allowed;
       },
     });
-    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '62', action: 'extend', count: 3, adminUserId: null });
-    expect(out.status).toBe(200);
-    expect(out.body).toMatchObject({ success: true, created: 1, shortfall: 2, alertResolved: false });
-    expect(state.insertedVisits).toHaveLength(1);
+    await expect(
+      runRecurringAlertAction(makeConn(handler), { idParam: '62', action: 'extend', count: 3, adminUserId: null }),
+    ).rejects.toMatchObject({ statusCode: 409, isOperational: true, code: 'EXTENSION_SHORTFALL' });
     expect(state.alert.resolved_at).toBeNull();
   });
 

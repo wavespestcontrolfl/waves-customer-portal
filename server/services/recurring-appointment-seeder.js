@@ -461,34 +461,51 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   }
 
   // Blackout/day-off exhaustion must not silently shrink the plan: when the
-  // bounded walk cannot place every requested follow-up, say so — callers
+  // bounded walk cannot place every requested follow-up, report it — callers
   // (booking confirm, estimate conversion) return success on whatever
   // seeded, and an undersized series is otherwise invisible until the
-  // customer's visits run out. A server log alone is not office-visible, so
-  // this also rings the admin bell (best-effort, fire-and-forget — a
-  // notification failure must never fail the seeding).
+  // customer's visits run out. The builder itself stays side-effect-free
+  // (it can run inside a caller transaction that later rolls back): the
+  // shortfall rides the returned array as a non-enumerable property, and
+  // seedFollowUpsForParent rings the admin bell only after the seed commits.
   if (rows.length < targetNewRows) {
-    const shortfallMsg = `Recurring plan for customer ${parent.customer_id || 'n/a'} wanted ${targetNewRows} follow-up visit(s) but only ${rows.length} could be placed — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
-    require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} ${shortfallMsg}`);
-    Promise.resolve()
-      .then(() => require('./notification-service').notifyAdmin(
-        'alert',
-        'Recurring plan seeded short',
-        shortfallMsg,
-        {
-          link: parent.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
-          metadata: {
-            customer_id: parent.customer_id || null,
-            recurring_parent_id: parentId || null,
-            requested: targetNewRows,
-            placed: rows.length,
-          },
-        },
-      ))
-      .catch((err) => require('./logger').warn(`[recurring-seeder] shortfall notification failed (non-blocking): ${err.message}`));
+    Object.defineProperty(rows, 'seedShortfall', {
+      value: { requested: targetNewRows, placed: rows.length },
+      enumerable: false,
+    });
   }
 
   return rows;
+}
+
+// Post-commit shortfall bell — see buildRecurringFollowUpRows. bell: true is
+// load-bearing: under GATE_ADMIN_BELL_POLICY the generic 'alert' category is
+// not allowlisted and the notification would be silently discarded. The
+// dedupeKey keeps a retried seed from stacking identical bells. Best-effort:
+// a notification failure never fails the seeding.
+function notifySeedShortfall(parent, shortfall) {
+  if (!shortfall) return;
+  const parentId = parent?.id || null;
+  const shortfallMsg = `Recurring plan for customer ${parent?.customer_id || 'n/a'} wanted ${shortfall.requested} follow-up visit(s) but only ${shortfall.placed} could be placed — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
+  require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} ${shortfallMsg}`);
+  Promise.resolve()
+    .then(() => require('./notification-service').notifyAdmin(
+      'alert',
+      'Recurring plan seeded short',
+      shortfallMsg,
+      {
+        link: parent?.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
+        bell: true,
+        metadata: {
+          dedupeKey: `recurring-seed-shortfall:${parentId || 'n/a'}:${shortfall.placed}/${shortfall.requested}`,
+          customer_id: parent?.customer_id || null,
+          recurring_parent_id: parentId,
+          requested: shortfall.requested,
+          placed: shortfall.placed,
+        },
+      },
+    ))
+    .catch((err) => require('./logger').warn(`[recurring-seeder] shortfall notification failed (non-blocking): ${err.message}`));
 }
 
 async function scheduledServiceColumns(conn) {
@@ -955,22 +972,42 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
     );
   } catch { /* fail open */ }
-  const rows = buildRecurringFollowUpRows(parent, {
+  const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
     existingDates,
     blackoutDates,
-  }).map((row) => filterByColumns(row, columns));
+  });
+  const seedShortfall = builtRows.seedShortfall || null;
+  // Ring the shortfall bell only once the seed is DURABLE: inside a caller
+  // transaction, executionPromise resolves on commit and rejects on
+  // rollback (a rolled-back seed must not report visits as placed); on a
+  // plain connection the insert path below commits its own scoped trx
+  // before this fires.
+  const notifyShortfallAfterCommit = () => {
+    if (!seedShortfall) return;
+    if (conn.isTransaction && conn.executionPromise) {
+      conn.executionPromise.then(
+        () => notifySeedShortfall(parent, seedShortfall),
+        () => {},
+      );
+    } else {
+      notifySeedShortfall(parent, seedShortfall);
+    }
+  };
+  const rows = builtRows.map((row) => filterByColumns(row, columns));
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent
     // was just marked recurring — that alone is tier evidence.
     await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+    notifyShortfallAfterCommit();
     return {
       pattern,
       plannedCount: plannedVisitCountForPattern(pattern, opts),
       insertedCount: 0,
       insertedRows: [],
+      seedShortfall,
     };
   }
 
@@ -985,11 +1022,13 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+  notifyShortfallAfterCommit();
   return {
     pattern,
     plannedCount: plannedVisitCountForPattern(pattern, opts),
     insertedCount: rows.length,
     insertedRows: insertedRows.length ? insertedRows : rows,
+    seedShortfall,
   };
 }
 
