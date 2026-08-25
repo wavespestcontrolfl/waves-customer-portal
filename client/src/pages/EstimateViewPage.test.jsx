@@ -1571,6 +1571,32 @@ describe('ServiceSection termite station rental row', () => {
     expect(row).toHaveTextContent('Included in your plan pricing.');
   });
 
+  it('drops the amount on a priceItemized stamp — terms only, never a second price', () => {
+    render(
+      <ServiceSection
+        section={termiteSection({
+          stationRental: {
+            label: 'Termite Station Rental',
+            detail: '16 rented stations · Waves-owned',
+            perApplicationAdd: 33,
+            monthlyAdd: 11,
+            annualAdd: 132,
+            priceItemized: true,
+          },
+        })}
+        selectedFrequencyKey="recurring"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{}}
+      />,
+    );
+
+    const row = screen.getByLabelText('Termite station rental');
+    expect(row).toHaveTextContent('16 rented stations · Waves-owned');
+    expect(row).not.toHaveTextContent('$33.00');
+  });
+
   it('renders no rental row when the section carries no stamp', () => {
     render(
       <ServiceSection

@@ -3816,9 +3816,14 @@ export function ServiceSection({
                   </div>
                 ) : null}
               </div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                {fmtMoney(section.stationRental.perApplicationAdd)} / application
-              </div>
+              {/* priceItemized (GH codex r2 P1): the bundle ladder's own
+                  treatment row already shows this amount — the rider then
+                  carries only the ownership terms, never a second price. */}
+              {section.stationRental.priceItemized ? null : (
+                <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                  {fmtMoney(section.stationRental.perApplicationAdd)} / application
+                </div>
+              )}
             </div>
             <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 4, lineHeight: 1.35 }}>
               Included in your plan pricing.

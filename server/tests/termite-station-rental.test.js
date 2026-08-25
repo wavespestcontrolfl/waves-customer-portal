@@ -620,10 +620,11 @@ describe('estimate sections treat the rental as a rider, never its own card', ()
     });
   });
 
-  test('a bundle ladder that already itemizes the rental is NOT stamped (GH codex r1 P2)', () => {
+  test('a bundle ladder that already itemizes the rental gets a TERMS-ONLY stamp (GH codex r1 P2 + r2 P1)', () => {
     // Mismatched monthly (999) fails split reconciliation → bundle fallback,
-    // but the kept ladder itemizes the rental — PriceCard renders that row,
-    // so the rider stamp would show the price twice.
+    // but the kept ladder itemizes the rental — PriceCard renders that row's
+    // label and PRICE (never row.detail), so the rider must keep the
+    // ownership terms without restating the amount.
     const itemizedLadder = {
       frequencies: [{
         key: 'quarterly',
@@ -640,7 +641,12 @@ describe('estimate sections treat the rental as a rider, never its own card', ()
     expect(sections).toHaveLength(1);
     expect(sections[0].key).toBe('bundle');
     attachTermiteStationRental(sections, multiEstData);
-    expect(sections[0].stationRental).toBeUndefined();
+    expect(sections[0].stationRental).toMatchObject({
+      priceItemized: true,
+      detail: '16 rented stations · Waves-owned',
+    });
+    // Bundle host never folds either way.
+    expect(sections[0].frequencies[0].monthly).toBe(999);
   });
 
   test('a rental row with no monitoring plan keeps its own section (fail-safe, never vanishes)', () => {

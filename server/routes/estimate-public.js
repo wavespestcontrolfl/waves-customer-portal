@@ -18214,15 +18214,15 @@ function attachTermiteStationRental(services = [], estData = {}) {
       && Array.isArray(s.memberKeys) && s.memberKeys.includes('termite_bait'));
   if (!section) return services;
   // A legacy bundle ladder can itemize the rental as a treatment row —
-  // PriceCard already renders those, so stamping the rider too would show
-  // the price twice (GH codex #3481 r1 P2). The itemized row IS the
-  // disclosure there; the stamp is only for layouts that suppressed it.
-  if (section.key === 'bundle'
+  // PriceCard already renders that row's label and PRICE, so the rider must
+  // not restate the amount (GH codex #3481 r1 P2). But PriceCard never
+  // renders row.detail, so the ownership terms (Waves-owned, $0 install)
+  // still need the rider (GH r2 P1) — stamp a terms-only variant: the
+  // client drops the amount column when priceItemized is set.
+  const bundleLadderItemizesRental = section.key === 'bundle'
     && (section.frequencies || []).some((frequency) => (frequency?.perServiceTreatments || [])
       .some((row) => recurringServiceKey(row) === 'termite_station_rental'
-        && firstPositiveNumber(row.perTreatment, row.displayPrice)))) {
-    return services;
-  }
+        && firstPositiveNumber(row.perTreatment, row.displayPrice)));
   const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
   const rentalRow = rows.find((svc) => recurringServiceKey(svc) === 'termite_station_rental') || null;
   if (!rentalRow) return services;
@@ -18236,6 +18236,7 @@ function attachTermiteStationRental(services = [], estData = {}) {
     perApplicationAdd: rentalPerApp,
     monthlyAdd: rentalMonthly,
     annualAdd: rentalAnnual,
+    ...(bundleLadderItemizesRental ? { priceItemized: true } : {}),
   };
   // Fold ONLY the solo termite section — a solo 'bundle' fallback builds
   // its frequencies from the payload ladder, which already sums every
