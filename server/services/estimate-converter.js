@@ -1888,12 +1888,25 @@ function coalesceRecurringServiceRows(existing = {}, next = {}) {
 // normalizing only one list split formerly-coalesced duplicates into two
 // scheduled bond visits (codex #3485 r5 P1).
 function normalizeBondTermService(li) {
-  if (!li || typeof li !== 'object' || li.service !== 'termite_bond') return li;
+  if (!li || typeof li !== 'object') return li;
+  // The bond identity can ride any of the key aliases recurringServiceKey
+  // accepts (service / serviceKey / service_key) — normalizing only
+  // `service` left alias-keyed stored rows deduplicating separately from
+  // raw rows and scheduling two bond visits (codex #3485 r8 P1). Every
+  // present alias field is rewritten so identity resolution agrees.
+  const keyFields = ['service', 'serviceKey', 'service_key'].filter((f) => li[f] !== undefined);
+  const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
+  if (!isBareBond) return li;
   const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');
   const bondTerm = li.bondTerm
     || (labelText.match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
     || null;
-  return bondTerm ? { ...li, service: `termite_bond_${bondTerm}` } : li;
+  if (!bondTerm) return li;
+  const out = { ...li };
+  for (const f of keyFields) {
+    if (out[f] === 'termite_bond') out[f] = `termite_bond_${bondTerm}`;
+  }
+  return out;
 }
 
 function mergeRecurringServiceLists(...lists) {

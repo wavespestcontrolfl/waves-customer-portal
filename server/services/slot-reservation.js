@@ -256,33 +256,37 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   if (isOneTime || !primary) return null;
   const visits = Number(primary.visitsPerYear);
   if (!Number.isFinite(visits) || visits <= 0) return null;
+  // EXACT catalog visit counts only (codex #3485 r8 P2): bucketing would
+  // stamp an unrelated durable identity for legacy/admin-authored profiles
+  // (8 pest visits are NOT the 6-visit bi-monthly row) — an off-catalog
+  // cadence stays unlinked, exactly as the fail-open contract promises.
   const key = String(primary.service || '');
   if (key === 'pest_control') {
-    if (visits >= 12) return 'pest_general_monthly';
-    if (visits >= 6) return 'pest_general_bimonthly';
-    if (visits >= 4) return 'pest_general_quarterly';
+    if (visits === 12) return 'pest_general_monthly';
+    if (visits === 6) return 'pest_general_bimonthly';
+    if (visits === 4) return 'pest_general_quarterly';
     if (visits === 2) return 'pest_general_semiannual';
     return null;
   }
   if (key === 'lawn_care') {
-    if (visits >= 12) return 'lawn_care_monthly';
-    if (visits >= 9) return 'lawn_care_6week';
-    if (visits >= 6) return 'lawn_care_recurring';
+    if (visits === 12) return 'lawn_care_monthly';
+    if (visits === 9) return 'lawn_care_6week';
+    if (visits === 6) return 'lawn_care_recurring';
     // 4-application Basic tier: the PUBLIC accept path 409s this retired
     // cadence, but legacy/admin-carried 4-visit lawn profiles still reach
     // commit and the lawn_care_quarterly row is active (codex P1).
-    if (visits >= 4) return 'lawn_care_quarterly';
+    if (visits === 4) return 'lawn_care_quarterly';
     return null;
   }
   if (key === 'mosquito') {
-    if (visits >= 12) return 'mosquito_monthly';
-    if (visits >= 9) return 'mosquito_seasonal';
+    if (visits === 12) return 'mosquito_monthly';
+    if (visits === 9) return 'mosquito_seasonal';
     return null;
   }
   if (key === 'tree_shrub') {
-    if (visits >= 9) return 'tree_shrub_6week';
-    if (visits >= 6) return 'tree_shrub_program';
-    if (visits >= 4) return 'tree_shrub_quarterly';
+    if (visits === 9) return 'tree_shrub_6week';
+    if (visits === 6) return 'tree_shrub_program';
+    if (visits === 4) return 'tree_shrub_quarterly';
     return null;
   }
   return null;

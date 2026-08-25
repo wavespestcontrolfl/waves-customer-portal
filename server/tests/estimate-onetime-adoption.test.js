@@ -213,6 +213,19 @@ describe('adoptedAppointmentCatalogStamp', () => {
     expect(stamp).toBeNull();
   });
 
+  test('NEVER overwrites a snapshot-only identity (cleared FK, surviving service_key_snapshot) — and never queries', async () => {
+    // ON DELETE SET NULL can clear the catalog FK while the durable
+    // snapshot survives, and completion resolution trusts the snapshot —
+    // adopting a same-family estimate must stand down (codex #3485 r8 P1).
+    const conn = makeCatalogConn(() => { throw new Error('must not query'); });
+    const stamp = await adoptedAppointmentCatalogStamp(conn, {
+      existingAppointmentRow: { ...WASP_ROW, service_id: null, service_key_snapshot: 'bee_wasp_removal' },
+      estimate: oneTimeEstimate(),
+      serviceMode: 'one_time',
+    });
+    expect(stamp).toBeNull();
+  });
+
   test('REGRESSION (pre-push codex P1): a service_id assigned BETWEEN preflight and lock wins — the locked row is authoritative and no stamp is computed', async () => {
     // Preflight saw service_id null; an admin repointed the visit before the
     // FOR UPDATE reload. The stamp call receives the LOCKED row (see the

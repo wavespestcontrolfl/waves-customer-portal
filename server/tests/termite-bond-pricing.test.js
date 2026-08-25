@@ -638,6 +638,20 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
     expect(bonds[0].service).toBe('termite_bond_5yr');
   });
 
+  test('alias-keyed stored rows (serviceKey/service_key) normalize and coalesce with raw rows', () => {
+    // recurringServiceKey accepts all three key aliases; the choke-point
+    // normalizer must too, or the formerly identical rows deduplicate
+    // under termite_bond AND termite_bond_5yr and schedule two bond
+    // visits (codex #3485 r8 P1).
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ name: 'Termite Bond (5-Year Term)', serviceKey: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+      result: { lineItems: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+    });
+    const bonds = rows.filter((r) => String(r.service || r.serviceKey || '').startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service || bonds[0].serviceKey).toBe('termite_bond_5yr');
+  });
+
   test('the term parses from serviceName/service_name label fields too', () => {
     const rows = recurringServicesFromEstimateData({
       result: {

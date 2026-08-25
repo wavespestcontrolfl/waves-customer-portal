@@ -325,6 +325,19 @@ describe('catalogServiceIdForProfile', () => {
       expect(capture.where).toEqual({ service_key: 'lawn_care_quarterly', is_active: true });
     });
 
+    test('off-catalog visit counts stay unlinked (exact match, never bucketed)', async () => {
+      // 8 pest visits are NOT the 6-visit bi-monthly row; bucketing would
+      // stamp an unrelated durable identity (codex #3485 r8 P2).
+      const capture = {};
+      for (const [service, visits] of [['pest_control', 8], ['lawn_care', 10], ['mosquito', 10], ['tree_shrub', 5]]) {
+        expect(await catalogLinkForProfile(
+          makeCadenceConn([{ id: 'x' }], capture),
+          { services: [{ service, visitsPerYear: visits }] },
+        )).toBeNull();
+      }
+      expect(capture.where).toBeUndefined();
+    });
+
     test('one_time mode and unknown cadence never trigger the keyed lookup', async () => {
       const capture = {};
       expect(await catalogLinkForProfile(

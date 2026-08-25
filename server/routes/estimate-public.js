@@ -14640,7 +14640,12 @@ async function adoptedAppointmentCatalogStamp(conn, {
   serviceMode = 'recurring',
   selectedFrequency = '',
 } = {}) {
-  if (!estimate || existingAppointmentRow?.service_id) return null;
+  // No-overwrite guard covers BOTH durable identities: a row whose catalog
+  // FK was cleared (ON DELETE SET NULL) can still carry an authoritative
+  // service_key_snapshot, and completion resolution trusts that snapshot —
+  // adopting a same-family estimate must not move an admin-authored
+  // specialty onto a different billing/completion lane (codex #3485 r8 P1).
+  if (!estimate || existingAppointmentRow?.service_id || existingAppointmentRow?.service_key_snapshot) return null;
   const estimateSlotAvailability = require('../services/estimate-slot-availability');
   if (typeof estimateSlotAvailability.resolveEstimateSlotProfile !== 'function') return null;
   let profile = null;
