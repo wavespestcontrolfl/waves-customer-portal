@@ -51,17 +51,25 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
     // A visit parked AFTER the pre-read is outside our lock set — do not
     // classify under a torn lock order; the next reconcile/sweep owns it.
-    const lockCheck = await trx('notifications')
+    // BOTH key families are rechecked (Codex PR r23 P1): a terminal
+    // registration committing between the pre-read and the lock would
+    // otherwise be scanned without its visit's mint lock held.
+    const lockCheckRows = await trx('notifications')
       .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .first('metadata');
-    const lockCheckMeta = lockCheck && (typeof lockCheck.metadata === 'string'
-      ? (() => { try { return JSON.parse(lockCheck.metadata); } catch { return null; } })()
-      : lockCheck.metadata);
-    const nowIds = [
-      ...(lockCheckMeta?.scheduledServiceId ? [String(lockCheckMeta.scheduledServiceId)] : []),
-      ...(Array.isArray(lockCheckMeta?.parkedVisitIds) ? lockCheckMeta.parkedVisitIds.map(String) : []),
-    ];
+      .where(function lockCheckKeys() {
+        this.whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .orWhereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey]);
+      })
+      .select('metadata');
+    const nowIds = [...new Set(lockCheckRows.flatMap((row) => {
+      const m = typeof row.metadata === 'string'
+        ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+        : row.metadata;
+      return [
+        ...(m?.scheduledServiceId ? [String(m.scheduledServiceId)] : []),
+        ...(Array.isArray(m?.parkedVisitIds) ? m.parkedVisitIds.map(String) : []),
+      ];
+    }))];
     if (nowIds.some((id) => !preLockVisitIds.includes(id))) {
       logger.warn(`[setup-fee-reconcile]${actorLabel} parked set grew mid-lock — deferring to the next reconcile`);
       return;
@@ -100,19 +108,40 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey])
             .select('id', 'body', 'metadata');
-          const reconcileTerminalFeeAlerts = async (feeIsProven) => {
+          const reconcileTerminalFeeAlerts = async (feeIsProven, coveredCentsNow = null) => {
             for (const row of terminalFeeAlerts) {
               const meta = typeof row.metadata === 'string'
                 ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
                 : row.metadata;
               const wasFeeResolved = meta?.setupFeeResolved === true;
+              // PARTIAL coverage rewrites the clause with the remainder
+              // (Codex PR r23 P1) — a $20 partial against $99 instructs
+              // $79, and a full→partial regression restores the remainder,
+              // never the original full amount.
+              const tExpectCents = Number(meta?.expectedSetupFeeCents);
+              const tPriorCovered = Number.isFinite(Number(meta?.coveredFeeCents)) ? Number(meta.coveredFeeCents) : null;
+              const tCoverageChanged = coveredCentsNow !== null && tPriorCovered !== coveredCentsNow;
+              if (!feeIsProven && !wasFeeResolved && tCoverageChanged
+                && Number.isFinite(tExpectCents) && tExpectCents > 0) {
+                const tRemainder = Math.max(0, tExpectCents - coveredCentsNow);
+                const rewrittenBody = String(row.body || '')
+                  .replace(/ (ALSO|UPDATE): the one-time (WaveGuard )?setup fee[\s\S]*$/, '')
+                  + ` ALSO: the one-time WaveGuard setup fee ($${(tRemainder / 100).toFixed(2)}${coveredCentsNow > 0 ? ' remaining' : ''}) is still owed — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
+                await trx('notifications').where({ id: row.id }).update({
+                  body: rewrittenBody,
+                  read_at: null,
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, coveredFeeCents: coveredCentsNow })]),
+                });
+                logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause rewritten — partial coverage, remainder instructed`);
+                continue;
+              }
               if (feeIsProven && !wasFeeResolved) {
                 const strippedBody = String(row.body || '')
                   .replace(/ ALSO: the one-time WaveGuard setup fee[\s\S]*$/, ' UPDATE: the one-time setup fee is now COVERED by a live invoice — do NOT bill it.');
                 await trx('notifications').where({ id: row.id }).update({
                   body: strippedBody,
                   read_at: null,
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true })]),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause retired — fee coverage proven`);
               } else if (!feeIsProven && wasFeeResolved) {
@@ -120,15 +149,18 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 // invoice was voided/edited away — restore the fee
                 // instruction instead of leaving a false "covered".
                 const expectCents = Number(meta?.expectedSetupFeeCents);
-                const feeAmt = Number.isFinite(expectCents) && expectCents > 0
-                  ? `$${(expectCents / 100).toFixed(2)}` : 'the accepted amount';
+                const reopenRemainder = Number.isFinite(expectCents) && expectCents > 0 && coveredCentsNow !== null
+                  ? Math.max(0, expectCents - coveredCentsNow)
+                  : (Number.isFinite(expectCents) ? expectCents : null);
+                const feeAmt = reopenRemainder !== null && reopenRemainder > 0
+                  ? `$${(reopenRemainder / 100).toFixed(2)}${coveredCentsNow > 0 ? ' remaining' : ''}` : 'the accepted amount';
                 const restoredBody = String(row.body || '')
                   .replace(/ UPDATE: the one-time setup fee is now COVERED[\s\S]*$/, '')
                   + ` ALSO: the one-time WaveGuard setup fee (${feeAmt}) is OWED AGAIN — its covering invoice is no longer live. Bill it using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes.`;
                 await trx('notifications').where({ id: row.id }).update({
                   body: restoredBody,
                   read_at: null,
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false })]),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause REOPENED — coverage regressed`);
               }
@@ -194,7 +226,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             const tFeeProven = feeWaivedByTerm || (tExpect > 0
               ? (tLiveFeeCents + tRefundedFeeCents) >= tExpect
               : tRefundedFeeCents > 0);
-            await reconcileTerminalFeeAlerts(tFeeProven);
+            await reconcileTerminalFeeAlerts(tFeeProven, tExpect > 0 ? (tLiveFeeCents + tRefundedFeeCents) : null);
             return;
           }
           const {
@@ -324,7 +356,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             || (expectedFeeCents !== null
               ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
               : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine)));
-          await reconcileTerminalFeeAlerts(feeProven);
+          await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? (liveFeeCents + refundedFeeCents) : null);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
             const v = map && Number(map[String(visitId)]);
