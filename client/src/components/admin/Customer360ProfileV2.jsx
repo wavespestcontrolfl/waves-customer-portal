@@ -47,6 +47,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Bell,
   CheckCircle2,
@@ -5182,9 +5183,9 @@ export default function Customer360ProfileV2({
     && String(data.customer.id) === String(customerId);
 
   if (loading || (data?.customer && !loadedCustomerMatches))
-    return (
+    return createPortal(
       <div
-        className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
+        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
       >
         {" "}
@@ -5198,12 +5199,12 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    );
+    , document.body);
 
   if (!data || !data.customer)
-    return (
+    return createPortal(
       <div
-        className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
+        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
       >
         {" "}
@@ -5230,7 +5231,7 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    );
+    , document.body);
 
   const c = data.customer;
   // Single seeding path for the edit-customer modal — the desktop pill, the
@@ -5559,9 +5560,12 @@ export default function Customer360ProfileV2({
     { key: "compliance", label: "Compliance" },
   ];
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
+      // Portaled to <body>, so the overlay leaves the admin shell's DOM
+      // scope — restate .admin-shell-v2 here to keep the forced-Roboto and
+      // border-box form-control rules from index.css applying inside it.
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
       {" "}
@@ -7338,7 +7342,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Nitrogen
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.nApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7353,7 +7357,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Phosphorus
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.pApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7368,7 +7372,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Potassium
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {fmtNumber(nutrientSummary.kApplied)}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7383,7 +7387,7 @@ export default function Customer360ProfileV2({
                     <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
                       Entries
                     </div>{" "}
-                    <div className="u-nums text-22 font-semibold text-zinc-900">
+                    <div className="u-nums text-22 font-medium text-zinc-900">
                       {nutrientSummary.entries || 0}
                     </div>{" "}
                     <div className="text-11 text-ink-secondary">
@@ -7949,5 +7953,5 @@ export default function Customer360ProfileV2({
         </div>
       )}
     </div>
-  );
+  , document.body);
 }

@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 
 class ApplicationLimitChecker {
   async checkLimits(customerId, productId, proposedDate = new Date()) {
@@ -57,10 +57,13 @@ class ApplicationLimitChecker {
   }
 
   async evaluateLimit(limit, history, moaHistory, proposedDate, product) {
+    // product_limits.limit_value is a pg decimal — node-pg returns it as a
+    // STRING ('14.0000'); coerce once so `< minDays + 7` etc. stay numeric.
+    const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
     switch (limit.limit_type) {
       case 'annual_max_apps': {
         const count = history.length;
-        const max = limit.limit_value;
+        const max = limitValue;
         if (count >= max) return { violated: true, message: `${product.name}: ${count}/${max} applications this year — LIMIT REACHED.`, current: count, max };
         if (count >= max - 1) return { approaching: true, message: `${product.name}: ${count}/${max} this year — this would be the LAST allowed.`, current: count, max };
         return { violated: false, current: count, max };
@@ -68,9 +71,16 @@ class ApplicationLimitChecker {
 
       case 'min_interval_days': {
         if (!history.length) return { violated: false };
-        const lastApp = new Date(history[0].application_date + 'T12:00:00');
-        const daysSince = Math.floor((proposedDate - lastApp) / 86400000);
-        const minDays = limit.limit_value;
+        // pg `date` columns arrive as JS Date objects (no type parser is
+        // configured) — normalize to YYYY-MM-DD before building the anchor.
+        // Both operands are ET calendar days anchored at noon UTC so the
+        // interval is whole days regardless of the proposed instant's clock.
+        const lastApp = new Date(etCalendarDayOf(history[0].application_date) + 'T12:00:00Z');
+        // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
+        // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
+        const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
+        const daysSince = Math.floor((proposedDay - lastApp) / 86400000);
+        const minDays = limitValue;
         if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };
         return { violated: false, current: daysSince, max: minDays };
@@ -78,7 +88,7 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
-        const maxRate = limit.limit_value;
+        const maxRate = limitValue;
         if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
         return { violated: false, current: totalApplied, max: maxRate };
       }
@@ -87,9 +97,13 @@ class ApplicationLimitChecker {
         if (!limit.season_start || !limit.season_end) return { violated: false };
         // Compare ET calendar days (YYYY-MM-DD), not Date objects — blackout
         // windows are legal calendar dates, not absolute timestamps.
-        const proposedYMD = etDateString(proposedDate);
-        const startMMDD = String(limit.season_start).slice(5, 10);
-        const endMMDD = String(limit.season_end).slice(5, 10);
+        // proposedDate may be a hydrated pg DATE (UTC midnight) — keep its
+        // literal calendar day rather than shifting to the prior ET day.
+        const proposedYMD = etCalendarDayOf(proposedDate);
+        // season_start/season_end are pg `date` columns → JS Date objects;
+        // String(date).slice(5, 10) yields "Jun 0", never a MM-DD.
+        const startMMDD = etCalendarDayOf(limit.season_start).slice(5, 10);
+        const endMMDD = etCalendarDayOf(limit.season_end).slice(5, 10);
         const proposedMMDD = proposedYMD.slice(5, 10);
         const wraps = startMMDD > endMMDD;
         const inRange = wraps
@@ -101,7 +115,7 @@ class ApplicationLimitChecker {
           return { violated: true, message: `BLACKOUT: ${(limit.jurisdiction || '').replace(/_/g, ' ')} restricts nitrogen ${startLabel} — ${endLabel}. Use iron/potassium only.`, current: 'in_blackout', max: 'none' };
         }
         // Approaching-window check: compute days-until using ET calendar math.
-        const proposedYear = etParts(proposedDate).year;
+        const proposedYear = Number(proposedYMD.slice(0, 4));
         const startYear = proposedMMDD <= startMMDD ? proposedYear : proposedYear + 1;
         const startDate = new Date(`${startYear}-${startMMDD}T12:00:00Z`);
         const proposedAnchor = new Date(`${proposedYMD}T12:00:00Z`);
@@ -117,7 +131,7 @@ class ApplicationLimitChecker {
           if (app.moa_group === product.moa_group) consecutive++;
           else break;
         }
-        const max = limit.limit_value;
+        const max = limitValue;
         if (consecutive >= max) {
           const alternatives = await db('products_catalog')
             .where('category', product.category).whereNot('moa_group', product.moa_group)
@@ -201,7 +215,9 @@ class ApplicationLimitChecker {
     return month >= 6 && month <= 9;   // June-Sept inclusive — was UTC month 5-8
   }
 
-  getYearStart(date) { return `${etParts(date).year}-01-01`; }
+  // Accepts a true instant or a hydrated pg DATE — etCalendarDayOf keeps a
+  // UTC-midnight Jan 1 as Jan 1 (etParts would read it as Dec 31 ET).
+  getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }
 
 module.exports = new ApplicationLimitChecker();

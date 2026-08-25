@@ -262,7 +262,7 @@ function renderInline(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
     if (part.startsWith("**") && part.endsWith("**"))
       return (
-        <strong key={i} style={{ color: "#0F172A", fontWeight: 600 }}>
+        <strong key={i} style={{ color: "#0F172A", fontWeight: 500 }}>
           {part.slice(2, -2)}
         </strong>
       );
@@ -608,7 +608,7 @@ function GlobalCommandPalette(_props, ref) {
                     background: `${accentColor}22`,
                     color: accentColor,
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     fontFamily: "JetBrains Mono, monospace",
                     animation: "pulse 1.5s ease infinite",
                   }}
@@ -656,7 +656,7 @@ function GlobalCommandPalette(_props, ref) {
               border: `1px solid ${accentColor}33`,
               color: accentColor,
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               whiteSpace: "nowrap",
             }}
           >
@@ -708,7 +708,7 @@ function GlobalCommandPalette(_props, ref) {
                   border: `1px solid ${D.border}`,
                   color: "#000",
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   fontFamily: "'Roboto', system-ui, sans-serif",
                   cursor: "pointer",
                   transition: "all 0.1s",
@@ -813,7 +813,7 @@ function GlobalCommandPalette(_props, ref) {
                 borderRadius: 8,
                 color: D.muted,
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >

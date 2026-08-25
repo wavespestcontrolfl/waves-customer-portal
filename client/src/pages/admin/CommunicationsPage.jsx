@@ -521,7 +521,7 @@ function PhoneCard({ number, label, sent, received, isTracking }) {
             style={{
               fontFamily: "JetBrains Mono, monospace",
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.green,
             }}
           >
@@ -544,7 +544,7 @@ function PhoneCard({ number, label, sent, received, isTracking }) {
             style={{
               fontFamily: "JetBrains Mono, monospace",
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.teal,
             }}
           >
@@ -719,7 +719,7 @@ function SmsLogItem({ msg: m, onReply }) {
                 background: D.teal,
                 color: "#fff",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -739,7 +739,7 @@ function SmsLogItem({ msg: m, onReply }) {
                 background: D.teal,
                 color: "#fff",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -893,7 +893,7 @@ function ConversationView({ thread, messages, onReply, onBack }) {
             background: D.teal,
             color: "#fff",
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -1233,7 +1233,7 @@ function CallLogTab() {
           <h2
             style={{
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               textTransform: "uppercase",
               letterSpacing: 1,
@@ -1295,7 +1295,7 @@ function CallLogTab() {
         <h2
           style={{
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.muted,
             textTransform: "uppercase",
             letterSpacing: 1,
@@ -1474,7 +1474,7 @@ function CallLogTab() {
             borderRadius: 8,
             color: D.heading,
             fontSize: 14,
-            fontWeight: 600,
+            fontWeight: 500,
             cursor: calling ? "not-allowed" : "pointer",
             fontFamily: "Roboto, Arial, sans-serif",
             opacity: !callTo.trim() ? 0.5 : 1,
@@ -1518,7 +1518,7 @@ function CallLogTab() {
           <h2
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               textTransform: "uppercase",
               letterSpacing: 1,
@@ -1632,7 +1632,7 @@ function CallLogTab() {
                         <div
                           style={{
                             fontSize: 13,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -1733,7 +1733,7 @@ function CallLogTab() {
                             background: D.red,
                             color: "#fff",
                             fontSize: 11,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             cursor: "pointer",
                           }}
                         >
@@ -1758,7 +1758,7 @@ function CallLogTab() {
                             background: "transparent",
                             color: D.teal,
                             fontSize: 11,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             cursor: "pointer",
                           }}
                         >
@@ -1784,7 +1784,7 @@ function CallLogTab() {
                             fontSize: 11,
                             color: D.muted,
                             marginBottom: 4,
-                            fontWeight: 600,
+                            fontWeight: 500,
                           }}
                         >
                           Recording{" "}
@@ -1816,7 +1816,7 @@ function CallLogTab() {
                             fontSize: 11,
                             color: D.muted,
                             marginBottom: 2,
-                            fontWeight: 600,
+                            fontWeight: 500,
                           }}
                         >
                           Transcription
@@ -1892,7 +1892,7 @@ function CSRCoachTab() {
     padding: "10px 14px",
     textAlign: "left",
     fontSize: 11,
-    fontWeight: 600,
+    fontWeight: 500,
     color: D.muted,
     borderBottom: `1px solid ${D.border}`,
     textTransform: "uppercase",
@@ -1927,7 +1927,7 @@ function CSRCoachTab() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -2010,7 +2010,7 @@ function CSRCoachTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2081,7 +2081,7 @@ function CSRCoachTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -2169,7 +2169,7 @@ function CSRCoachTab() {
               }}
             >
               {" "}
-              <span style={{ fontSize: 13, color: D.red, fontWeight: 600 }}>
+              <span style={{ fontSize: 13, color: D.red, fontWeight: 500 }}>
                 {""} {overview.fixableLossCount} fixable CSR errors = ~$
                 {overview.fixableRevenue?.toLocaleString()}/mo in lost bookings
               </span>{" "}
@@ -2197,7 +2197,7 @@ function CSRCoachTab() {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Follow-Up Tasks
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
@@ -2244,7 +2244,7 @@ function CSRCoachTab() {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                   >
                     {isOverdue ? " OVERDUE" : " DUE"}: {t.assigned_to} —{" "}
                     {t.task_type?.replace(/_/g, " ")}
@@ -2319,7 +2319,7 @@ function CSRCoachTab() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 4,
             }}
@@ -2347,7 +2347,7 @@ function CSRCoachTab() {
               <div style={{ flex: 1 }}>
                 {" "}
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {cat.category}: {cat.winner || "TBD"}
                 </div>{" "}
@@ -2501,7 +2501,7 @@ function SmsTemplatesTab() {
         }}
       >
         {" "}
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
           {filtered.length} SMS Templates
         </div>{" "}
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -2512,7 +2512,7 @@ function SmsTemplatesTab() {
               padding: "4px 10px",
               borderRadius: 6,
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               border: "none",
               cursor: "pointer",
               background: filter === "all" ? D.teal : D.card,
@@ -2529,7 +2529,7 @@ function SmsTemplatesTab() {
                 padding: "4px 10px",
                 borderRadius: 6,
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 border: "none",
                 cursor: "pointer",
                 background: filter === c ? catColors[c] || D.teal : D.card,
@@ -2566,7 +2566,7 @@ function SmsTemplatesTab() {
             {" "}
             <div>
               {" "}
-              <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+              <span style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
                 {t.name}
               </span>{" "}
               <span
@@ -2894,7 +2894,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                 {"\u00B7"}
               </span>
               Top:{" "}
-              <span style={{ fontWeight: 600, color: D.teal }}>{topLabel}</span>
+              <span style={{ fontWeight: 500, color: D.teal }}>{topLabel}</span>
               ({topCount} msgs)
             </>
           )}
@@ -2904,7 +2904,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
               <span style={{ color: D.muted, margin: "0 6px" }}>
                 {"\u00B7"}
               </span>{" "}
-              <span style={{ color: D.red, fontWeight: 600 }}>
+              <span style={{ color: D.red, fontWeight: 500 }}>
                 {dormantCount} dormant
               </span>{" "}
             </>
@@ -3046,7 +3046,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                         style={{
                           fontFamily: "'JetBrains Mono', monospace",
                           fontSize: 14,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: D.heading,
                         }}
                       >
@@ -3073,7 +3073,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                               : D.red + "22",
                             color: smsEnabled ? D.green : D.red,
                             fontFamily: "'JetBrains Mono', monospace",
-                            fontWeight: 600,
+                            fontWeight: 500,
                           }}
                         >
                           SMS {smsEnabled ? "\u2713" : "\u2717"}
@@ -3091,7 +3091,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                               : D.red + "22",
                             color: voiceEnabled ? D.green : D.red,
                             fontFamily: "'JetBrains Mono', monospace",
-                            fontWeight: 600,
+                            fontWeight: 500,
                           }}
                         >
                           Voice {voiceEnabled ? "\u2713" : "\u2717"}
@@ -3123,7 +3123,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                           style={{
                             fontFamily: "'JetBrains Mono', monospace",
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.green,
                           }}
                         >
@@ -3146,7 +3146,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                           style={{
                             fontFamily: "'JetBrains Mono', monospace",
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.teal,
                           }}
                         >
@@ -3169,7 +3169,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                           style={{
                             fontFamily: "'JetBrains Mono', monospace",
                             fontSize: 14,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.teal,
                           }}
                         >
@@ -3271,7 +3271,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
           <h2
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               textTransform: "uppercase",
               letterSpacing: 1,

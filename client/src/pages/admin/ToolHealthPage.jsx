@@ -292,7 +292,7 @@ export default function ToolHealthPage() {
               }}
             >
               {" "}
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
                 {a.title}
               </div>{" "}
               <div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>
@@ -518,7 +518,7 @@ export default function ToolHealthPage() {
                             padding: "8px 10px",
                             fontSize: 13,
                             color: D.heading,
-                            fontWeight: 600,
+                            fontWeight: 500,
                           }}
                         >
                           {t.toolName}
@@ -689,7 +689,7 @@ function RecentErrorRow({ err, isLast }) {
           <span
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               overflow: "hidden",
               textOverflow: "ellipsis",

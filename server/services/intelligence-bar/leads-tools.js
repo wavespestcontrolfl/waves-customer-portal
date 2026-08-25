@@ -468,30 +468,75 @@ async function getResponseTimes(days) {
 }
 
 
+// Resolve a lead for a status write. A name must match exactly ONE active
+// lead — the old `.first()` (no ORDER BY, no ambiguity check) silently
+// flipped whichever matching lead Postgres returned first. Returns a lead
+// row, null, or a structured { error, ambiguous, candidates } object.
+async function resolveLeadForUpdate({ lead_id, lead_name }) {
+  if (lead_id) return db('leads').where('id', lead_id).whereNull('deleted_at').first();
+  if (!lead_name) return null;
+  const matches = await db('leads').where(function () {
+    const s = `%${lead_name}%`;
+    this.whereILike('first_name', s).orWhereILike('last_name', s)
+      .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+  }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').limit(2);
+  if (matches.length > 1) {
+    return {
+      // Generic string: persisted in tool-health telemetry, must not carry
+      // the typed name (candidates hold the detail).
+      error: 'Multiple active leads match that name. Ask the operator which one, then retry with lead_id.',
+      ambiguous: true,
+      candidates: matches.map(l => ({
+        id: l.id,
+        name: `${l.first_name} ${l.last_name || ''}`.trim(),
+        status: l.status,
+        phone_last4: (l.phone || '').replace(/\D/g, '').slice(-4) || null,
+      })),
+    };
+  }
+  return matches[0] || null;
+}
+
+
 async function updateLeadStatus(input) {
-  const { lead_id, lead_name, new_status, lost_reason, notes } = input;
+  const { new_status, lost_reason, notes } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
-  let lead;
-  if (lead_id) {
-    lead = await db('leads').where('id', lead_id).whereNull('deleted_at').first();
-  } else if (lead_name) {
-    lead = await db('leads').where(function () {
-      const s = `%${lead_name}%`;
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').first();
-  }
+  const lead = await resolveLeadForUpdate(input);
   if (!lead) return { error: 'Lead not found' };
+  if (lead.error) return lead;
+  // _expected_status rides on a proposal-pinned confirmation: the card showed
+  // "X → new_status", so if the lead moved in the pending window the approved
+  // transition is stale — refuse and rebuild rather than overwrite.
+  if (input._expected_status && lead.status !== input._expected_status) {
+    return {
+      error: `Lead status changed after the card was approved (now "${lead.status}"). Rebuild the confirmation card.`,
+      preview_changed: true,
+    };
+  }
 
   const oldStatus = lead.status;
   const updates = { status: new_status, updated_at: new Date() };
   if (lost_reason) updates.lost_reason = lost_reason;
   if (notes) updates.notes = db.raw("COALESCE(notes, '') || '\n' || ?", [notes]);
 
-  await db('leads').where('id', lead.id).update(updates);
+  // Atomic guard: the UPDATE's own WHERE re-asserts the status we just read
+  // (and liveness), so a concurrent transition between the SELECT above and
+  // this statement matches zero rows instead of being overwritten — the
+  // _expected_status pre-check alone cannot close that race (codex P1).
+  const updatedRows = await db('leads')
+    .where('id', lead.id)
+    .where('status', oldStatus)
+    .whereNull('deleted_at')
+    .update(updates, ['id']);
+  if (!updatedRows || updatedRows.length === 0) {
+    return {
+      error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
 
   // Mirror the transition onto the lead's ad_service_attribution funnel row
   // (same guarded pattern as the admin-leads routes — monotonic, best-effort).
@@ -516,22 +561,42 @@ async function updateLeadStatus(input) {
 }
 
 
+// Confirm-time executions must operate on the SAME set the operator saw on
+// the card — pinned `lead_ids` intersect the criteria, so the executed set is
+// always a subset of the previewed one (a lead whose status changed after the
+// preview drops out instead of being clobbered).
+const BULK_LEAD_UPDATE_CAP = 500;
+
+function bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids }) {
+  const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
+  let query = db('leads').where('status', current_status).whereNull('deleted_at');
+  if (cutoff) query = query.where('updated_at', '<', cutoff);
+  if (Array.isArray(lead_ids)) query = query.whereIn('id', lead_ids.slice(0, BULK_LEAD_UPDATE_CAP));
+  return query;
+}
+
+async function matchBulkLeads(input) {
+  return bulkLeadCriteriaQuery(input).select('id', 'first_name', 'last_name', 'status', 'updated_at');
+}
+
+// Read-only preview of a bulk update — the route runs this at proposal time
+// to pin the matched ids into the stored pending-action params.
+async function previewBulkLeadUpdate(input) {
+  return bulkUpdateLeads({ ...input, dry_run: true });
+}
+
 async function bulkUpdateLeads(input) {
-  const { current_status, older_than_days, new_status, lost_reason, dry_run = true } = input;
+  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, lead_ids } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
-  const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
-
-  let query = db('leads').where('status', current_status).whereNull('deleted_at');
-  if (cutoff) query = query.where('updated_at', '<', cutoff);
-
-  const matching = await query.clone().select('id', 'first_name', 'last_name', 'status', 'updated_at');
 
   if (dry_run) {
+    const matching = await matchBulkLeads({ current_status, older_than_days, lead_ids });
     return {
       dry_run: true,
       matches: matching.length,
+      matched_ids: matching.map(l => l.id),
       preview: matching.slice(0, 10).map(l => ({
         name: `${l.first_name} ${l.last_name || ''}`.trim(),
         current_status: l.status,
@@ -542,14 +607,19 @@ async function bulkUpdateLeads(input) {
     };
   }
 
-  // Execute bulk update
-  const ids = matching.map(l => l.id);
-  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
-
+  // Execute: ONE guarded UPDATE that re-asserts the full criteria (status,
+  // deleted_at, cutoff, pinned ids) in its own WHERE clause — a lead whose
+  // status changed between preview and confirm is skipped, never clobbered
+  // (codex P1: the old SELECT-ids-then-UPDATE-by-id pair raced). RETURNING
+  // yields the ids actually updated, which feed the funnel bridge + activity
+  // log, and `updated` reports the real count.
   const updates = { status: new_status, updated_at: new Date() };
   if (lost_reason) updates.lost_reason = lost_reason;
 
-  await db('leads').whereIn('id', ids).update(updates);
+  const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+    .update(updates, ['id']);
+  const ids = updatedRows.map(r => r.id);
+  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
   // same monotonic stage predicate as the single-lead bridge.
@@ -575,4 +645,4 @@ async function bulkUpdateLeads(input) {
 }
 
 
-module.exports = { LEADS_TOOLS, executeLeadsTool };
+module.exports = { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP };

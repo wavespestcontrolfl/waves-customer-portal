@@ -51,7 +51,7 @@ function Chip({ children, tone }) {
         background: tone.bg,
         color: tone.fg,
         fontSize: 12,
-        fontWeight: 750,
+        fontWeight: 700,
         whiteSpace: "nowrap",
       }}
     >
@@ -76,7 +76,7 @@ function timeLabel(value) {
 function Bubble({ label, text, tone }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 11, fontWeight: 800, color: D.muted, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>{label}</div>
       <div
         style={{
           background: tone || D.bg,
@@ -107,7 +107,7 @@ function ScorePills({ scores }) {
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
       {entries.map(([label, value]) => (
-        <span key={label} style={{ fontSize: 12, fontWeight: 750, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "2px 7px" }}>
+        <span key={label} style={{ fontSize: 12, fontWeight: 700, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "2px 7px" }}>
           {label} <strong>{value ?? "-"}</strong>
         </span>
       ))}
@@ -121,7 +121,7 @@ function DraftCard({ draft }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 14, fontWeight: 850, color: D.heading }}>{draft.customerName || "Unknown customer"}</span>
+        <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>{draft.customerName || "Unknown customer"}</span>
         <Chip tone={{ bg: D.bg, fg: D.zinc }}>{intentLabel(draft.intent)}</Chip>
         {draft.schedulingIntent && <Chip tone={{ bg: "#FEF3C7", fg: D.amber }}>scheduling</Chip>}
         {tone ? <Chip tone={tone}>{tone.label}</Chip> : <Chip tone={{ bg: D.bg, fg: D.muted }}>Awaiting judge</Chip>}
@@ -157,13 +157,13 @@ function DraftCard({ draft }) {
 function IntentScoreCard({ row }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 850, color: D.heading, marginBottom: 6, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 6, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
         <span><strong style={{ color: D.heading }}>{row.drafts}</strong> drafts</span>
         <span><strong style={{ color: D.heading }}>{row.judged}</strong> judged</span>
         {row.avg && <span>overall <strong style={{ color: D.heading }}>{row.avg.overall}</strong>/10</span>}
         {row.verdicts?.draft_unsafe ? (
-          <span style={{ color: D.red, fontWeight: 750 }}>{row.verdicts.draft_unsafe} unsafe</span>
+          <span style={{ color: D.red, fontWeight: 700 }}>{row.verdicts.draft_unsafe} unsafe</span>
         ) : null}
       </div>
     </div>
@@ -201,16 +201,16 @@ function GraduationNote({ g }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
       {g.eligibleFor === "suggest" && (
-        <span style={{ background: "#DCFCE7", color: D.green, fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Ready — enable suggest</span>
+        <span style={{ background: "#DCFCE7", color: D.green, fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>✓ Ready — enable suggest</span>
       )}
       {g.eligibleFor === "auto_send" && (
-        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
+        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
       )}
       {/* Intent is AT auto_send but the send-time gate is blocking (e.g. a
           prompt bump reset the cohort evidence) — mirror the executor. */}
       {g.autoSendHealth && !g.autoSendHealth.sendReady && (
         <>
-          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>
+          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>
             ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
           </span>
           <span style={{ color: D.muted }}>
@@ -238,7 +238,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 850, color: D.heading, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</span>
         <Chip tone={tone}>{tone.label}</Chip>
         {!row.locked && (
           <button
@@ -254,7 +254,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
               // Green = stepping UP from shadow; zinc = stepping down a rung.
               color: row.mode === "shadow" ? D.green : D.zinc,
               fontSize: 12,
-              fontWeight: 750,
+              fontWeight: 700,
               padding: "0 10px",
               cursor: busy ? "default" : "pointer",
               opacity: busy ? 0.6 : 1,
@@ -287,7 +287,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
             background: "#1D4ED8",
             color: "#FFFFFF",
             fontSize: 12,
-            fontWeight: 800,
+            fontWeight: 700,
             padding: "0 12px",
             cursor: busy ? "default" : "pointer",
             opacity: busy ? 0.6 : 1,
@@ -329,14 +329,14 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Voice profile</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Voice profile</div>
         <div style={{ fontSize: 12, color: D.muted }}>
           Distilled daily from real Waves calls + texts. Green profiles auto-apply to the phone agent; exceptions park here. Style only, never facts.
         </div>
       </div>
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>v{row.version}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>v{row.version}</span>
           {pending ? (
             <Chip tone={{ bg: "#FEF3C7", fg: "#92400E", label: "Exception" }}>Exception — review needed</Chip>
           ) : (
@@ -345,7 +345,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
             </Chip>
           )}
           {flags.length > 0 && (
-            <span style={{ background: "#FEE2E2", color: D.red, fontWeight: 750, borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>
+            <span style={{ background: "#FEE2E2", color: D.red, fontWeight: 700, borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>
               ⚠ style-only check flagged: {flags.join(", ")}
             </span>
           )}
@@ -366,7 +366,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
               type="button"
               disabled={busy}
               onClick={() => onReview(pending, "approve")}
-              style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+              style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
             >
               Approve — make this the live voice
             </button>
@@ -374,7 +374,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
               type="button"
               disabled={busy}
               onClick={() => onReview(pending, "reject")}
-              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
             >
               Reject
             </button>
@@ -395,7 +395,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
             type="button"
             disabled={busy}
             onClick={() => onReview(approved, "revoke")}
-            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
           >
             Revoke — back to base voice
           </button>
@@ -462,13 +462,13 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Sealed exam</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Sealed exam</div>
         <div style={{ fontSize: 12, color: D.muted }}>
           A locked set of real past texts (with that day&apos;s facts frozen) the drafter never trains on. Each run replays the whole set on one provider and compares against the last examined version.
         </div>
       </div>
       {exam.gateEnabled === false && (
-        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
           GATE_SMS_SEALED_EVAL is off — sealing and exam runs are disabled until the gate is enabled.
         </div>
       )}
@@ -484,7 +484,7 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
               type="button"
               disabled={busy || exam.gateEnabled === false}
               onClick={onSeal}
-              style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.zinc, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+              style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.zinc, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
             >
               Top up sealed items
             </button>
@@ -493,7 +493,7 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
                 type="button"
                 disabled={busy}
                 onClick={() => onResume(inFlight)}
-                style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
               >
                 Resume stalled run
               </button>
@@ -504,7 +504,7 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
                     type="button"
                     disabled={busy || exam.gateEnabled === false}
                     onClick={() => onResume(resumableFailure)}
-                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
                   >
                     Resume failed run ({LEG_LABELS[resumableFailure.providerLeg] || resumableFailure.providerLeg})
                   </button>
@@ -515,7 +515,7 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
                     type="button"
                     disabled={busy || exam.gateEnabled === false || !items.active}
                     onClick={() => onRun(leg)}
-                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
                   >
                     Run exam — {label}
                   </button>
@@ -555,7 +555,7 @@ function ProposalCard({ proposal, busy, onReview }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>{cellLabel(proposal.surface, proposal.failure_mode)}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>{cellLabel(proposal.surface, proposal.failure_mode)}</span>
         <Chip tone={pending ? { bg: "#FEF3C7", fg: "#92400E" } : { bg: "#DCFCE7", fg: D.green }}>
           {pending ? "Proposed patch — review" : `Accepted${proposal.reviewed_by ? ` by ${proposal.reviewed_by}` : ""}`}
         </Chip>
@@ -577,7 +577,7 @@ function ProposalCard({ proposal, busy, onReview }) {
             type="button"
             disabled={busy}
             onClick={() => onReview(proposal, "accept")}
-            style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+            style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
           >
             Accept — worth building (ships as a new prompt version)
           </button>
@@ -585,7 +585,7 @@ function ProposalCard({ proposal, busy, onReview }) {
             type="button"
             disabled={busy}
             onClick={() => onReview(proposal, "dismiss")}
-            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
           >
             Dismiss
           </button>
@@ -603,13 +603,13 @@ function PathologySection({ data, busy, onReview }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Failure pathology</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Failure pathology</div>
         <div style={{ fontSize: 12, color: D.muted }}>
           Every unsafe draft is filed by where the fix lives and what it invented. Recurring cells earn a proposed patch below — nothing applies without you.
         </div>
       </div>
       {data.gateEnabled === false && (
-        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
           GATE_SMS_PATHOLOGY_LEDGER is off — the ledger shows history but no new failures are being classified.
         </div>
       )}
@@ -618,7 +618,7 @@ function PathologySection({ data, busy, onReview }) {
           {cells.slice(0, 8).map((c) => (
             <span
               key={`${c.surface}:${c.failureMode}`}
-              style={{ fontSize: 12, fontWeight: 750, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "4px 9px" }}
+              style={{ fontSize: 12, fontWeight: 700, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "4px 9px" }}
             >
               {cellLabel(c.surface, c.failureMode)} <strong>{c.total}</strong>
               {c.currentVersion > 0 && <span style={{ color: D.red }}> ({c.currentVersion} on {data.currentVersion})</span>}
@@ -908,7 +908,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
 
       <div className="shadow-drafts-wrap">
         {error && (
-          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750 }}>
+          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700 }}>
             {error}
           </div>
         )}
@@ -916,13 +916,13 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         {(modes?.intents || []).length > 0 && (
           <div style={{ display: "grid", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Intent graduation</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Intent graduation</div>
               <div style={{ fontSize: 12, color: D.muted }}>
                 Suggest surfaces the draft as an Agent Review card in the comms composer — a human still reads, edits, and sends.
               </div>
             </div>
             {modes.gateEnabled === false && (
-              <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
                 GATE_SMS_SUGGEST_MODE is off — suggest flips are saved but take effect once the gate is enabled.
               </div>
             )}
@@ -966,7 +966,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
               background: intentFilter === "" ? D.heading : D.card,
               color: intentFilter === "" ? "#fff" : D.text,
               fontSize: 12,
-              fontWeight: 750,
+              fontWeight: 700,
               padding: "0 10px",
               cursor: "pointer",
             }}
@@ -985,7 +985,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
                 background: intentFilter === intent ? D.heading : D.card,
                 color: intentFilter === intent ? "#fff" : D.text,
                 fontSize: 12,
-                fontWeight: 750,
+                fontWeight: 700,
                 padding: "0 10px",
                 cursor: "pointer",
               }}

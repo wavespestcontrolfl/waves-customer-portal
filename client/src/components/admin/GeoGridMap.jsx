@@ -109,7 +109,7 @@ export default function GeoGridMap({ pins = [], center }) {
             onCloseClick={() => setSelected(null)}
           >
             <div style={{ minWidth: 180, fontSize: 12, color: '#27272A' }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              <div style={{ fontWeight: 500, marginBottom: 4 }}>
                 Map-pack rank: {selected.map_pack_rank == null ? 'not in pack' : `#${selected.map_pack_rank}`}
               </div>
               {parseCompetitors(selected.top_competitors).length > 0 && (

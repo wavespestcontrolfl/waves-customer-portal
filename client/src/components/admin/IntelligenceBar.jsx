@@ -147,7 +147,7 @@ function renderInline(text) {
   return parts.map((part, i) => {
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
-        <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>
+        <strong key={i} style={{ color: D.heading, fontWeight: 500 }}>
           {part.slice(2, -2)}
         </strong>
       );
@@ -198,7 +198,7 @@ function QuickChip({ icon, label, onClick }) {
         border: `1px solid ${hover ? D.teal + "55" : D.border}`,
         color: hover ? D.teal : "#000",
         fontSize: 12,
-        fontWeight: 600,
+        fontWeight: 500,
         fontFamily: "'Roboto', system-ui, sans-serif",
         cursor: "pointer",
         transition: "all 0.15s ease",
@@ -246,7 +246,7 @@ function CustomerRow({ customer, onSelect }) {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             whiteSpace: "nowrap",
             overflow: "hidden",
@@ -283,7 +283,7 @@ function CustomerRow({ customer, onSelect }) {
           style={{
             fontFamily: "JetBrains Mono, monospace",
             fontSize: 11,
-            fontWeight: 600,
+            fontWeight: 500,
             color:
               c.health_score > 70
                 ? D.green
@@ -543,7 +543,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
                   background: `${D.teal}22`,
                   color: D.teal,
                   fontSize: 11,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   fontFamily: "JetBrains Mono, monospace",
                   animation: "pulse 1.5s ease infinite",
                 }}
@@ -583,7 +583,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
               borderRadius: 8,
               color: "#000",
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               fontFamily: "'Roboto', system-ui, sans-serif",
               whiteSpace: "nowrap",
@@ -621,7 +621,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
             style={{
               fontSize: 10,
               color: "#000",
-              fontWeight: 600,
+              fontWeight: 500,
               textTransform: "uppercase",
               letterSpacing: 0.8,
               marginBottom: 6,

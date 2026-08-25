@@ -89,7 +89,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 
@@ -390,7 +390,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -464,7 +464,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -523,7 +523,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -593,7 +593,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -762,7 +762,7 @@ function RailSection({ title, children }) {
       <div
         style={{
           fontSize: 10,
-          fontWeight: 600,
+          fontWeight: 500,
           color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 0.5,
@@ -930,7 +930,7 @@ function DetailPane({
           <div
             style={{
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               textTransform: "uppercase",
               letterSpacing: 0.4,
@@ -1079,7 +1079,7 @@ function DetailPane({
         <div
           style={{
             fontSize: 11,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.muted,
             textTransform: "uppercase",
             letterSpacing: 0.4,
@@ -1214,7 +1214,7 @@ function DetailPane({
             <div
               style={{
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
@@ -1234,7 +1234,7 @@ function DetailPane({
             <div
               style={{
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
@@ -1268,7 +1268,7 @@ function DetailPane({
             <div
               style={{
                 fontSize: 11,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
@@ -1326,7 +1326,7 @@ function DetailPane({
                 <div
                   style={{
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 0.4,
@@ -1345,7 +1345,7 @@ function DetailPane({
                 <div
                   style={{
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 0.4,
@@ -1364,7 +1364,7 @@ function DetailPane({
                 <div
                   style={{
                     fontSize: 11,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 0.4,
@@ -1470,7 +1470,7 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
               padding: "6px 12px",
               borderRadius: 999,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               whiteSpace: "nowrap",
               background: active ? D.selected : D.card,
               color: active ? D.selectedFg : D.text,
@@ -1718,7 +1718,7 @@ export default function ServiceLibraryPage() {
             padding: "10px 20px",
             borderRadius: 8,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 500,
             zIndex: 9999,
           }}
         >

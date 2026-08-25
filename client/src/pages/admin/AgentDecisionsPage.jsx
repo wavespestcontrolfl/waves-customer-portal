@@ -37,7 +37,7 @@ function Chip({ children, tone = "neutral" }) {
       background: colors.bg,
       color: colors.fg,
       fontSize: 12,
-      fontWeight: 750,
+      fontWeight: 700,
       whiteSpace: "nowrap",
     }}>
       {children}
@@ -100,7 +100,7 @@ function Field({ label, value }) {
   if (value === null || value === undefined || value === "") return null;
   return (
     <div>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>{label}</div>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>{label}</div>
       <div style={{ fontSize: 13, color: D.text, lineHeight: 1.35 }}>{String(value)}</div>
     </div>
   );
@@ -109,7 +109,7 @@ function Field({ label, value }) {
 function Panel({ icon: Icon, title, children }) {
   return (
     <section style={{ display: "grid", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: D.muted, fontWeight: 850 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: D.muted, fontWeight: 700 }}>
         {Icon && <Icon size={16} />}
         {title}
       </div>
@@ -306,7 +306,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
         <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "1.1fr 1.2fr 1fr", gap: 12, alignItems: "start" }}>
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Reply Quality</div>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Reply Quality</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
               {[
                 ["Accept", replyVerdicts.accepted || 0, replyRates.accepted, D.green],
@@ -315,7 +315,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                 ["No Reply", replyVerdicts.noReplyNeeded || 0, replyRates.noReplyNeeded, D.amber],
               ].map(([label, count, rate, color]) => (
                 <div key={label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
-                  <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>{label}</div>
+                  <div style={{ color: D.muted, fontSize: 11, fontWeight: 700 }}>{label}</div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <strong style={{ color, fontSize: 22 }}>{count}</strong>
                     <span style={{ color: D.muted, fontSize: 12 }}>{percent(rate)}</span>
@@ -326,14 +326,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </div>
 
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>By Workflow</div>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>By Workflow</div>
             {replyMetrics.byWorkflow?.length ? (
               <div style={{ display: "grid", gap: 8 }}>
                 {replyMetrics.byWorkflow.map((row) => (
                   <div key={row.workflow} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 10, alignItems: "center", fontSize: 13 }}>
-                    <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 750 }}>{row.workflow}</div>
+                    <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>{row.workflow}</div>
                     <span style={{ color: D.muted }}>{row.reviewed} reviewed</span>
-                    <span style={{ color: row.rejectedRate > 0.15 ? D.red : D.green, fontWeight: 800 }}>{percent(row.acceptanceRate)} accept</span>
+                    <span style={{ color: row.rejectedRate > 0.15 ? D.red : D.green, fontWeight: 700 }}>{percent(row.acceptanceRate)} accept</span>
                   </div>
                 ))}
               </div>
@@ -343,7 +343,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </div>
 
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Top Scenarios</div>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Top Scenarios</div>
             {replyMetrics.byScenario?.length ? (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {replyMetrics.byScenario.map((row) => (
@@ -358,11 +358,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
         {replyMetrics.recentRejected?.length ? (
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 850 }}>Recent Rejected Drafts</div>
+            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Recent Rejected Drafts</div>
             <div style={{ display: "grid", gap: 8 }}>
               {replyMetrics.recentRejected.map((row) => (
                 <div key={row.id} style={{ display: "grid", gap: 4, borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: D.muted, fontWeight: 800 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: D.muted, fontWeight: 700 }}>
                     <Chip tone="red">Rejected</Chip>
                     <span>{row.customerName || "Unknown customer"}</span>
                     <span>{row.workflow}</span>
@@ -390,7 +390,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                 background: status === item ? D.heading : D.card,
                 color: status === item ? "#fff" : D.text,
                 padding: "0 12px",
-                fontWeight: 750,
+                fontWeight: 700,
                 cursor: "pointer",
               }}
             >
@@ -401,7 +401,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
             type="button"
             onClick={load}
             disabled={loading}
-            style={{ marginLeft: "auto", height: 36, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, padding: "0 12px", fontWeight: 750, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+            style={{ marginLeft: "auto", height: 36, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, padding: "0 12px", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
           >
             <RefreshCw size={16} />
             Refresh
@@ -432,7 +432,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     <Chip tone={statusTone(decision.status)}>{statusLabel(decision.status)}</Chip>
                     <span style={{ marginLeft: "auto", color: D.muted, fontSize: 12 }}>{timeLabel(decision.createdAt)}</span>
                   </div>
-                  <div style={{ fontWeight: 850, color: D.heading }}>{decision.customerName || "Unknown customer"}</div>
+                  <div style={{ fontWeight: 700, color: D.heading }}>{decision.customerName || "Unknown customer"}</div>
                   <div style={{ color: D.muted, fontSize: 13, marginTop: 2 }}>{statusLabel(decision.detectedIntent)} · {confidence(decision.confidence)}</div>
                   <div style={{ color: D.text, fontSize: 13, marginTop: 8, lineHeight: 1.35 }}>
                     {decision.inboundMessage || "No message body"}
@@ -467,7 +467,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                 </section>
 
                 <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Inbound Message</div>
+                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Inbound Message</div>
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.inboundMessage || "-"}</div>
                 </section>
 
@@ -485,7 +485,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                           background: msg.isTrigger ? "#FEF3C7" : D.bg,
                           border: `1px solid ${msg.isTrigger ? "#F59E0B" : D.border}`,
                         }}>
-                          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: D.muted, fontWeight: 800 }}>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: D.muted, fontWeight: 700 }}>
                             <span>{msg.direction === "inbound" ? "Customer" : "Waves"}</span>
                             <span>{timeLabel(msg.createdAt)}</span>
                             {msg.type && <span>{msg.type}</span>}
@@ -525,7 +525,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <div style={{ display: "grid", gap: 8 }}>
                         {detail.context.calls.map((call) => (
                           <div key={call.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
-                            <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 800 }}>
+                            <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 700 }}>
                               <span>{call.direction || "call"}</span>
                               <span>{timeLabel(call.createdAt)}</span>
                               {call.outcome && <span>{call.outcome}</span>}
@@ -547,7 +547,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     <div style={{ display: "grid", gap: 8 }}>
                       {detail.context.services.map((service) => (
                         <div key={service.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
-                          <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 800 }}>
+                          <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 700 }}>
                             <span>{service.serviceType}</span>
                             <span>{service.serviceDate || timeLabel(service.createdAt)}</span>
                             <span>{service.status}</span>
@@ -562,7 +562,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                 </Panel>
 
                 <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Suggested Reply</div>
+                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Suggested Reply</div>
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.suggestedMessage || "-"}</div>
                 </section>
 
@@ -581,7 +581,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     )}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <section style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Actual Human Reply</div>
+                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>Actual Human Reply</div>
                         <textarea
                           value={actualReply}
                           onChange={(event) => setActualReply(event.target.value)}
@@ -591,7 +591,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         />
                       </section>
                       <section style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 800 }}>Final / Rewrite Reply</div>
+                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>Final / Rewrite Reply</div>
                         <textarea
                           value={idealReply}
                           onChange={(event) => setIdealReply(event.target.value)}
@@ -658,30 +658,30 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Recommended Actions</div>
+                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Recommended Actions</div>
                     <TextList items={selected.recommendedActions} />
                   </section>
                   <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Allowed In Future</div>
+                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Allowed In Future</div>
                     <TextList items={selected.autoActionsAllowed} />
                   </section>
                   <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Blocked Actions</div>
+                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Blocked Actions</div>
                     <TextList items={selected.blockedActions} />
                   </section>
                   <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Safety Flags</div>
+                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Safety Flags</div>
                     <TextList items={selected.safetyFlags} />
                   </section>
                 </div>
 
                 <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Reasoning</div>
+                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Reasoning</div>
                   <div style={{ color: D.text, lineHeight: 1.45 }}>{selected.reasoningSummary || "-"}</div>
                 </section>
 
                 <section style={{ display: "grid", gap: 10, borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Correction</div>
+                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Correction</div>
                   <textarea
                     value={correctedActions}
                     onChange={(event) => setCorrectedActions(event.target.value)}
@@ -727,7 +727,7 @@ function actionButton(color) {
     background: color,
     color: "#fff",
     padding: "0 12px",
-    fontWeight: 800,
+    fontWeight: 700,
     display: "inline-flex",
     alignItems: "center",
     gap: 6,

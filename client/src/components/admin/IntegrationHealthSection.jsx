@@ -188,7 +188,7 @@ function IntegrationCard({ integration }) {
               {integration.name}
             </div>
             {integration.deprecating && (
-              <span style={{ ...pillStyle("warn"), borderRadius: 999, padding: "3px 8px", fontSize: 10, fontWeight: 800 }}>
+              <span style={{ ...pillStyle("warn"), borderRadius: 999, padding: "3px 8px", fontSize: 10, fontWeight: 700 }}>
                 Deprecating
               </span>
             )}
@@ -203,7 +203,7 @@ function IntegrationCard({ integration }) {
             borderRadius: 999,
             padding: "4px 12px",
             fontSize: 11,
-            fontWeight: 800,
+            fontWeight: 700,
             whiteSpace: "nowrap",
             flexShrink: 0,
           }}
@@ -226,7 +226,7 @@ function IntegrationCard({ integration }) {
                 borderRadius: 999,
                 padding: "3px 8px",
                 fontSize: 10,
-                fontWeight: 800,
+                fontWeight: 700,
               }}
             >
               {gate.label}: {gate.enabled ? "On" : "Off"}
@@ -251,7 +251,7 @@ function IntegrationCard({ integration }) {
               }}
             >
               <span style={{ color: D.heading, fontWeight: 700 }}>{child.label}</span>
-              <span style={{ color: pillStyle(statusTone(child.status)).color, fontWeight: 800 }}>
+              <span style={{ color: pillStyle(statusTone(child.status)).color, fontWeight: 700 }}>
                 {child.statusLabel}
               </span>
             </div>

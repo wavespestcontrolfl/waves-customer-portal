@@ -1406,7 +1406,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // send-window deferred-completion marker commits inside the queue
     // row's transaction with its own key-merge raw — same jsonb || shape,
     // not a whole-column write — so it does not appear in this count.)
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(12);
+    // 13 since the Bill-To reconciliation restamp (codex #3466 r5 P1) —
+    // a key-merge like the reprice restamp, not a whole-column write.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(13);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

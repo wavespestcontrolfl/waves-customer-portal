@@ -704,7 +704,7 @@ function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
         <div
           style={{
             fontSize: 11,
-            fontWeight: 900,
+            fontWeight: 700,
             color: "#1B2C5B",
             textTransform: "uppercase",
             letterSpacing: 0.5,
@@ -745,7 +745,7 @@ function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
           background: "#FFD700",
           color: "#1B2C5B",
           fontSize: 13,
-          fontWeight: 900,
+          fontWeight: 700,
           textDecoration: "none",
         }}
       >
@@ -771,7 +771,7 @@ function ProjectPreviewRecommendationsBlock({ text, upcomingAppointment }) {
       <div style={wrapStyle}>
         {sections.map((section, index) => (
           <div key={section.heading} style={{ marginTop: index === 0 ? 0 : 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 4 }}>
               {titleCaseProjectSection(section.heading)}
             </div>
             <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
@@ -789,7 +789,7 @@ function ProjectPreviewRecommendationsBlock({ text, upcomingAppointment }) {
 
   return (
     <div style={wrapStyle}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 4 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 4 }}>
         Recommendations
       </div>
       <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
@@ -856,7 +856,7 @@ function ProjectPreviewPhotoTile({ photo, projectId }) {
         style={{
           padding: "7px 8px",
           fontSize: 12,
-          fontWeight: 800,
+          fontWeight: 700,
           color: "#1B2C5B",
           textTransform: "capitalize",
         }}
@@ -983,7 +983,7 @@ function CustomerProjectReportPreview({
               color: "#CDEBFA",
               textTransform: "uppercase",
               letterSpacing: 1,
-              fontWeight: 800,
+              fontWeight: 700,
             }}
           >
             Customer report preview
@@ -992,7 +992,7 @@ function CustomerProjectReportPreview({
             style={{
               fontSize: 18,
               color: "#fff",
-              fontWeight: 800,
+              fontWeight: 700,
               marginTop: 2,
               lineHeight: 1.15,
             }}
@@ -1017,7 +1017,7 @@ function CustomerProjectReportPreview({
               marginBottom: 12,
               color: "#065A8C",
               fontSize: 12,
-              fontWeight: 800,
+              fontWeight: 700,
               textDecoration: "none",
             }}
           >
@@ -1048,7 +1048,7 @@ function CustomerProjectReportPreview({
               <div
                 style={{
                   fontSize: 11,
-                  fontWeight: 900,
+                  fontWeight: 700,
                   color: "#1B2C5B",
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -1068,7 +1068,7 @@ function CustomerProjectReportPreview({
                       border: "1px solid #D7E3EA",
                     }}
                   >
-                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 2 }}>
                       {projectFieldLabel(typeCfg, key)}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
@@ -1085,7 +1085,7 @@ function CustomerProjectReportPreview({
               <div
                 style={{
                   fontSize: 11,
-                  fontWeight: 900,
+                  fontWeight: 700,
                   color: "#1B2C5B",
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -1105,7 +1105,7 @@ function CustomerProjectReportPreview({
                       border: "1px solid #D7E3EA",
                     }}
                   >
-                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 2 }}>
                       {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
@@ -1129,7 +1129,7 @@ function CustomerProjectReportPreview({
               <div
                 style={{
                   fontSize: 11,
-                  fontWeight: 900,
+                  fontWeight: 700,
                   color: "#1B2C5B",
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -1162,7 +1162,7 @@ function CustomerProjectReportPreview({
                 color: "#1B2C5B",
                 borderRadius: 8,
                 fontSize: 13,
-                fontWeight: 900,
+                fontWeight: 700,
               }}
             >
               Text Us
@@ -1174,7 +1174,7 @@ function CustomerProjectReportPreview({
                 color: "#065A8C",
                 borderRadius: 8,
                 fontSize: 13,
-                fontWeight: 900,
+                fontWeight: 700,
               }}
             >
               Call Us
@@ -2950,7 +2950,7 @@ export function ProjectDetail({
                 gap: 8,
                 color: "#09090B",
                 fontSize: 13,
-                fontWeight: 850,
+                fontWeight: 700,
                 marginBottom: 8,
               }}
             >
@@ -3008,17 +3008,17 @@ export function ProjectDetail({
               </div>
             </div>
             {billingBlocksClose && (
-              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
               </div>
             )}
             {followupBlocksClose && (
-              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 Auto-schedule follow-up is not wired yet. Use alert follow-up or schedule the return manually before closing.
               </div>
             )}
             {previewBlocksClose && !billingBlocksClose && !followupBlocksClose && (
-              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 This project cannot close from the linked service’s current state.
               </div>
             )}
@@ -3058,7 +3058,7 @@ export function ProjectDetail({
             report is emailed automatically the moment the invoice is paid.
             &ldquo;Send report&rdquo; delivers it now and clears the hold.
             {project.report_hold_last_error ? (
-              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 750 }}>
+              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 700 }}>
                 Last automatic release attempt failed:{" "}
                 {project.report_hold_last_error}
               </div>

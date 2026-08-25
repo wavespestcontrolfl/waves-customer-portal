@@ -46,8 +46,21 @@ function formFromInitialValues(initialValues = null) {
     pipelineStage: initialValues?.pipelineStage || "new_lead",
     tags: Array.isArray(initialValues?.tags) ? initialValues.tags : [],
     notes: initialValues?.notes || "",
+    // Add-Property origin: the server pins the attach to this profile's
+    // account when the phone matches several accounts.
+    attachToCustomerId: initialValues?.attachToCustomerId || "",
   };
 }
+
+// Fields whose edit invalidates a pending phone-match confirmation.
+const PHONE_MATCH_SENSITIVE_FIELDS = new Set([
+  "phone",
+  "addressLine1",
+  "addressLine2",
+  "city",
+  "state",
+  "zip",
+]);
 
 export default function MobileNewCustomerSheet({
   open,
@@ -58,9 +71,17 @@ export default function MobileNewCustomerSheet({
   const [form, setForm] = useState(() => formFromInitialValues(initialValues));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // 409 phone-match conflict from quick-add ({ code, match }) — the admin
+  // picks attach / duplicate / separate account and we resave with the flag.
+  const [phoneMatch, setPhoneMatch] = useState(null);
   const sheetRef = useModalFocus(open, onClose);
 
-  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => {
+    // A pending phone-match confirmation is only valid for the phone/address
+    // the admin saw it for — editing either invalidates it.
+    if (PHONE_MATCH_SENSITIVE_FIELDS.has(k)) setPhoneMatch(null);
+    setForm((p) => ({ ...p, [k]: v }));
+  };
 
   // Server quick-add only requires first name and phone; last name can be filled later.
   const canSave = useMemo(
@@ -69,12 +90,18 @@ export default function MobileNewCustomerSheet({
   );
 
   useEffect(() => {
-    if (open) setForm(formFromInitialValues(initialValues));
+    if (open) {
+      setForm(formFromInitialValues(initialValues));
+      setError(null);
+      setPhoneMatch(null);
+    }
   }, [open, initialValues]);
 
   if (!open) return null;
 
-  async function handleSave() {
+  // `save` takes explicit confirm flags; `handleSave` stays the zero-arg
+  // onClick handler so a click event never leaks into the request body.
+  async function save(extraFlags = {}) {
     if (!canSave || submitting) return;
     setSubmitting(true);
     setError(null);
@@ -103,13 +130,24 @@ export default function MobileNewCustomerSheet({
           pipelineStage: form.pipelineStage,
           tags: form.tags,
           notes: form.notes.trim() || undefined,
+          attachToCustomerId: form.attachToCustomerId || undefined,
+          ...extraFlags,
         }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
+        if (
+          r.status === 409 &&
+          (body.code === "DUPLICATE_PROFILE" ||
+            body.code === "PHONE_MATCH_CONFIRM")
+        ) {
+          setPhoneMatch(body);
+          return;
+        }
         throw new Error(body.message || body.error || `HTTP ${r.status}`);
       }
       const data = await r.json();
+      setPhoneMatch(null);
       onCreated?.(data.customer);
       onClose?.();
     } catch (e) {
@@ -118,6 +156,8 @@ export default function MobileNewCustomerSheet({
       setSubmitting(false);
     }
   }
+
+  const handleSave = () => save();
 
   return (
     <div
@@ -192,7 +232,7 @@ export default function MobileNewCustomerSheet({
         <button
           type="button"
           onClick={() => alert("Import from contacts — coming soon")}
-          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-semibold u-focus-ring"
+          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
           style={{ padding: "14px 20px", fontSize: 15, marginBottom: 18 }}
         >
           Import from contacts
@@ -254,7 +294,7 @@ export default function MobileNewCustomerSheet({
         {/* Address */}
         <h2
           className="text-zinc-900"
-          style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}
+          style={{ fontSize: 22, fontWeight: 500, marginBottom: 12 }}
         >
           Address
         </h2>{" "}
@@ -268,7 +308,7 @@ export default function MobileNewCustomerSheet({
             <div className="flex-1 min-w-0" style={{ lineHeight: 1.2 }}>
               {" "}
               <div
-                className="text-zinc-900 font-semibold"
+                className="text-zinc-900 font-medium"
                 style={{ fontSize: 13 }}
               >
                 Country
@@ -290,7 +330,10 @@ export default function MobileNewCustomerSheet({
             placeholder="Address line 1"
             value={form.addressLine1}
             onChange={(value) => set("addressLine1", value)}
-            onSelect={(parts) =>
+            onSelect={(parts) => {
+              // Autocomplete bypasses `set`, so clear the pending phone-match
+              // confirmation here too — it was shown for the old address.
+              setPhoneMatch(null);
               setForm((p) => ({
                 ...p,
                 addressLine1: parts.line1 || parts.formatted || p.addressLine1,
@@ -298,8 +341,8 @@ export default function MobileNewCustomerSheet({
                 city: parts.city || p.city,
                 state: parts.state || p.state || "FL",
                 zip: parts.zip || p.zip,
-              }))
-            }
+              }));
+            }}
           />{" "}
           <input
             className={ringClass()}
@@ -368,6 +411,63 @@ export default function MobileNewCustomerSheet({
             autoComplete="postal-code"
           />{" "}
         </div>
+        {phoneMatch && (
+          <div
+            className="mt-5 rounded-md border-hairline border-zinc-300 bg-zinc-50 p-3 flex flex-col gap-3"
+            role="status"
+            style={{ fontSize: 14 }}
+          >
+            <div className="text-zinc-900">
+              This phone belongs to{" "}
+              <strong>{phoneMatch.match?.name || "an existing customer"}</strong>
+              {phoneMatch.match?.address ? ` at ${phoneMatch.match.address}` : ""}
+              .{" "}
+              {phoneMatch.code === "DUPLICATE_PROFILE"
+                ? "They already have a profile at this address — saving again would create a duplicate."
+                : "Attach this address to their account as an additional property, or create a separate account."}
+            </div>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() =>
+                save(
+                  phoneMatch.code === "DUPLICATE_PROFILE"
+                    ? {
+                        confirmDuplicate: true,
+                        confirmMatchedAccountId: phoneMatch.match?.accountId,
+                      }
+                    : {
+                        confirmAttach: true,
+                        confirmMatchedAccountId: phoneMatch.match?.accountId,
+                      },
+                )
+              }
+              className="w-full rounded-full bg-zinc-900 text-white font-semibold u-focus-ring"
+              style={{ minHeight: 44, fontSize: 15 }}
+            >
+              {phoneMatch.code === "DUPLICATE_PROFILE"
+                ? "Create duplicate profile"
+                : "Attach as additional property"}
+            </button>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => save({ forceNewAccount: true, ignorePhoneMatch: true })}
+              className="w-full rounded-full bg-zinc-100 text-zinc-900 font-semibold u-focus-ring"
+              style={{ minHeight: 44, fontSize: 15 }}
+            >
+              Create separate account
+            </button>
+            <button
+              type="button"
+              onClick={() => setPhoneMatch(null)}
+              className="w-full rounded-full bg-white text-zinc-900 border-hairline border-zinc-300 u-focus-ring"
+              style={{ minHeight: 44, fontSize: 15 }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
         {error && (
           <div
             className="mt-5 rounded-md border-hairline border-alert-fg/30 bg-alert-bg p-3 text-alert-fg"
@@ -389,7 +489,7 @@ export default function MobileNewCustomerSheet({
           type="button"
           onClick={handleSave}
           disabled={!canSave || submitting}
-          className="w-full rounded-full font-semibold u-focus-ring"
+          className="w-full rounded-full font-medium u-focus-ring"
           style={{
             minHeight: 50,
             fontSize: 16,

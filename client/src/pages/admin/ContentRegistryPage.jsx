@@ -124,7 +124,7 @@ function Chip({ children, tone = "neutral" }) {
         background: colors.bg,
         color: colors.fg,
         fontSize: 12,
-        fontWeight: 750,
+        fontWeight: 700,
         whiteSpace: "nowrap",
       }}
     >
@@ -138,7 +138,7 @@ function Kpi({ label, value, tone = "neutral" }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14 }}>
       <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>{label}</div>
-      <div style={{ fontSize: 24, color, fontWeight: 850, fontFamily: MONO, marginTop: 4 }}>{Number(value || 0).toLocaleString()}</div>
+      <div style={{ fontSize: 24, color, fontWeight: 700, fontFamily: MONO, marginTop: 4 }}>{Number(value || 0).toLocaleString()}</div>
     </div>
   );
 }
@@ -146,7 +146,7 @@ function Kpi({ label, value, tone = "neutral" }) {
 function Field({ label, value, mono = false }) {
   return (
     <div>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 800, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
       <div style={{ color: D.text, fontSize: 13, fontFamily: mono ? MONO : undefined, overflowWrap: "anywhere", marginTop: 4 }}>
         {value || "-"}
       </div>
@@ -344,7 +344,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(420px, 100%), 1fr))", gap: 16, alignItems: "start" }}>
         <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "12px 14px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.heading, fontWeight: 850, fontSize: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.heading, fontWeight: 700, fontSize: 14 }}>
               <FileSearch size={16} strokeWidth={2} />
               Inventory
             </div>
@@ -362,7 +362,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                 <thead>
                   <tr>
                     {["Content", "Reconciliation", "Type", "Source", "Astro / DB", "Live", "Synced"].map((heading) => (
-                      <th key={heading} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 850, borderBottom: `1px solid ${D.border}` }}>
+                      <th key={heading} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 700, borderBottom: `1px solid ${D.border}` }}>
                         {heading}
                       </th>
                     ))}
@@ -378,7 +378,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                         style={{ cursor: "pointer", background: active ? "#F8FAFC" : D.card }}
                       >
                         <td style={cellStyle}>
-                          <div style={{ color: D.heading, fontWeight: 800, fontSize: 13, lineHeight: 1.25 }}>{item.title || item.slug || item.canonical_url_normalized || "Untitled"}</div>
+                          <div style={{ color: D.heading, fontWeight: 700, fontSize: 13, lineHeight: 1.25 }}>{item.title || item.slug || item.canonical_url_normalized || "Untitled"}</div>
                           <div style={{ color: D.muted, fontSize: 12, marginTop: 4, fontFamily: MONO, overflowWrap: "anywhere" }}>{item.canonical_url_normalized || item.live_url || "-"}</div>
                         </td>
                         <td style={cellStyle}><Chip tone={STATUS_TONE[item.reconciliation_status]}>{labelize(item.reconciliation_status)}</Chip></td>
@@ -404,14 +404,14 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
         <aside style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "12px 14px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
             <Database size={16} strokeWidth={2} />
-            <div style={{ fontSize: 14, fontWeight: 850, color: D.heading }}>Registry Detail</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>Registry Detail</div>
           </div>
           {!selected ? (
             <div style={{ padding: 24, color: D.muted, textAlign: "center" }}>Select a registry row.</div>
           ) : (
             <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
               <div>
-                <div style={{ color: D.heading, fontSize: 18, lineHeight: 1.25, fontWeight: 850 }}>{selected.title || selected.slug || "Untitled"}</div>
+                <div style={{ color: D.heading, fontSize: 18, lineHeight: 1.25, fontWeight: 700 }}>{selected.title || selected.slug || "Untitled"}</div>
                 <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                   <Chip tone={STATUS_TONE[selected.reconciliation_status]}>{labelize(selected.reconciliation_status)}</Chip>
                   <Chip tone={LIVE_TONE[selected.live_status] || "neutral"}>{labelize(selected.live_status)}</Chip>
@@ -426,7 +426,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
                   href={selectedHref}
                   target="_blank"
                   rel="noreferrer"
-                  style={{ minHeight: 40, borderRadius: 6, border: `1px solid ${D.border}`, color: D.heading, textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 13, fontWeight: 800 }}
+                  style={{ minHeight: 40, borderRadius: 6, border: `1px solid ${D.border}`, color: D.heading, textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 13, fontWeight: 700 }}
                 >
                   <ExternalLink size={15} strokeWidth={2} />
                   Open Live URL
@@ -451,7 +451,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
 
               {mismatchReasons.length > 0 && (
                 <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14 }}>
-                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 850, textTransform: "uppercase", marginBottom: 8 }}>Mismatch Reasons</div>
+                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Mismatch Reasons</div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {mismatchReasons.map((reason) => <Chip key={reason} tone="amber">{labelize(reason)}</Chip>)}
                   </div>
@@ -459,11 +459,11 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
               )}
 
               <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.astro_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 800 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.astro_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 700 }}>
                   <CheckCircle2 size={15} strokeWidth={2} />
                   Astro {labelize(selected.astro_status)}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.db_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 800 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: selected.db_status === "present" ? D.green : D.muted, fontSize: 13, fontWeight: 700 }}>
                   <CheckCircle2 size={15} strokeWidth={2} />
                   DB {labelize(selected.db_status)}
                 </div>
@@ -475,7 +475,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
 
       {data?.latest_sync_run && (
         <div style={{ marginTop: 16, color: D.muted, fontSize: 12 }}>
-          Latest sync: <span style={{ color: D.text, fontWeight: 750 }}>{labelize(data.latest_sync_run.status)}</span> at {formatDate(data.latest_sync_run.completed_at || data.latest_sync_run.started_at)}
+          Latest sync: <span style={{ color: D.text, fontWeight: 700 }}>{labelize(data.latest_sync_run.status)}</span> at {formatDate(data.latest_sync_run.completed_at || data.latest_sync_run.started_at)}
           {data.latest_sync_run.astro_repo_sha ? <span style={{ fontFamily: MONO }}> - {data.latest_sync_run.astro_repo_sha.slice(0, 8)}</span> : null}
         </div>
       )}
@@ -503,7 +503,7 @@ function tabStyle(active) {
     alignItems: "center",
     gap: 6,
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 700,
     cursor: "pointer",
   };
 }

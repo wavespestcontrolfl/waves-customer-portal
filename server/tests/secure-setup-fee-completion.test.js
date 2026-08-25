@@ -49,7 +49,7 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
   });
 
   test('the claimed fee rides the SAME completion mint as its own line', () => {
-    expect(dispatchSource).toMatch(/const mintOptions = \{[\s\S]{0,3600}extraLineItems: secureSetupFee\s*\n\s*\? \[\{\s*\n\s*description: 'One-time setup fee',/);
+    expect(dispatchSource).toMatch(/const mintOptions = \{[\s\S]{0,4400}extraLineItems: secureSetupFee\s*\n\s*\? \[\{\s*\n\s*description: 'One-time setup fee',/);
     // The line amount is the CLAIMED (stamped-at-selection) value — the
     // billed fee always equals the disclosed fee.
     expect(dispatchSource).toMatch(/unit_price: secureSetupFee\.amount,\s*\n\s*amount: secureSetupFee\.amount,/);

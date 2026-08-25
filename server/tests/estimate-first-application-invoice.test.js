@@ -77,7 +77,7 @@ describe('estimate first-application invoice lookup', () => {
       scheduled_date: '2026-06-08',
     }, knex);
 
-    expect(result).toBe(firstApplicationInvoice);
+    expect(result).toEqual({ invoice: firstApplicationInvoice, liveBeside: null });
     expect(knex.calls).toContainEqual(['table', 'invoices as i']);
     expect(knex.calls).toContainEqual(['join', 'scheduled_services as first_visit', 'i.scheduled_service_id', 'first_visit.id']);
     expect(knex.calls).toContainEqual(['where', 'i.customer_id', 'customer-1']);
@@ -86,13 +86,30 @@ describe('estimate first-application invoice lookup', () => {
     expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
   });
 
+  test('a REFUNDED sibling first-application invoice still suppresses (status quo — own-visit terminal handling lives in admin-dispatch)', async () => {
+    const refunded = {
+      id: 'inv-sib', status: 'refunded', scheduled_service_id: 'sibling-visit',
+      title: 'WaveGuard Membership Setup + First Application',
+      notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application - $99 setup fee plus first application.',
+    };
+    const knex = makeKnex([refunded]);
+    const found = await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex,
+    );
+    expect(found).toEqual({ invoice: refunded, liveBeside: null });
+    // Only void is filtered here — deliberately NOT the terminal vocabulary.
+    expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
+    expect(knex.calls.some((c) => c[0] === 'whereNotIn')).toBe(false);
+  });
+
   test('does not query when the service is not linked to an estimate date', async () => {
     const knex = makeKnex();
 
     await expect(findFirstApplicationInvoiceForEstimateService({
       customer_id: 'customer-1',
       scheduled_date: '2026-06-08',
-    }, knex)).resolves.toBeNull();
+    }, knex)).resolves.toEqual({ invoice: null, liveBeside: null });
 
     expect(knex).not.toHaveBeenCalled();
   });

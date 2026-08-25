@@ -231,7 +231,7 @@ export function WeekViewV2({ startDate, onDateClick }) {
                   <div
                     key={s.id}
                     className={cn(
-                      'text-11 truncate rounded-[3px] px-1.5 py-0.5 font-semibold',
+                      'text-11 truncate rounded-[3px] px-1.5 py-0.5 font-medium',
                       s.status === 'completed' ? 'line-through bg-zinc-200 text-zinc-500' : 'text-white'
                     )}
                     style={s.status === 'completed' ? undefined : { background: s.status === 'en_route' ? '#1E40AF' : s.status === 'on_site' ? '#18181B' : '#3B82F6' }}
@@ -312,7 +312,7 @@ function MonthServiceChip({ service, onViewCustomer }) {
       {...attributes}
       {...listeners}
       className={cn(
-        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-semibold',
+        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-medium',
         completed && 'bg-zinc-200 text-zinc-500 line-through',
         service.status === 'skipped' && 'bg-alert-bg text-alert-fg',
         !completed && service.status !== 'skipped' && 'text-white',

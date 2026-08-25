@@ -1836,6 +1836,109 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
   return query;
 }
 
+// New-customer create on a live phone match — admin-confirm gate (#3453's
+// lead-convert pattern extended to the direct create paths). Before this,
+// POST / and quick-add silently minted a second "Rental property" profile on
+// the phone-matched account with no address comparison and no confirmation —
+// an office re-key of an existing customer (same phone + same address) split
+// history across two rows. Called INSIDE the create transaction, after
+// ensureCustomerAccount resolved a phone match (and possibly wrote the
+// legacy-row attach) — throwing here rolls that write back.
+//  - submitted street key matches a live profile on the account → 409
+//    DUPLICATE_PROFILE unless the admin passed confirmDuplicate:true;
+//  - genuinely different (or missing) address → the attach itself still
+//    requires confirmAttach:true — otherwise 409 PHONE_MATCH_CONFIRM.
+// streetKey (services/customer-properties) is suffix-canonical and
+// unit-stripped, so "123 Main St" keys with "123 Main Street" but not with
+// "123 Main Ave". Both flags are admin-parsed at the route (requireAdmin
+// already guards these routes, so the match payload never reaches a tech).
+// Add-Property from a specific profile passes the originating customer id
+// (admin-only, codex #3469 r3 P1): multiple live accounts can legitimately
+// share a phone (admin-created separate accounts), and the phone-first
+// `.first()` pick could resolve a DIFFERENT account than the profile the
+// admin started from — splitting history again. The explicit origin wins,
+// but only when its live row still matches the submitted phone (all inside
+// the create transaction); otherwise the hint is ignored and the standard
+// visible confirm flow applies.
+async function resolveExplicitAttachTarget(trx, account, attachToCustomerId, submittedPhone, forceNewAccount = false) {
+  // "Create separate account" outranks the origin hint (codex #3469 r4 P1):
+  // Add-Property always carries attachToCustomerId, so a retry that adds
+  // forceNewAccount would otherwise mint the fresh account and then
+  // immediately re-pin to the origin — attaching against the admin's
+  // explicit choice and committing an orphan account row.
+  if (forceNewAccount) return account;
+  if (!attachToCustomerId) return account;
+  const origin = await trx('customers').where({ id: attachToCustomerId }).whereNull('deleted_at').first();
+  if (!origin) return account;
+  const digits = phoneLast10(submittedPhone);
+  if (!digits || phoneLast10(origin.phone) !== digits) return account;
+  const originKey = String(origin.account_id || origin.id);
+  if (account?.accountId && String(account.accountId) === originKey) return account;
+  const accountId = await attachMatchedCustomerToAccount(trx, origin);
+  return { accountId, existingCustomer: { ...origin, account_id: accountId }, matchType: 'phone' };
+}
+
+async function assertPhoneAttachConfirmed(trx, account, { streetLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId }) {
+  if (!account?.existingCustomer || account.matchType !== 'phone') return;
+  // Row-lock the matched customer BEFORE relying on the match (codex #3469
+  // r3 P2): the advisory comms fence only stops writers that take that lock
+  // — a phone-only PUT /:id does not. FOR UPDATE serializes against any
+  // update of the matched row for the rest of this transaction, and the
+  // locked re-read verifies the row still carries the matched phone and
+  // account; any drift fails closed with zero writes.
+  const matched = account.existingCustomer;
+  const lockedRow = await trx('customers').where({ id: matched.id }).whereNull('deleted_at').forUpdate().first();
+  if (!lockedRow
+    || String(lockedRow.account_id || lockedRow.id) !== String(account.accountId)
+    || phoneLast10(lockedRow.phone) !== phoneLast10(matched.phone)) {
+    const busyErr = new Error('That customer record is being updated — retry in a moment.');
+    busyErr.statusCode = 409;
+    busyErr.status = 409;
+    busyErr.isOperational = true;
+    busyErr.code = 'CUSTOMER_BUSY';
+    throw busyErr;
+  }
+  // A confirm flag is honored only for the account the admin actually saw:
+  // the 409 payload carries match.accountId, the client echoes it back as
+  // confirmMatchedAccountId, and it is re-checked here against the account
+  // the phone resolves to NOW (inside this transaction). A changed phone or
+  // a concurrent edit that moves the match to a different account gets a
+  // fresh 409 instead of silently attaching to an unapproved account.
+  const confirmedThisAccount = confirmMatchedAccountId != null
+    && String(confirmMatchedAccountId) === String(account.accountId);
+  const { streetKey } = require('../services/customer-properties');
+  const profiles = await trx('customers')
+    .where({ account_id: account.accountId })
+    .whereNull('deleted_at')
+    .select('id', 'first_name', 'last_name', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc');
+  const rows = profiles.length ? profiles : [account.existingCustomer];
+  const raise = (code, message, row) => {
+    const err = new Error(message);
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = code;
+    err.match = {
+      accountId: String(account.accountId),
+      customerId: row.id,
+      name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+      phoneMasked: maskPhone(row.phone || account.existingCustomer.phone),
+      address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }) || null,
+    };
+    throw err;
+  };
+  const submittedKey = streetKey(streetLine1);
+  const dupe = submittedKey ? rows.find((row) => streetKey(row.address_line1) === submittedKey) : null;
+  if (dupe) {
+    if (confirmDuplicate && confirmedThisAccount) return;
+    raise('DUPLICATE_PROFILE', 'This phone belongs to an existing customer with a profile at this address — confirm before creating a duplicate profile.', dupe);
+  }
+  if (confirmAttach && confirmedThisAccount) return;
+  raise('PHONE_MATCH_CONFIRM', 'This phone belongs to an existing customer — confirm attaching this as an additional property on their account, or create a separate account.', rows[0]);
+}
+
 async function findCrossAccountContactConflict(customerId, accountId, updates) {
   const normalizedAccountId = accountId ? String(accountId) : null;
   const conflicts = [];
@@ -1998,8 +2101,24 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     }
     if (!isValidStage(normalized.pipelineStage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
+    // Same admin-parsed confirm flags as POST / below (#3453's pattern).
+    const isAdmin = req.techRole === 'admin';
+    const confirmDuplicate = isAdmin && req.body.confirmDuplicate === true;
+    const confirmAttach = isAdmin && req.body.confirmAttach === true;
+    const forceNewAccount = isAdmin && req.body.forceNewAccount === true;
+    const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
+    const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
+      ? req.body.confirmMatchedAccountId.trim() : null;
+    const attachToCustomerId = isAdmin && typeof req.body.attachToCustomerId === 'string' && req.body.attachToCustomerId.trim()
+      ? req.body.attachToCustomerId.trim() : null;
+
     const customer = await db.transaction(async (trx) => {
-      const account = await ensureCustomerAccount(trx, normalized);
+      // fenceAttach: same concurrency fence as POST / below — lock + re-
+      // resolve the matched row inside this transaction, CUSTOMER_BUSY on
+      // any drift.
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
+      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
         account_id: account.accountId,
@@ -2029,7 +2148,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
           }
         }
       }
-      return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
+      return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _existingCustomer: account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
     logger.info(`[customers] Quick-add created customer_id=${customer.id} account_id=${customer.account_id || customer.id}`);
@@ -2043,6 +2162,8 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         accountId: customer.account_id,
         profileLabel: customer.profile_label,
         attachedToExistingAccount: customer._attachedToExistingAccount,
+        existingCustomerId: customer._existingCustomer?.id || null,
+        existingCustomerName: customer._existingCustomer ? [customer._existingCustomer.first_name, customer._existingCustomer.last_name].filter(Boolean).join(' ') : null,
         propertyCount: customer._propertyCount,
         address: formatAddress({ line1: customer.address_line1, line2: customer.address_line2, city: customer.city, state: customer.state, zip: customer.zip }),
         city: customer.city,
@@ -2051,7 +2172,12 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         tier: customer.waveguard_tier,
       },
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && (err.code === 'DUPLICATE_PROFILE' || err.code === 'PHONE_MATCH_CONFIRM')) {
+      return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/customers — directory + pipeline
@@ -3124,6 +3250,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     if (!isValidStage(normalized.pipelineStage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
+    // Phone-match confirm flags — parsed exactly like the lead-convert flags
+    // in admin-leads.js (#3453): strict `=== true`, admin-only. requireAdmin
+    // already guards this route; the predicate keeps the parse shape
+    // identical to the tech-collapse pattern there.
+    const isAdmin = req.techRole === 'admin';
+    const confirmDuplicate = isAdmin && req.body.confirmDuplicate === true;
+    const confirmAttach = isAdmin && req.body.confirmAttach === true;
+    // "Create a separate account anyway" — reuses findAccountByContact's
+    // existing forceNewAccount/ignorePhoneMatch lane (built for lead-convert).
+    const forceNewAccount = isAdmin && req.body.forceNewAccount === true;
+    const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
+    // Binds a confirm flag to the account the 409 displayed (parsed like
+    // admin-leads.js's attachToAccountId).
+    const confirmMatchedAccountId = isAdmin && typeof req.body.confirmMatchedAccountId === 'string' && req.body.confirmMatchedAccountId.trim()
+      ? req.body.confirmMatchedAccountId.trim() : null;
+    // Add-Property origin: which profile the admin pressed "Add Property"
+    // on — see resolveExplicitAttachTarget.
+    const attachToCustomerId = isAdmin && typeof req.body.attachToCustomerId === 'string' && req.body.attachToCustomerId.trim()
+      ? req.body.attachToCustomerId.trim() : null;
+
     // Billing lane at create (#3140 resolution — the inferred-monthly
     // vector): a create with a real membership tier + a positive rate and
     // NO lane used to mint a NULL-mode row the lane resolver infers into
@@ -3162,7 +3308,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     const customer = await db.transaction(async (trx) => {
-      const account = await ensureCustomerAccount(trx, normalized);
+      // fenceAttach (comms-lock try-lock + re-resolve, #3453's lane): a
+      // concurrent phone/account edit between lookup and insert fails closed
+      // with CUSTOMER_BUSY instead of attaching on stale match data. Safe
+      // here because this caller always runs inside db.transaction.
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
+      await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
         account_id: account.accountId,
@@ -3275,7 +3427,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       existingCustomerId: customer._existingCustomer?.id || null,
       existingCustomerName: customer._existingCustomer ? `${customer._existingCustomer.first_name} ${customer._existingCustomer.last_name}` : null,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && (err.code === 'DUPLICATE_PROFILE' || err.code === 'PHONE_MATCH_CONFIRM')) {
+      // Same 409 shape as admin-leads.js's convert confirms: the client
+      // resubmits with the confirm flag after the admin's explicit choice.
+      return res.status(409).json({ error: err.message, code: err.code, match: err.match || null });
+    }
+    next(err);
+  }
 });
 
 // PUT /api/admin/customers/:id

@@ -100,7 +100,7 @@ function MetricCard({
       <div
         style={{
           fontSize: large ? 32 : 26,
-          fontWeight: 800,
+          fontWeight: 700,
           color,
           letterSpacing: "-0.02em",
           lineHeight: 1.1,
@@ -112,7 +112,7 @@ function MetricCard({
       <div
         style={{
           fontSize: 11,
-          fontWeight: 600,
+          fontWeight: 500,
           color: WAVES_COLORS.textSecondary,
           textTransform: "uppercase",
           letterSpacing: "0.08em",
@@ -323,7 +323,7 @@ function StatusDot({ status }) {
         gap: 6,
         fontSize: 12,
         color: colors[status],
-        fontWeight: 600,
+        fontWeight: 500,
       }}
     >
       {" "}
@@ -350,7 +350,7 @@ function DeltaArrow({ current, previous }) {
   if (diff === 0)
     return (
       <span
-        style={{ color: WAVES_COLORS.textMuted, fontSize: 13, fontWeight: 600 }}
+        style={{ color: WAVES_COLORS.textMuted, fontSize: 13, fontWeight: 500 }}
       >
         --
       </span>
@@ -396,7 +396,7 @@ function PositionBadge({ pos }) {
         background: bg,
         color,
         fontSize: 14,
-        fontWeight: 800,
+        fontWeight: 700,
         fontFamily: "'Roboto', Arial, sans-serif",
       }}
     >
@@ -462,7 +462,7 @@ function FilterPill({ label, active, onClick }) {
         background: active ? WAVES_COLORS.accentGlow : "transparent",
         color: active ? WAVES_COLORS.accent : WAVES_COLORS.textMuted,
         fontSize: 12,
-        fontWeight: 600,
+        fontWeight: 500,
         cursor: "pointer",
         transition: "all 0.2s",
         fontFamily: "'Roboto', Arial, sans-serif",
@@ -683,7 +683,7 @@ export default function WavesSEODashboard() {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             color: WAVES_COLORS.textPrimary,
             marginBottom: 8,
           }}
@@ -960,7 +960,7 @@ export default function WavesSEODashboard() {
                         <td
                           style={{
                             padding: "10px 12px",
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: WAVES_COLORS.textPrimary,
                           }}
                         >
@@ -1023,7 +1023,7 @@ export default function WavesSEODashboard() {
                     style={{
                       fontSize: 12,
                       color: WAVES_COLORS.yellow,
-                      fontWeight: 600,
+                      fontWeight: 500,
                     }}
                   >
                     {aiOverview.quickWins.length} opportunities
@@ -1353,7 +1353,7 @@ export default function WavesSEODashboard() {
                       <td
                         style={{
                           padding: "10px 12px",
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: WAVES_COLORS.textPrimary,
                           whiteSpace: "nowrap",
                         }}
@@ -1382,7 +1382,7 @@ export default function WavesSEODashboard() {
                             padding: "2px 8px",
                             borderRadius: 6,
                             fontSize: 11,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             background: "#F4F4F5",
                             color: WAVES_COLORS.textSecondary,
                           }}
@@ -1457,7 +1457,7 @@ export default function WavesSEODashboard() {
                       <span
                         style={{
                           fontSize: 13,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: WAVES_COLORS.textPrimary,
                         }}
                       >
@@ -1466,7 +1466,7 @@ export default function WavesSEODashboard() {
                       <span
                         style={{
                           fontSize: 13,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: WAVES_COLORS.green,
                         }}
                       >
@@ -1501,7 +1501,7 @@ export default function WavesSEODashboard() {
                       <span
                         style={{
                           fontSize: 13,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: WAVES_COLORS.textPrimary,
                         }}
                       >
@@ -1510,7 +1510,7 @@ export default function WavesSEODashboard() {
                       <span
                         style={{
                           fontSize: 13,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           color: WAVES_COLORS.red,
                         }}
                       >

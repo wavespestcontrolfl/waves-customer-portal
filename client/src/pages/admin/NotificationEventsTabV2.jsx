@@ -182,7 +182,7 @@ function SmsCard({
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <MessageSquare size={14} />
-              <div className="text-14 font-semibold text-zinc-900 truncate">{template.name}</div>
+              <div className="text-14 font-medium text-zinc-900 truncate">{template.name}</div>
               <Badge tone="neutral" className="capitalize">{template.category || "sms"}</Badge>
             </div>
             <div className="mt-1 text-11 text-ink-tertiary font-mono truncate">
@@ -237,7 +237,7 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <Mail size={14} />
-              <div className="text-14 font-semibold text-zinc-900 truncate">
+              <div className="text-14 font-medium text-zinc-900 truncate">
                 {automation.template_name || automation.template_key}
               </div>
               <Badge tone={automation.status === "active" ? "strong" : "neutral"}>
@@ -341,7 +341,7 @@ function EventSection({
       <div className="mb-3 flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-16 font-semibold text-zinc-900">{event.name || event.event_key}</h3>
+            <h3 className="text-16 font-medium text-zinc-900">{event.name || event.event_key}</h3>
             <Badge tone={statusTone(event.status)}>{statusLabel(event.status)}</Badge>
             {event.audience ? <Badge tone="neutral">{event.audience}</Badge> : null}
             {event.fires_when ? <Badge tone="neutral">{event.fires_when}</Badge> : null}

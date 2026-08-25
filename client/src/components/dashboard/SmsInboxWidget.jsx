@@ -68,7 +68,7 @@ export default function SmsInboxWidget() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: `1px solid ${D.border}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, color: D.text }}>Messages</span>
+          <span style={{ fontSize: 15, fontWeight: 500, color: D.text }}>Messages</span>
           {unreadCount > 0 && (
             <span style={{ background: D.red, color: D.white, fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, minWidth: 20, textAlign: 'center' }}>
               {unreadCount}
@@ -129,7 +129,7 @@ export default function SmsInboxWidget() {
                     disabled={sending || !replyText.trim()}
                     style={{
                       padding: '8px 16px', borderRadius: 8, border: 'none',
-                      background: D.teal, color: D.white, fontSize: 13, fontWeight: 600,
+                      background: D.teal, color: D.white, fontSize: 13, fontWeight: 500,
                       cursor: sending ? 'wait' : 'pointer', opacity: sending || !replyText.trim() ? 0.5 : 1,
                     }}
                   >

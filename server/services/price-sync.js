@@ -112,8 +112,15 @@ async function syncPricesToEstimator(options = {}) {
 
         newCostPerTank += newCost;
 
+        // Every component here has a usable price+size (the blockers guard
+        // above), so a persisted cost_unknown flag is RESOLVED — strip it,
+        // and count the strip as a change so the cleared state persists
+        // (codex #3465 r17-push P1: the list otherwise reported
+        // cost_incomplete forever after pricing arrived).
+        if (p.cost_unknown) hasChange = true;
+        const { cost_unknown: _resolvedUnknown, ...rest } = p;
         return {
-          ...p,
+          ...rest,
           cost_per_oz: pricing.cost_per_oz,
           cost_in_tank: Math.round(newCost * 100) / 100,
         };

@@ -174,18 +174,33 @@ input[type="week"] {
   color: #000 !important;
 }
 
-/* /admin/* — Roboto everywhere. Scoped to .admin-shell-v2 (the
-   AdminLayoutV2 root) so the customer portal and tech portal keep their
-   existing brand fonts (Luckiest Guy / Baloo 2 / Inter / Montserrat).
+/* /admin/* — Roboto everywhere. Scoped to html.admin-app (mounted by
+   AdminLayoutV2, same hook the pointer:coarse block above uses), so the customer portal and tech
+   portal keep their existing brand fonts (Luckiest Guy / Baloo 2 / Inter /
+   Montserrat) while portaled admin overlays (Dialog / Sheet / Mobile*Sheet,
+   rendered outside .admin-shell-v2) are covered too — previously they leaked
+   the global h1/h2 brand fonts (Anton / Montserrat) onto admin screens.
    The mono override below keeps numbers/code on the
    same Roboto family while preserving tabular numeric spacing.
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
-   beats class-based rules in the cascade. */
+   beats class-based rules in the cascade.
+   .admin-shell-v2 stays as an additional selector because html.admin-app is
+   only added by AdminLayoutV2's useEffect, which can run after the browser's
+   first paint on a cold /admin mount — the shell class is present in the
+   initial markup, so keeping it avoids a Roboto font flash / layout shift. */
+html.admin-app,
+html.admin-app *,
 .admin-shell-v2,
 .admin-shell-v2 * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
+html.admin-app [class*="font-mono"],
+html.admin-app [class*="font-mono"] *,
+html.admin-app code,
+html.admin-app code *,
+html.admin-app pre,
+html.admin-app pre *,
 .admin-shell-v2 [class*="font-mono"],
 .admin-shell-v2 [class*="font-mono"] *,
 .admin-shell-v2 code,
@@ -193,6 +208,44 @@ input[type="week"] {
 .admin-shell-v2 pre,
 .admin-shell-v2 pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
+}
+
+/* Admin shell height. iOS Safari's 100vh is the LARGE viewport (toolbars
+   retracted), so a 100vh scroller leaves its last ~80-100px under the
+   toolbar + fixed tab bar. 100dvh tracks the visible viewport. */
+:root {
+  --admin-vh: 100vh;
+}
+@supports (height: 100dvh) {
+  :root {
+    --admin-vh: 100dvh;
+  }
+}
+
+/* Horizontal-scroll affordance for wide admin tables. Overlay scrollbars on
+   macOS/iOS give no hint that a table continues to the right (Inventory hides
+   ~45% of its columns, Pricing Reality Check ~60%). Pure-CSS scroll shadows:
+   the local-attached white covers hide the shadow at the scroll ends.
+   Scoped to scrollers whose direct child is a <table> (ui/Table and the
+   hand-rolled wrappers) — NOT every overflow-x-auto: tab strips such as the
+   Content Review hero (AutonomousContentReviewPage) scroll horizontally on a
+   non-white background and must keep their own surface. Most admin table
+   wrappers use inline style={{ overflowX: "auto" }} rather than the class
+   (Inventory, Pricing Reality Check, Revenue, …); React applies those via
+   CSSOM, whose reflected style attribute serializes as "overflow-x: auto",
+   so the attribute selector reaches them without touching every page.
+   Wrappers that also set an inline background keep it (inline wins). */
+html.admin-app .overflow-x-auto:has(> table),
+html.admin-app [style*="overflow-x: auto"]:has(> table) {
+  background:
+    linear-gradient(to right, #fff 30%, rgba(255, 255, 255, 0)),
+    linear-gradient(to right, rgba(255, 255, 255, 0), #fff 70%) 100% 0,
+    linear-gradient(to right, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0)),
+    linear-gradient(to left, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0)) 100% 0;
+  background-repeat: no-repeat;
+  background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+  background-attachment: local, local, scroll, scroll;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Tailwind preflight is intentionally disabled, so native form controls keep

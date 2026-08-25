@@ -49,7 +49,7 @@ const sBtn = (bg, color) => ({
   border: "none",
   borderRadius: 8,
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
@@ -58,7 +58,7 @@ const sBadge = (bg, color) => ({
   borderRadius: 4,
   background: bg,
   color,
-  fontWeight: 600,
+  fontWeight: 500,
 });
 const sInput = {
   width: "100%",
@@ -275,7 +275,7 @@ function MoneyModelTab({ dashboard, loading }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -334,7 +334,7 @@ function MoneyModelTab({ dashboard, loading }) {
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: D.heading,
                   marginBottom: 2,
                 }}
@@ -364,7 +364,7 @@ function MoneyModelTab({ dashboard, loading }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 16,
           }}
@@ -432,7 +432,7 @@ function MoneyModelTab({ dashboard, loading }) {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -454,7 +454,7 @@ function MoneyModelTab({ dashboard, loading }) {
               <div>
                 {" "}
                 <span
-                  style={{ color: D.heading, fontWeight: 600, fontSize: 13 }}
+                  style={{ color: D.heading, fontWeight: 500, fontSize: 13 }}
                 >
                   {o.customerName}
                 </span>{" "}
@@ -543,7 +543,7 @@ function ValueEquationTab() {
       >
         {" "}
         <div>
-          <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+          <span style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
             {label}
           </span>
           <span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>
@@ -597,7 +597,7 @@ function ValueEquationTab() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -610,7 +610,7 @@ function ValueEquationTab() {
         <div
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.green,
             textTransform: "uppercase",
             letterSpacing: 1,
@@ -638,7 +638,7 @@ function ValueEquationTab() {
         <div
           style={{
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.red,
             textTransform: "uppercase",
             letterSpacing: 1,
@@ -683,7 +683,7 @@ function ValueEquationTab() {
             <div
               style={{
                 fontSize: 56,
-                fontWeight: 800,
+                fontWeight: 700,
                 fontFamily: MONO,
                 color:
                   result.valueScore >= 70
@@ -698,7 +698,7 @@ function ValueEquationTab() {
             <div
               style={{
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginTop: 4,
               }}
@@ -732,7 +732,7 @@ function ValueEquationTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -774,7 +774,7 @@ function ValueEquationTab() {
               }}
             >
               {" "}
-              <div style={{ color: D.teal, fontWeight: 600 }}>
+              <div style={{ color: D.teal, fontWeight: 500 }}>
                 {l.lever}
               </div>{" "}
               <div style={{ color: D.text, marginTop: 2 }}>
@@ -824,7 +824,7 @@ function OfferBuilderTab({ showToast }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           Grand Slam Offers
         </div>{" "}
         <button style={sBtn(D.teal, D.white)}>+ New Offer</button>{" "}
@@ -945,7 +945,7 @@ function OfferBuilderTab({ showToast }) {
               style={{
                 fontSize: 11,
                 color: D.amber,
-                fontWeight: 600,
+                fontWeight: 500,
                 marginBottom: 8,
               }}
             >
@@ -966,7 +966,7 @@ function OfferBuilderTab({ showToast }) {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}
@@ -976,7 +976,7 @@ function OfferBuilderTab({ showToast }) {
           {offers.map((o) => (
             <div key={o.id} style={{ ...sCard, marginBottom: 8 }}>
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 {o.name}
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
@@ -1043,7 +1043,7 @@ function UpsellEngineTab({ showToast }) {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -1077,7 +1077,7 @@ function UpsellEngineTab({ showToast }) {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {o.customerName}
                 </div>{" "}
@@ -1127,7 +1127,7 @@ function UpsellEngineTab({ showToast }) {
           }}
         >
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Upsell Rules
           </div>{" "}
         </div>
@@ -1158,7 +1158,7 @@ function UpsellEngineTab({ showToast }) {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {r.name}
                 </div>{" "}
@@ -1243,7 +1243,7 @@ function LTVAnalysisTab() {
         }}
       >
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
           Customer Lifetime Value
         </div>{" "}
         <button
@@ -1318,7 +1318,7 @@ function LTVAnalysisTab() {
           <div
             style={{
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 12,
             }}

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
@@ -141,5 +141,55 @@ describe('CustomersPageV2 workflow state', () => {
     expect(await screen.findByText('Failed to load customers')).toBeInTheDocument();
     expect(screen.getByText('Map customers unavailable')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('phone-match 409 shows the confirm choices and resubmits with confirmAttach', async () => {
+    const postBodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      const path = String(url);
+      if (path.includes('/admin/customers?')) return response(list);
+      if (path.endsWith('/admin/customers') && opts?.method === 'POST') {
+        const body = JSON.parse(opts.body);
+        postBodies.push(body);
+        if (body.confirmAttach === true) {
+          return response(
+            { id: 'cust-new', attachedToExistingAccount: true, existingCustomerName: 'Avery Customer' },
+            201,
+          );
+        }
+        return response(
+          {
+            error: 'This phone belongs to an existing customer',
+            code: 'PHONE_MATCH_CONFIRM',
+            match: { customerId: 'customer-a', accountId: 'acct-a', name: 'Avery Customer', address: '10 Palm Ave, Naples FL 34102' },
+          },
+          409,
+        );
+      }
+      return response({});
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+
+    const dialog = screen.getByRole('dialog');
+    const inputs = within(dialog).getAllByRole('textbox');
+    fireEvent.change(inputs[0], { target: { value: 'Testfirst' } }); // First name
+    fireEvent.change(inputs[2], { target: { value: '5551234567' } }); // Phone
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Submit' }));
+
+    // The confirm panel names the matched customer + address — no silent create.
+    expect(await within(dialog).findByText(/at 10 Palm Ave, Naples FL 34102/)).toBeInTheDocument();
+    expect(postBodies).toHaveLength(1);
+    expect(postBodies[0].confirmAttach).toBeUndefined();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Attach as additional property' }));
+    await waitFor(() => expect(postBodies).toHaveLength(2));
+    expect(postBodies[1].confirmAttach).toBe(true);
+    // The confirm is bound to the account the admin saw in the 409.
+    expect(postBodies[1].confirmMatchedAccountId).toBe('acct-a');
+    // Attach success surfaces the account the profile landed on.
+    expect(await screen.findByText(/additional property on Avery Customer's account/)).toBeInTheDocument();
   });
 });

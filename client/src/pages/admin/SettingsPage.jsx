@@ -99,7 +99,7 @@ function Toggle({ checked, onChange, label, description }) {
       {" "}
       <div>
         {" "}
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
           {label}
         </div>
         {description && (
@@ -351,7 +351,7 @@ export default function SettingsPage() {
                 background: "#DCFCE7",
                 color: D.green,
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
               }}
             >
               Password updated. Older staff sessions have been signed out.
@@ -363,7 +363,7 @@ export default function SettingsPage() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
@@ -421,7 +421,7 @@ export default function SettingsPage() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
@@ -449,7 +449,7 @@ export default function SettingsPage() {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 15, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 15, fontWeight: 500, color: D.heading }}
                 >
                   {user?.name || "Unknown"}
                 </div>{" "}
@@ -472,7 +472,7 @@ export default function SettingsPage() {
                 borderRadius: 8,
                 color: D.heading,
                 fontSize: 14,
-                fontWeight: 600,
+                fontWeight: 500,
                 textDecoration: "none",
               }}
             >
@@ -485,7 +485,7 @@ export default function SettingsPage() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
@@ -551,7 +551,7 @@ export default function SettingsPage() {
                   <Activity size={18} color={D.heading} />
                 </div>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Pest Pressure</div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>Pest Pressure</div>
                   <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
                     Configure the 0–5 score on customer service reports — service-line scope, weights, labels, trend thresholds, overrides, audit log.
                   </div>
@@ -571,7 +571,7 @@ export default function SettingsPage() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 4,
             }}
@@ -597,7 +597,7 @@ export default function SettingsPage() {
               <div>
                 {" "}
                 <div
-                  style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
+                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
                 >
                   {key}
                 </div>{" "}
@@ -643,7 +643,7 @@ export default function SettingsPage() {
           <div
             style={{
               fontSize: 16,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.heading,
               marginBottom: 16,
             }}
@@ -670,7 +670,7 @@ export default function SettingsPage() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
@@ -733,7 +733,7 @@ export default function SettingsPage() {
             <div
               style={{
                 fontSize: 16,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 12,
               }}
@@ -744,7 +744,7 @@ export default function SettingsPage() {
               style={{
                 fontSize: 12,
                 color: gates.cronJobs ? D.green : D.red,
-                fontWeight: 600,
+                fontWeight: 500,
                 marginBottom: 12,
               }}
             >
@@ -966,7 +966,7 @@ function VisitTimelineSettingsCard() {
         <Toggle checked={config.showTechnicianEnRoute !== false} onChange={(value) => update({ showTechnicianEnRoute: value })} label="Show technician en route" description="Source: Bouncie." />
         <Toggle checked={config.showTechnicianOnSite !== false} onChange={(value) => update({ showTechnicianOnSite: value })} label="Show technician on site" description="Source: Bouncie." />
         <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: "#FAFAFA" }}>
-          <div style={{ fontSize: 13, color: D.heading, fontWeight: 800 }}>Service completed is required</div>
+          <div style={{ fontSize: 13, color: D.heading, fontWeight: 700 }}>Service completed is required</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 3, lineHeight: 1.4 }}>
             Completed reports always show Service completed from Waves report finalization.
           </div>
@@ -1483,7 +1483,7 @@ function BlackoutDaysTab() {
 
   return (
     <Card>
-      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
         Blackout Days
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
@@ -1493,7 +1493,7 @@ function BlackoutDaysTab() {
         dispatch if you choose to.
       </div>
 
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+      <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
         Weekly days off
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
@@ -1584,7 +1584,7 @@ function BlackoutDaysTab() {
             }}
           >
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
                 {fmtDay(b.date)}
               </div>
               {b.reason && (
@@ -1596,7 +1596,7 @@ function BlackoutDaysTab() {
               onClick={() => remove(b.id)}
               style={{
                 background: "transparent", border: `1px solid ${D.border}`,
-                borderRadius: 8, color: D.muted, fontSize: 12, fontWeight: 600,
+                borderRadius: 8, color: D.muted, fontSize: 12, fontWeight: 500,
                 padding: "6px 12px", cursor: "pointer",
               }}
             >
@@ -1835,7 +1835,7 @@ function settingsButtonStyle(tone) {
     color: tone === "primary" ? D.white : D.text,
     padding: "8px 11px",
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 700,
     cursor: "pointer",
   };
 }
@@ -1858,7 +1858,7 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
 
   return (
     <Card style={{ position: "sticky", top: 16 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, textTransform: "uppercase", marginBottom: 10 }}>Preview</div>
+      <div style={{ fontSize: 12, color: D.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>Preview</div>
       <div style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 16, background: "#FAFAFA" }}>
         <h2 style={{ margin: "0 0 6px", color: D.heading, fontSize: 24, lineHeight: 1.2 }}>{title || "Service Coverage"}</h2>
         <p style={{ margin: 0, color: D.muted, fontSize: 13, lineHeight: 1.45 }}>{intro}</p>
@@ -1869,7 +1869,7 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
         {showSummary && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
             {["Completed: 2", "Inspected: 0", "Inaccessible: 0", "Needs Attention: 0"].map((chip) => (
-              <span key={chip} style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 800 }}>
+              <span key={chip} style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 700 }}>
                 {chip}
               </span>
             ))}
@@ -1893,7 +1893,7 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
                   alignItems: "center",
                   justifyContent: "center",
                   fontSize: 12,
-                  fontWeight: 900,
+                  fontWeight: 700,
                 }}
               >
                 {item.label}
@@ -1906,15 +1906,15 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
             {sampleItems.map((item) => (
               <div key={item.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                  <span style={{ width: 28, height: 28, borderRadius: 999, background: D.teal, color: D.white, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900, flex: "0 0 auto" }}>
+                  <span style={{ width: 28, height: 28, borderRadius: 999, background: D.teal, color: D.white, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flex: "0 0 auto" }}>
                     {item.label}
                   </span>
                   <div>
-                    <div style={{ color: D.heading, fontSize: 13, fontWeight: 800 }}>{item.area}</div>
+                    <div style={{ color: D.heading, fontSize: 13, fontWeight: 700 }}>{item.area}</div>
                     <div style={{ color: D.muted, fontSize: 12, lineHeight: 1.35 }}>{item.description}</div>
                   </div>
                 </div>
-                <span style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 800 }}>
+                <span style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 700 }}>
                   {statusLabels[item.status] || "Completed"}
                 </span>
               </div>
@@ -1969,7 +1969,7 @@ function GbpConnectSection() {
 
   return (
     <Card style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
         Google Business Profile — per-location connection
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
@@ -2006,7 +2006,7 @@ function GbpConnectSection() {
             }}
           >
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 {loc.name}
               </div>
               <div
@@ -2030,7 +2030,7 @@ function GbpConnectSection() {
                 padding: "6px 14px",
                 borderRadius: 8,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: busy === loc.id ? "default" : "pointer",
                 border: `1px solid ${D.teal}`,
                 background: loc.hasCredentials ? "transparent" : D.teal,
@@ -2094,7 +2094,7 @@ function LinkedInConnectSection() {
   const orgMismatch = connected && status?.orgVerified === false;
   return (
     <Card style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
         LinkedIn — company page connection
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
@@ -2139,7 +2139,7 @@ function LinkedInConnectSection() {
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0" }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
               Waves Pest Control
             </div>
             <div style={{ fontSize: 11, color: orgMismatch ? D.amber : connected ? D.green : D.muted }}>
@@ -2163,7 +2163,7 @@ function LinkedInConnectSection() {
               padding: "6px 14px",
               borderRadius: 8,
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: busy ? "default" : "pointer",
               border: `1px solid ${D.teal}`,
               background: connected ? "transparent" : D.teal,
@@ -2183,7 +2183,7 @@ function IntegrationsTab({ canAdmin }) {
   if (!canAdmin) {
     return (
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
           Admin access required
         </div>
         <div style={{ fontSize: 12, color: D.muted }}>
@@ -2245,7 +2245,7 @@ function TeamList() {
           </div>{" "}
           <div style={{ flex: 1 }}>
             {" "}
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
               {t.name}
             </div>{" "}
             <div style={{ fontSize: 12, color: D.muted }}>{t.email}</div>{" "}
@@ -2255,7 +2255,7 @@ function TeamList() {
               padding: "3px 10px",
               borderRadius: 6,
               fontSize: 11,
-              fontWeight: 600,
+              fontWeight: 500,
               background: t.role === "admin" ? D.teal + "22" : D.border,
               color: t.role === "admin" ? D.teal : D.muted,
               textTransform: "capitalize",
