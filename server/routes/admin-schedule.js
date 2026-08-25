@@ -7120,6 +7120,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               seenDates,
               blackoutDates: rewriteBlackoutDates,
             });
+            // All-or-nothing: blackout exhaustion can leave the generator
+            // mapping only a prefix of the pending children. Committing the
+            // parent's new cadence while later children keep their old dates
+            // splits the series across two cadences with no one told —
+            // refuse the save (trx rolls back) so the operator adjusts the
+            // days-off/blackout settings or the plan instead.
+            if (childTargets.size < pendingChildren.length) {
+              throw Object.assign(
+                new Error(`This cadence change can only place ${childTargets.size} of ${pendingChildren.length} pending visit(s) — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or reduce the plan before saving.`),
+                { statusCode: 409, isOperational: true, code: 'CADENCE_REWRITE_SHORTFALL' },
+              );
+            }
             const rewriteProbeExcludeIds = [parent.id, ...pendingRewriteIds];
             for (const child of pendingChildren) {
               const nextDateStr = childTargets.get(child.id);
@@ -13991,8 +14003,14 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
 
     let created = 0;
+    // Visits the action still OWES: extend owes its requested count and
+    // convert_ongoing owes its top-up. The resolve below only fires when the
+    // debt is fully placed — a partial placement commits its visits but
+    // leaves the alert OPEN with the shortfall reported.
+    let owed = 0;
     if (action === 'extend') {
       const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
+      owed = n;
       const seen = new Set(seriesDateSeed);
       const maxAttempts = n * 4 + 30;
       let attempt = 1;
@@ -14066,6 +14084,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       // confirmed gets topped up with extra (billable) duplicates.
       const pendingCount = await countUpcomingSeriesVisits(trx, parentId);
       const need = Math.max(0, 3 - pendingCount);
+      owed = need;
       const seen = new Set(seriesDateSeed);
       const maxAttempts = need * 4 + 30;
       let attempt = 1;
@@ -14140,6 +14159,27 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       }
     }
 
+    // Partial placement: the visits that DID fit commit (they are real,
+    // wanted work), but the alert must stay open — resolving it on a
+    // shortfall dismisses the banner while the plan is still short. The
+    // operator sees created + shortfall and can retry after adjusting the
+    // days-off/blackout settings (the loops dedupe against existing dates,
+    // so a retry only adds the missing visits). Zero-placement throws above.
+    if (created < owed) {
+      logger.warn(`[recurring-alerts] ${action} on parent=${parentId} placed ${created} of ${owed} visit(s) — alert left OPEN (remaining candidates blacked out, on closed weekdays, or booked)`);
+      outcome = {
+        status: 200,
+        body: {
+          success: true,
+          action,
+          created,
+          shortfall: owed - created,
+          alertResolved: false,
+          warning: `Placed ${created} of ${owed} visit(s) — the rest fall on blackout days, closed weekdays, or booked slots. The alert stays open; adjust the days-off/blackout settings or schedule the remaining visits manually.`,
+        },
+      };
+      return;
+    }
     // Resolve/insert the alert row in the SAME transaction — the resolution
     // IS the idempotency claim a concurrent click's in-lock re-read checks.
     if (alert) {

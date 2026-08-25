@@ -718,10 +718,13 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
         }
         if (calls.some((c) => c[0] === 'whereRaw')) {
           // Global occupancy probe (findConflictingVisits): clash when
-          // scripted, else clear.
+          // scripted ('*' = all, function = predicate), else clear.
           const dateWhere = calls.find((c) => c[0] === 'where' && c[1] === 'scheduled_date');
           const probed = dateWhere ? dateWhere[2] : null;
-          return (clashDates === '*' || clashDates.includes(probed)) ? [{ id: 'occupied-1' }] : [];
+          const clashes = typeof clashDates === 'function'
+            ? clashDates(probed)
+            : (clashDates === '*' || clashDates.includes(probed));
+          return clashes ? [{ id: 'occupied-1' }] : [];
         }
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
           return statusVisible(calls, liveRows()).map((r) => ({ scheduled_date: r.scheduled_date }));
@@ -902,6 +905,29 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.insertedVisits).toHaveLength(1);
     expect(state.insertedVisits[0].scheduled_date).not.toBe('2098-10-15');
     expect(state.insertedVisits[0].scheduled_date > '2098-10-15').toBe(true);
+  });
+
+  test('P1: a PARTIAL extension commits its visits but leaves the alert OPEN with the shortfall reported', async () => {
+    // Only the first placeable candidate is free; every later day clashes.
+    // The one visit that fits must commit, but resolving the alert would
+    // dismiss the banner while the plan is still short.
+    let allowed = null;
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+      ],
+      alertRow: { id: 62, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+      clashDates: (d) => {
+        if (allowed === null) { allowed = d; return false; }
+        return d !== allowed;
+      },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '62', action: 'extend', count: 3, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ success: true, created: 1, shortfall: 2, alertResolved: false });
+    expect(state.insertedVisits).toHaveLength(1);
+    expect(state.alert.resolved_at).toBeNull();
   });
 
   test('P1: an extension that places ZERO visits fails (409) and leaves the alert OPEN', async () => {

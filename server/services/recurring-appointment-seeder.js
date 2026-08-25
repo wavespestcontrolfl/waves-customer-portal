@@ -462,10 +462,30 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
 
   // Blackout/day-off exhaustion must not silently shrink the plan: when the
   // bounded walk cannot place every requested follow-up, say so — callers
-  // return success on whatever seeded, and an undersized series is otherwise
-  // invisible until the customer's visits run out.
+  // (booking confirm, estimate conversion) return success on whatever
+  // seeded, and an undersized series is otherwise invisible until the
+  // customer's visits run out. A server log alone is not office-visible, so
+  // this also rings the admin bell (best-effort, fire-and-forget — a
+  // notification failure must never fail the seeding).
   if (rows.length < targetNewRows) {
-    require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} wanted ${targetNewRows} follow-up(s), placed ${rows.length} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
+    const shortfallMsg = `Recurring plan for customer ${parent.customer_id || 'n/a'} wanted ${targetNewRows} follow-up visit(s) but only ${rows.length} could be placed — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
+    require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} ${shortfallMsg}`);
+    Promise.resolve()
+      .then(() => require('./notification-service').notifyAdmin(
+        'alert',
+        'Recurring plan seeded short',
+        shortfallMsg,
+        {
+          link: parent.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
+          metadata: {
+            customer_id: parent.customer_id || null,
+            recurring_parent_id: parentId || null,
+            requested: targetNewRows,
+            placed: rows.length,
+          },
+        },
+      ))
+      .catch((err) => require('./logger').warn(`[recurring-seeder] shortfall notification failed (non-blocking): ${err.message}`));
   }
 
   return rows;
