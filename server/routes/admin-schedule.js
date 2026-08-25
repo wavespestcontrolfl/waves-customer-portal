@@ -5121,6 +5121,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
 
     for (const id of serviceIds) {
       try {
+        // Held locally until this row's transaction COMMITS: the CAS below
+        // can still throw after the probe hit, and a warning pushed from
+        // inside the trx would survive the rollback and report an unmoved
+        // row as stacked (Codex #3486 r3 P2).
+        let pendingOverlapWarning = null;
         switch (action) {
           case 'reassign': {
             await db.transaction(async (trx) => {
@@ -5295,7 +5300,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
                   });
                   if (bulkOverlap.length) {
-                    overlapWarnings.push({ id, warning: slotOverlapWarning(bulkTargetDate) });
+                    pendingOverlapWarning = { id, warning: slotOverlapWarning(bulkTargetDate) };
                   }
                 }
               }
@@ -5628,6 +5633,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           }
         }
         updated.push(id);
+        if (pendingOverlapWarning) overlapWarnings.push(pendingOverlapWarning);
       } catch (e) {
         failed.push({ id, reason: e.message });
       }

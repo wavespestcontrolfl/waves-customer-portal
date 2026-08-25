@@ -13958,6 +13958,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
+        // Staff surface: occupancy clashes commit with a warning instead of
+        // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
+        overlapAdvisory: true,
         // Same staleness fence via the series writer's own expectAnchor
         // mechanism: the anchor whose window this route just validated must
         // still be the anchor the trx moves.
@@ -14140,6 +14143,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
+    // Staff surface: occupancy clashes commit with a warning instead of
+    // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
+    rescheduleOptions.overlapAdvisory = true;
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {

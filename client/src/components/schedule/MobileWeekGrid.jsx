@@ -604,6 +604,11 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
       if (notifyCustomer && result?.notificationSent === false) {
         alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
       }
+      // Advisory schedule-overlap notes — the move committed (conflicts no
+      // longer block staff saves); say what now stacks.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Moved.\n\n${result.warnings.join('\n\n')}`);
+      }
       const j = await adminFetch(`/admin/schedule/week?start=${weekStart}`);
       setData(j);
       setOptimistic(null);

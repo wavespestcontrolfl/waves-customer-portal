@@ -548,6 +548,17 @@ class SmartRebooker {
       }
     }
 
+    // Staff-advisory overlap mode (options.overlapAdvisory — the admin
+    // dispatch reschedule passes it; owner ruling 2026-08-25: staff-side
+    // saves never block on schedule conflicts): an occupancy clash below
+    // commits the move and the result carries a warning naming the date.
+    // Customer-facing callers (public reschedule/re-service, rain-out,
+    // reschedule-sms) omit the option and keep the hard SLOT_TAKEN 409s.
+    // Blackout/past-window validation and the concurrency CAS are NOT
+    // advisory at any setting.
+    const overlapAdvisory = options.overlapAdvisory === true;
+    let overlapWarned = false;
+
     await db.transaction(async (trx) => {
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
@@ -598,11 +609,14 @@ class SmartRebooker {
           )
           .first('id');
         if (overlap) {
-          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
+          if (!overlapAdvisory) {
+            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+          overlapWarned = true;
         }
       }
 
@@ -626,13 +640,16 @@ class SmartRebooker {
           excludeStatuses: ['cancelled', 'completed'],
         });
         if (occupancyClash.length) {
-          // Same failure mode as the kept-tech check so every caller's
-          // 409/SLOT_TAKEN handling works unchanged.
-          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
+          if (!overlapAdvisory) {
+            // Same failure mode as the kept-tech check so every caller's
+            // 409/SLOT_TAKEN handling works unchanged.
+            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+          overlapWarned = true;
         }
       }
 
@@ -765,6 +782,10 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
     }
 
+    if (overlapWarned) {
+      const { slotOverlapWarning } = require('./scheduling/window-rules');
+      return { success: true, originalDate, newDate, warnings: [slotOverlapWarning(newDateStr)] };
+    }
     return { success: true, originalDate, newDate };
   }
 
@@ -787,6 +808,11 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // Staff-advisory overlap mode — same contract as the single path above:
+    // occupancy clashes commit and warn (per clashing date); validation and
+    // concurrency aborts are unaffected.
+    const overlapAdvisory = options.overlapAdvisory === true;
+    const overlapWarnDates = new Set();
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;
@@ -1183,11 +1209,14 @@ class SmartRebooker {
               )
               .first('id');
             if (overlap) {
-              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-                statusCode: 409,
-                isOperational: true,
-                code: 'SLOT_TAKEN',
-              });
+              if (!overlapAdvisory) {
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'SLOT_TAKEN',
+                });
+              }
+              overlapWarnDates.add(String(date).split('T')[0]);
             }
           }
         }
@@ -1211,11 +1240,14 @@ class SmartRebooker {
             excludeStatuses: TERMINAL,
           });
           if (anchorOccClash.length) {
-            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-              statusCode: 409,
-              isOperational: true,
-              code: 'SLOT_TAKEN',
-            });
+            if (!overlapAdvisory) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+            overlapWarnDates.add(String(date).split('T')[0]);
           }
         }
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
@@ -1274,11 +1306,14 @@ class SmartRebooker {
             excludeStatuses: TERMINAL,
           });
           if (occClash.length) {
-            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-              statusCode: 409,
-              isOperational: true,
-              code: 'SLOT_TAKEN',
-            });
+            if (!overlapAdvisory) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+            overlapWarnDates.add(String(date).split('T')[0]);
           }
         }
 
@@ -1435,12 +1470,17 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
     }
 
+    const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
+      const { slotOverlapWarning } = require('./scheduling/window-rules');
+      return slotOverlapWarning(d);
+    });
     return {
       success: true,
       originalDate: service.scheduled_date,
       newDate,
       occurrencesRescheduled: occurrencesRescheduled.length,
       rescheduledOccurrences: occurrencesRescheduled,
+      ...(seriesWarnings.length ? { warnings: seriesWarnings } : {}),
     };
   }
 }
