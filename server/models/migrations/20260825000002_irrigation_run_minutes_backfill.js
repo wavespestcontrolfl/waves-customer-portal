@@ -75,6 +75,24 @@ function parseRunMinutesFromNotes(notes) {
   // mention ("Mon/Wed/Fri at 4am") is just a start time and stays fine.
   const timeMentions = text.match(/\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|am|pm|morning|evening|night|noon|midday)\b/gi) || [];
   if (timeMentions.length > 1) return null;
+  // (5) ALLOWLIST — the decisive guard. Blocklisting repetition phrasings is
+  // an unbounded game ("runs again", "goes again", "pauses then…", …); free
+  // text can always express a second cycle a new way. Instead, every word in
+  // the note must belong to a small benign schedule vocabulary — any token
+  // outside it (a verb we did not anticipate, an exception, a location
+  // remark) declines the promotion. Fail-closed: the cost of declining a
+  // promotable note is the email ask; the cost of promoting a wrong one is
+  // bad watering advice.
+  const BENIGN_WORDS = new Set([
+    'each', 'every', 'all', 'zone', 'zones', 'run', 'runs', 'running', 'gets', 'get', 'waters', 'water', 'goes',
+    'for', 'about', 'around', 'approx', 'min', 'mins', 'minute', 'minutes', 'per', 'a', 'an', 'the', 'and', 'on', 'at',
+    'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'am', 'pm', 'morning', 'early', 'day', 'days', 'week', 'weekly',
+    'rain', 'sensor', 'starts', 'start', 'schedule', 'system', 'sprinkler', 'sprinklers', 'irrigation',
+  ]);
+  const tokens = (text.toLowerCase().match(/[a-z]+/g) || []);
+  if (tokens.some((t) => !BENIGN_WORDS.has(t))) return null;
 
   if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
   return matched;

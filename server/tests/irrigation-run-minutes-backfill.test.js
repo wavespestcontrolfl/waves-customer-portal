@@ -57,6 +57,12 @@ describe('parseRunMinutesFromNotes', () => {
     ['Each zone runs 20 min at 4am and 6pm', 'two clock times'],
     ['Each zone runs 20 min morning and evening', 'paired day-parts'],
     ['Each zone runs 20 min AM & PM', 'am-pm pair'],
+    // The allowlist guard: ANY word outside the benign schedule vocabulary
+    // declines — repetition phrased a way no blocklist anticipated (GH codex
+    // P1 on #3478 r10), or unrelated remarks we cannot vouch for.
+    ['Each zone runs 20 minutes, pauses, then goes again.', 'unanticipated repetition'],
+    ['Each zone runs 20 min, controller in garage', 'off-vocabulary remark'],
+    ['Each zone runs 20 min when it feels like it', 'off-vocabulary remark'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],
