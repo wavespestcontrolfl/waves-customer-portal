@@ -120,6 +120,24 @@ function cappedServiceType(value, fallback = 'Estimate service') {
   return `${label.slice(0, MAX_SERVICE_TYPE_LENGTH - 3).trimEnd()}...`;
 }
 
+// Catalog row NAMES are admin-mutable, and appointment-tagger's classifier
+// consumes ONLY service_type — an admin rename that drops the family tokens
+// (a WDO row renamed "Real Estate Report") would classify the visit and
+// every seeded follow-up 'general' and skip type-specific automation like
+// WDO prep, even though id + snapshot still identify the service exactly
+// (codex #3485 r20 P1). Adopt the linked row's name only when it classifies
+// the same as the stable canonical label; otherwise keep the canonical
+// label — the durable identity still rides service_id + the key snapshot.
+function classifierStableServiceType(linkName, canonicalLabel) {
+  const linkLabel = cappedServiceType(linkName);
+  const canon = String(canonicalLabel || '').trim();
+  if (!canon) return linkLabel;
+  const tagger = require('./appointment-tagger');
+  const linkTag = tagger.classifyAppointmentType(linkLabel).tag;
+  const canonTag = tagger.classifyAppointmentType(canon).tag;
+  return (linkTag === canonTag || canonTag === 'general') ? linkLabel : cappedServiceType(canon);
+}
+
 function serviceKeyForLabel(value = '') {
   const raw = String(value || '').toLowerCase();
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
@@ -769,9 +787,10 @@ async function reserveSlot({
       // service_interest fallback.
       const catalogLink = await catalogLinkForProfile(trx, serviceProfile);
       const catalogServiceId = catalogLink ? catalogLink.id : null;
+      const holdCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const serviceType = catalogLink?.name
-        ? cappedServiceType(catalogLink.name)
-        : canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
+        ? classifierStableServiceType(catalogLink.name, holdCanonicalLabel)
+        : holdCanonicalLabel;
 
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
@@ -1336,11 +1355,12 @@ async function commitReservation({
       // Same rule for the snapshot and the label: id, key, and label must
       // describe the same accepted service.
       const commitLink = await catalogLinkForProfile(client, serviceProfile);
+      const commitCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.service_id = commitLink ? commitLink.id : null;
       updates.service_key_snapshot = commitLink?.service_key || null;
       updates.service_type = commitLink?.name
-        ? cappedServiceType(commitLink.name)
-        : canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
+        ? classifierStableServiceType(commitLink.name, commitCanonicalLabel)
+        : commitCanonicalLabel;
     }
 
     const [updated] = await client('scheduled_services')
@@ -1445,6 +1465,7 @@ module.exports = {
     addMinutesToTime,
     cappedServiceType,
     canonicalServiceTypeForProfile,
+    classifierStableServiceType,
     notesWithServiceMix,
     catalogLinkForProfile,
   },

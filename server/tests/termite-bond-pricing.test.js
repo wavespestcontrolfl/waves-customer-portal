@@ -624,6 +624,23 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
     expect(bond.service).toBe('termite_bond_5yr');
   });
 
+  test('a bond row that lost bondTerm but kept numeric bondYears synthesizes the term key', () => {
+    // bondYears is emitted alongside bondTerm by the pricing engine and
+    // preserved by the estimate adapters; with a GENERIC label there is no
+    // parseable term, and bare 'termite_bond' joins no term-specific
+    // route/row — the sold 10-year warranty would mint at the 1-year
+    // default (codex #3485 r20 P1).
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [
+          { name: 'Termite Bond', service: 'termite_bond', bondYears: 10, annual: 216, visitsPerYear: 4 },
+        ],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_10yr');
+  });
+
   test('the same term-less bond row in stored AND raw lists still coalesces to ONE service', () => {
     // Normalization must run at the merge choke point: rewriting only the
     // raw lineItems representation split formerly-coalesced duplicates into
@@ -729,6 +746,15 @@ describe('bond term identity (2026-08-25 bridge fixes)', () => {
       service_key_snapshot: 'termite_bond_1yr',
       service_type: 'Termite Bait Station Service',
     })).toBeNull();
+  });
+
+  test('with NO identity at all, only a label that names a termite bond can mint', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // termYearsFrom defaults to 1 on any parse miss — a visit reclassified
+    // under the lock (identity cleared, label now non-bond) must not
+    // become a 1-year bond (codex #3485 r20 P2).
+    expect(termYearsForVisit({ service_type: 'Pest Control' })).toBeNull();
+    expect(termYearsForVisit({ service_type: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)' })).toBe(5);
   });
 
   test('with no link, a NON-bond snapshot vetoes a stale bond label', () => {

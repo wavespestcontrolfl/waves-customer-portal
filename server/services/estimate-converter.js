@@ -1937,7 +1937,15 @@ function normalizeBondTermService(li) {
   // keyed to anything else is never reinterpreted from its label.
   const isNameOnlyBond = keyFields.length === 0 && /^termite\s+bond\b/i.test(labelText.trim());
   if (!isBareBond && !isNameOnlyBond) return li;
+  // bondYears is emitted alongside bondTerm by the pricing engine and
+  // preserved by the estimate adapters — an older persisted row that lost
+  // bondTerm but kept the numeric field must not stay bare 'termite_bond'
+  // (that shape joins no term-specific route/row, and syncTermiteBonds
+  // would default the sold 5/10-year warranty to one year — codex #3485
+  // r20 P1). Label parsing stays the last resort.
+  const bondYears = Number(li.bondYears);
   const bondTerm = li.bondTerm
+    || (Number.isFinite(bondYears) && bondYears > 0 ? `${bondYears}yr` : null)
     || (labelText.match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
     || null;
   if (!bondTerm) return li;

@@ -50,6 +50,26 @@ describe('slot reservation helpers', () => {
     jest.clearAllMocks();
   });
 
+  test('an admin-renamed catalog row never changes the visit CLASSIFICATION (codex r20 P1)', () => {
+    const { classifierStableServiceType } = slotReservation._internals;
+    // A WDO row renamed to wording without the classifier's family tokens
+    // would tag the visit 'general' and skip WDO prep automation — keep the
+    // canonical label when the rename changes classification.
+    expect(classifierStableServiceType('Real Estate Report', 'WDO Inspection'))
+      .toBe('WDO Inspection');
+    // A rename that classifies the same is cosmetic — the linked row's name
+    // stays the one source of truth for the label.
+    expect(classifierStableServiceType('Complete WDO Inspection Service', 'WDO Inspection'))
+      .toBe('Complete WDO Inspection Service');
+    // When the canonical fallback classifies 'general', the link name can
+    // only improve — adopt it.
+    expect(classifierStableServiceType('Monthly Pest Control Service', 'Estimate service'))
+      .toBe('Monthly Pest Control Service');
+    // No canonical label at all → link name.
+    expect(classifierStableServiceType('Lawn Dethatching Service', ''))
+      .toBe('Lawn Dethatching Service');
+  });
+
   test('canonicalizes rodent trapping reservations to the trapping service type', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile(
       { serviceMode: 'one_time', services: [] },

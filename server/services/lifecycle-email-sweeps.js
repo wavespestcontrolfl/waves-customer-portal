@@ -87,7 +87,13 @@ function termYearsForVisit(v) {
     }
     return null;
   }
-  return termYearsFrom(v.service_type);
+  // Label tier: termYearsFrom defaults to 1 on ANY parse miss, so it can
+  // only run when the label actually names a termite bond — a visit
+  // reclassified under the lock (identity cleared, label now
+  // 'Pest Control') must not mint a one-year bond (codex #3485 r20 P2).
+  return /termite\s*bond/i.test(String(v.service_type || ''))
+    ? termYearsFrom(v.service_type)
+    : null;
 }
 
 function displayDate(d) {
