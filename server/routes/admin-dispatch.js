@@ -9451,23 +9451,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // to bill the fee again.
           const {
             invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication,
+            sumPositiveSetupFeeCents, sumBaseApplicationCents,
           } = require('../services/estimate-first-application-invoice');
-          const feeCoveredBy = liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
-            || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || null;
-          // Only the durable base-application identity counts on every
-          // row (Codex P0, round 18 — linkage alone is insufficient: an
-          // add-on invoice on the visit must not read as the application
-          // billed). Manual invoices become recognizable via the exact
-          // line description the alert bodies instruct.
-          // Stamped first-application coverage belongs to the alert's
-          // PRIMARY visit only (Codex PR r3 P1): when this completion is
-          // an ADDITIONAL parked visit (the standing alert names another
-          // visit), the acceptance invoice's first application cannot
-          // cover it — only an invoice attached to THIS visit can.
+          // Expected FROZEN cents FIRST, coverage compared cents-exact
+          // (Codex P0): a nominal partial line ($9.90 on a $99 fee) must
+          // never suppress the only follow-up. Rows deduped by id — a
+          // stamped invoice attached to this visit appears in both scans.
+          const expectedSetupFeeCents = Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100);
+          const expectedAppCentsThisVisit = Math.round(Number(
+            (Number(mintInvoiceAmount) > 0 ? mintInvoiceAmount : svc.estimated_price) || 0,
+          ) * 100);
           const currentVisitIsPrimary = !already || !alreadyMeta?.scheduledServiceId
             || String(alreadyMeta.scheduledServiceId) === String(svc.id);
-          const applicationCoveredBy = liveOnVisitRows.find(invoiceBillsBaseApplication)
-            || (currentVisitIsPrimary ? liveStampedRows.find(invoiceBillsBaseApplication) : null) || null;
+          const uniqueLiveNow = [...new Map(
+            [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
+          ).values()];
+          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
+          const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
+          const feeCoveredBy = feeCovered
+            ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
+              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || uniqueLiveNow[0] || null)
+            : null;
+          // Only the durable base-application identity counts on every
+          // row (Codex P0, round 18), and stamped first-application
+          // coverage belongs to the alert's PRIMARY visit only (Codex PR
+          // r3 P1) — an additional parked visit needs its own attached
+          // invoice.
+          const onVisitIdSet = new Set(liveOnVisitRows.map((r) => String(r.id)));
+          const appEligibleRows = uniqueLiveNow.filter((r) => onVisitIdSet.has(String(r.id)) || currentVisitIsPrimary);
+          const appCentsNow = appEligibleRows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
+          const applicationCovered = expectedAppCentsThisVisit > 0
+            ? appCentsNow >= expectedAppCentsThisVisit
+            : appEligibleRows.some(invoiceBillsBaseApplication);
+          const applicationCoveredBy = applicationCovered
+            ? (liveOnVisitRows.find(invoiceBillsBaseApplication)
+              || (currentVisitIsPrimary ? liveStampedRows.find(invoiceBillsBaseApplication) : null)
+              || appEligibleRows[0] || null)
+            : null;
           // Out-of-band prepayment proves the APPLICATION collected (the
           // amount was compared against the visit charge), never the fee.
           const applicationCoveredOutOfBand = setupFeePrepaidBeside;
@@ -9482,13 +9502,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
             return true;
           }
-          // Frozen expected amounts, persisted for cents-exact
-          // reconciliation (Codex PR r7 P1): coverage is later compared
-          // against THESE, never re-derived or boolean-matched.
-          const expectedSetupFeeCents = Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100);
-          const expectedAppCentsThisVisit = Math.round(Number(
-            (Number(mintInvoiceAmount) > 0 ? mintInvoiceAmount : svc.estimated_price) || 0,
-          ) * 100);
           const setupFeeLabel = `$${Number(unmintedSetupFeeObligation.setupFee || 0).toFixed(2)}`;
           const firstAppLabel = Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '';
           // A dead acceptance invoice no suppressor can surface

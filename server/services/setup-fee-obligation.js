@@ -251,7 +251,16 @@ async function findUnmintedSetupFeeObligation({
   // so the office can distinguish "voided without replacement" from
   // "never minted".
   const DEAD_STATUSES = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
-  const { invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
+  const {
+    invoiceHasPositiveSetupFeeLine, invoiceBillsBaseApplication, sumPositiveSetupFeeCents,
+  } = require('./estimate-first-application-invoice');
+  // CENTS-EXACT clearing (Codex P0): a $9.90 partial line must not clear
+  // a frozen $99 obligation — live/canceled resolution requires SUMMED
+  // fee cents >= the accepted amount. (Refunded keeps the any-positive
+  // doctrine: refunded money is never re-instructed, rounds 5/13/19.)
+  const expectedFeeCents = Math.round(Number(
+    snapshotFeeAmount != null ? snapshotFeeAmount : EstimateConverter.WAVEGUARD_SETUP_FEE,
+  ) * 100);
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
     .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
@@ -264,9 +273,10 @@ async function findUnmintedSetupFeeObligation({
   // An application-only live stamped invoice leaves the obligation OWED —
   // the completion hold then suppresses the duplicate application mint
   // and the alert's revalidation directs staff to bill only the fee.
-  const liveStampedFee = stampedRows.find((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase())
-    && invoiceHasPositiveSetupFeeLine(r));
-  if (liveStampedFee) return { owed: false };
+  const liveStampedFeeCents = stampedRows
+    .filter((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase()))
+    .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
+  if (liveStampedFeeCents >= expectedFeeCents) return { owed: false };
   // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
   // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
   // an operator/webhook money action, not a silent leak — and a
@@ -290,7 +300,7 @@ async function findUnmintedSetupFeeObligation({
   const canceledAttachedFee = stampedRows.find((r) => {
     const status = String(r.status || '').toLowerCase();
     return (status === 'canceled' || status === 'cancelled')
-      && r.scheduled_service_id && invoiceHasPositiveSetupFeeLine(r);
+      && r.scheduled_service_id && sumPositiveSetupFeeCents(r) >= expectedFeeCents;
   });
   if (canceledAttachedFee && excludeScheduledServiceId) {
     const attachedRow = await conn('scheduled_services')

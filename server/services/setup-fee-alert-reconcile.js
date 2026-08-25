@@ -139,12 +139,18 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           const { sumPositiveSetupFeeCents, sumBaseApplicationCents } = require('./estimate-first-application-invoice');
           const expectedFeeCents = Number.isFinite(Number(staleMeta?.expectedSetupFeeCents))
             ? Number(staleMeta.expectedSetupFeeCents) : null;
-          const liveFeeCents = [...stampedLive, ...onParkedLive]
+          // Deduped by invoice id (Codex P0): a stamped invoice attached
+          // to a parked visit appears in BOTH scans — counting its fee
+          // line twice would let $49.50 satisfy a $99 expectation.
+          const uniqueLiveRows = [...new Map(
+            [...stampedLive, ...onParkedLive].map((r) => [String(r.id), r]),
+          ).values()];
+          const liveFeeCents = uniqueLiveRows
             .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
           const feeProven = refundedFee
             || (expectedFeeCents !== null
               ? liveFeeCents >= expectedFeeCents
-              : [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine));
+              : uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine));
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
             const v = map && Number(map[String(visitId)]);
