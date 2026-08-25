@@ -699,6 +699,12 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
     const invoice = await InvoiceService.createFromService(serviceRecordId, {
       amount: parseFloat(amount), description, taxRate,
     });
+    // Coverage-creating transition (PR #3476): a linked from-service
+    // invoice may satisfy a parked setup-fee alert — retire it now, not
+    // on the daily sweep. Post-commit, best-effort.
+    await require('../services/setup-fee-alert-reconcile')
+      .reconcileSetupFeeAlertForInvoice(invoice)
+      .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after from-service invoice ${invoice?.id}: ${err.message}`));
 
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {

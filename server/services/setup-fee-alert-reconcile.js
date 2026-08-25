@@ -96,11 +96,21 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // bills the fee.
           const AnnualPrepayRenewalsReconcile = require('./annual-prepay-renewals');
           const prepaidParkedRows = parkedIds.length
-            ? await trx('scheduled_services').whereIn('id', parkedIds).select('id', 'prepaid_amount', 'prepaid_method')
+            ? await trx('scheduled_services').whereIn('id', parkedIds).select('id', 'prepaid_amount', 'prepaid_method', 'estimated_price')
             : [];
+          // FULL coverage only (Codex P0): the completion guard requires
+          // prepaid_amount >= the visit charge — a partial prepayment must
+          // not prove the application billed. Cents compare against the
+          // row's own estimated_price; an unknown price proves nothing.
+          const cents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
           const prepaidCoveredIds = new Set(prepaidParkedRows
-            .filter((r) => Number(r.prepaid_amount) > 0
-              && r.prepaid_method !== AnnualPrepayRenewalsReconcile.ANNUAL_PREPAY_PREPAID_METHOD)
+            .filter((r) => {
+              const paid = cents(r.prepaid_amount);
+              const priceDue = cents(r.estimated_price);
+              return paid !== null && paid > 0 && priceDue !== null && priceDue > 0
+                && paid >= priceDue
+                && r.prepaid_method !== AnnualPrepayRenewalsReconcile.ANNUAL_PREPAY_PREPAID_METHOD;
+            })
             .map((r) => String(r.id)));
           const feeProven = [...stampedLive, ...onParkedLive].some(invoiceHasPositiveSetupFeeLine);
           const primaryVisitId = String(staleMeta?.scheduledServiceId || '');
