@@ -104,7 +104,10 @@ describe('irrigation schedule-copy migration', () => {
       expect(knex.__db.email_templates[i].active_version_id).toBe(`v${i}`);
       expect(knex.__db.email_template_versions.find((v) => v.id === `v${i}`).status).toBe('active');
     }
-    expect(JSON.parse(knex.__db.email_template_fixtures[0].payload).schedule_ask).toBeUndefined();
+    // Fixture values survive rollback: up() preserves a pre-existing value,
+    // so down() cannot tell staff-authored data from its own seed — it
+    // leaves both (an extra key on an optional variable renders nothing).
+    expect(JSON.parse(knex.__db.email_template_fixtures[0].payload).schedule_ask).toBe(TARGETS[0].fixtureValue);
 
     const knex2 = makeKnex(fixture());
     await migration.up(knex2);

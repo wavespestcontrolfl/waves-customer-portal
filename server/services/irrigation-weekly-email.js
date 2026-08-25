@@ -290,7 +290,12 @@ function buildWeeklyEmailDecision({
   // surfaces must agree — a customer whose report shows 1" must never get an
   // email claiming we have no schedule for them (codex #3138 r1 P2).
   const turfType = String(turfIrrigationType || '').trim().toLowerCase();
-  const prefsInches = numberOrNull(irrigationInchesPerWeek);
+  // Only a POSITIVE explicit entry is an authoritative schedule — the advice
+  // engine (buildIrrigationAdvice) and the portal UI both treat <= 0 as "no
+  // schedule", so a zero here must fall through to the runtime derivation
+  // rather than block it and then read as missing anyway.
+  const prefsInchesRaw = numberOrNull(irrigationInchesPerWeek);
+  const prefsInches = prefsInchesRaw != null && prefsInchesRaw > 0 ? prefsInchesRaw : null;
   // A figure DERIVED from the customer's own runtime entries. It is still a
   // portal entry (their minutes, their days, their heads) so it outranks a
   // tech reading — but their explicit inches number always outranks it: the

@@ -80,6 +80,15 @@ describe('derived schedule → confirm_schedule with a derived schedule_note', (
     expect(d.payload.schedule_note).toContain('what you entered under Irrigation in your portal');
   });
 
+  test('a zero-inch legacy value is "no schedule", not an authoritative entry — derivation still runs', () => {
+    // buildIrrigationAdvice treats <= 0 as profileMissing, so honoring a zero
+    // as explicit would send setup copy claiming minutes are missing while
+    // they sit on file (pre-push audit P1 on eb840ef70).
+    const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationInchesPerWeek: 0 });
+    expect(d.payload.schedule_inches).toBe('2');
+    expect(d.payload.schedule_note).toContain('what you entered under Irrigation in your portal');
+  });
+
   test('the portal toggle OFF suppresses a derived-only figure the same way it suppresses a typed one', () => {
     const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationSystem: false });
     expect(d.reason).toBe('setup_system');

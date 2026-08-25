@@ -162,19 +162,13 @@ exports.down = async function down(knex) {
     });
     await knex('email_template_versions').where({ id: current.id }).update({ status: 'archived', updated_at: new Date() });
 
-    if (await knex.schema.hasTable('email_template_fixtures')) {
-      const fixtures = await knex('email_template_fixtures').where({ template_id: tpl.id }).select('id', 'payload');
-      for (const f of fixtures) {
-        const payload = typeof f.payload === 'string' ? JSON.parse(f.payload || '{}') : (f.payload || {});
-        if (payload[target.variable] !== undefined) {
-          delete payload[target.variable];
-          await knex('email_template_fixtures').where({ id: f.id }).update({ payload: JSON.stringify(payload) });
-        }
-      }
-    }
-    // The allowlist entry stays on down — an inert allowed variable is
-    // harmless, while removing one a re-edited body still references would
-    // break sends.
+    // The allowlist entry AND the fixture values stay on down. An inert
+    // allowed variable is harmless, while removing one a re-edited body
+    // still references would break sends — and up() preserved any fixture
+    // value that already existed, so down() cannot tell a staff-authored
+    // value from the one it seeded; deleting either would destroy data this
+    // migration did not create. An extra fixture key on an optional variable
+    // renders nothing.
   }
 };
 

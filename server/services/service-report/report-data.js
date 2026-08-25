@@ -302,8 +302,11 @@ function monthFromServiceDate(serviceDate) {
  */
 function portalIrrigationInches(propertyPrefs) {
   if (!propertyPrefs) return null;
+  // Positive entries only — the advice engine and portal UI both treat <= 0
+  // as "no schedule", so a zero falls through to the runtime derivation
+  // (same rule as the weekly email's prefsInches).
   const explicit = numberOrNull(propertyPrefs.irrigation_inches_per_week);
-  if (explicit != null) return explicit;
+  if (explicit != null && explicit > 0) return explicit;
   return deriveIrrigationInchesPerWeek({
     runMinutes: propertyPrefs.irrigation_run_minutes,
     wateringDays: propertyPrefs.watering_days,

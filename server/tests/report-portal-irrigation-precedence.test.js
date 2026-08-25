@@ -24,6 +24,11 @@ describe('portalIrrigationInches', () => {
     expect(portalIrrigationInches(DERIVED_PREFS)).toBe(2);
   });
 
+  test('a zero-inch legacy value falls through to derivation — <= 0 is "no schedule" everywhere', () => {
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: 0 })).toBe(2);
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: '0', irrigation_run_minutes: null })).toBeNull();
+  });
+
   test('declines to null when derivation cannot be honest', () => {
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system_type: ['spray', 'rotor'] })).toBeNull();
     expect(portalIrrigationInches(null)).toBeNull();
