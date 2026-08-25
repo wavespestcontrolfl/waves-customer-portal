@@ -20,6 +20,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const { isHoneypotTripped } = require('../utils/lead-abuse');
@@ -756,6 +757,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
     }
+    // Optional extra properties the visitor wants covered. Capture-only —
+    // never priced by this route; each becomes a manual follow-up quote.
+    const additionalProperties = normalizeWebAdditionalProperties(req.body, normalizedAddress.fullAddress);
     const quoteAddress = normalizedAddress.line1 || address;
     // Fall back to a ZIP lookup when neither the parsed address nor the client
     // supplied a city (free-text address with no Places pick). Feeds the lead,
@@ -1147,6 +1151,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
+      ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
     });
 
     // If the property-lookup step already captured a lead row, update it
@@ -1179,8 +1184,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // provenance and the text-back one-shot stamp survive this stage, same
         // rule as the attach in public-property-lookup.js. CASE keeps the
         // ownership-predicated UPDATE atomic (no read-then-write).
+        // The replace branch carries forward additional_properties captured at
+        // the property-lookup stage (jsonb_strip_nulls drops the key when the
+        // prior row had none); a value in THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),

@@ -23,7 +23,8 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
+const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
@@ -181,6 +182,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       normalizedAddress,
       address,
       fullAddress,
+      additionalProperties,
       pageUrl,
       landingUrl,
       utmSource,
@@ -202,6 +204,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceInterest,
       leadSource,
     } = intake;
+    // Human-readable note for triage / lead-response / owner alerts so the
+    // extra-property ask can never be silently swallowed again (the ask used
+    // to arrive as free text in the unit box and vanish).
+    const additionalPropertiesNote = additionalProperties.length
+      ? `Visitor also asked to cover ${additionalProperties.length > 1 ? 'additional properties' : 'an additional property'}: ${additionalProperties.map(p => formatAddress({ line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip })).join('; ')}`
+      : '';
 
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail
     // closed BEFORE any lead/customer mutation (same guard as
@@ -360,6 +368,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // Contact line goes FIRST: Customer 360 previews the body truncated
         // to 200 chars, and a long UTM-laden pageUrl would push it out of view.
         body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
+          + (additionalPropertiesNote ? `\n${additionalPropertiesNote}` : '')
           + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
@@ -370,6 +379,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             state: normalizedAddress.state || null,
             zip: normalizedAddress.zip || null,
           },
+          // Existing customers return before the leads insert below, so the
+          // extra-property ask must ride on this note or it is lost entirely.
+          ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
         }),
       });
 
@@ -424,7 +436,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       await db('customer_interactions').insert({
         customer_id: customer.id, interaction_type: 'note',
         subject: `New lead from ${leadSource.detail || leadSource.source}`,
-        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.`,
+        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}.` : ''}`,
         metadata: JSON.stringify({ leadSource, formId, address: normalizedAddress }),
       });
 
@@ -469,6 +481,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null, fbclid: fbclid || null, fbc: fbc || null, fbp: fbp || null },
       },
       address: normalizedAddress,
+      ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
     };
     const buildPrefillAttachFields = () => ({
       first_name: firstName, last_name: lastName,
@@ -1033,7 +1046,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     if (legacyLeadSmsWanted && !leadBellDelivered) {
       try {
         await TwilioService.sendSMS(ADAM_CELL,
-          `New lead!\n${firstName} ${lastName}\nPhone: ${phoneFormatted}\nAddress: ${fullAddress || 'No address'}\nSource: ${leadSource.detail || leadSource.source}${utmCampaign ? '\nCampaign: ' + utmCampaign : ''}`,
+          `New lead!\n${firstName} ${lastName}\nPhone: ${phoneFormatted}\nAddress: ${fullAddress || 'No address'}${additionalPropertiesNote ? `\n${additionalPropertiesNote}` : ''}\nSource: ${leadSource.detail || leadSource.source}${utmCampaign ? '\nCampaign: ' + utmCampaign : ''}`,
           { messageType: 'internal_alert' }
         );
       } catch (smsErr) {
@@ -1044,7 +1057,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // Fire-and-forget AI triage
     if (leadRecord) {
       const messageText = body.message || body['Message'] || serviceInterest || findField(body, /service|help|pest|lawn|message/i) || '';
-      aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: messageText, address: fullAddress, pageUrl, formName })
+      const triageMessage = [messageText, additionalPropertiesNote].filter(Boolean).join('\n');
+      aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: triageMessage, address: fullAddress, pageUrl, formName })
         .then(async (triageResult) => {
           if (!triageResult) return;
           try {
@@ -1060,10 +1074,16 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             if (triageResult.extractedData) {
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
-              // one-shot stamp the attach just preserved.
+              // one-shot stamp the attach just preserved. The replace branch
+              // still carries forward additional_properties captured at intake
+              // (jsonb_strip_nulls drops the key when the row had none) so the
+              // triage snapshot can't erase the extra-property ask.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
-                : JSON.stringify(triageResult.extractedData);
+                : db.raw(
+                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties')) || ?::jsonb",
+                  [JSON.stringify(triageResult.extractedData)]
+                );
             }
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
@@ -1150,7 +1170,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         customerId: customer.id,
         phone: phoneFormatted,
         name: `${firstName} ${lastName}`,
-        message: messageText,
+        message: [messageText, additionalPropertiesNote].filter(Boolean).join('\n'),
         address: fullAddress || '',
         city: resolvedCity,
         leadSource: leadSource.source,
@@ -1541,6 +1561,9 @@ function buildLeadWebhookIntake(body = {}) {
   });
   const address = normalizedAddress.line1 || rawAddress;
   const fullAddress = normalizedAddress.fullAddress || rawAddress;
+  // Optional extra properties the visitor wants covered ("also my rental next
+  // door"). Capture-only — never priced; each becomes a manual follow-up quote.
+  const additionalProperties = normalizeWebAdditionalProperties(body, fullAddress);
   const attribution = getLeadWebhookAttribution(body);
   const normalizedName = normalizeLeadName(body);
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
@@ -1567,6 +1590,7 @@ function buildLeadWebhookIntake(body = {}) {
     normalizedAddress,
     address,
     fullAddress,
+    additionalProperties,
     ...attribution,
     formId: body.form_id || body['Form Id'] || '',
     formName: body.form_name || body['Form Name'] || body.source || '',
