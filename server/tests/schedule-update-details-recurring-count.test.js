@@ -31,7 +31,7 @@ const {
   MAX_SERIES_VISIT_COUNT,
 } = adminScheduleRouter._test;
 const { transitionJobStatus } = require('../services/job-status');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
@@ -74,7 +74,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -116,6 +116,9 @@ function scenario({
   invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
+  // Weekly days-off JSON served through the fake conn (getBlackoutDates reads
+  // via the caller's conn/trx).
+  weeklyDaysOff = null,
 }) {
   const parent = {
     id: 10,
@@ -185,6 +188,10 @@ function scenario({
       }
       return [];
     }
+    if (table === 'system_settings') {
+      return weeklyDaysOff ? { value: weeklyDaysOff } : null;
+    }
+    if (table === 'schedule_blackout_dates') return [];
     return null;
   };
   return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };
@@ -502,6 +509,182 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
     expect(r2.cancelledIds).toHaveLength(0);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — blackout days and weekly closures', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('top-up visits honor weekly days off even when the row does not skip weekends', async () => {
+    // schedule_weekly_days_off=[0,6] (Sat+Sun closed, the 08-18 owner setting):
+    // a daily-cadence top-up spans more than a week, so without the blackout
+    // nudge some rows MUST land on a weekend. Every landed date has to be a
+    // weekday, strictly future, and unique.
+    const { conn, parent, inserted } = scenario({
+      upcoming: 1,
+      weeklyDaysOff: '[0,6]',
+      parentOverrides: { recurring_interval_days: 1, skip_weekends: false },
+    });
+    const result = await reconcile(conn, parent, 8);
+    expect(result.added).toHaveLength(7);
+    const dates = inserted.map((r) => r.scheduled_date);
+    expect(new Set(dates).size).toBe(7);
+    for (const d of dates) {
+      expect(d > TODAY).toBe(true);
+      // scheduled_date is an ET calendar date — assert the weekday in the
+      // same explicit ET semantics the blackout logic uses, not host-local.
+      expect([0, 6]).not.toContain(etParts(parseETDateTime(`${d}T12:00`)).dayOfWeek);
+    }
+  });
+});
+
+describe('planCadenceRewriteTargets — cadence edits stay future-only and clear of blackouts', () => {
+  const { planCadenceRewriteTargets } = adminScheduleRouter._test;
+
+  test('re-dating pending children of an older parent never targets a past date', () => {
+    const { childTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [
+        { id: 'c1', scheduled_date: daysOut(-30) },
+        { id: 'c2', scheduled_date: daysOut(1) },
+      ],
+      pendingBoosters: [],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(childTargets.size).toBe(2);
+    for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
+  test('a years-stale parent still re-dates every pending child — the plan base fast-forwards to the current cadence phase', () => {
+    // Four years back on monthly cadence: without the fast-forward, all
+    // (2*4+30) attempts land on/before today and childTargets stays empty,
+    // silently leaving the children on the old cadence.
+    const base = new Date(`${TODAY}T12:00:00Z`);
+    base.setUTCDate(base.getUTCDate() - 1460);
+    const { childTargets } = planCadenceRewriteTargets({
+      baseDateStr: base.toISOString().slice(0, 10),
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [
+        { id: 'c1', scheduled_date: daysOut(5) },
+        { id: 'c2', scheduled_date: daysOut(35) },
+      ],
+      pendingBoosters: [],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(childTargets.size).toBe(2);
+    for (const d of childTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
+  test('booster rewrites of an older parent never target a past date', () => {
+    // Base 60 days back with a booster month covering roughly today: the
+    // recomputed booster walk emits candidates on/before today, which must
+    // be skipped — a pending FUTURE booster is never re-dated into the past.
+    const base = new Date(`${TODAY}T12:00:00Z`);
+    base.setUTCDate(base.getUTCDate() - 60);
+    const allMonths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: base.toISOString().slice(0, 10),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [
+        { id: 'b1', scheduled_date: daysOut(10) },
+        { id: 'b2', scheduled_date: daysOut(40) },
+      ],
+      boosterMonths: allMonths,
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    for (const d of boosterTargets.values()) expect(d > TODAY).toBe(true);
+  });
+
+  test('P2: a stale booster never consumes a recomputed FUTURE target — a missed historical visit is not resurrected', () => {
+    // planBase fast-forwards to the current phase, so the recomputed walk
+    // emits future candidates; the oldest pending booster being PAST-dated
+    // must not receive one (that re-dates a missed visit into the future and
+    // resets its lifecycle/reminder). The future booster still gets a target.
+    const allMonths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [
+        { id: 'b-stale', scheduled_date: daysOut(-20) },
+        { id: 'b-future', scheduled_date: daysOut(30) },
+      ],
+      boosterMonths: allMonths,
+      seenDates: new Set(),
+      blackoutDates: null,
+    });
+    expect(boosterTargets.has('b-stale')).toBe(false);
+    expect(boosterTargets.has('b-future')).toBe(true);
+    expect(boosterTargets.get('b-future') > TODAY).toBe(true);
+  });
+
+  test('P2: a stale fallback booster is skipped, never nudged from one past date to another', () => {
+    // No booster_months on the plan → every pending booster takes the
+    // fallback branch (its own date + shift/nudge). A STALE booster whose
+    // date is blacked out used to be nudged to the next past day — the
+    // write path then rewound its lifecycle and reset its reminder. The
+    // fallback must apply the same future-only floor as the recomputed walk
+    // and leave the stale row alone.
+    const stale = daysOut(-10);
+    const { boosterTargets } = planCadenceRewriteTargets({
+      baseDateStr: daysOut(-60),
+      pattern: 'quarterly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingChildren: [],
+      pendingBoosters: [{ id: 'b1', scheduled_date: stale }],
+      boosterMonths: [],
+      seenDates: new Set(),
+      blackoutDates: new Set([stale]),
+    });
+    expect(boosterTargets.has('b1')).toBe(false);
+  });
+
+  test('a child landing on a blacked-out day is nudged forward by the shared clear-of-blackout', () => {
+    const args = {
+      baseDateStr: '2098-03-10',
+      pattern: 'monthly',
+      rOpts: {},
+      skip: false,
+      dir: 'forward',
+      pendingBoosters: [],
+      boosterMonths: [],
+    };
+    const clear = planCadenceRewriteTargets({
+      ...args,
+      pendingChildren: [{ id: 'c1', scheduled_date: '2098-04-01' }],
+      seenDates: new Set(),
+      blackoutDates: null,
+    }).childTargets.get('c1');
+    const nudged = planCadenceRewriteTargets({
+      ...args,
+      pendingChildren: [{ id: 'c1', scheduled_date: '2098-04-01' }],
+      seenDates: new Set(),
+      blackoutDates: new Set([clear]),
+    }).childTargets.get('c1');
+    const next = new Date(`${clear}T12:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    expect(nudged).toBe(next.toISOString().slice(0, 10));
   });
 });
 

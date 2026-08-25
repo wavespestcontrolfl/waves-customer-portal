@@ -7,6 +7,7 @@ const {
   etNthWeekdayOfMonth,
 } = require('../utils/datetime-et');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -102,9 +103,14 @@ function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDat
     if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
     const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
     const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
-    if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
+    if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
   }
-  return dateStr;
+  // Exhausted: no clear in-season date within the bounded search (an
+  // extended blackout can eat all of it). Returning the original off-season
+  // date would violate the Feb–Oct contract — null lets callers skip the
+  // candidate or report a placement shortfall like every other exhausted
+  // nudge.
+  return null;
 }
 
 const DEFAULT_ONE_YEAR_COUNTS = {
@@ -371,18 +377,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // forward a day at a time (re-applying the weekend shift) until clear —
   // skipping the visit entirely would silently shrink the customer's plan.
   const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
-  const clearOfBlackout = (dateStr) => {
-    if (!blackoutDates || !blackoutDates.size) return dateStr;
-    let candidate = dateStr;
-    for (let nudge = 0; nudge < 14 && blackoutDates.has(candidate); nudge++) {
-      candidate = shiftPastWeekend(
-        etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), 1)),
-        skipWeekends,
-        'forward',
-      );
-    }
-    return candidate;
-  };
+  const clearOfBlackout = (dateStr) => nudgeOffBlackoutDates(dateStr, blackoutDates, { skipWeekends });
 
   // Weekend shift and blackout nudge can cross the season edge — clamp back
   // into Feb–Oct (see clampDateToSeason for the direction rules).
@@ -393,6 +388,9 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
     const nextDateStr = clampToSeason(clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir)));
+    // A null candidate means the blackout nudge exhausted its bounded search
+    // — skip it rather than book a closure.
+    if (!nextDateStr) continue;
     if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
     if (existingDates.has(nextDateStr)) continue;
     existingDates.add(nextDateStr);
@@ -467,7 +465,67 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     rows.push(row);
   }
 
+  // Blackout/day-off exhaustion must not silently shrink the plan: when the
+  // bounded walk cannot place every requested follow-up, report it — callers
+  // (booking confirm, estimate conversion) return success on whatever
+  // seeded, and an undersized series is otherwise invisible until the
+  // customer's visits run out. The builder itself stays side-effect-free
+  // (it can run inside a caller transaction that later rolls back): the
+  // shortfall rides the returned array as a non-enumerable property, and
+  // seedFollowUpsForParent rings the admin bell only after the seed commits.
+  if (rows.length < targetNewRows) {
+    Object.defineProperty(rows, 'seedShortfall', {
+      value: { requested: targetNewRows, placed: rows.length },
+      enumerable: false,
+    });
+  }
+
   return rows;
+}
+
+// Post-commit shortfall bell — see buildRecurringFollowUpRows. bell: true is
+// load-bearing: under GATE_ADMIN_BELL_POLICY the generic 'alert' category is
+// not allowlisted and the notification would be silently discarded. The
+// dedupeKey keeps a retried seed from stacking identical bells. Best-effort:
+// a notification failure never fails the seeding.
+function notifySeedShortfall(parent, shortfall) {
+  if (!shortfall) return;
+  const parentId = parent?.id || null;
+  const dedupeKey = `recurring-seed-shortfall:${parentId || 'n/a'}:${shortfall.placed}/${shortfall.requested}`;
+  const shortfallMsg = `Recurring plan for customer ${parent?.customer_id || 'n/a'} wanted ${shortfall.requested} follow-up visit(s) but only ${shortfall.placed} could be placed — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
+  require('./logger').warn(`[recurring-seeder] parent=${parentId || 'n/a'} ${shortfallMsg}`);
+  Promise.resolve()
+    .then(async () => {
+      // Real dedupe, not just a stamped key: the admin notifyAdmin path has
+      // no dedupe lookup of its own (only the customer path does), so check
+      // the notifications metadata directly before inserting. Best-effort —
+      // a concurrent double-fire can still race past this, but retried
+      // seeds (the common repeat) no longer stack identical bells.
+      const db = require('../models/db');
+      const existing = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+        .first('id')
+        .catch(() => null);
+      if (existing) return;
+      await require('./notification-service').notifyAdmin(
+        'alert',
+        'Recurring plan seeded short',
+        shortfallMsg,
+        {
+          link: parent?.customer_id ? `/admin/customers/${parent.customer_id}` : '/admin/schedule',
+          bell: true,
+          metadata: {
+            dedupeKey,
+            customer_id: parent?.customer_id || null,
+            recurring_parent_id: parentId,
+            requested: shortfall.requested,
+            placed: shortfall.placed,
+          },
+        },
+      );
+    })
+    .catch((err) => require('./logger').warn(`[recurring-seeder] shortfall notification failed (non-blocking): ${err.message}`));
 }
 
 async function scheduledServiceColumns(conn) {
@@ -934,22 +992,42 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
     );
   } catch { /* fail open */ }
-  const rows = buildRecurringFollowUpRows(parent, {
+  const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
     existingDates,
     blackoutDates,
-  }).map((row) => filterByColumns(row, columns));
+  });
+  const seedShortfall = builtRows.seedShortfall || null;
+  // Ring the shortfall bell only once the seed is DURABLE: inside a caller
+  // transaction, executionPromise resolves on commit and rejects on
+  // rollback (a rolled-back seed must not report visits as placed); on a
+  // plain connection the insert path below commits its own scoped trx
+  // before this fires.
+  const notifyShortfallAfterCommit = () => {
+    if (!seedShortfall) return;
+    if (conn.isTransaction && conn.executionPromise) {
+      conn.executionPromise.then(
+        () => notifySeedShortfall(parent, seedShortfall),
+        () => {},
+      );
+    } else {
+      notifySeedShortfall(parent, seedShortfall);
+    }
+  };
+  const rows = builtRows.map((row) => filterByColumns(row, columns));
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent
     // was just marked recurring — that alone is tier evidence.
     await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+    notifyShortfallAfterCommit();
     return {
       pattern,
       plannedCount: plannedVisitCountForPattern(pattern, opts),
       insertedCount: 0,
       insertedRows: [],
+      seedShortfall,
     };
   }
 
@@ -964,11 +1042,13 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+  notifyShortfallAfterCommit();
   return {
     pattern,
     plannedCount: plannedVisitCountForPattern(pattern, opts),
     insertedCount: rows.length,
     insertedRows: insertedRows.length ? insertedRows : rows,
+    seedShortfall,
   };
 }
 

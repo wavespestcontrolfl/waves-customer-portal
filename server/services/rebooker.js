@@ -891,7 +891,11 @@ class SmartRebooker {
           out = etDateString(addETDays(at, delta));
         }
       }
-      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends });
+      // No blackout layer is threaded here, so the clamp can only exhaust
+      // on 75 straight in-season weekend days — impossible. The || keeps
+      // this caller's legacy always-a-date contract if that ever changes
+      // (its write sites are not null-safe).
+      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends }) || out;
     };
     const opts = {
       ...(isMonthBasedPattern

@@ -150,10 +150,12 @@ function makeConn(handler) {
     const record = (name) => (...args) => {
       if (name === 'where' && typeof args[0] === 'function') {
         const nested = [];
-        const sub = {
-          where(...a) { nested.push(['where', ...a]); return sub; },
-          orWhere(...a) { nested.push(['orWhere', ...a]); return sub; },
-        };
+        const sub = {};
+        // The occupancy probe's nested predicates (findConflictingVisits)
+        // chain whereNull/orWhereRaw/etc. inside the callback too.
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw']) {
+          sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
+        }
         args[0].call(sub, sub);
         calls.push(['whereFn', nested]);
       } else {
@@ -161,7 +163,7 @@ function makeConn(handler) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -199,7 +201,7 @@ const COLS = {
 function afterSeriesCancelScenario({ recurringOngoing }) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
-    recurring_ongoing: recurringOngoing, scheduled_date: '2026-01-15',
+    recurring_ongoing: recurringOngoing, scheduled_date: '2098-01-15',
     window_start: '08:00', window_end: '10:00',
     service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
     estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
@@ -215,12 +217,12 @@ function afterSeriesCancelScenario({ recurringOngoing }) {
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: recurringOngoing };
         if (firstCall[1] === 'create_invoice_on_complete') return undefined;
         // Latest LIVE visit = the earlier retained one being completed now.
-        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: '2026-07-15' };
+        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: '2098-07-15' };
         return parent;
       }
       if (op === 'await') {
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
-          return [{ scheduled_date: '2026-07-15' }];
+          return [{ scheduled_date: '2098-07-15' }];
         }
         return [];
       }
@@ -240,19 +242,19 @@ describe('maintenance after a series-scope cancel (P0-2c, behavioural)', () => {
   test('completing an earlier RETAINED visit does NOT re-extend the stopped plan', async () => {
     const { conn, inserted } = afterSeriesCancelScenario({ recurringOngoing: false });
     await runRecurringSeriesMaintenance(conn, {
-      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15',
+      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15',
     });
     // The re-bill: before the cancel cleared the flag, this completion minted
-    // a fresh 2026-10-15 visit on a cancelled plan.
+    // a fresh 2098-10-15 visit on a cancelled plan.
     expect(inserted).toHaveLength(0);
   });
 
   test('the same completion DOES extend while the plan is still running (the guard is the flag, not the count)', async () => {
     const { conn, inserted } = afterSeriesCancelScenario({ recurringOngoing: true });
     await runRecurringSeriesMaintenance(conn, {
-      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15',
+      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15',
     });
     expect(inserted).toHaveLength(1);
-    expect(inserted[0].scheduled_date).toBe('2026-10-15');
+    expect(inserted[0].scheduled_date).toBe('2098-10-15');
   });
 });

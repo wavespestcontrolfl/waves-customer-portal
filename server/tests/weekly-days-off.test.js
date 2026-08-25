@@ -13,10 +13,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const {
   getBlackoutDates,
+  getBlackoutLayers,
   isBlackoutDate,
   getWeeklyDaysOff,
   expandWeeklyDaysOff,
 } = require('../services/scheduling/blackout-dates');
+const { clearOfBlackout, isBlackedOut } = require('../services/scheduling/blackout-nudge');
 
 // 2026-07-24 is a Friday; 07-25 Sat, 07-26 Sun, 07-27 Mon.
 function mockTables({ weeklyValue, blackoutDates = [], down = false } = {}) {
@@ -117,5 +119,66 @@ describe('isBlackoutDate honors weekly closures', () => {
     mockTables({ down: true });
     expect((await getBlackoutDates('2026-07-24', '2026-07-27')).size).toBe(0);
     expect(await isBlackoutDate('2026-07-25')).toBe(false);
+  });
+});
+
+
+describe('getBlackoutLayers — savepoint-isolated strict reads', () => {
+  // Fake conn: table-callable + .transaction(cb) that models the savepoint.
+  function fakeConn({ weeklyValue, blackoutDates = [], failRange = false } = {}) {
+    const conn = (table) => {
+      if (table === 'system_settings') {
+        return { where: () => ({ first: async () => (weeklyValue === undefined ? null : { value: weeklyValue }) }) };
+      }
+      if (table === 'schedule_blackout_dates') {
+        return {
+          whereBetween: () => ({
+            select: async () => {
+              if (failRange) throw new Error('db down');
+              return blackoutDates.map((d) => ({ date: d }));
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected table ${table}`);
+    };
+    conn.transaction = (cb) => Promise.resolve().then(() => cb(conn));
+    return conn;
+  }
+
+  test('returns both layers: expanded dates within the range AND the raw weekly set', async () => {
+    const layers = await getBlackoutLayers('2026-07-24', '2026-07-31', fakeConn({ weeklyValue: '[0,6]', blackoutDates: ['2026-07-29'] }));
+    expect([...layers.dates].sort()).toEqual(['2026-07-25', '2026-07-26', '2026-07-29']);
+    expect([...layers.weeklyDaysOff].sort()).toEqual([0, 6]);
+  });
+
+  test('THROWS on a lookup failure instead of failing open — the savepoint rolls back and the caller fails open itself', async () => {
+    await expect(getBlackoutLayers('2026-07-24', '2026-07-31', fakeConn({ weeklyValue: '[0,6]', failRange: true })))
+      .rejects.toThrow('db down');
+  });
+});
+
+describe('blackout-nudge — shared clear-of-blackout', () => {
+  test('weekly closures apply to dates BEYOND any expanded horizon (object shape)', () => {
+    // 2026-07-25 is a Saturday; the dates Set is empty (past the horizon),
+    // but the weeklyDaysOff layer still blocks it and nudges to Monday.
+    const layers = { dates: new Set(), weeklyDaysOff: new Set([0, 6]) };
+    expect(isBlackedOut('2026-07-25', layers)).toBe(true);
+    expect(clearOfBlackout('2026-07-25', layers)).toBe('2026-07-27');
+  });
+
+  test('legacy Set shape still nudges (the seeder path)', () => {
+    expect(clearOfBlackout('2026-07-29', new Set(['2026-07-29']))).toBe('2026-07-30');
+  });
+
+  test('an exhausted bounded search returns null — refuse, never book a closure', () => {
+    // Every day of the week configured off: nothing can ever clear.
+    const layers = { dates: new Set(), weeklyDaysOff: new Set([0, 1, 2, 3, 4, 5, 6]) };
+    expect(clearOfBlackout('2026-07-25', layers)).toBe(null);
+  });
+
+  test('a clear date passes through untouched', () => {
+    expect(clearOfBlackout('2026-07-27', { dates: new Set(), weeklyDaysOff: new Set([0, 6]) })).toBe('2026-07-27');
+    expect(clearOfBlackout('2026-07-27', null)).toBe('2026-07-27');
   });
 });
