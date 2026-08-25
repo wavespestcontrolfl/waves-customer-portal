@@ -134,6 +134,24 @@ describe('irrigation schedule-copy migration', () => {
     expect(knex.__db.email_template_versions.find((v) => v.id === 'draft0').status).toBe('draft');
   });
 
+  test('down() declines when staff republished with the same blocks but a different subject', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    // Staff publish: identical blocks, new subject — NOT the migration's
+    // version. Rollback must leave it active rather than resurrect v0 and
+    // discard the subject change.
+    const active = knex.__db.email_template_versions.find((v) => v.template_id === 't0' && v.status === 'active');
+    const staff = {
+      ...active, id: 'staff0', version_number: Number(active.version_number) + 1,
+      subject: 'Staff rewrote this subject', status: 'active',
+    };
+    active.status = 'archived';
+    knex.__db.email_template_versions.push(staff);
+    knex.__db.email_templates[0].active_version_id = 'staff0';
+    await migration.down(knex);
+    expect(knex.__db.email_templates[0].active_version_id).toBe('staff0');
+  });
+
   test('no-ops when the tables are absent', async () => {
     const knex = makeKnex(fixture(), { tables: [] });
     await migration.up(knex);

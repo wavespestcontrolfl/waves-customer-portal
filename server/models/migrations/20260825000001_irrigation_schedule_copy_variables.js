@@ -152,12 +152,25 @@ exports.down = async function down(knex) {
 
     const restored = blocks.map((b, i) => (i === at ? { type: 'callout', content: target.seededCallout } : b));
     const restoredJson = JSON.stringify(restored);
+    // Identity must hold across EVERY field up() authored, not blocks alone
+    // — a staff republish that keeps the blocks but changes the subject,
+    // preview text, or text body would otherwise be mistaken for our
+    // version and their changes discarded on rollback.
+    const textBodyMatches = (prev) => {
+      if (typeof prev.text_body === 'string' && prev.text_body.includes(target.seededCallout)) {
+        return current.text_body === prev.text_body.replace(target.seededCallout, replacement.content);
+      }
+      return (current.text_body ?? null) === (prev.text_body ?? null);
+    };
     const archived = await knex('email_template_versions')
       .where({ template_id: tpl.id, status: 'archived' });
     const previous = (archived || [])
       .slice()
       .sort((a, b) => Number(b.version_number) - Number(a.version_number))
-      .find((v) => JSON.stringify(parseBlocks(v.blocks) || []) === restoredJson);
+      .find((v) => JSON.stringify(parseBlocks(v.blocks) || []) === restoredJson
+        && v.subject === current.subject
+        && (v.preview_text ?? null) === (current.preview_text ?? null)
+        && textBodyMatches(v));
     if (!previous) continue;
 
     await knex('email_template_versions').where({ id: previous.id }).update({ status: 'active', updated_at: new Date() });
