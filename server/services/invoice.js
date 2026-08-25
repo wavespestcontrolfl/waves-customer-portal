@@ -2330,6 +2330,31 @@ const InvoiceService = {
           logger.error(
             `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
           );
+          return { sent: true, payUrl, finalizeError: err.message };
+        }
+        // Finalize is durable — run the normal post-delivery bookkeeping
+        // (each leg best-effort/idempotent, mirroring the happy path) so a
+        // recovered send still gets its collection follow-ups, audit line,
+        // and lead conversion instead of silently losing them.
+        try {
+          await require("./invoice-followups").scheduleForInvoice(invoiceId);
+        } catch (e) {
+          logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
+        }
+        await db("activity_log")
+          .insert({
+            customer_id: invoice.customer_id,
+            action: "invoice_sent",
+            description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
+            metadata: JSON.stringify({ invoiceId, payUrl }),
+          })
+          .catch(() => {});
+        if (!allowClaimed) {
+          try {
+            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+          } catch (e) {
+            logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
+          }
         }
         return { sent: true, payUrl, finalizeError: err.message };
       }
