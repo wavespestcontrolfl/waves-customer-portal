@@ -483,6 +483,19 @@ describe('20260825000010 service name suffix renames', () => {
     }
   });
 
+  test('down() on a mixed-status merged reminder reverts only the open component', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    // rem-merged carries both renamed components (roach via v-open-1, bed
+    // bug via the sibling sweep from v-bb). Complete the BED BUG visit:
+    // its component stays renamed, but the roach component (open visit)
+    // must still revert even though the whole-string no longer equals the
+    // roach pass's recorded `written` value (codex pre-push P1).
+    visit(db, 'v-bb').status = 'completed';
+    await migration.down(fakeKnex(db));
+    expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_OLD} & Bed Bug Treatment Service`);
+  });
+
   test('up() survives absent companion tables', async () => {
     const db = { services: seedDb().services, system_settings: [] };
     await migration.up(fakeKnex(db));

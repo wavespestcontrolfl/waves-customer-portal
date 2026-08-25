@@ -1147,21 +1147,21 @@ const RODENT = {
     warning: 'Customer declined exclusion. Trap-only monitoring does not include a rodent-free structural warranty. Service covers scheduled monitoring and included response callbacks only.',
     plans: {
       standard: {
-        label: 'Standard Trap-Only Retainer',
+        label: 'Standard Trap-Only Retainer Service',
         annualPrice: r(495),
         monthlyPrice: r(49),
         scheduledVisitsIncluded: 4,
         responseCallbacksIncluded: 2,
       },
       plus: {
-        label: 'Plus Trap-Only Retainer',
+        label: 'Plus Trap-Only Retainer Service',
         annualPrice: r(695),
         monthlyPrice: r(69),
         scheduledVisitsIncluded: 6,
         responseCallbacksIncluded: 3,
       },
       monthly: {
-        label: 'Monthly Trap-Only Retainer',
+        label: 'Monthly Trap-Only Retainer Service',
         annualPrice: r(995),
         monthlyPrice: r(99),
         scheduledVisitsIncluded: 12,

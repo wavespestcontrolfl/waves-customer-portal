@@ -681,9 +681,20 @@ exports.down = async function down(knex) {
       for (const [id, r] of Object.entries(reminderRecs)) {
         if (!r || typeof r.written !== 'string' || typeof r.prior !== 'string') continue;
         if (r.scheduled_service_id && reminderTerminal.has(r.scheduled_service_id)) continue;
+        // Component-wise reversal on the CURRENT value (codex pre-push P1):
+        // a merged reminder whose OTHER renamed component is kept (its
+        // visit completed) can never equal this pass's recorded `written`
+        // whole-string — reverting just this pass's component leaves the
+        // kept component in place, and only rows up() recorded are touched.
+        const current = await knex('appointment_reminders')
+          .where({ id })
+          .first('id', 'service_type');
+        if (!current) continue;
+        const restored = relabelReminderServiceType(current.service_type, toName, fromName);
+        if (restored === null) continue;
         await knex('appointment_reminders')
-          .where({ id, service_type: r.written })
-          .update({ service_type: r.prior, updated_at: knex.fn.now() });
+          .where({ id, service_type: current.service_type })
+          .update({ service_type: restored, updated_at: knex.fn.now() });
       }
     }
 
