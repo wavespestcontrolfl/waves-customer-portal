@@ -269,7 +269,7 @@ class WavesAssistant {
       return { reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true };
 
     } catch (err) {
-      logger.error(`[ai-assistant] Claude API error: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
+      logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
     }
   }
@@ -397,13 +397,16 @@ class WavesAssistant {
       status: 'pending',
     }).returning('*');
 
-    // Update conversation
+    // The ai_escalations row above is the source of truth. Once it exists,
+    // the customer must get the escalation reply — session bookkeeping and
+    // transcript logging are best-effort (a failed UPDATE here once surfaced
+    // as the generic error fallback mid-escalation).
     await db('agent_sessions').where('id', conversation.id).update({
       escalated: true,
       escalation_reason: reason,
       status: 'escalated',
       updated_at: new Date(),
-    });
+    }).catch(e => logger.error(`[ai-assistant] Failed to mark session escalated: ${e.message}`, { conversationId: conversation.id }));
 
     // Reply to customer
     const reply = customer
@@ -416,7 +419,7 @@ class WavesAssistant {
       content: reply,
       channel: conversation.channel,
       sent_to_customer: true,
-    });
+    }).catch(e => logger.error(`[ai-assistant] Failed to save escalation reply: ${e.message}`, { conversationId: conversation.id }));
 
     // Notify Adam via SMS for urgent escalations
     if (priority === 'urgent') {
