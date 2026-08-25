@@ -9297,8 +9297,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc')
             .select('id', 'invoice_number', 'status', 'line_items', 'notes');
-          const freshLiveOnVisit = onVisitLockedRows.find((r) => String(r.id) !== String(terminalCompletionInvoice.id)
-            && !terminalResolvedAway.includes(r.status)) || null;
           // Fee coverage is classified INDEPENDENTLY from the visit
           // charge (Codex PR r3 P1) and CENTS-EXACT against the accepted
           // amount (Codex PR r13 P1): a $9.90 partial fee line must not
@@ -9308,6 +9306,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sumBaseApplicationCents: terminalAppCents,
             invoiceBillsBaseApplication: terminalBillsApp,
           } = require('../services/estimate-first-application-invoice');
+          // The replacement pick PREFERS a row that actually bills the
+          // application (Codex PR r24 P1): with a newer fee-only invoice
+          // beside an older paid application invoice, newest-first chose
+          // the wrong row and the alert directed staff at it.
+          const freshLiveRows = onVisitLockedRows.filter((r) => String(r.id) !== String(terminalCompletionInvoice.id)
+            && !terminalResolvedAway.includes(r.status));
+          const freshLiveOnVisit = freshLiveRows.find((r) => terminalBillsApp(r)) || freshLiveRows[0] || null;
           const termExpectedFeeCents = Math.round(Number(unmintedSetupFeeObligation?.setupFee || 0) * 100);
           // Stamped fee invoices are RE-SCANNED inside this transaction
           // (Codex PR r18 P1): a stamped unattached fee invoice that
@@ -9368,10 +9373,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .first('id', 'invoice_number', 'status', 'line_items', 'notes') || liveBesideNow;
           }
           const termExpectedAppCents = Math.round(Number(svc.estimated_price || 0) * 100);
-          const besideAppCents = liveBesideFull ? terminalAppCents(liveBesideFull) : 0;
+          // Application coverage sums across EVERY live on-visit row plus
+          // the chosen beside row (deduped) — one qualifying older paid
+          // invoice settles the application even with unrelated newer
+          // rows present (Codex PR r24 P1).
+          const appCoverageRows = [...new Map(
+            [...freshLiveRows, ...(liveBesideFull ? [liveBesideFull] : [])].map((r) => [String(r.id), r]),
+          ).values()];
+          const besideAppCents = appCoverageRows.reduce((sum, r) => sum + terminalAppCents(r), 0);
           const besideCoversApplication = termExpectedAppCents > 0
             ? besideAppCents >= termExpectedAppCents
-            : !!(liveBesideFull && terminalBillsApp(liveBesideFull));
+            : appCoverageRows.some(terminalBillsApp);
           const covered = liveBesideNow && ['paid', 'prepaid'].includes(liveBesideNow.status)
             && besideCoversApplication;
           // Settled visit coverage does NOT settle a still-owed setup fee
