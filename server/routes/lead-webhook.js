@@ -367,6 +367,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // Contact line goes FIRST: Customer 360 previews the body truncated
         // to 200 chars, and a long UTM-laden pageUrl would push it out of view.
         body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
+          + (additionalPropertiesNote ? `\n${additionalPropertiesNote}` : '')
           + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
@@ -377,6 +378,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             state: normalizedAddress.state || null,
             zip: normalizedAddress.zip || null,
           },
+          // Existing customers return before the leads insert below, so the
+          // extra-property ask must ride on this note or it is lost entirely.
+          ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
         }),
       });
 
