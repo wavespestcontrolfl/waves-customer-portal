@@ -5870,6 +5870,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
       }
+      // Advisory schedule-overlap notes — the move committed (conflicts no
+      // longer block staff saves); say what now stacks before closing.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Moved.\n\n${result.warnings.join("\n\n")}`);
+      }
       onRescheduled?.();
       onClose();
     } catch (e) {
@@ -5919,6 +5924,10 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         alert(
           `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
+      }
+      // Advisory schedule-overlap notes — same as the suggested path above.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Moved.\n\n${result.warnings.join("\n\n")}`);
       }
       onRescheduled?.();
       onClose();
