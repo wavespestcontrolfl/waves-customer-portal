@@ -581,7 +581,9 @@ class GoogleBusinessService {
         // the link is undoable in Reviews, and serializing the
         // customer-facing /go redirect behind sync locks would trade a
         // paper-thin race for real latency.
-        const result = await db.transaction(async (trx) => {
+        let result;
+        try {
+          result = await db.transaction(async (trx) => {
           const match = await findConfidentClickMatch(row, { conn: trx });
           if (!match) return { nomatch: true };
           // The collector entry is a detached payload — re-read the live row.
@@ -631,17 +633,28 @@ class GoogleBusinessService {
           // linked review with a still-false flag would keep asking the
           // customer forever — the retry sweep only scans UNLINKED rows —
           // so a failed flip must roll the link back for the next sweep.
-          // Same conditional shape as _markCustomerLeftReview (idempotent;
-          // 0 rows = already flagged, not an error).
-          await trx('customers')
+          // Zero rows = the flag was claimed by a HUMAN between the
+          // correlation read and this write (correlation refuses
+          // already-flagged candidates), so ownership would be ambiguous —
+          // abort the link toward the manual queue (GH codex #3483 r7).
+          const flipped = await trx('customers')
             .where({ id: match.customerId })
             .whereNull('deleted_at')
             .where(function alreadyFlagged() {
               this.where('has_left_google_review', false).orWhereNull('has_left_google_review');
             })
             .update({ has_left_google_review: true, review_marked_at: markTime });
+          if (!flipped) {
+            const raceErr = new Error('suppression flag claimed concurrently');
+            raceErr.code = 'FLAG_CLAIM_RACE';
+            throw raceErr;
+          }
           return { linked: true, match, live };
-        });
+          });
+        } catch (err) {
+          if (err?.code === 'FLAG_CLAIM_RACE') return { nomatch: true };
+          throw err;
+        }
         if (!result?.linked) return result;
         // The flag flip committed atomically with the link above. NO
         // thank-you enrollment here — like the payout (pre-push P0),
@@ -1519,6 +1532,15 @@ class GoogleBusinessService {
               .where({ customer_id: alRow.customer_id })
               .whereNot('id', alRow.id)
               .first('id');
+            // Unlink the unconfirmed probabilistic match itself (GH codex
+            // #3483 r7): the review is gone from Google, yet a retained
+            // customer_id still reads as "has a linked review" in every
+            // suppression check (sequence runner, correlation's linked
+            // exclusion). The retained row keeps the review text as
+            // evidence; only the never-confirmed attribution is dropped.
+            await trx('google_reviews')
+              .where({ id: alRow.id, link_source: 'click_auto' })
+              .update({ customer_id: null, link_source: null, auto_linked_at: null });
             // Ownership check (GH codex r6): a review_marked_at LATER than
             // this auto-link's own stamp means a human independently
             // confirmed the customer reviewed — that flag is not ours to
