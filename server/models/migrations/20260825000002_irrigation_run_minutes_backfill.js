@@ -93,6 +93,16 @@ function parseRunMinutesFromNotes(notes) {
   ]);
   const tokens = (text.toLowerCase().match(/[a-z]+/g) || []);
   if (tokens.some((t) => !BENIGN_WORDS.has(t))) return null;
+  // (6) NUMBER BUDGET — the allowlist admits words, but a bare clock value
+  // ("at 4 and 6am") is all digits. The note may contain at most: the one
+  // minutes figure, one zone count ("3 zones"), and one start time — any
+  // number beyond that budget is an unaccounted quantity (a second start
+  // time, a second cycle) and declines.
+  const numberTokens = text.match(/\d+(?::\d{2})?/g) || [];
+  let numberBudget = 1; // the minutes figure
+  if (/\d+\s*zones?\b/i.test(text)) numberBudget += 1;
+  if (timeMentions.some((t) => /\d/.test(t))) numberBudget += 1;
+  if (numberTokens.length > numberBudget) return null;
 
   if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
   return matched;

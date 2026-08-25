@@ -63,6 +63,10 @@ describe('parseRunMinutesFromNotes', () => {
     ['Each zone runs 20 minutes, pauses, then goes again.', 'unanticipated repetition'],
     ['Each zone runs 20 min, controller in garage', 'off-vocabulary remark'],
     ['Each zone runs 20 min when it feels like it', 'off-vocabulary remark'],
+    // Bare clock values are all digits and slip the word allowlist — the
+    // number budget catches them (GH codex P1 on #3478 r11).
+    ['Each zone runs 20 min at 4 and 6am', 'abbreviated double start time'],
+    ['Each zone runs 20 min at 4am and 6', 'abbreviated double start time'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],
