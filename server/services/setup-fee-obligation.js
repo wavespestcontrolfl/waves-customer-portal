@@ -284,18 +284,18 @@ async function findUnmintedSetupFeeObligation({
   const liveStampedFeeCents = stampedRows
     .filter((r) => !DEAD_STATUSES.has(String(r.status || '').toLowerCase()))
     .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
-  if (liveStampedFeeCents >= expectedFeeCents) return { owed: false };
-  // REFUNDED (fee-carrying) satisfies regardless of attachment (Codex
-  // PR r2 P1): the fee was COLLECTED and then deliberately refunded —
-  // an operator/webhook money action, not a silent leak — and a
-  // setup-only acceptance invoice is deliberately created with NO
-  // scheduled_service_id (estimate-converter). There is no refund-event
-  // clock, and a bounced refund (refund.failed) restores the row to
-  // paid: instructing a manual re-bill here would risk a double
-  // collection.
-  const refundedFee = stampedRows.find((r) => String(r.status || '').toLowerCase() === 'refunded'
-    && invoiceHasPositiveSetupFeeLine(r));
-  if (refundedFee) return { owed: false };
+  // REFUNDED fee cents CREDIT the obligation regardless of attachment
+  // (Codex PR r2 P1 → final-round P0): the refunded amount was collected
+  // and deliberately refunded — the no-rebill doctrine holds for THAT
+  // amount (no refund-event clock; refund.failed restores it to paid) —
+  // but a $9.90 partial refund never clears a $99 obligation: only full
+  // cents coverage resolves, and the REMAINDER stays owed.
+  const refundedFeeCents = stampedRows
+    .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+    .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
+  const coveredFeeCents = liveStampedFeeCents + refundedFeeCents;
+  if (coveredFeeCents >= expectedFeeCents) return { owed: false };
+  const remainingFeeCents = expectedFeeCents - coveredFeeCents;
   // A CANCELED fee-carrying invoice satisfies only when #3474's
   // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
   // round 14): findFirstApplicationInvoiceForEstimateService joins
@@ -380,8 +380,9 @@ async function findUnmintedSetupFeeObligation({
 
   return {
     owed: true,
-    // The accepted (frozen) amount wins over the current constant.
-    setupFee: authoritativeFee,
+    // The accepted (frozen) amount wins over the current constant, and
+    // covered/refunded cents are already credited — this is the REMAINDER.
+    setupFee: Math.round(remainingFeeCents) / 100,
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,

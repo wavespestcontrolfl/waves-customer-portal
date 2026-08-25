@@ -7,30 +7,36 @@
 
 let mockTables = {};
 let mockUpdates = [];
+let mockCounters = {};
 
 jest.mock('../models/db', () => {
-  const makeTrx = () => {
-    const counters = {};
-    const trx = (table) => {
-      counters[table] = (counters[table] || 0) + 1;
-      const spec = mockTables[table];
-      const val = typeof spec === 'function' ? spec(counters[table]) : spec;
-      const chain = {};
-      const self = () => chain;
-      ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orderBy', 'forUpdate'].forEach((m) => {
-        chain[m] = jest.fn(self);
+  // ONE shared per-test counter map: the pre-read (direct db) and the
+  // transaction reads advance the same sequence.
+  const handler = (table) => {
+    mockCounters[table] = (mockCounters[table] || 0) + 1;
+    const spec = mockTables[table];
+    const val = typeof spec === 'function' ? spec(mockCounters[table]) : spec;
+    const chain = {};
+    const self = () => chain;
+    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate'].forEach((m) => {
+      chain[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') args[0].call(chain, chain);
+        return chain;
       });
-      chain.first = jest.fn(async () => (Array.isArray(val) ? (val[0] ?? null) : (val ?? null)));
-      chain.select = jest.fn(async () => (Array.isArray(val) ? val : (val ? [val] : [])));
-      chain.update = jest.fn(async (payload) => { mockUpdates.push({ table, payload }); return 1; });
-      return chain;
-    };
+    });
+    chain.first = jest.fn(async () => (Array.isArray(val) ? (val[0] ?? null) : (val ?? null)));
+    chain.select = jest.fn(async () => (Array.isArray(val) ? val : (val ? [val] : [])));
+    chain.pluck = jest.fn(async () => []);
+    chain.update = jest.fn(async (payload) => { mockUpdates.push({ table, payload }); return 1; });
+    return chain;
+  };
+  const mock = jest.fn((table) => handler(table));
+  mock.transaction = jest.fn(async (fn) => {
+    const trx = (table) => handler(table);
     trx.raw = jest.fn(async () => ({ rows: [] }));
     trx.fn = { now: jest.fn(() => 'NOW') };
-    return trx;
-  };
-  const mock = jest.fn();
-  mock.transaction = jest.fn(async (fn) => fn(makeTrx()));
+    return fn(trx);
+  });
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
   mock.fn = { now: jest.fn(() => 'NOW') };
   return mock;
@@ -55,15 +61,17 @@ function alertRow(metaOverrides = {}) {
   };
 }
 
-// notifications is read twice: call 1 = the estate alert (.first), call 2 =
-// the terminal-registration scan (.select — none in these tests).
+// notifications reads, in order: 1 = pre-lock scan (.select), 2 = in-trx
+// lock recheck (.first), 3 = the estate alert (.first), 4 = the
+// terminal-registration scan (.select — none in these tests).
 function notificationsInOrder(primary) {
-  return (n) => (n === 1 ? primary : []);
+  return (n) => (n === 1 ? [primary] : (n === 2 || n === 3 ? primary : []));
 }
 
 beforeEach(() => {
   mockUpdates = [];
   mockTables = {};
+  mockCounters = {};
 });
 
 test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — never rewritten to demand the fee again', async () => {

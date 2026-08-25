@@ -22,8 +22,50 @@ const logger = require('./logger');
 async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel = '' }) {
   if (!customerId || !sourceEstimateId) return;
   const dedupeKey = `unminted_setup_fee_manual_billing:${sourceEstimateId}`;
+  // Pre-read the visit ids the coverage scans will touch so their shared
+  // mint locks can be taken in the SAME global order every invoice writer
+  // uses — mint locks first (sorted), dedupe lock after, exactly like the
+  // alert-writing transaction (Codex P0: row locks cannot stop phantom
+  // inserts; only the shared advisory locks serialize linked mints).
+  const preAlerts = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .where(function preKeys() {
+      this.whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+        .orWhereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey]);
+    })
+    .select('metadata');
+  const preLockVisitIds = [...new Set(preAlerts.flatMap((row) => {
+    const m = typeof row.metadata === 'string'
+      ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
+      : row.metadata;
+    return [
+      ...(m?.scheduledServiceId ? [String(m.scheduledServiceId)] : []),
+      ...(Array.isArray(m?.parkedVisitIds) ? m.parkedVisitIds.map(String) : []),
+    ];
+  }))].sort();
   await db.transaction(async (trx) => {
+    const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+    for (const lockId of preLockVisitIds) {
+      await acquireScheduledInvoiceMintLock(trx, lockId);
+    }
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+    // A visit parked AFTER the pre-read is outside our lock set — do not
+    // classify under a torn lock order; the next reconcile/sweep owns it.
+    const lockCheck = await trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .first('metadata');
+    const lockCheckMeta = lockCheck && (typeof lockCheck.metadata === 'string'
+      ? (() => { try { return JSON.parse(lockCheck.metadata); } catch { return null; } })()
+      : lockCheck.metadata);
+    const nowIds = [
+      ...(lockCheckMeta?.scheduledServiceId ? [String(lockCheckMeta.scheduledServiceId)] : []),
+      ...(Array.isArray(lockCheckMeta?.parkedVisitIds) ? lockCheckMeta.parkedVisitIds.map(String) : []),
+    ];
+    if (nowIds.some((id) => !preLockVisitIds.includes(id))) {
+      logger.warn(`[setup-fee-reconcile]${actorLabel} parked set grew mid-lock — deferring to the next reconcile`);
+      return;
+    }
           // RESOLVED rows are reconciled too (Codex P0, pre-push round
           // 18): if the fee's covering invoice is later voided while the
           // application invoice stays live, the resolved alert is the
@@ -109,7 +151,9 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 .select('id', 'status', 'line_items', 'notes')
               : [];
             const tRows = [...new Map([...tStamped, ...tOnVisit].map((r) => [String(r.id), r])).values()];
-            const tRefundedFee = tRows.some((r) => String(r.status || '').toLowerCase() === 'refunded' && tFeeLine(r));
+            const tRefundedFeeCents = tRows
+              .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+              .reduce((sum, r) => sum + tFeeCents(r), 0);
             const tLiveFeeCents = tRows
               .filter((r) => !tDead.has(String(r.status || '').toLowerCase()))
               .reduce((sum, r) => sum + tFeeCents(r), 0);
@@ -120,7 +164,9 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               const v = Number(m?.expectedSetupFeeCents);
               return Number.isFinite(v) ? v : 0;
             }));
-            const tFeeProven = tRefundedFee || (tExpect > 0 && tLiveFeeCents >= tExpect);
+            const tFeeProven = tExpect > 0
+              ? (tLiveFeeCents + tRefundedFeeCents) >= tExpect
+              : tRefundedFeeCents > 0;
             await reconcileTerminalFeeAlerts(tFeeProven);
             return;
           }
@@ -219,14 +265,17 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // action, refund.failed can restore the payment, and there is
           // no refund-event clock — re-instructing the fee risks double
           // collection. Application coverage stays live-rows-only.
-          const refundedFee = [...stampedAll, ...onParkedAll].some((r) => (
-            String(r.status || '').toLowerCase() === 'refunded' && invoiceHasPositiveSetupFeeLine(r)));
           // CENTS-EXACT coverage against the FROZEN expected amounts the
           // alert persisted at parking time (Codex PR r7 P1): a $9.90
           // typo must not retire a $99 obligation. Alerts without the
           // persisted amounts (none exist pre-gate) keep the boolean
           // positive-line behavior.
           const { sumPositiveSetupFeeCents, sumBaseApplicationCents } = require('./estimate-first-application-invoice');
+          const refundedFeeCents = [...new Map(
+            [...stampedAll, ...onParkedAll].map((r) => [String(r.id), r]),
+          ).values()]
+            .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+            .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
           const expectedFeeCents = Number.isFinite(Number(staleMeta?.expectedSetupFeeCents))
             ? Number(staleMeta.expectedSetupFeeCents) : null;
           // Deduped by invoice id (Codex P0): a stamped invoice attached
@@ -237,10 +286,13 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           ).values()];
           const liveFeeCents = uniqueLiveRows
             .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
-          const feeProven = refundedFee
-            || (expectedFeeCents !== null
-              ? liveFeeCents >= expectedFeeCents
-              : uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine));
+          // Refunded fee cents CREDIT the obligation (never re-billed —
+          // the no-rebill doctrine holds for the amount actually
+          // refunded), but only full coverage resolves (Codex P0): a
+          // $9.90 partial refund leaves the remainder owed.
+          const feeProven = expectedFeeCents !== null
+            ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
+            : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine));
           await reconcileTerminalFeeAlerts(feeProven);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
@@ -307,9 +359,11 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               .select('id', 'is_recurring');
             const histPlanIds = histPlanRows.filter((r) => r.is_recurring).map((r) => String(r.id));
             if (histPlanIds.length) {
-              const histRecordIds = await trx('service_records')
+              const histRecords = await trx('service_records')
                 .whereIn('scheduled_service_id', histPlanIds)
-                .pluck('id');
+                .select('id', 'scheduled_service_id');
+              const recordToVisit = new Map(histRecords.map((r) => [String(r.id), String(r.scheduled_service_id)]));
+              const histRecordIds = histRecords.map((r) => r.id);
               const histBilled = (await trx('invoices')
                 .where({ customer_id: scanCustomerId })
                 .where(function histLinked() {
@@ -317,10 +371,15 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                   if (histRecordIds.length) this.orWhereIn('service_record_id', histRecordIds);
                 })
                 .forUpdate()
-                .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id'))
+                .select('id', 'status', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id'))
                 .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
+              // Record-linked invoices map back to their visit (Codex P0):
+              // an application invoice attached only through its service
+              // record is coverage for that visit, not perpetual debt.
               feeOnlyUncoveredIds = histPlanIds.filter((visitId) => !histBilled.some((r) => (
-                String(r.scheduled_service_id || '') === String(visitId) && invoiceBillsBaseApplication(r))));
+                (String(r.scheduled_service_id || '') === String(visitId)
+                  || recordToVisit.get(String(r.service_record_id || '')) === String(visitId))
+                && invoiceBillsBaseApplication(r))));
             }
           }
           const applicationProven = feeOnlyAlert
