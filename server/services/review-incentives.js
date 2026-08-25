@@ -591,10 +591,13 @@ async function getAttributionQueue(options = {}) {
   // correctable through this queue even when the payout program is off (GH
   // codex #3483 r1 P1) — only the payout-driven reasons below require the
   // policy. policyEnabled still reports the real flag for the UI.
+  // Scan by the PERIOD only — the program-start cutoff would hide click_auto
+  // rows predating the payout program from their only correction surface
+  // (pre-push P1); the payout-driven branches re-apply the cutoff below.
   const reviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .whereNull('missing_since')
-    .where('review_created_at', '>=', effectiveSince.toISOString())
+    .where('review_created_at', '>=', since.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
 
@@ -623,6 +626,8 @@ async function getAttributionQueue(options = {}) {
     }
 
     if (!policy.enabled) continue;
+    // Payout-driven reasons only exist inside the program window.
+    if (!reviewWithinProgramWindow(review, policy)) continue;
     const rating = toInt(review.star_rating, 0);
     if (rating < Math.max(1, toInt(policy.minRating, 1))) continue;
 
@@ -855,6 +860,14 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const prior = await conn('google_reviews')
     .where({ id: review.id })
     .first('customer_id', 'link_source');
+
+  // Re-validate the payout-policy exemption against the LIVE row (pre-push
+  // P1): payoutEligible was derived from a pre-lock snapshot, and its
+  // click-auto-only relaxation must not survive a concurrent attribution
+  // that already restamped the row 'manual' — retry with fresh state instead.
+  if (!payoutEligible && prior?.link_source !== 'click_auto') {
+    throw operationalError('Review attribution changed while this request was in flight — reload and retry', 409, 'attribution_conflict');
+  }
 
   // Conditional write, not a snapshot re-check: a stamp can still have
   // committed before the lock was free. Zero rows updated means liveness was

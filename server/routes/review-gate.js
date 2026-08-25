@@ -186,11 +186,6 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         google_review_clicked: true,
         redirected_to_google: true,
         google_location: loc.id,
-        // Every server-observed click, not just the first: redirected_at is
-        // the atomic first-click claim below and never moves, but the click
-        // auto-link needs the LATEST click to correlate against a review's
-        // post time (GH codex #3483 r1).
-        last_redirected_at: new Date(),
       };
       if (!request.opened_at) {
         updates.opened_at = new Date();
@@ -260,6 +255,17 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       } catch (err) {
         logger.warn(`[review-gate] click notification failed: ${err.message}`);
       }
+    }
+
+    // Latest-click stamp for the auto-link correlation, recorded ONLY once
+    // every pre-redirect step has succeeded — a failed attempt falls back to
+    // the rate page and must not become "latest click" evidence (pre-push P1;
+    // redirected_at is the immutable first-click claim above and never
+    // moves). Best-effort: a stamp failure must not cost the redirect.
+    try {
+      await db('review_requests').where({ id: request.id }).update({ last_redirected_at: new Date() });
+    } catch (err) {
+      logger.warn(`[review-gate] last-click stamp failed: ${err.message}`);
     }
 
     return res.redirect(302, loc.googleReviewUrl);
