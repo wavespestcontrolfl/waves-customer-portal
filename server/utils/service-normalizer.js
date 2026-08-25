@@ -27,13 +27,20 @@ const SERVICE_TYPE_MAP = [
   { match: /stinging|wasp|hornet|yellow\s*jacket/i,         type: 'Stinging Insect Removal' },
 
   // Rodent
+  // Wire mesh must precede the generic exclusion pattern or the renamed
+  // catalog identity collapses to 'Rodent Exclusion' (codex #3484 P2).
+  { match: /wire\s*mesh/i,                                  type: 'Rodent Wire Mesh Exclusion Service' },
   { match: /rodent.*exclusion/i,                            type: 'Rodent Exclusion' },
   { match: /rodent.*control|rat|mouse|mice/i,               type: 'Rodent Control' },
 
   // Termite
   { match: /wdo|wood\s*destroy|real\s*estate.*inspect/i,    type: 'WDO Inspection' },
   { match: /termite.*inspect/i,                             type: 'Termite Inspection' },
-  { match: /termite.*treat|bora.?care|termidor/i,           type: 'Termite Treatment' },
+  // Renamed catalog identities must survive normalization (codex #3484 P2)
+  // — without their own entries the generic termite/rodent patterns
+  // collapsed them to family labels on /api/schedule and reschedule texts.
+  { match: /bora.?care/i,                                   type: 'Bora-Care Wood Treatment Service' },
+  { match: /termite.*treat|termidor/i,                      type: 'Termite Treatment' },
   { match: /termite.*bait|advance|trelona/i,                type: 'Termite Bait Monitoring' },
   { match: /termite/i,                                      type: 'Termite Service' },
 
@@ -42,8 +49,8 @@ const SERVICE_TYPE_MAP = [
   { match: /lawn\s*care/i,                                  type: 'Lawn Care' },
   { match: /fertil/i,                                       type: 'Lawn Fertilization' },
   { match: /weed\s*control/i,                               type: 'Weed Control' },
-  { match: /dethatch/i,                                     type: 'Dethatching Service' },
-  { match: /top\s*dress/i,                                  type: 'Top Dressing' },
+  { match: /dethatch/i,                                     type: 'Lawn Dethatching Service' },
+  { match: /top\s*dress/i,                                  type: 'Lawn Top Dressing Service' },
   { match: /aerat/i,                                        type: 'Lawn Aeration' },
   { match: /sod/i,                                          type: 'Sod Installation' },
 
