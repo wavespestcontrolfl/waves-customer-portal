@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -23,7 +23,13 @@ import { CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 const NAVY = '#04395E';
 
 const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
-  { intent, loadStripeSdk, glassActive = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange },
+  // prepay (GATE_PREPAY_CARD_AND_CHARGE): the accept charges the 12-month
+  // prepay total on this card immediately after booking — the heading, the
+  // checkbox summary, and the full-terms text must all say so (the base
+  // Auto Pay copy's "nothing charged today" would contradict the charge).
+  // The exact surcharged total is quoted in a separate confirm step before
+  // any charge (PREPAY_CHARGE_QUOTE).
+  { intent, loadStripeSdk, glassActive = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, prepay = false },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -134,10 +140,13 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
 
   return (
     <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${borderColor}`, textAlign: 'left' }}>
-      <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>Auto Pay — nothing charged today</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
+        {prepay ? 'Annual prepay — your card pays for the year' : 'Auto Pay — nothing charged today'}
+      </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
-        After each completed service, your card is charged that service&rsquo;s
-        amount automatically.
+        {prepay
+          ? 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
+          : 'After each completed service, your card is charged that service’s amount automatically.'}
       </div>
       <div ref={mountRef} style={{ marginTop: 14 }} />
       <div style={{ fontSize: 14, color: bodyColor, marginTop: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -157,8 +166,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>
-          I authorize Waves to charge this card after each completed service —
-          cancel anytime.
+          {prepay
+            ? 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
+            : 'I authorize Waves to charge this card after each completed service — cancel anytime.'}
         </span>
       </label>
       <button
@@ -168,7 +178,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       >{termsOpen ? 'Hide full terms' : 'View full terms'}</button>
       {termsOpen ? (
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
-          {CARD_CONSENT_TEXT}
+          {prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}
         </div>
       ) : null}
       {error ? (

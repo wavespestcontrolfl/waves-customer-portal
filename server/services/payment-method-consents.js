@@ -30,12 +30,16 @@ async function recordConsent({
   methodType = 'card',
   ip = null,
   userAgent = null,
+  // 'prepay_card' snapshots the annual-prepay authorization (immediate
+  // charge + future invoices) instead of the base card text — the UI must
+  // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
+  consentVariant = null,
 }) {
   if (!customerId) throw new Error('recordConsent: customerId required');
   if (!stripePaymentMethodId) throw new Error('recordConsent: stripePaymentMethodId required');
   if (!VALID_SOURCES.has(source)) throw new Error(`recordConsent: invalid source "${source}"`);
 
-  const consentText = getConsentText(methodType);
+  const consentText = getConsentText(methodType, { variant: consentVariant });
 
   const [row] = await db('payment_method_consents').insert({
     customer_id: customerId,

@@ -48,9 +48,14 @@ function isRecurringCardOnFileEnabled() {
 // the same live-verified SetupIntent capture as per-application, and the
 // accept route auto-charges the prepay invoice on the just-enrolled method
 // post-commit. Kill = unset GATE_PREPAY_CARD_AND_CHARGE.
+// CONJUNCTION with the master gate (pre-push Codex P1): with only the
+// prepay gate set, the resolver returns feature_disabled and captures no
+// card — /data must not advertise prepayInLane and the accept must not run
+// a charge the UI never disclosed. The prepay lane exists only inside the
+// recurring card lane.
 function isPrepayCardAndChargeEnabled() {
   const flag = process.env.GATE_PREPAY_CARD_AND_CHARGE;
-  return flag === '1' || flag === 'true' || flag === 'on';
+  return isRecurringCardOnFileEnabled() && (flag === '1' || flag === 'true' || flag === 'on');
 }
 
 // What a recurring accept requires. Exempt lanes:
@@ -287,6 +292,10 @@ async function completeRecurringCardEnrollment({
   // visits on payer-billed accounts — the enrollment must judge at the
   // same scope or it refuses on the account payer.
   scheduledServiceId = null,
+  // 'prepay_card' for in-lane annual-prepay accepts: the capture UI rendered
+  // the prepay authorization (immediate 12-month charge), so the recorded
+  // snapshot must be that same variant.
+  consentVariant = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -324,6 +333,7 @@ async function completeRecurringCardEnrollment({
         methodType: saved?.method_type || 'card',
         ip,
         userAgent,
+        consentVariant,
       });
     }
     if (saved?.id) {
@@ -368,10 +378,66 @@ async function alertEnrollmentNeedsReview({ customerId, estimateId, reason }) {
   } catch (e) { logger.warn('[recurring-cof] enrollment review alert failed', { error: e.message }); }
 }
 
+// In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE): resolve which method the
+// accept will charge, plus the funding needed to quote the EXACT surcharged
+// total BEFORE the customer authorizes the charge. Sources, in the same
+// precedence the enrollment paths use:
+//   1. the live-verified SetupIntent's payment method (fresh capture — no
+//      payment_methods row exists yet; funding comes from Stripe),
+//   2. the policy's auto-satisfy saved method (savedMethodRowId),
+//   3. the customer's active Auto Pay method (autopay_already_active —
+//      pre-push Codex P0: these customers previously resolved NO method and
+//      every such prepay accept skipped the charge).
+// Returns { stripePaymentMethodId, paymentMethodRowId, methodType, funding,
+// last4 } or null when no chargeable source resolves. Read-only; never
+// throws (a resolution failure quotes/charges nothing — the pay-link
+// fallback owns the miss).
+async function resolvePrepayChargeMethod({ policy = {}, verification = null, customerId = null }) {
+  try {
+    if (verification?.ok && verification.paymentMethodId) {
+      const pm = await StripeService.retrievePaymentMethod(verification.paymentMethodId);
+      if (pm) {
+        return {
+          stripePaymentMethodId: pm.id,
+          paymentMethodRowId: null, // saved at enrollment, post-commit
+          methodType: pm.type || 'card',
+          funding: pm.card?.funding || null,
+          last4: pm.card?.last4 || null,
+        };
+      }
+      return null;
+    }
+    let rowId = policy.savedMethodRowId || null;
+    if (!rowId && policy.exemptReason === 'autopay_already_active' && customerId) {
+      const customer = await db('customers').where({ id: customerId }).first('autopay_payment_method_id');
+      rowId = customer?.autopay_payment_method_id || null;
+    }
+    if (!rowId) return null;
+    const row = await db('payment_methods').where({ id: rowId }).first();
+    if (!row || String(row.customer_id) !== String(customerId || row.customer_id) || !row.stripe_payment_method_id) return null;
+    let funding = row.card_funding || null;
+    if (row.method_type === 'card' && !funding) {
+      const pm = await StripeService.retrievePaymentMethod(row.stripe_payment_method_id).catch(() => null);
+      funding = pm?.card?.funding || null;
+    }
+    return {
+      stripePaymentMethodId: row.stripe_payment_method_id,
+      paymentMethodRowId: row.id,
+      methodType: row.method_type || 'card',
+      funding,
+      last4: row.last_four || null,
+    };
+  } catch (err) {
+    logger.warn(`[recurring-cof] prepay charge-method resolution failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
+  resolvePrepayChargeMethod,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
   completeRecurringCardEnrollment,

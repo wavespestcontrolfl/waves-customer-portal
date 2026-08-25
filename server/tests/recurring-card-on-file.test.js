@@ -24,10 +24,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockRetrieveSetupIntent = jest.fn();
 const mockCreateRecurringCardSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn();
+const mockRetrievePaymentMethod = jest.fn();
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
   createRecurringCardSetupIntent: (...a) => mockCreateRecurringCardSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
+  retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
 }));
 
 const mockQualifyingRows = jest.fn(async () => []);
@@ -78,6 +80,7 @@ const {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
+  resolvePrepayChargeMethod,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
   completeRecurringCardEnrollment,
@@ -155,6 +158,14 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       expect(isPrepayCardAndChargeEnabled()).toBe(false);
     });
 
+    it('is a CONJUNCTION with the master gate — prepay gate alone stays off', () => {
+      process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+      delete process.env.RECURRING_CARD_ON_FILE;
+      expect(isPrepayCardAndChargeEnabled()).toBe(false);
+      process.env.RECURRING_CARD_ON_FILE = 'true';
+      expect(isPrepayCardAndChargeEnabled()).toBe(true);
+    });
+
     it('keeps the legacy prepay exemption while the gate is off (kill switch restores today)', async () => {
       delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
       const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
@@ -191,6 +202,43 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       delete process.env.RECURRING_CARD_ON_FILE;
       const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, paymentMethodPreference: 'prepay_annual' });
       expect(p).toEqual({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    });
+  });
+
+  describe('resolvePrepayChargeMethod (quote-time method + funding)', () => {
+    it('resolves the live-verified SetupIntent capture with Stripe funding (no row yet)', async () => {
+      mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit', last4: '4242' } });
+      const m = await resolvePrepayChargeMethod({ verification: { ok: true, paymentMethodId: 'pm_1' }, customerId: 'cust-1' });
+      expect(m).toEqual({ stripePaymentMethodId: 'pm_1', paymentMethodRowId: null, methodType: 'card', funding: 'credit', last4: '4242' });
+    });
+
+    it('resolves the auto-satisfy saved method row', async () => {
+      mockDbFixtures.payment_methods = { id: 'pmrow-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm_9', method_type: 'card', card_funding: 'debit', last_four: '1111' };
+      const m = await resolvePrepayChargeMethod({ policy: { savedMethodRowId: 'pmrow-1' }, customerId: 'cust-1' });
+      expect(m.paymentMethodRowId).toBe('pmrow-1');
+      expect(m.funding).toBe('debit');
+    });
+
+    it('falls back to the ACTIVE Auto Pay method for autopay_already_active (pre-push P0: these accepts previously skipped the charge)', async () => {
+      mockDbFixtures.customers = { autopay_payment_method_id: 'pmrow-7' };
+      mockDbFixtures.payment_methods = { id: 'pmrow-7', customer_id: 'cust-1', stripe_payment_method_id: 'pm_7', method_type: 'card', card_funding: 'credit', last_four: '7777' };
+      const m = await resolvePrepayChargeMethod({ policy: { exemptReason: 'autopay_already_active' }, customerId: 'cust-1' });
+      expect(m.paymentMethodRowId).toBe('pmrow-7');
+      expect(m.stripePaymentMethodId).toBe('pm_7');
+    });
+
+    it('returns null when nothing resolves (no quote → no charge; pay-link fallback owns it)', async () => {
+      expect(await resolvePrepayChargeMethod({ policy: {}, customerId: 'cust-1' })).toBe(null);
+    });
+
+    it('never resolves a row owned by another customer', async () => {
+      mockDbFixtures.payment_methods = { id: 'pmrow-1', customer_id: 'cust-OTHER', stripe_payment_method_id: 'pm_9', method_type: 'card', card_funding: 'debit' };
+      expect(await resolvePrepayChargeMethod({ policy: { savedMethodRowId: 'pmrow-1' }, customerId: 'cust-1' })).toBe(null);
+    });
+
+    it('never throws — a Stripe failure resolves null', async () => {
+      mockRetrievePaymentMethod.mockRejectedValue(new Error('stripe down'));
+      expect(await resolvePrepayChargeMethod({ verification: { ok: true, paymentMethodId: 'pm_1' }, customerId: 'cust-1' })).toBe(null);
     });
   });
 
@@ -388,6 +436,14 @@ describe('completeRecurringCardEnrollment (save → consent → enroll)', () => 
       source: 'estimate_accept',
     }));
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('threads the prepay consent variant into the recorded snapshot (in-lane prepay accepts)', async () => {
+    mockDbFixtures.payment_methods = null;
+    mockSavePaymentMethod.mockResolvedValue({ id: 'pmrow-1', method_type: 'card' });
+    const r = await completeRecurringCardEnrollment({ ...ARGS, consentVariant: 'prepay_card' });
+    expect(r.enrolled).toBe(true);
+    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'prepay_card' }));
   });
 
   it('is idempotent: reuses an existing pm row and skips a duplicate consent', async () => {

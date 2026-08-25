@@ -1848,7 +1848,15 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
+  // opts.maxAuthorizedTotalCents — ceiling on the FINAL surcharged charge
+  // total (computeChargeAmount output), for callers that displayed an exact
+  // quoted total the customer authorized (e.g. the prepay-at-accept quote):
+  // the charge refuses if the in-lock surcharged total EXCEEDS the quoted
+  // cents (a lower total — more account credit applied, non-credit funding —
+  // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
+  // which caps the PRE-surcharge amount due, and from expectedTotal, which
+  // demands exact equality.
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2184,6 +2192,9 @@ const StripeService = {
         total = invTotalCents / 100;
         if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
           throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+        }
+        if (maxAuthorizedTotalCents != null && invTotalCents > Math.round(Number(maxAuthorizedTotalCents))) {
+          throw new Error('Charge total exceeds the quoted total the customer authorized. Review before charging.');
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);

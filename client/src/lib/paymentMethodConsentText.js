@@ -2,7 +2,7 @@
 // Keep in sync — when the server version bumps, update this too.
 import { WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
-export const CONSENT_VERSION = 'v10_2026-07-13';
+export const CONSENT_VERSION = 'v11_2026-08-25';
 
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
@@ -28,13 +28,29 @@ export const ACH_CONSENT_TEXT = [
   'anytime in my customer portal.',
 ].join(' ');
 
+// Annual-prepay card capture (GATE_PREPAY_CARD_AND_CHARGE): the accept
+// charges the 12-month prepay invoice immediately after booking — mirror of
+// the server's PREPAY_CARD_CONSENT_TEXT.
+export const PREPAY_CARD_CONSENT_TEXT = [
+  'By checking this box, I authorize Waves Pest Control, LLC to save',
+  'this card, charge it now for my 12-month annual prepay invoice at the',
+  'exact total shown before I confirm, and charge it for future invoices',
+  'as agreed (including plan renewals), until I revoke authorization. I',
+  'can revoke anytime — email billing@wavespestcontrol.com, call',
+  `${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the card in the Waves app or my customer`,
+  'portal. A credit card surcharge of up to 2.9% may apply; the exact',
+  'surcharge and total will be shown before payment. Debit cards, prepaid',
+  'cards, and bank transfers have no added card surcharge.',
+].join(' ');
+
 // Back-compat alias. Anything that imports CONSENT_TEXT without a method
 // type falls back to the card variant.
 export const CONSENT_TEXT = CARD_CONSENT_TEXT;
 
-export function getConsentText(methodType) {
+export function getConsentText(methodType, { variant = null } = {}) {
   if (methodType === 'us_bank_account' || methodType === 'ach') {
     return ACH_CONSENT_TEXT;
   }
+  if (variant === 'prepay_card') return PREPAY_CARD_CONSENT_TEXT;
   return CARD_CONSENT_TEXT;
 }

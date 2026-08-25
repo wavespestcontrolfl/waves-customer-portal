@@ -35,7 +35,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -2495,7 +2495,11 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // completed application the saved card is charged automatically. The locked
 // card consent text is rendered verbatim behind a checkbox so the server's
 // consent snapshot records exactly what the customer agreed to.
-function RecurringCardModal({ intent, onSuccess, onCancel }) {
+// prepay: in-lane annual-prepay accept (GATE_PREPAY_CARD_AND_CHARGE) — the
+// card is charged the 12-month total right after booking, so the modal copy
+// and the recorded consent variant must say so (the exact surcharged total
+// is quoted in the PREPAY_CHARGE_QUOTE step before any charge).
+function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
@@ -2577,11 +2581,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
           ask 2026-07-12 — Auto Pay mirrors the glass UI); the inline styles
           are the non-glass fallback. */}
       <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
-        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Set up Auto Pay</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>
+          {prepay ? 'Save your card — annual prepay' : 'Set up Auto Pay'}
+        </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-          Save your card to confirm your recurring plan — nothing is charged
-          today. After each completed service, your card is charged that
-          service&rsquo;s amount automatically.
+          {prepay
+            ? 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
+            : 'Save your card to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.'}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -2592,7 +2598,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
             disabled={submitting}
             style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
           />
-          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{CARD_CONSENT_TEXT}</span>
+          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}</span>
         </label>
         {error ? (
           <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
@@ -4129,6 +4135,14 @@ function EstimateViewPageInner() {
   // /data and /accept) — force the capture branch on the next confirm so the
   // customer isn't stuck re-submitting the same 402 until a full reload.
   const recurringCardForceRef = useRef(false);
+  // In-lane prepay exact-total quote (PREPAY_CHARGE_QUOTE 402): the server
+  // computes the exact surcharged total for the card that will actually be
+  // charged and refuses to accept until the customer acknowledges it. The
+  // quote renders as a "Confirm & pay $T" step in review; the ref carries
+  // the acknowledged cents into the re-submitted accept. Server-authoritative:
+  // a stale ack simply earns a fresh quote.
+  const [prepayChargeQuote, setPrepayChargeQuote] = useState(null);
+  const prepayChargeAckRef = useRef(null);
   // Seamless single-screen booking (owner 2026-07-12): when the review card
   // owes an Auto Pay card, the Payment Element renders INLINE in the review
   // (one tap saves the card and books). inlineCardIntent holds the pre-minted
@@ -4817,6 +4831,7 @@ function EstimateViewPageInner() {
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
           recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
+          prepayChargeAcknowledgedTotalCents: prepayChargeAckRef.current ?? undefined,
         }),
       });
       if (!r.ok) {
@@ -4839,6 +4854,15 @@ function EstimateViewPageInner() {
           cardHoldSetupIntentIdRef.current = null;
           throw new Error(body.error || 'Add a card to hold your appointment to confirm this visit.');
         }
+        if (r.status === 402 && body.code === 'PREPAY_CHARGE_QUOTE' && body.quote) {
+          // In-lane prepay: the server quoted the exact surcharged total for
+          // the card on file — show it and require an explicit "Confirm &
+          // pay" tap before re-submitting with the acknowledged cents.
+          prepayChargeAckRef.current = null;
+          setPrepayChargeQuote(body.quote);
+          setCtaPhase('review');
+          return;
+        }
         if (r.status === 402 && body.code === 'RECURRING_CARD_REQUIRED') {
           // The Auto Pay card couldn't be verified — drop it so the next
           // confirm re-opens the capture modal. The server is authoritative:
@@ -4849,6 +4873,9 @@ function EstimateViewPageInner() {
           recurringCardSetupIntentIdRef.current = null;
           recurringCardForceRef.current = true;
           setInlineCardIntent(null);
+          // Any prepay quote/ack belonged to the dropped card.
+          prepayChargeAckRef.current = null;
+          setPrepayChargeQuote(null);
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
@@ -5169,6 +5196,10 @@ function EstimateViewPageInner() {
     setReservation(null);
     setPaymentPreference(null);
     setError(null);
+    // A prepay quote/ack is scoped to the abandoned review — drop it (the
+    // server re-quotes authoritatively on the next confirm regardless).
+    prepayChargeAckRef.current = null;
+    setPrepayChargeQuote(null);
     // Don't clear selectedSlotId — the customer usually goes back to tweak
     // something and continues with the same slot. The hold stays live
     // server-side (up to 15 min) and is intentionally NOT released here:
@@ -6145,6 +6176,36 @@ function EstimateViewPageInner() {
               into view along with the confirm card. Cleared on every retry
               (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
           <EstimateErrorBanner error={error} />
+          {prepayChargeQuote ? (
+            // In-lane prepay exact-total step (consent v11 promise: "the
+            // exact surcharge and total will be shown before payment"). The
+            // server refused the accept until this total is acknowledged;
+            // the button re-submits with the acknowledged cents and the
+            // charge is frozen to them server-side.
+            <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, textAlign: 'center' }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Confirm your annual prepay total
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 12 }}>
+                {fmtMoney(prepayChargeQuote.total)} due today
+              </div>
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 8, lineHeight: 1.5 }}>
+                {Number(prepayChargeQuote.surcharge) > 0
+                  ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
+                  : `Charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
+              </div>
+              <button
+                type="button"
+                disabled={ctaPhase === 'submitting'}
+                onClick={() => {
+                  prepayChargeAckRef.current = prepayChargeQuote.totalCents;
+                  setPrepayChargeQuote(null);
+                  handleConfirm();
+                }}
+                style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 15 }}
+              >{`Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
+            </div>
+          ) : null}
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
@@ -6192,6 +6253,7 @@ function EstimateViewPageInner() {
                 glassActive={!!glassContent}
                 busy={inlineConfirmBusy}
                 onStateChange={handleInlineCardState}
+                prepay={paymentPreference === 'prepay_annual'}
               />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
@@ -6245,6 +6307,7 @@ function EstimateViewPageInner() {
               intent={recurringCardIntent}
               onSuccess={handleRecurringCardSuccess}
               onCancel={handleRecurringCardCancel}
+              prepay={paymentPreference === 'prepay_annual'}
             />
           ) : null}
           {aiPanelBlock}
