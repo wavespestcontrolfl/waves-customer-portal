@@ -416,6 +416,11 @@ describe('20260825000010 service name suffix renames', () => {
     expect(invoiceById(db, 'inv-draft').title).toBe(ROACH_NEW);
     expect(db.self_booked_appointments[0].service_type).toBe(ROACH_NEW);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(ROACH_NEW);
+    // The reminder linked to the completed visit keeps the new label too
+    // (codex #3484 P2) — agreement with the visit/invoice snapshots.
+    expect(reminder(db, 'rem-1').service_type).toBe(ROACH_NEW);
+    // A reminder on a still-open visit reverted normally.
+    expect(reminder(db, 'rem-lts').service_type).toBe('Lawn + Tree & Shrub');
     // The other open visit reverted normally.
     expect(visit(db, 'v-open-2').service_type).toBe(ROACH_OLD);
   });
@@ -431,6 +436,7 @@ describe('20260825000010 service name suffix renames', () => {
       '../services/pricing-engine/v1-legacy-mapper.js',
       '../services/ask-waves-intake.js',
       '../routes/booking.js',
+      '../routes/public-quote.js',
       '../services/booking-abandon-recovery.js',
     ];
     // rodent_guarantee_combo keeps its own bundle label by design (it must

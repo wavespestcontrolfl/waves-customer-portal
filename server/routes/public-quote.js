@@ -594,9 +594,9 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.trenching ? 'Termite Trenching' : null,
     services.preSlab ? 'Pre-Slab Termite Treatment' : null,
     services.oneTimeLawn ? 'One-Time Lawn Treatment' : null,
-    services.dethatching ? 'Lawn Dethatching' : null,
-    services.plugging ? 'Lawn Plugging' : null,
-    services.topDressing ? 'Lawn Top Dressing' : null,
+    services.dethatching ? 'Lawn Dethatching Service' : null,
+    services.plugging ? 'Lawn Plugging Service' : null,
+    services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
   ].filter(Boolean).join(' + ');
