@@ -9335,9 +9335,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const termFeeEstimateRef = unmintedSetupFeeObligation
             ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
             : null;
+          // The remainder subtracts BOTH live and refunded coverage
+          // (Codex PR r20 P1) — refunded cents are never re-billed.
+          const termFeeRemainder = Math.max(0, termExpectedFeeCents - liveFeeCentsOnVisit - refundedFeeCentsTerm);
           const effectiveSetupFeeNote = (!terminalSetupFeeNote || terminalFeeCovered)
             ? ''
-            : ` ALSO: the one-time WaveGuard setup fee ($${((termExpectedFeeCents - liveFeeCentsOnVisit) / 100).toFixed(2)}${liveFeeCentsOnVisit > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
+            : ` ALSO: the one-time WaveGuard setup fee ($${(termFeeRemainder / 100).toFixed(2)}${(liveFeeCentsOnVisit + refundedFeeCentsTerm) > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
           //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),

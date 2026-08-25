@@ -126,6 +126,21 @@ test('a PARTIAL fee amount ($9.90 vs expected $99) never resolves the fee — ce
   expect(mockUpdates[0].payload.body).not.toContain('RESOLVED');
 });
 
+test('a covered annual-prepay term WAIVES the estate fee — a fee-owed alert resolves instead of instructing $99', async () => {
+  mockTables = {
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: false })),
+    'annual_prepay_terms as t': { id: 'term-1' }, // coveredTermsAsOf hit
+    scheduled_services: {}, // no annual stamp on the visit row
+    invoices: (n) => (n === 1
+      ? []
+      : [{ id: 'inv-app', status: 'paid', scheduled_service_id: 'ss-1', line_items: APP_LINE }]),
+  };
+  await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+  expect(mockUpdates).toHaveLength(1);
+  expect(mockUpdates[0].payload.body).toContain('RESOLVED');
+  expect(mockUpdates[0].payload.body).not.toContain('Still owed');
+});
+
 test('a foreign re-linked visit never reconciles another customer\'s alert', async () => {
   mockTables = {
     notifications: notificationsInOrder(alertRow({ resolvedCovered: false })),

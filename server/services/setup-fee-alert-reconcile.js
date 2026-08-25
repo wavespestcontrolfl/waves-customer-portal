@@ -317,9 +317,13 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // the no-rebill doctrine holds for the amount actually
           // refunded), but only full coverage resolves (Codex P0): a
           // $9.90 partial refund leaves the remainder owed.
-          const feeProven = expectedFeeCents !== null
-            ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
-            : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine));
+          // A covered annual-prepay term WAIVES the fee estate-wide
+          // (Codex P0) — the estate alert must never instruct a waived
+          // $99 while the term stands.
+          const feeProven = feeWaivedByTerm
+            || (expectedFeeCents !== null
+              ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
+              : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine)));
           await reconcileTerminalFeeAlerts(feeProven);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;

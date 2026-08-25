@@ -3308,6 +3308,9 @@ const InvoiceService = {
         "phone",
         "email",
         "waveguard_tier",
+        // Saved-card state rides along so a deep-linked invoice row keeps
+        // its card badge and Charge-card action (Codex PR #3476 r20 P2).
+        "card_on_file",
         "address_line1",
         "city",
         "state",
