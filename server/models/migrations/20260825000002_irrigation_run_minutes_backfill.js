@@ -64,6 +64,11 @@ function parseRunMinutesFromNotes(notes) {
   // promotable row staying NULL for the email ask, never a wrong figure
   // driving watering advice.
   if (/\b(?:twice|thrice|(?:two|three|four|\d+)\s*(?:x|times)|\d+x|cycles?|start\s+times?|(?:second|2nd)\s+run|runs?\s+again|repeats?)\b/i.test(text)) return null;
+  // (4) more than one time-of-day mention — "at 4am and 6pm", "morning and
+  // evening", "AM & PM" — is multiple daily runs however it is phrased. One
+  // mention ("Mon/Wed/Fri at 4am") is just a start time and stays fine.
+  const timeMentions = text.match(/\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|am|pm|morning|evening|night|noon|midday)\b/gi) || [];
+  if (timeMentions.length > 1) return null;
 
   if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
   return matched;
