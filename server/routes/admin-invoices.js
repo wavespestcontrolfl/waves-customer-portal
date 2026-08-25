@@ -320,6 +320,24 @@ async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
   const prePlanStatus = stamp.startsWith(`${stampBase}:prev=`)
     ? stamp.slice(`${stampBase}:prev=`.length)
     : null;
+  // A pre-plan ADMIN pause is restored FIRST (codex PR r9 P1): pauseSequence
+  // leaves is_autopay_held set, so an autopay-held sequence the admin then
+  // explicitly paused must come back as PAUSED — restoring the hold instead
+  // would let a later autopay-failure release resume reminders despite the
+  // explicit hold. The prev=paused stamp (and, for legacy bare stamps, a
+  // non-plan paused_reason) identifies it; the is_autopay_held flag rides
+  // along untouched, reproducing the exact pre-plan shape.
+  if (seq.paused_reason !== 'payment_plan_created'
+    && (prePlanStatus === 'paused' || seq.paused_reason)) {
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      status: 'paused',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+      updated_at: new Date(),
+    });
+    return 'restored_pause';
+  }
   // Autopay customers re-enter the HOLD, not the active cadence (codex PR r1
   // P1): resumeSequence would set status 'active' with a due time and the
   // next cron would dun a customer whose card is on autopay — the existing
@@ -334,27 +352,6 @@ async function rearmFollowupsForCancelledPlan(trx, invoiceId, planId) {
       updated_at: new Date(),
     });
     return 'held';
-  }
-  // A pre-plan ADMIN pause survives the plan (codex PR r6+r8 P1s): the
-  // plan stop restamped the row 'stopped' but recorded prev=paused in the
-  // stamp (and kept the paused_reason/paused_until memo). Restore the
-  // PAUSE instead of activating the cadence — the admin's hold still
-  // applies to the reopened invoice, and its own expiry/release paths
-  // decide when reminders resume. The prev= memo catches REASONLESS pauses
-  // (pauseSequence permits an empty reason, which the field check alone
-  // misses); the paused_reason check remains for legacy bare stamps.
-  // ('payment_plan_created' as paused_reason is the legacy PLAN pause
-  // shape, not an admin hold.)
-  if (seq.paused_reason !== 'payment_plan_created'
-    && (prePlanStatus === 'paused' || seq.paused_reason)) {
-    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
-      status: 'paused',
-      stopped_reason: null,
-      stopped_by_admin_id: null,
-      next_touch_at: null,
-      updated_at: new Date(),
-    });
-    return 'restored_pause';
   }
   const FollowUpsSvc = require('../services/invoice-followups');
   await FollowUpsSvc.resumeSequence(invoiceId, trx);
