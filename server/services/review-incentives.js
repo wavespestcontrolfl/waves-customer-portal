@@ -158,6 +158,11 @@ function qualifiesGoogleReview(review, policy) {
   if (!policy.eligibleSources.includes('google_review')) return false;
   if (!review || review.reviewer_name === '_stats') return false;
   if (!reviewWithinProgramWindow(review, policy)) return false;
+  // A click-tracking auto-link is probabilistic evidence, and paid payouts
+  // block later reassignment — heuristic links never mint money until a
+  // human confirms the match (manual attribution restamps link_source to
+  // 'manual', which lifts this exclusion). Pre-push P0.
+  if (review.link_source === 'click_auto') return false;
   if (policy.requireCustomerMatchForGoogle && !review.customer_id) return false;
   const rating = toInt(review.star_rating, 0);
   return rating >= Math.max(1, toInt(policy.minRating, 1));
@@ -813,6 +818,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     .whereNull('missing_since')
     .update({
       customer_id: customerId,
+      // Human confirmation: a manual attribution touch (including a
+      // missing_technician repair over a click-auto link) upgrades the
+      // provenance, which lifts the click_auto payout exclusion in
+      // qualifiesGoogleReview.
+      link_source: 'manual',
       updated_at: new Date(),
     });
   if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {

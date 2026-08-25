@@ -559,31 +559,30 @@ class GoogleBusinessService {
     try {
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('reviewClickAutoLink')) return false;
-      if (!row?.google_review_id) return false;
-      const { findConfidentClickMatch } = require('./review-click-correlation');
-      const match = await findConfidentClickMatch(row);
-      if (!match) return false;
-      // The collector entry is a detached payload — re-read the live row.
-      const live = await db('google_reviews')
-        .where({ google_review_id: row.google_review_id })
-        .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
-      if (!live || live.missing_since) return false;
-      // Linked since insert (manual match mid-sync): nothing to do, and a
-      // "come match this" bell for an already-matched review is pure noise —
-      // report handled so the caller skips the unlinked notification.
-      if (live.customer_id) return true;
-      // Write + side effects under the SAME per-location advisory lock that
-      // manual attribution holds (review-incentives.js, pre-push P1 r3):
-      // without it a manual match landing right after the conditional update
-      // could leave the review assigned to one customer while the flag flip
-      // and thank-you land on another. Lock contention (another mutator
-      // active) = not handled — fall to the manual queue rather than guess.
-      const outcome = await runExclusive(`gbp-review-sync:${live.location_id}`, async () => {
-        // Conditional-write guards (pre-push P1 r2): a manual match since
-        // the read above must not be overwritten, and a removal reconcile
-        // stamping missing_since must not be linked over. Zero rows = a
-        // manual link stands or the review is gone; either way the
-        // unlinked bell would be noise (handled, not linked).
+      if (!row?.google_review_id || !row?.location_id) return false;
+      // Everything — correlation, liveness read, write, side effects — runs
+      // under the SAME per-location advisory lock manual attribution holds
+      // (review-incentives.js, pre-push P1 r3/r4): the sole-clicker check
+      // must not go stale before the write, and a manual match must never
+      // interleave between the link and its flag-flip/thank-you. Lock
+      // contention (another mutator active) = fall to the manual queue.
+      const outcome = await runExclusive(`gbp-review-sync:${row.location_id}`, async () => {
+        const { findConfidentClickMatch } = require('./review-click-correlation');
+        const match = await findConfidentClickMatch(row);
+        if (!match) return { nomatch: true };
+        // The collector entry is a detached payload — re-read the live row.
+        const live = await db('google_reviews')
+          .where({ google_review_id: row.google_review_id })
+          .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+        if (!live || live.missing_since) return { nomatch: true };
+        // Linked since insert (manual match mid-sync): nothing to do, and a
+        // "come match this" bell for an already-matched review is pure
+        // noise — handled, so the caller skips the unlinked notification.
+        if (live.customer_id) return { handled: true };
+        // Conditional-write guards (pre-push P1 r2): a manual match or a
+        // removal-reconcile stamp that committed before the lock was free
+        // must win at the atomic write. Zero rows = a manual link stands or
+        // the review is gone; either way the unlinked bell would be noise.
         const updated = await db('google_reviews')
           .where({ id: live.id })
           .whereNull('customer_id')
@@ -593,6 +592,8 @@ class GoogleBusinessService {
         await this._markCustomerLeftReview(match.customerId);
         // Same attribution side effect as the name-match and manual paths —
         // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
+        // Payouts are NOT a side effect here: qualifiesGoogleReview excludes
+        // link_source='click_auto' until a human confirms (pre-push P0).
         const { enrollReviewThankYou } = require('./automation-enroll');
         await enrollReviewThankYou({
           customerId: match.customerId,
@@ -600,14 +601,15 @@ class GoogleBusinessService {
           starRating: live.star_rating,
           source: 'google_review_click_autolink',
         });
-        return { linked: true };
+        return { linked: true, match };
       }, { recordHealth: false });
-      if (outcome?.skipped) return false;
+      if (outcome?.skipped || outcome?.nomatch) return false;
       if (!outcome?.linked) return true;
+      const match = outcome.match;
       // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
       // match is one glance + one manual re-match away, not silent.
       try {
-        const stars = Number(live.star_rating) || 0;
+        const stars = Number(row.star_rating) || 0;
         await NotificationService.notifyAdmin(
           'review',
           `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,

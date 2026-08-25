@@ -178,6 +178,32 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('a click-auto-linked review never mints a payout until a human confirms the match', async () => {
+    const conn = createDbMock({
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-click',
+        customer_id: 'customer-1',
+        link_source: 'click_auto',
+        reviewer_name: 'SunshineGal88',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/click',
+      }],
+    });
+
+    const result = await ReviewIncentives.createPayoutForGoogleReview('google-click', { conn, policy });
+
+    expect(result).toMatchObject({ created: false, skipped: true, reason: 'not_eligible' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
   test('does not create duplicate payouts for the same Google review', async () => {
     const conn = createDbMock({
       service_records: [{
