@@ -176,20 +176,20 @@ async function findUnmintedSetupFeeObligation({
     return { owed: false };
   }
 
-  // A LIVE annual-prepay term means the accept took (or switched to) the
-  // prepay path — the fee is waived by that policy and the prepay invoice
-  // is its own billing record. CANCELLED terms do not suppress (Codex PR
-  // round 2 P1): a voided/refunded prepay flips its term to 'cancelled'
-  // and returns the customer to per-application billing — for a Mark Won
-  // accept there is no superseded acceptance invoice to restore, so the
-  // fee would be silently lost forever if a dead term satisfied this.
-  // The table's CHECK also permits 'refunded' (Codex P0, pre-push round
-  // 13) — every dead-term status is excluded, not just the cancel pair.
-  const prepayTerm = await conn('annual_prepay_terms')
-    .where({ source_estimate_id: estimate.id })
-    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'void', 'voided'])
-    .first('id');
-  if (prepayTerm) return { owed: false };
+  // A COVERED annual-prepay term means the accept took (or switched to)
+  // the prepay path and its money actually stands — the fee is waived by
+  // that policy and the prepay invoice is its own billing record.
+  // Coverage comes from the ONE canonical predicate
+  // (annual-prepay-renewals.coveredTermsAsOf — Codex P0, pre-push rounds
+  // 13 and 18): a cancelled/refunded term, a payment_pending term whose
+  // invoice never settled, or a decided term whose backing payment was
+  // clawed back all read NOT covered, and none of them may erase the
+  // setup-fee obligation.
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const coveredPrepayTerm = await AnnualPrepayRenewals.coveredTermsAsOf(conn, null)
+    .where('t.source_estimate_id', estimate.id)
+    .first('t.id');
+  if (coveredPrepayTerm) return { owed: false };
 
   // Every accept-time mint (converter setup/prepay draft, public inline
   // pay-per-application mint, invoice-mode mint) stamps
@@ -317,11 +317,9 @@ async function findUnmintedSetupFeeObligation({
     // invoice that happens to hang off the visit (Codex P0, pre-push
     // round 6) — a setup-only or otherwise fee-marked attached invoice
     // proves nothing about the application and must not clear the guard.
-    // These rows are visit-LINKED, so the manual-invoice shape (li_* ids,
-    // service-type description) also counts (round 16).
-    const { linkedInvoiceHasPositiveNonSetupCharge } = require('./estimate-first-application-invoice');
-    priorCompleted = (priorBilledRows || []).find((r) => invoiceBillsBaseApplication(r)
-      || linkedInvoiceHasPositiveNonSetupCharge(r)) || null;
+    // Only the durable base-application identity counts (round 18 —
+    // linkage alone is insufficient money evidence).
+    priorCompleted = (priorBilledRows || []).find(invoiceBillsBaseApplication) || null;
   }
 
   return {

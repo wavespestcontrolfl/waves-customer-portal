@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
     const chain = {};
     const notIn = {};
     const self = () => chain;
-    ['where', 'whereNot', 'whereIn', 'whereNull', 'orderBy'].forEach((m) => {
+    ['where', 'whereNot', 'whereIn', 'whereNull', 'orderBy', 'leftJoin', 'whereRaw', 'orWhere'].forEach((m) => {
       chain[m] = jest.fn(self);
     });
     // whereNotIn is honored on `first` so status-vocabulary filters (e.g.
@@ -72,7 +72,7 @@ function acceptedEstimate(overrides = {}) {
 function baseTables(overrides = {}) {
   return {
     estimates: acceptedEstimate(),
-    annual_prepay_terms: null,
+    'annual_prepay_terms as t': null,
     invoices: null,
     activity_log: { id: 'log-1' },
     scheduled_services: null,
@@ -238,13 +238,15 @@ test('a dead UNATTACHED stamped invoice leaves the fee unbilled — owed, dead i
   });
 });
 
-test('a LIVE annual prepay term waives the fee — not owed', async () => {
-  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'active' } });
+test('a COVERED annual prepay term (canonical coveredTermsAsOf predicate) waives the fee — not owed', async () => {
+  mockTables = baseTables({ 'annual_prepay_terms as t': { id: 'term-1' } });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(false);
 });
 
-test('a REFUNDED prepay term does not suppress either (the table CHECK permits it)', async () => {
-  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'refunded' } });
+test('a NON-covered term (refunded / unpaid payment_pending / clawed-back) does not suppress', async () => {
+  // coveredTermsAsOf returns no row for these — the detector must not
+  // maintain its own status allowlist (Codex P0, pre-push round 18).
+  mockTables = baseTables({ 'annual_prepay_terms as t': null });
   expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID })).owed).toBe(true);
 });
 
@@ -253,7 +255,7 @@ test('a live prepay invoice whose line says "setup fee waived" is NOT a billed f
   // (setup fee waived)" — after that prepay is refunded and its term
   // cancelled, the waived text must not read as fee-collected.
   mockTables = baseTables({
-    annual_prepay_terms: { id: 'term-1', status: 'cancelled' },
+    'annual_prepay_terms as t': null,
     invoices: {
       id: 'inv-1',
       status: 'refunded',
@@ -264,14 +266,6 @@ test('a live prepay invoice whose line says "setup fee waived" is NOT a billed f
   expect(result.owed).toBe(true);
 });
 
-test('a CANCELLED prepay term does not suppress — the customer is back on per-application billing', async () => {
-  // A voided/refunded prepay flips its term to 'cancelled'; for a Mark
-  // Won accept there is no superseded acceptance invoice to restore, so
-  // a dead term must not satisfy the obligation (Codex PR r2 P1).
-  mockTables = baseTables({ annual_prepay_terms: { id: 'term-1', status: 'cancelled' } });
-  const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST_ID });
-  expect(result.owed).toBe(true);
-});
 
 test('accepts before the 2026-07-10 fee rule are out of scope', async () => {
   mockTables = baseTables({ estimates: acceptedEstimate({ accepted_at: '2026-06-01T12:00:00Z' }) });
