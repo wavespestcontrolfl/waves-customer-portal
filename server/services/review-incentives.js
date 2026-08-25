@@ -822,47 +822,59 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // committed before the lock was free. Zero rows updated means liveness was
   // lost — abort BEFORE any side effect (the has_left_google_review mark,
   // thank-you enrollment, and the payout).
-  const linkedCount = await conn('google_reviews')
-    .where({ id: review.id })
-    .whereNull('missing_since')
-    .update({
-      customer_id: customerId,
-      // Human confirmation: a manual attribution touch (including a
-      // missing_technician repair over a click-auto link) upgrades the
-      // provenance, which lifts the click_auto payout exclusion in
-      // qualifiesGoogleReview.
-      link_source: 'manual',
-      updated_at: new Date(),
-    });
-  if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
-    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
-  }
-
-  // Reversal of a wrong click auto-link (pre-push P1 r6): re-matching a
-  // click_auto attribution to a DIFFERENT customer must un-suppress the
-  // previously linked one, or their review asks stay silenced by a link a
-  // human just declared wrong. Only when this review was the sole basis —
-  // another linked review still proves they reviewed. Best-effort: a
-  // reversal hiccup must not fail the attribution itself.
-  if (prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
-    try {
-      const otherLink = await conn('google_reviews')
+  //
+  // The reassignment and the click-auto reversal are ONE transaction
+  // (pre-push P1 r8): once the row is restamped 'manual' a failed reversal
+  // becomes unretryable (prior.link_source is gone), permanently silencing
+  // the wrongly linked customer's review asks — so a reversal failure must
+  // roll the reassignment back too. Reversal of a wrong click auto-link
+  // (pre-push P1 r6): re-matching to a DIFFERENT customer un-suppresses the
+  // previously linked one when this review was their only linked review;
+  // another linked review still proves they reviewed. Only the audit-log
+  // insert stays best-effort, outside the transaction.
+  let reversedCustomerId = null;
+  const linkedCount = await conn.transaction(async (trx) => {
+    const count = await trx('google_reviews')
+      .where({ id: review.id })
+      .whereNull('missing_since')
+      .update({
+        customer_id: customerId,
+        // Human confirmation: a manual attribution touch (including a
+        // missing_technician repair over a click-auto link) upgrades the
+        // provenance, which lifts the click_auto payout exclusion in
+        // qualifiesGoogleReview.
+        link_source: 'manual',
+        updated_at: new Date(),
+      });
+    const linked = (Array.isArray(count) ? count.length : count) > 0;
+    if (linked && prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
+      const otherLink = await trx('google_reviews')
         .where({ customer_id: prior.customer_id })
         .whereNot('id', review.id)
         .first('id');
       if (!otherLink) {
-        await conn('customers')
+        await trx('customers')
           .where({ id: prior.customer_id })
           .update({ has_left_google_review: false, review_marked_at: null });
-        await conn('activity_log').insert({
-          customer_id: prior.customer_id,
-          admin_user_id: attrs.adminId || null,
-          action: 'review_automark_reversed',
-          description: 'Click auto-link re-matched to a different customer — "already left a Google review" cleared; review asks resume.',
-        });
+        reversedCustomerId = prior.customer_id;
       }
+    }
+    return count;
+  });
+  if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+  }
+
+  if (reversedCustomerId) {
+    try {
+      await conn('activity_log').insert({
+        customer_id: reversedCustomerId,
+        admin_user_id: attrs.adminId || null,
+        action: 'review_automark_reversed',
+        description: 'Click auto-link re-matched to a different customer — "already left a Google review" cleared; review asks resume.',
+      });
     } catch (revErr) {
-      logger.warn(`[review-incentives] auto-mark reversal failed for customer ${prior.customer_id}: ${revErr.message}`);
+      logger.warn(`[review-incentives] auto-mark reversal audit log failed for customer ${reversedCustomerId}: ${revErr.message}`);
     }
   }
 
