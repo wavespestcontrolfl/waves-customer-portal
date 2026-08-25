@@ -107,6 +107,15 @@ async function acquireAdminSlotLocks({ trx, dates = [] } = {}) {
   return locked;
 }
 
+// Statuses that do NOT occupy a slot for ADMIN overlap probes: the
+// rebooker's set (cancelled + completed) plus the two the edit path
+// classifies as terminal/non-occupying (skipped + no_show) — a skipped or
+// no-show future visit keeps its window on the row but has freed it on the
+// calendar (Codex #3443 P2). ONE copy here; routes/admin-schedule.js
+// imports it, and probeSlotOverlap defaults to it so a freed slot never
+// draws a false double-booking warning.
+const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+
 // One copy of the advisory-overlap warning every staff surface shows —
 // dates only, no customer data.
 function slotOverlapWarning(date) {
@@ -123,7 +132,10 @@ function slotOverlapWarning(date) {
  * is ADVISORY: the conflicting rows are RETURNED for the caller to surface
  * via slotOverlapWarning; nothing throws.
  */
-async function probeSlotOverlap({ trx, date, windowStart, windowEnd, excludeServiceIds = [] } = {}) {
+async function probeSlotOverlap({
+  trx, date, windowStart, windowEnd, excludeServiceIds = [],
+  excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+} = {}) {
   if (!trx || !date || !windowStart || !windowEnd) return [];
   const dateStr = String(date).split('T')[0];
   await acquireOccupancyLock(trx, dateStr);
@@ -133,6 +145,7 @@ async function probeSlotOverlap({ trx, date, windowStart, windowEnd, excludeServ
     windowStart,
     windowEnd,
     excludeServiceIds,
+    excludeStatuses,
   });
   return clash.map((row) => ({
     id: row.id,
@@ -150,6 +163,7 @@ module.exports = {
   probeSlotOverlap,
   slotOverlapWarning,
   acquireAdminSlotLocks,
+  ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
   _internals: { parseHHMM, minutesToHHMM },

@@ -821,24 +821,28 @@ async function moveStopsToDay(input) {
 
   logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
+  // ONE `warning` key: the card renders body.result.warning only, so the
+  // overlap note and the texts-failed note must COMBINE, never overwrite
+  // each other (a later spread writing `warning` clobbered the overlap).
+  const overlapNote = overlapMovedIds.length
+    ? `${slotOverlapWarning(dateStr)} (${overlapMovedIds.length} moved stop${overlapMovedIds.length === 1 ? '' : 's'} overlap${overlapMovedIds.length === 1 ? 's' : ''} an existing appointment)`
+    : null;
+  // Top-level partial-failure signal: /confirm-action reports success (the
+  // moves DID commit), so without this the card shows a bare "Done" and
+  // the operator assumes every customer was texted.
+  const notifyNote = notifyCustomers && notificationFailures.length
+    ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote].filter(Boolean).join(' ');
+
   return {
     success: true,
     moved_count: movedStops.length,
     new_date: dateStr,
     stops: movedStops,
-    // Advisory occupancy-overlap note — the moves stand; the operator hears
-    // which committed stops now stack on the target date.
-    ...(overlapMovedIds.length ? {
-      warning: `${slotOverlapWarning(dateStr)} (${overlapMovedIds.length} moved stop${overlapMovedIds.length === 1 ? '' : 's'} overlap${overlapMovedIds.length === 1 ? 's' : ''} an existing appointment)`,
-      overlap_ids: overlapMovedIds,
-    } : {}),
+    ...(combinedWarning ? { warning: combinedWarning } : {}),
+    ...(overlapMovedIds.length ? { overlap_ids: overlapMovedIds } : {}),
     ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
-    // Top-level partial-failure signal: /confirm-action reports success (the
-    // moves DID commit), so without this the card shows a bare "Done" and
-    // the operator assumes every customer was texted.
-    ...(notifyCustomers && notificationFailures.length
-      ? { warning: `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}` }
-      : {}),
     ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),

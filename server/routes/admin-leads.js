@@ -1566,7 +1566,16 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // staff-side saves never block on schedule conflicts): the booking
       // commits and the response carries a warning naming the date.
       {
-        const clash = await findConflictingVisits({ db: trx, date: occupancyDate, windowStart, windowEnd });
+        const clash = await findConflictingVisits({
+          db: trx,
+          date: occupancyDate,
+          windowStart,
+          windowEnd,
+          // Freed terminal rows (skipped/no_show/completed) must not draw a
+          // false overlap note — same admin exclusion set every other staff
+          // probe uses (one copy: scheduling/window-rules.js).
+          excludeStatuses: require('../services/scheduling/window-rules').ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+        });
         if (clash.length) {
           bookingWarnings.push(slotOverlapWarning(occupancyDate));
         }

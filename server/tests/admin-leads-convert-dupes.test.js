@@ -769,18 +769,23 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // response carries the advisory warning naming the date.
       expect(json.warnings).toEqual([expect.stringContaining('2027-01-15')]);
       expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
-      // Probe still runs, tech-blind with the default cancelled exclusion.
+      // Probe still runs, tech-blind with the shared admin exclusion set
+      // (freed terminal rows never draw a false overlap note).
       const probe = calls.find((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
-      expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
+      expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'completed', 'skipped', 'no_show']]);
       expect(probe.ops.some((o) => o.op === 'where' && o.args[0]?.technician_id !== undefined)).toBe(false);
     });
   });
 
   it('occupancy: a clean booking carries no warnings key', async () => {
+    // Dynamic future date — a hardcoded one time-bombs the not-in-the-past
+    // validator (AGENTS.md date rule).
+    const et = jest.requireActual('../utils/datetime-et');
+    const futureDate = et.etDateString(et.addETDays(et.parseETDateTime(`${et.etDateString()}T12:00`), 30));
     const calls = [];
     install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { rebook: true });
+      const res = await post(baseUrl, { rebook: true, date: futureDate });
       expect(res.status).toBe(200);
       expect((await res.json()).warnings).toBeUndefined();
     });

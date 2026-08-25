@@ -859,6 +859,23 @@ test('a DATE-ONLY move of a legacy 07:00 row lands in failed[] — the stored wi
   expect(updateChain.update).not.toHaveBeenCalled();
 });
 
+test('presence is not change: a row ALREADY on the target date with an unchanged block is not probed and draws no overlap note', async () => {
+  // An already-stacked visit swept up in a bulk move to its own date must
+  // not be told it "now overlaps" — nothing about its slot changed. The
+  // probe is skipped outright (queue carries NO probe chain).
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, scheduled_date: '2099-01-15', status: 'pending' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.updated).toEqual(['svc-1']);
+  expect(body.overlapWarnings).toEqual([]);
+});
+
 test('a DATE-ONLY move of a windowless row (both null) still moves', async () => {
   const updateChain = chain();
   wireTrx({

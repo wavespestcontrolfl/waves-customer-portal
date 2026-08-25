@@ -11,7 +11,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
-  assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning,
+  assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText } = require('../utils/visit-notes');
@@ -630,12 +630,9 @@ function shouldRewritePendingRecurringRows(before, after) {
     .some((key) => prev[key] !== next[key]);
 }
 
-// Statuses that do NOT occupy a slot for the admin creator/editor probes:
-// the rebooker's set (cancelled + completed) plus the two the edit path
-// already classifies as terminal/non-occupying (skipped + no_show) — a
-// skipped or no-show future visit keeps its window on the row but has
-// freed it on the calendar (Codex #3443 P2).
-const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+// ADMIN_OCCUPANCY_EXCLUDE_STATUSES (which statuses do NOT occupy a slot
+// for admin probes) now lives in scheduling/window-rules.js — one copy,
+// shared with probeSlotOverlap's default — and is imported above.
 
 // Owner ruling (2026-08-25): a schedule-conflict hit on an ADMIN write is
 // ADVISORY, never a block — the save commits and the operator gets a
@@ -5285,15 +5282,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   durationMinutes: windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes),
                 });
               }
-              // Gated overlap probe (lock already held at the top of this trx);
+              // Overlap probe (lock already held at the top of this trx);
               // the moving row excludes itself. An end-less row probes its
               // DERIVED end (same effective duration), never skips. A hit is
               // advisory: the move commits and the row gets an overlap note.
+              // Presence is not change (the update-details rule): a row
+              // already on the target date whose effective block this save
+              // does not move is NOT probed — an already-stacked visit must
+              // not draw a "now overlaps" note for an action that changed
+              // nothing about its slot.
               {
                 const effStart = updates.window_start || normalizeHHMM(svc.window_start);
                 const effEnd = updates.window_end || normalizeHHMM(svc.window_end)
                   || (effStart ? deriveWindowEnd(effStart, windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes)) : null);
-                if (effStart && effEnd) {
+                const storedStart = normalizeHHMM(svc.window_start);
+                const storedEnd = normalizeHHMM(svc.window_end)
+                  || (storedStart ? deriveWindowEnd(storedStart, windowDurationMinutes(svc.window_start, svc.window_end, svc.estimated_duration_minutes)) : null);
+                const slotUnchanged = bulkTargetDate === normalizeDateOnly(svc.scheduled_date)
+                  && effStart === storedStart && effEnd === storedEnd;
+                if (!slotUnchanged && effStart && effEnd) {
                   const bulkOverlap = await probeSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
                   });
