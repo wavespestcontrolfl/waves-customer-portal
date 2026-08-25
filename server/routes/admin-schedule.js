@@ -4745,7 +4745,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // state, or reminder-row durability.
     res.status(201).json({
       id: svc.id,
-      recurringCreated: isRecurring ? (recurringCount || 4) : 1,
+      // The ACTUAL number of committed appointments (parent + children +
+      // boosters) — blackout exhaustion can place fewer than requested, and
+      // reporting the requested count made callers record a complete plan
+      // with visits missing. The shortfall itself is named in `warnings`.
+      recurringCreated: createdAppointments.length,
       appointments: createdAppointments,
       waveguardPlanSync,
       estimateAccepted: estimateAutoAccepted,
@@ -7546,6 +7550,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
             recurringCreated++;
             inserted++;
+          }
+          // All-or-nothing (mirror of the cadence-rewrite and alert-action
+          // paths): blackout exhaustion must not commit the parent as
+          // recurring (and possibly ongoing) with fewer children than the
+          // requested plan — nobody would see the shortfall until the
+          // customer's visits run out. The throw rolls the whole save back.
+          if (inserted < spawnTarget) {
+            throw Object.assign(
+              new Error(`Making this recurring can only place ${inserted} of ${spawnTarget} follow-up visit(s) — the rest fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or choose a smaller plan, then save again.`),
+              { statusCode: 409, isOperational: true, code: 'RECURRING_SPAWN_SHORTFALL' },
+            );
           }
         }
       }
