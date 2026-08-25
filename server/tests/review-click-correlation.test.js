@@ -239,4 +239,14 @@ describe('findConfidentClickMatch', () => {
     const conn = makeConn({ failClicks: true });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
+
+  test('fails closed when the raw scan fills SCAN_LIMIT (older clicks may be truncated out)', async () => {
+    // 200 rows, all one customer — sole by count, but the scan may have
+    // dropped a second customer's older click. Never confident.
+    const conn = makeConn({
+      clickRows: Array.from({ length: 200 }, (_, i) =>
+        clickRow({ redirected_at: new Date(Date.parse(REVIEW_AT) - (i + 1) * 60000).toISOString() })),
+    });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
 });

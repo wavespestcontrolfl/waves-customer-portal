@@ -54,24 +54,8 @@ function createDbMock(initialRows = {}) {
       const last = String(bindings[0] || '').trim().toLowerCase();
       return row => String(row.last_name || '').trim().toLowerCase() === last;
     }
-    // Tier-3 surname-initial expansion ("Michael F." → last_name LIKE 'f%').
-    if (sql.includes("COALESCE(last_name, ''))) LIKE LOWER(?)")) {
-      const prefix = String(bindings[0] || '').toLowerCase().replace(/%+$/, '');
-      return row => String(row.last_name || '').trim().toLowerCase().startsWith(prefix);
-    }
-    if (sql.includes("TRIM(COALESCE(last_name, '')) != ''")) {
-      return row => String(row.last_name || '').trim() !== '';
-    }
     if (sql.includes("reviewer_name IS NULL OR reviewer_name != '_stats'")) {
       return row => row.reviewer_name == null || row.reviewer_name !== '_stats';
-    }
-    // Tier-3 corroboration: delivered review asks only.
-    if (sql.includes('sms_sent_at IS NOT NULL OR sent_at IS NOT NULL')) {
-      return row => row.sms_sent_at != null || row.sent_at != null;
-    }
-    if (sql.includes('template_key IS NULL OR template_key NOT IN')) {
-      // ASK_TOUCH_SQL — the null-template canonical ask is all the tests seed.
-      return row => row.template_key == null;
     }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
@@ -1428,100 +1412,6 @@ describe('Google Business review sync', () => {
     });
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
-  });
-
-  test('a surname-initial display name ("Michael F.") matches the one recently-asked customer with that initial', async () => {
-    db.__state.rows.customers.push({
-      id: 'cust-mf',
-      first_name: 'Michael',
-      last_name: 'Fossier',
-      has_left_google_review: false,
-      review_marked_at: null,
-    });
-    // Corroboration: the initial expansion only links a customer we recently
-    // asked for a review.
-    db.__state.rows.review_requests = [{
-      id: 'ask-1', customer_id: 'cust-mf', created_at: new Date().toISOString(),
-      sent_at: new Date().toISOString(), template_key: null,
-    }];
-    global.fetch = jest.fn(async (url) => {
-      if (String(url).includes('maps.googleapis.com')) {
-        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-      }
-      return jsonResponse({ reviews: [{
-        name: 'accounts/1/locations/2/reviews/rev-initial',
-        reviewer: { displayName: 'Michael F.' },
-        starRating: 'FIVE',
-        comment: 'Great service',
-        createTime: '2026-05-25T12:00:00Z',
-      }] });
-    });
-
-    await service.syncAllReviews();
-
-    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-initial');
-    expect(review.customer_id).toBe('cust-mf');
-    expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
-  });
-
-  test('a surname-initial match with NO DELIVERED recent review ask stays unlinked (weak identity — manual queue)', async () => {
-    db.__state.rows.customers.push({
-      id: 'cust-mf',
-      first_name: 'Michael',
-      last_name: 'Fossier',
-      has_left_google_review: false,
-      review_marked_at: null,
-    });
-    // A pending row that never reached the customer is not corroboration.
-    db.__state.rows.review_requests = [{
-      id: 'ask-pending', customer_id: 'cust-mf', created_at: new Date().toISOString(),
-      sms_sent_at: null, sent_at: null, template_key: null,
-    }];
-    global.fetch = jest.fn(async (url) => {
-      if (String(url).includes('maps.googleapis.com')) {
-        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-      }
-      return jsonResponse({ reviews: [{
-        name: 'accounts/1/locations/2/reviews/rev-initial-noask',
-        reviewer: { displayName: 'Michael F.' },
-        starRating: 'FIVE',
-        comment: 'Great service',
-        createTime: '2026-05-25T12:00:00Z',
-      }] });
-    });
-
-    await service.syncAllReviews();
-
-    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-initial-noask');
-    expect(review.customer_id).toBeNull();
-    expect(db.__state.rows.customers[0].has_left_google_review).toBe(false);
-  });
-
-  test('a surname initial matching TWO customers stays unlinked (ambiguous — manual queue)', async () => {
-    db.__state.rows.customers.push(
-      { id: 'cust-mf', first_name: 'Michael', last_name: 'Fossier', has_left_google_review: false, review_marked_at: null },
-      { id: 'cust-mfar', first_name: 'Michael', last_name: 'Farley', has_left_google_review: false, review_marked_at: null },
-    );
-    global.fetch = jest.fn(async (url) => {
-      if (String(url).includes('maps.googleapis.com')) {
-        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-      }
-      return jsonResponse({ reviews: [{
-        name: 'accounts/1/locations/2/reviews/rev-initial-2',
-        reviewer: { displayName: 'Michael F.' },
-        starRating: 'FIVE',
-        comment: 'Great service',
-        createTime: '2026-05-25T12:00:00Z',
-      }] });
-    });
-
-    await service.syncAllReviews();
-
-    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-initial-2');
-    expect(review.customer_id).toBeNull();
-    expect(db.__state.rows.customers.every(c => !c.has_left_google_review)).toBe(true);
-    const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
-    expect(alert?.title).toContain('Michael F.');
   });
 
   describe('click auto-link (GATE_REVIEW_CLICK_AUTOLINK)', () => {

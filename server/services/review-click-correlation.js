@@ -146,7 +146,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     // click in the window: a customer the suggestion list hides as
     // already-attributed can still review a DIFFERENT location's profile,
     // so their click is competing evidence, not noise (pre-push P1).
-    if (_meta) _meta.distinctClickers = byCustomer.size;
+    if (_meta) {
+      _meta.distinctClickers = byCustomer.size;
+      // A scan that filled SCAN_LIMIT may have truncated an older click out
+      // of the window — sole-clicker can't be asserted over a partial read.
+      _meta.scanTruncated = clicks.length >= SCAN_LIMIT;
+    }
 
     // A customer already linked to a synced review is attributed — excluded
     // from the SUGGESTION list so it only holds open questions (codex #3264).
@@ -216,8 +221,11 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     if (candidates.length !== 1) return null;
     // Sole clicker must hold over the RAW window — including clickers the
     // suggestion list excludes as already-attributed (their click may aim at
-    // a different location's profile). Anything else is ambiguity.
+    // a different location's profile). Anything else is ambiguity, and a
+    // scan that hit its row cap can't prove the window held no one else
+    // (pre-push P1 r3) — fail closed toward the manual queue.
     if (meta.distinctClickers !== 1) return null;
+    if (meta.scanTruncated) return null;
     const only = candidates[0];
     if (only.locationMatch !== true) return null;
     if (!only.clickedBeforeReview) return null;

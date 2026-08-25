@@ -428,54 +428,20 @@ class GoogleBusinessService {
       .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
       .select('id')
       .limit(2);
-    if (matches.length === 1) return matches[0].id;
-    if (matches.length > 1) {
-      // ID-less log — reviewer names are PII (AGENTS.md); the name rides in
-      // the unlinked-review admin notification, not the plaintext log.
-      logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
+    if (matches.length !== 1) {
+      if (matches.length > 1) {
+        // ID-less log — reviewer names are PII (AGENTS.md); the name rides in
+        // the unlinked-review admin notification, not the plaintext log.
+        logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
+      }
+      // NO surname-initial expansion ("Michael F." → Michael Fossier): an
+      // initial is too weak an identity to auto-attribute (any stranger can
+      // share it — pre-push P1 ×3). Truncated display names are exactly what
+      // the click auto-link handles without needing the name at all; the
+      // rest stay in the manual queue with the likely-reviewer suggestions.
       return null;
     }
-
-    // TIER 3 — surname initial. Google truncates many display names to
-    // "Michael F." — Tier 2's exact-last-name arm can never match those. A
-    // single-LETTER final token is treated as an initial: first name exact,
-    // last name starting with that letter, still unambiguous-only. Only
-    // fires when Tiers 1-2 found nothing, so a full-surname match always
-    // outranks an initial expansion.
-    if (lastToken.length === 1 && /^[a-z]$/i.test(lastToken)) {
-      const initialMatches = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
-        .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) LIKE LOWER(?)", [`${lastToken}%`])
-        .whereRaw("TRIM(COALESCE(last_name, '')) != ''")
-        .select('id')
-        .limit(2);
-      if (initialMatches.length === 1) {
-        // Corroboration (pre-push P1): an initial is weak identity — any
-        // "Michael F." on Google could be a non-customer stranger, and Tiers
-        // 1-2 at least demand the full surname. Only accept the expansion
-        // when we actually ASKED this customer for a review recently, so the
-        // truncated display name lands on someone with a live reason to have
-        // reviewed. No ask on file → manual queue with the suggestion list.
-        // DELIVERED review asks only, same predicates as getDeliveredAskStats
-        // (pre-push P1 r2): a pending/deferred/blocked row proves nothing
-        // reached the customer, and a no-link private check-in isn't an ask.
-        const OUTREACH = require('./review-outreach-templates');
-        const asked = await db('review_requests')
-          .where({ customer_id: initialMatches[0].id })
-          .where('created_at', '>=', new Date(Date.now() - 180 * 24 * 3600 * 1000))
-          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
-          .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)')
-          .first('id');
-        if (asked) return initialMatches[0].id;
-        logger.info('[gbp] Surname-initial match lacks a recent review ask — routing to manual match, no auto-mark');
-        return null;
-      }
-      if (initialMatches.length > 1) {
-        logger.info('[gbp] Reviewer surname initial matched multiple active customers — routing to manual match, no auto-mark');
-      }
-    }
-    return null;
+    return matches[0].id;
   }
 
   /**
@@ -606,29 +572,38 @@ class GoogleBusinessService {
       // "come match this" bell for an already-matched review is pure noise —
       // report handled so the caller skips the unlinked notification.
       if (live.customer_id) return true;
-      // Conditional-write guards (pre-push P1 r2): a manual match between
-      // the read above and this write must not be overwritten, and a
-      // removal reconcile stamping missing_since concurrently must not be
-      // linked over — this flush runs OUTSIDE the per-location sync lock, so
-      // the atomic update, not the snapshot read, is the authority. Zero
-      // rows = a manual link stands or the review is gone; either way the
-      // unlinked bell would be noise (handled).
-      const updated = await db('google_reviews')
-        .where({ id: live.id })
-        .whereNull('customer_id')
-        .whereNull('missing_since')
-        .update({ customer_id: match.customerId, link_source: 'click_auto' });
-      if (!updated) return true;
-      await this._markCustomerLeftReview(match.customerId);
-      // Same attribution side effect as the name-match and manual paths —
-      // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
-      const { enrollReviewThankYou } = require('./automation-enroll');
-      await enrollReviewThankYou({
-        customerId: match.customerId,
-        locationId: live.location_id,
-        starRating: live.star_rating,
-        source: 'google_review_click_autolink',
-      });
+      // Write + side effects under the SAME per-location advisory lock that
+      // manual attribution holds (review-incentives.js, pre-push P1 r3):
+      // without it a manual match landing right after the conditional update
+      // could leave the review assigned to one customer while the flag flip
+      // and thank-you land on another. Lock contention (another mutator
+      // active) = not handled — fall to the manual queue rather than guess.
+      const outcome = await runExclusive(`gbp-review-sync:${live.location_id}`, async () => {
+        // Conditional-write guards (pre-push P1 r2): a manual match since
+        // the read above must not be overwritten, and a removal reconcile
+        // stamping missing_since must not be linked over. Zero rows = a
+        // manual link stands or the review is gone; either way the
+        // unlinked bell would be noise (handled, not linked).
+        const updated = await db('google_reviews')
+          .where({ id: live.id })
+          .whereNull('customer_id')
+          .whereNull('missing_since')
+          .update({ customer_id: match.customerId, link_source: 'click_auto' });
+        if (!updated) return { handled: true };
+        await this._markCustomerLeftReview(match.customerId);
+        // Same attribution side effect as the name-match and manual paths —
+        // the shared helper owns the gate / 4-5-star bar / once-ever dedupe.
+        const { enrollReviewThankYou } = require('./automation-enroll');
+        await enrollReviewThankYou({
+          customerId: match.customerId,
+          locationId: live.location_id,
+          starRating: live.star_rating,
+          source: 'google_review_click_autolink',
+        });
+        return { linked: true };
+      }, { recordHealth: false });
+      if (outcome?.skipped) return false;
+      if (!outcome?.linked) return true;
       // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
       // match is one glance + one manual re-match away, not silent.
       try {
