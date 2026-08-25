@@ -36,6 +36,10 @@ const mockVoidInvoice = jest.fn(async () => ({ status: 'void' }));
 const mockCreateInvoice = jest.fn(async () => ({ id: 'inv-new', invoice_number: 'WPC-2026-0401' }));
 const mockSendInvoice = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/invoice', () => ({
+  // Real shared base-application identity (PR #3476) — the undo path
+  // classifies live-invoice lines with it.
+  lineIsBaseApplication: (li) => /_primary$/.test(String(li?.client_id || ''))
+    || /^first (service )?application$/i.test(String(li?.description || '').trim()),
   voidInvoice: (...args) => mockVoidInvoice(...args),
   create: (...args) => mockCreateInvoice(...args),
   sendViaSMSAndEmail: (...args) => mockSendInvoice(...args),

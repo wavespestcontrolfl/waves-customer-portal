@@ -83,21 +83,111 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { l
   return canceledSetupFee ? { invoice: null, liveBeside: null, canceledSetupFee } : { invoice: null, liveBeside: null };
 }
 
-// Does this invoice row carry the one-time setup-fee charge? Authoritative
+// Does this invoice row carry the one-time setup-fee CHARGE? Authoritative
 // source: a parsed line_items entry (the acceptance mint writes
-// 'WaveGuard Membership — one-time setup fee'); provenance fallback for rows
-// without parseable line items: the acceptance notes name the fee only when
-// it was charged ("$99 setup fee plus first application" vs
-// "first application only").
+// 'WaveGuard Membership — one-time setup fee') — but only a POSITIVE line
+// whose text does not say the fee was WAIVED: the converter's real
+// annual-prepay line reads "12 months prepaid (setup fee waived)", and
+// counting it as a billed fee would let a refunded prepay read as
+// fee-collected while nothing was ever billed for it (Codex P0, pre-push
+// round 13). Provenance fallback for rows without parseable line items:
+// the acceptance notes name the fee only when it was charged
+// ("$99 setup fee plus first application" vs "first application only"),
+// with the same waived-language rejection.
 function invoiceContainsSetupFeeLine(row) {
   let items = row?.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
   if (Array.isArray(items) && items.length) {
-    return items.some((li) => /setup fee/i.test(String(li?.description || '')));
+    return items.some((li) => {
+      const desc = String(li?.description || '');
+      if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return false;
+      const qty = li?.quantity != null ? Number(li.quantity) : 1;
+      const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+      return Number.isFinite(amt) && amt > 0;
+    });
   }
-  return /setup fee/i.test(String(row?.notes || ''));
+  const notes = String(row?.notes || '');
+  return /setup fee/i.test(notes) && !/setup fee waiv/i.test(notes);
+}
+
+// Does this invoice bill the BASE plan application? Identity comes from
+// the ONE shared predicate (InvoiceService.lineIsBaseApplication — the
+// same classifier the switch-supersede restore and prepay-switch undo
+// use), so line-identity changes land in one place. This wrapper adds
+// the BILLING-EVIDENCE layer its callers need: the line must carry a
+// POSITIVE amount (a refunded/credited base line is not the application
+// being billed — Codex P0 rounds 6–11), and unreadable rows FAIL CLOSED
+// (prove nothing): the callers skip parking or resolve alerts on this
+// evidence.
+function invoiceBillsBaseApplication(row) {
+  const { lineIsBaseApplication } = require('./invoice');
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items) || !items.length) return false;
+  return items.some((li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li);
+  });
+}
+
+// STRICT billed-fee evidence for OBLIGATION-CLEARING and ALERT-RESOLVING
+// decisions: a positive parsed non-waived setup-fee LINE, no notes
+// fallback — provenance text on an unreadable row proves nothing about
+// money actually billed (Codex P0, pre-push round 17).
+// invoiceContainsSetupFeeLine (above) keeps its notes fallback for the
+// #3474 canceledSetupFee PARKING decision, where matching errs toward
+// caution (an alert), never toward clearing an obligation.
+function invoiceHasPositiveSetupFeeLine(row) {
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items) || !items.length) return false;
+  return items.some((li) => {
+    const desc = String(li?.description || '');
+    if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return false;
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0;
+  });
+}
+
+// Cents totals for coverage comparison (Codex PR r7 P1): boolean
+// any-positive-line evidence lets a $9.90 typo retire a $99 obligation —
+// resolution compares SUMMED live coverage against the frozen expected
+// amounts persisted on the alert.
+function sumPositiveSetupFeeCents(row) {
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items)) return 0;
+  return items.reduce((sum, li) => {
+    const desc = String(li?.description || '');
+    if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return sum;
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0 ? sum + Math.round(amt * 100) : sum;
+  }, 0);
+}
+
+function sumBaseApplicationCents(row) {
+  let items = row?.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (!Array.isArray(items)) return 0;
+  const { lineIsBaseApplication } = require('./invoice');
+  return items.reduce((sum, li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li) ? sum + Math.round(amt * 100) : sum;
+  }, 0);
 }
 
 module.exports = {
@@ -105,4 +195,8 @@ module.exports = {
   findFirstApplicationInvoiceForEstimateService,
   isAutoGeneratedPayPerApplicationInvoice,
   invoiceContainsSetupFeeLine,
+  invoiceHasPositiveSetupFeeLine,
+  invoiceBillsBaseApplication,
+  sumPositiveSetupFeeCents,
+  sumBaseApplicationCents,
 };

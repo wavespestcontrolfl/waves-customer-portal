@@ -673,6 +673,7 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
     db.transaction = jest.fn(async (fn) => {
       const trx = (table) => handler(table);
       trx.transaction = async (inner) => inner(trx); // insertInvoiceRow savepoint
+      trx.raw = jest.fn(async () => ({ rows: [] })); // advisory mint lock (PR #3476)
       return fn(trx);
     });
     return { getInsertedInvoice: () => insertedInvoice };

@@ -9572,6 +9572,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             .first('scheduled_date');
           acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+          // The shared invoice MINT lock joins the pre-row-lock rung too
+          // (PR #3476 r22 P1): scheduled-invoice writers lock advisory →
+          // customer KEY SHARE → visit row, while this txn locks customer
+          // and estimate rows below — taking the advisory key only inside
+          // commitReservation (after those row locks) ABBA-deadlocks
+          // against a concurrent writer holding the advisory key and
+          // waiting on the customer row. Reentrant no-op downstream.
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, acceptHoldRow.id);
         }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
@@ -9625,6 +9634,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? { ...acceptedEstDataForPricing }
         : null;
       if (nextEstimateData) {
+        // Freeze the RENDERED setup fee at acceptance (PR #3476, Codex
+        // r10 P1): a fee-less stored snapshot is repaired WITH the fee at
+        // view time, but acceptance persists the original data — without
+        // this stamp the unminted-fee detector would later fall back to
+        // whatever WAVEGUARD_SETUP_FEE is configured to, not what the
+        // customer accepted. Best-effort: on failure the detector's
+        // constant fallback stands.
+        try {
+          const EstimateConverter = require('../services/estimate-converter');
+          const frozenRecurring = EstimateConverter.recurringServicesFromEstimateData(nextEstimateData);
+          if (nextEstimateData.acceptedSetupFeeAmount == null
+            && EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+              recurringServices: frozenRecurring, estimateData: nextEstimateData,
+            })) {
+            nextEstimateData.acceptedSetupFeeAmount = EstimateConverter.WAVEGUARD_SETUP_FEE;
+          }
+        } catch (feeFreezeErr) {
+          logger.warn(`[estimate-public] accept-time setup-fee freeze skipped: ${feeFreezeErr.message}`);
+        }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       if (selectedFrequency) {
@@ -10124,6 +10152,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // FOR UPDATE reload serializes against such writes; a row that
           // has become cross-family or a free callback aborts the adopt
           // with the same re-pick 409 as a lost claim.
+          // Canonical lock order (Codex PR #3476 r19 P1): the shared
+          // advisory mint lock comes BEFORE the visit row FOR UPDATE —
+          // create() takes the advisory lock later in this transaction,
+          // and every scheduled-invoice writer locks advisory-then-row;
+          // taking the row first here would ABBA-deadlock against them.
+          // Re-acquisition at create() is a same-transaction no-op.
+          {
+            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
+          }
           const lockedAdoptRow = await trx('scheduled_services')
             .leftJoin('services', 'services.id', 'scheduled_services.service_id')
             .select(
@@ -22180,6 +22218,11 @@ async function handleEstimateAsk(req, res, next) {
 
 module.exports = router;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
+// Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
+// snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
+// counts as fee-shown (PR #3476).
+module.exports.isWaveGuardSetupOneTimeItem = isWaveGuardSetupOneTimeItem;
+module.exports.oneTimeItemAmount = oneTimeItemAmount;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;

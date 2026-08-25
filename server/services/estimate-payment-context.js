@@ -232,6 +232,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   const term = await resolveAnnualPrepayTerm(estimate, scheduledServiceId);
 
   let annualPrepay = null;
+  // Canonical coverage result, hoisted for the gating below (Codex PR r3
+  // P2): a status-live term whose backing money is unpaid/clawed back
+  // reads NOT covered — the completion detector then treats the fee as
+  // owed, and the card must run the same detector instead of hiding the
+  // warning behind prepay context. null = predicate unreadable (fall back
+  // to status semantics).
+  let termCanonicallyCovered = null;
   if (term) {
     let invoice = null;
     if (term.prepay_invoice_id) {
@@ -251,6 +258,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     // reads NOT paid). Fall back to the term's own status only when the
     // predicate can't be read.
     const covered = await termCoverageStillValid(term);
+    termCanonicallyCovered = covered;
     const paid = covered != null ? covered : TERM_PAID_STATUSES.has(status);
     // Visit-level coverage: the term's money being valid ≠ THIS visit covered
     // (detached after a coverage-window change, service mismatch, date outside
@@ -297,8 +305,26 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     };
   }
 
+  // A DEAD term (cancelled/refunded prepay) returned the customer to
+  // per-application billing — it must not gate the acceptance-invoice /
+  // setup-fee-missing section or claim billing-term authority, or the
+  // card shows only prepay context while completion parks the visit for
+  // the missing fee (Codex PR round 2 P1). The annualPrepay panel above
+  // still renders the term's history either way.
+  // A cancel-at-renewal term rides out its PAID window as covered
+  // (coveredTermsAsOf's decided-lapse branch) — status alone must not
+  // force standard billing while coverage stands, or the card renders
+  // "do not collect" beside "Per application" (Codex PR r9 P2).
+  const termIsDead = !!term
+    && ['cancelled', 'canceled', 'refunded', 'void', 'voided'].includes(String(term.status || '').toLowerCase())
+    && termCanonicallyCovered !== true;
   let acceptanceInvoice = null;
-  if (!term) {
+  let setupFeeMissing = null;
+  // An UNCOVERED live-status term (unpaid payment_pending, clawed-back
+  // money) also opens this section (Codex PR r3 P2): completion's
+  // detector treats the fee as owed there, so the card must run the same
+  // detector instead of hiding the warning behind prepay context.
+  if (!term || termIsDead || termCanonicallyCovered === false) {
     const inv = await findAcceptanceInvoice(estimate);
     if (inv) {
       acceptanceInvoice = {
@@ -312,6 +338,71 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         firstApplicationAmount: sumMatchingLines(inv, FIRST_APPLICATION_RE),
       };
     }
+    // The canonical detector ALWAYS decides (Codex PR r8 P1): a partial
+    // fee line ($9.90 on a $99 obligation) or an application-only invoice
+    // must not hide the warning — completion's cents-exact check would
+    // still park, and the card must never contradict completion. A fully
+    // billed fee simply reads not-owed inside the detector.
+    {
+      // Was the setup fee simply never minted (standard Mark Won accepts
+      // skip it)? Surface it so the card can warn BEFORE the visit
+      // completes and parks.
+      // Fail-soft like every read here: unknown degrades to no warning.
+      try {
+        const { findUnmintedSetupFeeObligation } = require('./setup-fee-obligation');
+        // No excludeScheduledServiceId here (unlike the completion caller):
+        // for DISPLAY, a visit that already completed means the leak
+        // already happened — the warning would be stale advice, so
+        // firstVisitAlreadyCompleted should count this visit too.
+        // Qualify against the DISPLAYED visit (Codex PR r2 P2): a
+        // non-recurring add-on sharing the estimate never parks —
+        // completion passes the row's recurrence identity, so the card
+        // must judge the same row or it warns about a visit that will
+        // invoice normally. No visit in scope (estimate-only surfaces)
+        // → estimate-level warning stands.
+        let visitPlanRow = null;
+        if (scheduledServiceId) {
+          visitPlanRow = await db('scheduled_services')
+            .where({ id: scheduledServiceId })
+            .first('is_recurring', 'recurring_parent_id', 'estimated_price') || null;
+        }
+        const obligation = await findUnmintedSetupFeeObligation({
+          sourceEstimateId: estimate.id,
+          customerId: estimate.customer_id,
+          visitPlanRow,
+        });
+        if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+          setupFeeMissing = {
+            // Display the REMAINDER when partial coverage stands.
+            setupFee: Number.isFinite(Number(obligation.setupFeeRemainingCents))
+              ? Number(obligation.setupFeeRemainingCents) / 100
+              : obligation.setupFee,
+            // The card's copy must match what completion will DO: with a
+            // live application-only acceptance invoice standing, only the
+            // FEE is parked — never "setup fee + first application"
+            // (Codex PR r11 P2).
+            // CENTS-EXACT against the visit's own price when one is in
+            // scope (Codex PR r12 P1 — completion compares summed
+            // coverage to the full expected application cents; a partial
+            // line must not promise a fee-only park).
+            applicationCovered: (() => {
+              if (!acceptanceInvoice
+                || INVOICE_DEAD_STATUSES.includes(String(acceptanceInvoice.status || '').toLowerCase())) return false;
+              const appCents = Math.round((Number(acceptanceInvoice.firstApplicationAmount) || 0) * 100);
+              const expectCents = Math.round((Number(visitPlanRow?.estimated_price) || 0) * 100);
+              return expectCents > 0 ? appCents >= expectCents : appCents > 0;
+            })(),
+            // The card's copy must describe what completion will ACTUALLY
+            // do (Codex PR r2 P2): parking only happens while the gate is
+            // on; while off, completion mints the bare per-application
+            // invoice and the fee must be billed by hand.
+            parkingEnabled: process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true',
+          };
+        }
+      } catch (err) {
+        logger.warn('[estimate-payment-context] unminted setup-fee check failed', { error: err.message });
+      }
+    }
   }
 
   // Billing term: a prepay term is authoritative; otherwise the persisted
@@ -319,11 +410,22 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // the converter's standard (pay-per-application) path. Null when nothing is
   // known — the card renders nothing rather than guessing.
   let billingTerm = null;
-  if (term) billingTerm = 'prepay_annual';
-  else if (paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
-  else if (paymentPreference || acceptanceInvoice) billingTerm = 'standard';
+  // An uncovered term keeps prepay billing-term authority ONLY while no
+  // setup-fee obligation stands — an owed fee means completion will park
+  // on the standard path, and the card must say so (the warning row
+  // renders under the standard section).
+  if (term && !termIsDead && !(termCanonicallyCovered === false && setupFeeMissing)) billingTerm = 'prepay_annual';
+  // The persisted preference must not re-select prepay past an uncovered
+  // term with an owed fee (Codex PR r21 P2) — same exclusion as above.
+  else if (!termIsDead && !(termCanonicallyCovered === false && setupFeeMissing)
+    && paymentPreference === 'prepay_annual') billingTerm = 'prepay_annual';
+  // An owed-but-unminted setup fee proves the accept converted onto the
+  // standard per-application plan even when no explicit preference was ever
+  // stored ("inferred" profiles) — without this the card would render no
+  // billing rows at all and the warning below it would never show.
+  else if (paymentPreference || acceptanceInvoice || setupFeeMissing) billingTerm = 'standard';
 
-  return { billingTerm, paymentPreference, annualPrepay, acceptanceInvoice };
+  return { billingTerm, paymentPreference, annualPrepay, acceptanceInvoice, setupFeeMissing };
 }
 
 module.exports = {

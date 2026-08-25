@@ -17,6 +17,16 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
+// Never-minted setup-fee detector (setup-fee-obligation): tests control the
+// obligation directly; an Error spec exercises the fail-soft catch.
+let mockSetupFeeObligation = { owed: false };
+jest.mock('../services/setup-fee-obligation', () => ({
+  findUnmintedSetupFeeObligation: jest.fn(async () => {
+    if (mockSetupFeeObligation instanceof Error) throw mockSetupFeeObligation;
+    return mockSetupFeeObligation;
+  }),
+}));
+
 // Canonical coverage predicate (annual-prepay-renewals.coveredTermsAsOf):
 // tests control whether the term counts as still-valid paid coverage. null =
 // not covered (refunded/void); an object = covered; throwing exercises the
@@ -79,6 +89,7 @@ beforeEach(() => {
   mockCoveredTermRow = null;
   mockCoveredThrows = false;
   mockCoversVisit = false;
+  mockSetupFeeObligation = { owed: false };
 });
 
 describe('sumMatchingLines — exact cents from persisted line items', () => {
@@ -350,6 +361,94 @@ describe('buildEstimatePaymentContext', () => {
     expect(invoiceChain.where).toHaveBeenCalledWith('notes', 'like', '%selected pay per application%');
   });
 
+  it('runs the detector beside an application-ONLY acceptance invoice — its presence is not fee coverage', async () => {
+    // A stamped "first application only" invoice is legitimate converter
+    // output (Codex pre-push r6 P1): the card must still warn that the
+    // setup fee was never billed.
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'pay_at_visit' },
+      annual_prepay_terms: null,
+      invoices: {
+        id: 'inv-7',
+        title: 'First Service Application',
+        status: 'sent',
+        total: '135.67',
+        notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+        line_items: JSON.stringify([
+          { description: 'First service application', quantity: 1, unit_price: 135.67 },
+        ]),
+      },
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-7' });
+    expect(ctx.acceptanceInvoice).toMatchObject({ id: 'inv-7', firstApplicationAmount: 135.67 });
+    // The live application-only invoice marks the application covered —
+    // the card then promises a FEE-ONLY park (Codex PR r11 P2).
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false, applicationCovered: true });
+  });
+
+  it('flags an owed-but-unminted setup fee and forces the standard term so the card can warn', async () => {
+    // The incident's exact shape: no stored payment preference ("inferred"), no
+    // acceptance invoice anywhere — without the setupFeeMissing fallback the
+    // term would stay null and the card would render no billing rows at all.
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: null,
+      invoices: null,
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-8' });
+    expect(ctx.billingTerm).toBe('standard');
+    expect(ctx.acceptanceInvoice).toBe(null);
+    // parkingEnabled mirrors the server gate so the card describes what
+    // completion will ACTUALLY do (gate unset in tests → false).
+    expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: false, applicationCovered: false });
+  });
+
+  it('reports parkingEnabled true while the completion parking gate is on', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: null,
+      invoices: null,
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: false };
+    process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
+    try {
+      const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-8b' });
+      expect(ctx.setupFeeMissing).toEqual({ setupFee: 99, parkingEnabled: true, applicationCovered: false });
+    } finally {
+      delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+    }
+  });
+
+  it('suppresses the setup-fee warning once the first visit already completed (stale advice)', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: null,
+      invoices: null,
+    });
+    mockSetupFeeObligation = { owed: true, setupFee: 99, firstVisitAlreadyCompleted: true };
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-9' });
+    expect(ctx.setupFeeMissing).toBe(null);
+    expect(ctx.billingTerm).toBe(null);
+  });
+
+  it('fails soft to no warning when the detector read throws', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: null,
+      invoices: null,
+    });
+    mockSetupFeeObligation = new Error('detector down');
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-10' });
+    expect(ctx.setupFeeMissing).toBe(null);
+    expect(ctx.billingTerm).toBe(null);
+  });
+
   it('flags a chosen-but-unrecorded prepay so the card never invents an amount', async () => {
     configureDb({
       scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'prepay_annual' },
@@ -371,6 +470,7 @@ describe('buildEstimatePaymentContext', () => {
       paymentPreference: null,
       annualPrepay: null,
       acceptanceInvoice: null,
+      setupFeeMissing: null,
     });
   });
 

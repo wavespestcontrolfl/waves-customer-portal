@@ -11929,10 +11929,17 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
               .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
               .select('id', 'invoice_number', 'line_items');
             if (liveOnVisit.length > 0) {
-              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some((li) => (
-                /_primary$/.test(String(li?.client_id || ''))
-                || /^First service application$/i.test(String(li?.description || '').trim())
-              ));
+              // Shared base-application identity (InvoiceService, PR
+              // #3476) PLUS the positive-amount billing-evidence layer
+              // the identity contract requires (Codex PR r10 P1): a
+              // zero/credited legacy "First application" line is not a
+              // billed application and must not strip the restore.
+              const { lineIsBaseApplication } = require('../services/invoice');
+              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some((li) => {
+                const qty = li?.quantity != null ? Number(li.quantity) : 1;
+                const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+                return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li);
+              });
               const unreadable = liveOnVisit.some((inv) => invoiceLineItems(inv.line_items).length === 0);
               if (unreadable) {
                 return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'a live invoice on this visit has unreadable lines — reconcile from Invoices' } };

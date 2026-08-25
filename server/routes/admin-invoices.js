@@ -713,9 +713,61 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'serviceDate must be YYYY-MM-DD' });
     }
 
-    const invoice = await InvoiceService.create({
-      customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
-    });
+    // Serialize LINKED manual creates under the shared mint lock (owner
+    // ruling 2026-08-25, Codex #3476): an invoice attached to a scheduled
+    // visit must not commit between a completion-alert transaction's
+    // coverage scans and its instruction write. Unlinked creates keep the
+    // untransacted best-effort path (see InvoiceService.create's accrual
+    // comment for why every create is not blanket-wrapped).
+    let linkedScheduledServiceId = null;
+    if (serviceRecordId) {
+      // FAIL CLOSED (Codex P0): a lookup error must not silently take the
+      // unlinked/unlocked path — only a successful read proving no
+      // scheduled visit may skip the mint lock. The error propagates and
+      // the operator retries.
+      const srLink = await db('service_records')
+        .where({ id: serviceRecordId })
+        .first('scheduled_service_id');
+      linkedScheduledServiceId = srLink?.scheduled_service_id || null;
+    }
+    // A STAMPED manual invoice ("accepted estimate #<id>" in notes — the
+    // exact linkage the setup-fee alert instructs) serializes on the
+    // alert's own dedupe advisory lock, so it can never commit between
+    // the alert transaction's coverage scans and its instruction write,
+    // and it retires the alert immediately after creation (Codex P0).
+    const stampedEstimateId = (String(notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const createArgs = {
+      customerId,
+      serviceRecordId,
+      // Persist the visit link too (Codex P0): reconciliation credits an
+      // invoice to a SECONDARY parked visit only via scheduled_service_id.
+      ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
+      title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
+    };
+    const invoice = (linkedScheduledServiceId || stampedEstimateId)
+      ? await db.transaction(async (trx) => {
+        if (linkedScheduledServiceId) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
+        }
+        if (stampedEstimateId) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${stampedEstimateId}`]);
+        }
+        return InvoiceService.create({ ...createArgs, database: trx });
+      })
+      : await InvoiceService.create(createArgs);
+    if (stampedEstimateId) {
+      // Post-commit retirement: the new coverage rewrites/resolves the
+      // parked alert now, not on the next completion. Best-effort — the
+      // invoice exists either way, and completion reconciles again.
+      await require('../services/setup-fee-alert-reconcile')
+        .reconcileSetupFeeAlert({
+          customerId: invoice.customer_id,
+          sourceEstimateId: stampedEstimateId,
+          actorLabel: ` manual-invoice ${invoice.id}:`,
+        })
+        .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after manual invoice ${invoice.id}: ${err.message}`));
+    }
 
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -744,6 +796,12 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
     const invoice = await InvoiceService.createFromService(serviceRecordId, {
       amount: parseFloat(amount), description, taxRate,
     });
+    // Coverage-creating transition (PR #3476): a linked from-service
+    // invoice may satisfy a parked setup-fee alert — retire it now, not
+    // on the daily sweep. Post-commit, best-effort.
+    await require('../services/setup-fee-alert-reconcile')
+      .reconcileSetupFeeAlertForInvoice(invoice)
+      .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after from-service invoice ${invoice?.id}: ${err.message}`));
 
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -1118,7 +1176,26 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
 // PUT /:id — update invoice
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
+    // Pre-edit provenance FIRST (Codex PR r12 P2): an edit can strip the
+    // "accepted estimate #" note along with a tracked line — the post-edit
+    // row then carries no linkage and the regression would hide until the
+    // daily sweep. Reconcile under BOTH provenances (idempotent by key).
+    let preEditRow = null;
+    try {
+      preEditRow = await db('invoices')
+        .where({ id: req.params.id })
+        .first('id', 'notes', 'scheduled_service_id', 'customer_id');
+    } catch { preEditRow = null; /* provenance capture is best-effort */ }
     const invoice = await InvoiceService.update(req.params.id, req.body);
+    // Coverage-changing transition (PR #3476): a line-item edit can add or
+    // remove the charge the setup-fee alert tracks — reconcile post-commit.
+    const reconcile = require('../services/setup-fee-alert-reconcile');
+    await reconcile.reconcileSetupFeeAlertForInvoice(invoice)
+      .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after edit ${req.params.id}: ${err.message}`));
+    if (preEditRow) {
+      await reconcile.reconcileSetupFeeAlertForInvoice(preEditRow)
+        .catch((err) => logger.error(`[admin-invoices] pre-edit setup-fee alert reconcile failed for ${req.params.id}: ${err.message}`));
+    }
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
   } catch (err) {

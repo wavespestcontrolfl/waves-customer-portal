@@ -20,6 +20,9 @@ const DEFAULTS = {
   highValueEstimateAmount: 1000,
   highValueInvoiceAmount: 1000,
 };
+// Stale unsent DRAFT invoices are surfaced by the dashboard-alerts
+// `stale_draft_invoices` computed alert (services/dashboard-alerts.js) —
+// the feed the dashboard actually reads. Deliberately NOT duplicated here.
 
 const PRE_ARRIVAL_JOB_STATUSES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route']);
 const DONE_JOB_STATUSES = new Set(['completed', 'cancelled', 'canceled', 'skipped', 'no_show']);

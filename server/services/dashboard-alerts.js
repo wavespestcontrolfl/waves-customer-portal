@@ -259,6 +259,64 @@ async function computeDashboardAlertsUncached() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }
 
+  // 6b. Billable draft invoices unsent for 3+ days (owner ruling
+  //     2026-08-24, after a 7-week-old unsent completion draft was caught
+  //     by hand). Drafts are invisible to dunning, the follow-up
+  //     sequences, and the unpaid list — nothing chases the money until a
+  //     human notices. This is the feed the dashboard ACTUALLY reads
+  //     (Codex PR round 2: the command-center root endpoint has no UI
+  //     caller), so the predicate lives here too. Statement-accrued
+  //     NET-terms drafts (payer_statement_id) stay unsent BY DESIGN.
+  try {
+    const staleDraftCutoff = new Date(Date.now() - 3 * 86400000);
+    const staleDraftRows = await db('invoices as i')
+      .leftJoin('scheduled_services as ss', 'i.scheduled_service_id', 'ss.id')
+      .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
+      .whereNull('i.archived_at')
+      .where('i.status', 'draft')
+      .whereNull('i.sent_at')
+      .whereNull('i.sms_sent_at')
+      .whereNull('i.payer_statement_id')
+      // Card-lane ANCHOR invoices are deliberately draft/unsent until
+      // their visit completes — keyed to the PERSISTED lane marker
+      // (estimate_data.recurringCardLaneAccepted, stamped at accept), not
+      // visit status alone: an ordinary payable acceptance invoice
+      // attached to a future visit must still surface when it was never
+      // sent (Codex PR r5 P2 → r11 P2).
+      .where(function anchorHoldExcluded() {
+        this.whereNull('i.scheduled_service_id')
+          .orWhere('ss.status', 'completed')
+          .orWhereRaw("COALESCE(e.estimate_data::jsonb->>'recurringCardLaneAccepted', 'false') <> 'true'");
+      })
+      .where('i.total', '>', 0)
+      .where('i.created_at', '<', staleDraftCutoff)
+      .orderBy('i.created_at', 'asc')
+      .select('i.id', 'i.invoice_number');
+    const staleDraftCount = staleDraftRows.length;
+    if (staleDraftCount > 0) {
+      // The link must land the operator ON the offending row (Codex PR r4
+      // P2): the invoices page reads ?invoice=<id> but has no status
+      // filter, so an old draft would otherwise stay buried past page
+      // one. Single hit deep-links it; multiple hits name the oldest few
+      // in the label so they are searchable.
+      const named = staleDraftRows.slice(0, 3)
+        .map((r) => r.invoice_number || r.id).join(', ');
+      alerts.push({
+        id: 'stale_draft_invoices',
+        // Collection WORK, not a passive observation — actions rank ahead
+        // of same-severity alerts in the inbox (Codex PR r8 P2).
+        kind: 'action',
+        severity: 'warn',
+        count: staleDraftCount,
+        // Sorted membership so a dismissal re-surfaces when the QUEUE
+        // changes even at the same count (Codex PR r5 P2).
+        members: queueMembers(staleDraftRows.map((r) => r.id)),
+        label: `${staleDraftCount} draft invoice${staleDraftCount === 1 ? '' : 's'} unsent 3+ days — invisible to dunning (${named}${staleDraftCount > 3 ? ', …' : ''})`,
+        href: `/admin/invoices?invoice=${encodeURIComponent(staleDraftRows[0].id)}`,
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
+
   // 7. Persisted admin command-center alerts. These are event-backed
   // operating alerts created by domain workflows such as WaveGuard lawn
   // readiness snapshots.
