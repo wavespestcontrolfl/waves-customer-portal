@@ -624,12 +624,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // comment for why every create is not blanket-wrapped).
     let linkedScheduledServiceId = null;
     if (serviceRecordId) {
+      // FAIL CLOSED (Codex P0): a lookup error must not silently take the
+      // unlinked/unlocked path — only a successful read proving no
+      // scheduled visit may skip the mint lock. The error propagates and
+      // the operator retries.
       const srLink = await db('service_records')
         .where({ id: serviceRecordId })
-        .first('scheduled_service_id')
-        .catch(() => null);
+        .first('scheduled_service_id');
       linkedScheduledServiceId = srLink?.scheduled_service_id || null;
     }
+    // A STAMPED manual invoice ("accepted estimate #<id>" in notes — the
+    // exact linkage the setup-fee alert instructs) serializes on the
+    // alert's own dedupe advisory lock, so it can never commit between
+    // the alert transaction's coverage scans and its instruction write,
+    // and it retires the alert immediately after creation (Codex P0).
+    const stampedEstimateId = (String(notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
     const createArgs = {
       customerId,
       serviceRecordId,
@@ -638,13 +647,30 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
       title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
     };
-    const invoice = linkedScheduledServiceId
+    const invoice = (linkedScheduledServiceId || stampedEstimateId)
       ? await db.transaction(async (trx) => {
-        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-        await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
+        if (linkedScheduledServiceId) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
+        }
+        if (stampedEstimateId) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${stampedEstimateId}`]);
+        }
         return InvoiceService.create({ ...createArgs, database: trx });
       })
       : await InvoiceService.create(createArgs);
+    if (stampedEstimateId) {
+      // Post-commit retirement: the new coverage rewrites/resolves the
+      // parked alert now, not on the next completion. Best-effort — the
+      // invoice exists either way, and completion reconciles again.
+      await require('../services/setup-fee-alert-reconcile')
+        .reconcileSetupFeeAlert({
+          customerId: invoice.customer_id,
+          sourceEstimateId: stampedEstimateId,
+          actorLabel: ` manual-invoice ${invoice.id}:`,
+        })
+        .catch((err) => logger.error(`[admin-invoices] setup-fee alert reconcile failed after manual invoice ${invoice.id}: ${err.message}`));
+    }
 
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
