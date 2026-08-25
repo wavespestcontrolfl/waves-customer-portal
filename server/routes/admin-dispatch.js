@@ -9309,10 +9309,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             invoiceBillsBaseApplication: terminalBillsApp,
           } = require('../services/estimate-first-application-invoice');
           const termExpectedFeeCents = Math.round(Number(unmintedSetupFeeObligation?.setupFee || 0) * 100);
-          const liveFeeCentsOnVisit = onVisitLockedRows
+          // Stamped fee invoices are RE-SCANNED inside this transaction
+          // (Codex PR r18 P1): a stamped unattached fee invoice that
+          // committed after the obligation lookup — the exact write the
+          // setup-fee lock serializes — must count, or the alert
+          // instructs an already-covered fee.
+          const stampedFeeRowsNow = unmintedSetupFeeObligation && svc.source_estimate_id
+            ? await trx('invoices')
+              .where({ customer_id: svc.customer_id })
+              .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
+              .forUpdate()
+              .select('id', 'status', 'line_items', 'notes')
+            : [];
+          const termFeeRows = [...new Map(
+            [...onVisitLockedRows, ...stampedFeeRowsNow].map((r) => [String(r.id), r]),
+          ).values()];
+          const liveFeeCentsOnVisit = termFeeRows
             .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
             .reduce((sum, r) => sum + terminalFeeCents(r), 0);
-          const terminalFeeCovered = termExpectedFeeCents > 0 && liveFeeCentsOnVisit >= termExpectedFeeCents;
+          const refundedFeeCentsTerm = termFeeRows
+            .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+          const terminalFeeCovered = termExpectedFeeCents > 0
+            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents;
           const termFeeEstimateRef = unmintedSetupFeeObligation
             ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
             : null;

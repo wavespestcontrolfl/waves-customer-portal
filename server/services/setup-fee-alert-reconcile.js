@@ -172,10 +172,19 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 : row.metadata;
               return m?.scheduledServiceId ? String(m.scheduledServiceId) : null;
             }).filter(Boolean))];
+            const tRecords = tVisitIds.length
+              ? await trx('service_records')
+                .whereIn('scheduled_service_id', tVisitIds)
+                .select('id')
+              : [];
+            const tRecordIds = tRecords.map((r) => r.id);
             const tOnVisit = tVisitIds.length
               ? await trx('invoices')
                 .where({ customer_id: tCustomer })
-                .whereIn('scheduled_service_id', tVisitIds)
+                .where(function tLinked() {
+                  this.whereIn('scheduled_service_id', tVisitIds);
+                  if (tRecordIds.length) this.orWhereIn('service_record_id', tRecordIds);
+                })
                 .forUpdate()
                 .select('id', 'status', 'line_items', 'notes')
               : [];
@@ -496,9 +505,19 @@ async function reconcileSetupFeeAlertForInvoice(invoice) {
     const stamp = String(invoice.notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/);
     let estimateId = stamp ? stamp[1] : null;
     let customerId = invoice.customer_id || null;
-    if (!estimateId && invoice.scheduled_service_id) {
+    let linkedVisitId = invoice.scheduled_service_id || null;
+    if (!linkedVisitId && invoice.service_record_id) {
+      // Record-only linkage resolves through service_records (Codex PR
+      // r18 P2) — an edited historical invoice with no stamp and no
+      // direct visit link must still find its estimate.
+      const sr = await db('service_records')
+        .where({ id: invoice.service_record_id })
+        .first('scheduled_service_id');
+      linkedVisitId = sr?.scheduled_service_id || null;
+    }
+    if (!estimateId && linkedVisitId) {
       const ss = await db('scheduled_services')
-        .where({ id: invoice.scheduled_service_id })
+        .where({ id: linkedVisitId })
         .first('source_estimate_id', 'customer_id');
       estimateId = ss?.source_estimate_id || null;
       customerId = customerId || ss?.customer_id || null;
