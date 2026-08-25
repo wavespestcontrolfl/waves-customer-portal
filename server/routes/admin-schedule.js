@@ -637,6 +637,24 @@ function shouldRewritePendingRecurringRows(before, after) {
 // freed it on the calendar (Codex #3443 P2).
 const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
 
+// Owner ruling (2026-08-25): a schedule-conflict hit on an ADMIN write is
+// ADVISORY, not a block — the save commits and the operator gets a warning
+// naming the clashing date (the sole operator stacks/resolves overlaps on
+// the calendar; a quarterly cadence edit was being refused wholesale over a
+// clash on a generated child date months out). GATE_ADMIN_OCCUPANCY_BLOCKING
+// ='true' restores the hard SLOT_TAKEN 409s (fail-closed parse, read at
+// call time — same convention as GATE_ADMIN_SLOT_OVERLAP_GUARD). The rung-1
+// locks and the tech-blind probes run identically either way: detection,
+// lock ordering, and every customer self-booking / rebooker / public
+// reschedule gate are unchanged — only the admin-side abort is gated.
+function adminOccupancyBlockingEnabled() {
+  return process.env.GATE_ADMIN_OCCUPANCY_BLOCKING === 'true';
+}
+
+function occupancyOverlapWarning(date) {
+  return `Heads up: this booking overlaps another appointment on the schedule${date ? ` on ${date}` : ''} — both are kept on the calendar.`;
+}
+
 // ---- update-details recurrence date planning (rung-1 lock set) -----------
 //
 // PUT /:id/update-details can write scheduled_services rows on dates other
@@ -831,9 +849,13 @@ async function seriesCandidateDateClashes(conn, template, date) {
 // means the series moved under us — abort (retryable) rather than take a
 // second rung-1 key mid-txn (the contract's row-lock rule). Then the
 // tech-blind global probe on the row's own block, same predicate and status
-// exclusions as the parent move probe; a hit is the SLOT_TAKEN 409 naming
-// only the date (no customer data).
-async function guardRecurrenceDestination(trx, { lockedDates, date, row, excludeServiceIds }) {
+// exclusions as the parent move probe. A hit is ADVISORY by default (owner
+// ruling above): the write proceeds and the caller's `warnings` array gets
+// a line naming only the date (no customer data); with
+// GATE_ADMIN_OCCUPANCY_BLOCKING on it is the hard SLOT_TAKEN 409 instead.
+// The SERIES_CHANGED_RETRY abort is NOT gated — it is a lock-contract
+// concurrency guard, not a conflict block.
+async function guardRecurrenceDestination(trx, { lockedDates, date, row, excludeServiceIds, warnings }) {
   if (!lockedDates || !lockedDates.has(date)) {
     throw Object.assign(
       new Error('This plan changed while saving — reload and save again.'),
@@ -851,10 +873,14 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
   if (clash.length) {
-    throw Object.assign(
-      new Error(`That time slot conflicts with another appointment on the schedule on ${date}. Pick another time.`),
-      { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' },
-    );
+    if (adminOccupancyBlockingEnabled()) {
+      throw Object.assign(
+        new Error(`That time slot conflicts with another appointment on the schedule on ${date}. Pick another time.`),
+        { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN' },
+      );
+    }
+    logger.warn(`[schedule] occupancy overlap on ${date} allowed (advisory mode — GATE_ADMIN_OCCUPANCY_BLOCKING off)`);
+    if (Array.isArray(warnings)) warnings.push(occupancyOverlapWarning(date));
   }
 }
 
@@ -4181,7 +4207,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     // Same SLOT_TAKEN 409 the parent probe throws, naming the generated
-    // date that collided (dates only — no customer data).
+    // date that collided (dates only — no customer data). Thrown only when
+    // GATE_ADMIN_OCCUPANCY_BLOCKING is on; the advisory default books
+    // through the overlap and warns instead (owner ruling above).
     const slotTakenError = (conflictDate) => Object.assign(
       new Error(conflictDate
         ? `That time slot conflicts with another appointment on the schedule on ${conflictDate}. Pick another time.`
@@ -4357,9 +4385,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Global occupancy probe under rung 1 (the contract's second half):
       // tech-blind, counts live estimate holds, same predicate the customer
       // /book and rebooker commit gates run. A timed parent that overlaps
-      // ANY existing visit is refused with the SLOT_TAKEN 409 those paths
-      // already return — the admin UI's SlotConflictNotice is advisory only
-      // and carries no overbook flag, so there is nothing to honor here.
+      // ANY existing visit books through with a warning by default (owner
+      // ruling above); with GATE_ADMIN_OCCUPANCY_BLOCKING on it is refused
+      // with the SLOT_TAKEN 409 those paths already return.
       // Windowless rows carry no occupancy and skip the probe (the
       // predicate's NULL window_start is inert either way).
       if (insertData.window_start && insertData.window_end) {
@@ -4370,7 +4398,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           windowEnd: insertData.window_end,
           excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
         });
-        if (adminCreateClash.length) throw slotTakenError(null);
+        if (adminCreateClash.length) {
+          if (adminOccupancyBlockingEnabled()) throw slotTakenError(null);
+          bookingWarnings.push(occupancyOverlapWarning(dateOnly(scheduledDate)));
+        }
       }
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
@@ -4444,7 +4475,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
             windowEnd: childData.window_end,
             excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
           });
-          if (childClash.length) throw slotTakenError(nextDateStr);
+          if (childClash.length) {
+            if (adminOccupancyBlockingEnabled()) throw slotTakenError(nextDateStr);
+            bookingWarnings.push(occupancyOverlapWarning(nextDateStr));
+          }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
@@ -4519,7 +4553,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
               windowEnd: boosterData.window_end,
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
             });
-            if (boosterClash.length) throw slotTakenError(boosterDate);
+            if (boosterClash.length) {
+              if (adminOccupancyBlockingEnabled()) throw slotTakenError(boosterDate);
+              bookingWarnings.push(occupancyOverlapWarning(boosterDate));
+            }
           }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
@@ -6411,6 +6448,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // the cadence rewrite below — same post-commit cleanup, applied per
     // row after commit with each row's unchanged status.
     const rewoundSeriesRows = [];
+    // Advisory occupancy-overlap notes collected by this save's probes
+    // (move probe + recurrence guards) while GATE_ADMIN_OCCUPANCY_BLOCKING
+    // is off — returned as `warnings` so the modal can say what stacked.
+    const editWarnings = [];
     // Rung-1 lock set for every date this save's recurrence paths can write
     // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
     // top-up extends), computed from an UNLOCKED peek with the same
@@ -6749,11 +6790,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
               });
               if (adminMoveClash.length) {
-                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-                  statusCode: 409,
-                  isOperational: true,
-                  code: 'SLOT_TAKEN',
-                });
+                if (adminOccupancyBlockingEnabled()) {
+                  throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                    statusCode: 409,
+                    isOperational: true,
+                    code: 'SLOT_TAKEN',
+                  });
+                }
+                logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory mode — GATE_ADMIN_OCCUPANCY_BLOCKING off)`);
+                editWarnings.push(occupancyOverlapWarning(occDate));
               }
             }
           }
@@ -7182,6 +7227,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   date: nextDateStr,
                   row: child,
                   excludeServiceIds: rewriteProbeExcludeIds,
+                  warnings: editWarnings,
                 });
               }
               const childUpdates = {
@@ -7264,6 +7310,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     date: nextDateStr,
                     row: booster,
                     excludeServiceIds: rewriteProbeExcludeIds,
+                    warnings: editWarnings,
                   });
                 }
                 const boosterUpdates = { scheduled_date: nextDateStr };
@@ -7533,6 +7580,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               date: nextDateStr,
               row: childData,
               excludeServiceIds: [parent.id],
+              warnings: editWarnings,
             });
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
@@ -7660,7 +7708,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               claimToken: visitCountClaimToken,
               protectedVisitId: req.params.id,
               ongoingSeries: true,
-              occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId] },
+              occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
             });
             // An EXHAUSTED plan (zero upcoming) flipped to ongoing with zero
             // placeable top-ups is a dead state: auto-extend only fires from
@@ -7703,7 +7751,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             baselineCount: Number.isInteger(Number.parseInt(recurringPlannedCountBaseline, 10))
               ? Number.parseInt(recurringPlannedCountBaseline, 10)
               : null,
-            occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId] },
+            occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
           });
           recurringCreated += visitCountResult.added.length;
           for (const child of visitCountResult.added) {
@@ -8005,6 +8053,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         },
       } : {}),
       ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
+      // Advisory occupancy-overlap notes (GATE_ADMIN_OCCUPANCY_BLOCKING off)
+      // — present only when this save stacked over an existing visit.
+      ...(editWarnings.length ? { warnings: editWarnings } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —
@@ -9259,6 +9310,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
         date: nd,
         row: data,
         excludeServiceIds: occupancyGuard.excludeServiceIds,
+        warnings: occupancyGuard.warnings,
       });
     }
     const [row] = await trx('scheduled_services').insert(data).returning('*');

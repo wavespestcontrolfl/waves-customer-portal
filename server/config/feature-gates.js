@@ -44,6 +44,7 @@
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_ADMIN_SLOT_OVERLAP_GUARD=true (admin schedule writes 409 SLOT_CONFLICT on a time overlap — occupancy.js probe)
+ *   GATE_ADMIN_OCCUPANCY_BLOCKING=true (admin schedule create/edit occupancy probes hard-409 SLOT_TAKEN again — default is book-through + warning)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -1613,6 +1614,20 @@ const gates = {
   // scheduling/window-rules.js so a flip needs no redeploy. The on-the-hour
   // / 8am window rules are NOT gated. Kill switch: unset.
   adminSlotOverlapGuard: process.env.GATE_ADMIN_SLOT_OVERLAP_GUARD === 'true',
+
+  // Admin occupancy hard-block restore (2026-08-25): OFF (default) = the
+  // ungated occupancy probes in routes/admin-schedule.js (create parent /
+  // generated children / boosters, edit-modal date-window move, cadence
+  // rewrite + spawn + visit-count top-up destinations) let an overlapping
+  // save COMMIT and return the clash as a `warnings` entry naming the date
+  // — owner ruling: schedule conflicts must not block an admin save; the
+  // sole operator resolves overlaps on the calendar. 'true' restores the
+  // hard SLOT_TAKEN 409s. Fail-closed ==='true', read at call time by
+  // routes/admin-schedule.js so a flip needs no redeploy. Locks + probes
+  // (and therefore detection and the occupancy.js ORDERING CONTRACT) run
+  // identically at either setting; customer self-booking, rebooker, and
+  // public reschedule commit gates are unaffected.
+  adminOccupancyBlocking: process.env.GATE_ADMIN_OCCUPANCY_BLOCKING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

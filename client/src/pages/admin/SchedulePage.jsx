@@ -2028,6 +2028,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
       }
+      // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
+      // longer block admin edits) — tell the operator what now stacks so
+      // the double-booking is a choice, not a surprise.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      }
       // Resizing a plan moves visits the operator can't see from this modal —
       // say what happened rather than closing on a silent change. The count
       // itself may fall short of the target when the cadence has nowhere left
