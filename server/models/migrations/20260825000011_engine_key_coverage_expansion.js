@@ -47,6 +47,14 @@ const ENGINE_KEY_SEEDS = [
   // reserved-path label is an admin-editable name, so the link is the only
   // durable identity (codex #3485 r1 P1).
   { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
+  // Recurring rodent bait — ONE recurring bait row exists and the plan is
+  // quarterly by definition (estimate-converter treats rodent_bait as
+  // quarterly-only), so unlike the pest/lawn cadence families there is no
+  // per-cadence row set to disambiguate: the plan key maps 1:1. Without it
+  // a reserved bait-only accept stayed on the mutable "Rodent Bait"
+  // short-name fallback and could lose its typed completion lane after a
+  // catalog rename (codex #3485 r22 P1).
+  { service_key: 'rodent_bait_quarterly', engine_keys: ['rodent_bait'] },
   // Foam pair — the one-time line previously mis-resolved to the BAIT row
   // via short-name fallback (grade-D in the 2026-08-25 audit).
   { service_key: 'foam_drill', engine_keys: ['foam_drill'] },
