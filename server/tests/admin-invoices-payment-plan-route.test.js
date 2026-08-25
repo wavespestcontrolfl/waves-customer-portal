@@ -105,7 +105,12 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     });
 
     const invoicesQB = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
-    const plansQB = makeRecorder({ first: jest.fn(async () => null) });
+    // first() with no args = the pre-existing-active-plan check (none);
+    // first('status') = the post-commit confirmation-email fence re-reading
+    // the created plan (still active → email allowed).
+    const plansQB = makeRecorder({
+      first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'active' } : null)),
+    });
     const activityQB = makeRecorder();
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoicesQB;
@@ -173,6 +178,34 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         customerId: 'cust-2-post-repoint',
         idempotencyKey: 'payment.plan_confirmed:plan-1:cust-2-post-repoint',
       }));
+    });
+  });
+
+  test('P2: a plan cancelled between commit and the post-commit email gets NO confirmation (fence re-reads status)', async () => {
+    const email = require('../services/payment-lifecycle-email');
+    // The fence's first('status') sees the concurrent cancel's write.
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
+      if (table === 'payment_plans') {
+        return makeRecorder({
+          first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'cancelled' } : null)),
+        });
+      }
+      if (table === 'activity_log') return makeRecorder();
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(email.sendPaymentPlanConfirmed).not.toHaveBeenCalled();
     });
   });
 

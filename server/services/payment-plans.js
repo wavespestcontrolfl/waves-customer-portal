@@ -30,8 +30,13 @@ async function completeActivePlansForInvoice(invoiceId, conn = db) {
   // existing paths). Unconditional (not gated on flipped>0) so a retry can
   // repair a partial earlier attempt; admin stops with unrelated reasons
   // keep their stamp.
+  // 'paused' included: legacy plan creations parked the sequence via
+  // pauseSequence(reason: 'payment_plan_created') — the stopped_reason stamp
+  // survives the pause, and a stale paused row reads as ACTIVE to
+  // hasActiveSequence, suppressing every reminder after a dispute reopen.
   await conn('invoice_followup_sequences')
-    .where({ invoice_id: invoiceId, status: 'stopped' })
+    .where({ invoice_id: invoiceId })
+    .whereIn('status', ['stopped', 'paused'])
     .where('stopped_reason', 'like', 'payment_plan_created:%')
     .update({ status: 'completed', next_touch_at: null, updated_at: now });
   return flipped;

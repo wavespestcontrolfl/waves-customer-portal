@@ -258,15 +258,16 @@ async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
       // (codex r12 P1): a settled plan's stop survives (stopOnPayment skips
       // stopped rows), and without restamping it to the NEW plan's reason the
       // replacement plan's cancel would fail the ownership check and leave
-      // reminders off. 'completed' plan-owned rows are included too (codex PR
-      // r2 P1): plan settlement flips its stop to 'completed' keeping the
-      // stamp, and a completed row is invisible to both hasActiveSequence and
-      // isDunningStopped — a replacement plan after a dispute reopen must
-      // restamp it 'stopped' or legacy late-payment reminders keep firing
-      // under the new plan. Admin stops with unrelated reasons keep their stamp.
-      this.whereIn('status', ['active', 'paused', 'autopay_hold'])
-        .orWhere(function planOwnedTerminalRow() {
-          this.whereIn('status', ['stopped', 'completed'])
+      // reminders off. ALL 'completed' rows are included too (codex PR r2+r3
+      // P1s): a completed sequence — whether plan-settled (stamp retained) or
+      // naturally exhausted (no stamp, every touch sent) — is invisible to
+      // both hasActiveSequence and isDunningStopped, so without restamping it
+      // 'stopped' here the legacy late-payment path keeps sending reminders
+      // under the new plan. Admin stops with unrelated reasons keep their
+      // stamp (only 'stopped' rows check the plan-owned reason).
+      this.whereIn('status', ['active', 'paused', 'autopay_hold', 'completed'])
+        .orWhere(function planOwnedStoppedRow() {
+          this.where('status', 'stopped')
             .where('stopped_reason', 'like', 'payment_plan_created:%');
         });
     })
@@ -2334,13 +2335,25 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     // which carries the locked-row customer_id the plan was inserted with.
     const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
-    const emailResult = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
-      customerId: planCustomerId,
-      paymentPlanId: paymentPlan.id,
-      paymentMethodId,
-      plan: paymentPlan,
-      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
-    }).catch((err) => ({ ok: false, error: err.message }));
+    // Fence against a concurrent cancel landing between our commit and this
+    // post-commit email (codex PR r3 P2): re-read the plan's status right
+    // before sending — a "payment plan confirmed" email for a plan another
+    // admin already cancelled misleads the customer, and the mail helper
+    // never re-checks status itself. Best-effort: an unreadable status
+    // fails closed (no confirmation), the plan itself is already committed.
+    const planNow = await db('payment_plans')
+      .where({ id: paymentPlan.id })
+      .first('status')
+      .catch(() => null);
+    const emailResult = (planNow && planNow.status === 'active')
+      ? await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+        customerId: planCustomerId,
+        paymentPlanId: paymentPlan.id,
+        paymentMethodId,
+        plan: paymentPlan,
+        idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
+      }).catch((err) => ({ ok: false, error: err.message }))
+      : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
 
     // NOTE: no post-commit pauseSequence here (codex r9 P1). The in-trx
     // stopInvoiceFollowupsForPaymentPlan above already stopped the sequence

@@ -31,6 +31,12 @@ exports.up = async function up(knex) {
     // so a settled invoice still reads isDunningStopped() = true. If a later
     // dispute reopens it, every reminder path stays suppressed forever.
     // Flip those plan-owned stops to 'completed' alongside the plans.
+    // 'paused' rows are covered too: the pre-change plan-creation route
+    // called pauseSequence(reason: 'payment_plan_created') after its
+    // transactional stop, so historical plan-owned rows can sit paused
+    // (the stopped_reason stamp survives the pause) — a stale paused row
+    // reads as ACTIVE to hasActiveSequence and suppresses every reminder
+    // just the same.
     if (await knex.schema.hasTable('invoice_followup_sequences')) {
       await knex.raw(`
         UPDATE invoice_followup_sequences s
@@ -39,7 +45,7 @@ exports.up = async function up(knex) {
                updated_at = NOW()
           FROM invoices i
          WHERE s.invoice_id = i.id
-           AND s.status = 'stopped'
+           AND s.status IN ('stopped', 'paused')
            AND s.stopped_reason LIKE 'payment_plan_created:%'
            AND i.status IN ('paid', 'prepaid')
       `);
