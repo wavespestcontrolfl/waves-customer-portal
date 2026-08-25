@@ -47,6 +47,7 @@ function createDbMock(initialRows = {}) {
     rows = rows.filter((row) => query.notNull.every((key) => valueFor(row, key) != null));
     rows = rows.filter((row) => query.nulls.every((key) => valueFor(row, key) == null));
     rows = rows.filter((row) => query.ins.every(([key, values]) => values.includes(valueFor(row, key))));
+    rows = rows.filter((row) => (query.rawFilters || []).every((fn) => fn(row)));
     rows = rows.filter((row) => query.ops.every(([key, op, value]) => {
       const left = valueFor(row, key);
       if (left == null) return false;
@@ -78,6 +79,7 @@ function createDbMock(initialRows = {}) {
       nulls: [],
       ops: [],
       ins: [],
+      rawFilters: [],
       order: null,
       limitValue: null,
       where(arg, op, value) {
@@ -102,6 +104,14 @@ function createDbMock(initialRows = {}) {
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
       whereNull(column) { this.nulls.push(column); return this; },
+      whereRaw(sql) {
+        // Recognized raw clauses become row predicates; anything else is a
+        // pass-through (matches the google-business-sync mock convention).
+        if (String(sql).includes("link_source NOT IN ('manual_no_visit', 'click_auto')")) {
+          this.rawFilters.push((row) => row.link_source == null || !['manual_no_visit', 'click_auto'].includes(row.link_source));
+        }
+        return this;
+      },
       forUpdate() { return this; },
       leftJoin() { return this; },
       select() { return this; },
@@ -176,6 +186,79 @@ describe('review incentives', () => {
       reason: 'confirmed_google_review_required',
     });
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('a click-auto-linked review never mints a payout until a human confirms the match', async () => {
+    const conn = createDbMock({
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-click',
+        customer_id: 'customer-1',
+        link_source: 'click_auto',
+        reviewer_name: 'SunshineGal88',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/click',
+      }],
+    });
+
+    const result = await ReviewIncentives.createPayoutForGoogleReview('google-click', { conn, policy });
+
+    expect(result).toMatchObject({ created: false, skipped: true, reason: 'not_eligible' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('an explicit no-visit confirm never auto-resolves a technician or mints a payout', async () => {
+    // The customer HAS a resolvable prior service — exactly the case where
+    // the technician resolver would otherwise hijack a "Confirm match (no
+    // visit on file)" click into a paid 'manual' link (pre-push P0).
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+      }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-click',
+        customer_id: 'customer-1',
+        link_source: 'click_auto',
+        reviewer_name: 'SunshineGal88',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/click',
+      }],
+    });
+
+    const result = await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-click',
+      customerId: 'customer-1',
+      technicianId: null,
+      serviceRecordId: null,
+      noVisit: true,
+      adminId: 'admin-1',
+    }, { conn, policy });
+
+    expect(result).toMatchObject({ created: false, skipped: true, reason: 'payout_policy_ineligible' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+    expect(conn.__state.rows.google_reviews[0]).toMatchObject({
+      customer_id: 'customer-1',
+      link_source: 'manual_no_visit',
+    });
   });
 
   test('does not create duplicate payouts for the same Google review', async () => {

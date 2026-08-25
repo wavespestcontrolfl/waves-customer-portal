@@ -185,8 +185,12 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         open_count: db.raw('COALESCE(open_count, 0) + 1'),
         google_review_clicked: true,
         redirected_to_google: true,
-        google_location: loc.id,
       };
+      // google_location is NOT stamped here: a failed attempt (cadence
+      // stop / claim errors fall back to the rate page) would persist a
+      // location that redirected_at never observed, and a later successful
+      // retry after routing changes would pair them falsely (GH codex
+      // #3483 r6). It is set atomically WITH the redirected_at claim below.
       if (!request.opened_at) {
         updates.opened_at = new Date();
         if (request.status === 'sent') updates.status = 'opened';
@@ -224,7 +228,10 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       const claimed = await db('review_requests')
         .where({ id: request.id })
         .whereNull('redirected_at')
-        .update({ redirected_at: new Date() });
+        // google_location pairs atomically with the first-click claim (GH
+        // codex #3483 r4/r6): one conditional write, one observation — the
+        // frozen first location can never describe a failed attempt.
+        .update({ redirected_at: new Date(), google_location: loc.id });
       firstClick = claimed > 0;
     } catch (err) {
       logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
@@ -255,6 +262,20 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       } catch (err) {
         logger.warn(`[review-gate] click notification failed: ${err.message}`);
       }
+    }
+
+    // Latest-click stamp for the auto-link correlation, recorded ONLY once
+    // every pre-redirect step has succeeded — a failed attempt falls back to
+    // the rate page and must not become "latest click" evidence (pre-push P1;
+    // redirected_at is the immutable first-click claim above and never
+    // moves). Best-effort: a stamp failure must not cost the redirect.
+    try {
+      await db('review_requests').where({ id: request.id }).update({
+        last_redirected_at: new Date(),
+        last_google_location: loc.id,
+      });
+    } catch (err) {
+      logger.warn(`[review-gate] last-click stamp failed: ${err.message}`);
     }
 
     return res.redirect(302, loc.googleReviewUrl);

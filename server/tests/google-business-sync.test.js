@@ -54,6 +54,9 @@ function createDbMock(initialRows = {}) {
       const last = String(bindings[0] || '').trim().toLowerCase();
       return row => String(row.last_name || '').trim().toLowerCase() === last;
     }
+    if (sql.includes("reviewer_name IS NULL OR reviewer_name != '_stats'")) {
+      return row => row.reviewer_name == null || row.reviewer_name !== '_stats';
+    }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
@@ -117,6 +120,7 @@ function createDbMock(initialRows = {}) {
           else if (op === '<') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) < new Date(compareValue));
           else if (op === '>') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) > new Date(compareValue));
           else if (op === '>=') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) >= new Date(compareValue));
+          else if (op === '<=') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) <= new Date(compareValue));
           else this._where[arg] = compareValue;
         } else if (typeof arg === 'string' && arguments.length >= 2) {
           this._where[arg] = value;
@@ -133,6 +137,7 @@ function createDbMock(initialRows = {}) {
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot() { return this; },
       select() { return this; },
+      orderBy() { return this; },
       limit(n) { this._limit = n; return this; },
       async first() {
         const rows = state.rows[this._table] || [];
@@ -1408,5 +1413,193 @@ describe('Google Business review sync', () => {
     });
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
+  });
+
+  describe('click auto-link (GATE_REVIEW_CLICK_AUTOLINK)', () => {
+    const CONFIDENT_MATCH = {
+      customerId: 'cust-clicker',
+      clickedAt: '2026-05-25T11:58:00.000Z',
+      clickOffsetMs: 2 * 60000,
+      clickOffsetLabel: '2m before',
+    };
+
+    function feedWithUnmatchedReview() {
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) {
+          return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        }
+        return jsonResponse({ reviews: [{
+          name: 'accounts/1/locations/2/reviews/rev-click',
+          reviewer: { displayName: 'SunshineGal88' },
+          starRating: 'FIVE',
+          comment: 'Loved it',
+          createTime: '2026-05-25T12:00:00Z',
+        }] });
+      });
+    }
+
+    afterEach(() => {
+      delete process.env.GATE_REVIEW_CLICK_AUTOLINK;
+    });
+
+    test('gate ON + confident sole-click match → review links, flag flips, FYI bell replaces the match-this bell', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => CONFIDENT_MATCH),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Jane', last_name: 'Doe',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      feedWithUnmatchedReview();
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-click');
+      expect(review.customer_id).toBe('cust-clicker');
+      expect(review.link_source).toBe('click_auto');
+      expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].title).toContain('Auto-linked');
+      expect(notifs[0].body).toContain('2m before');
+    });
+
+    test('gate OFF: even a confident match stays a manual-queue notification, no link', async () => {
+      const findConfidentClickMatch = jest.fn(async () => CONFIDENT_MATCH);
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch,
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      feedWithUnmatchedReview();
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-click');
+      expect(review.customer_id).toBeNull();
+      expect(review.link_source).toBeUndefined();
+      expect(findConfidentClickMatch).not.toHaveBeenCalled();
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].title).toContain('Unlinked');
+    });
+
+    test('gate ON but no confident match → normal unlinked notification', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => null),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      feedWithUnmatchedReview();
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-click');
+      expect(review.customer_id).toBeNull();
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].title).toContain('Unlinked');
+    });
+
+    test('retro sweep links a review parked unlinked on an EARLIER sync', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => CONFIDENT_MATCH),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Jane', last_name: 'Doe',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      // Parked on a previous run: already synced + unlinked, so this run's
+      // upsert is NOT an insert and never reaches the collector — only the
+      // end-of-run retro sweep can link it.
+      db.__state.rows.google_reviews.push({
+        id: 'parked-1',
+        google_review_id: 'accounts/1/locations/2/reviews/gid-parked-1',
+        gbp_review_name: 'accounts/1/locations/2/reviews/gid-parked-1',
+        location_id: 'bradenton',
+        reviewer_name: 'MysteryHandle',
+        star_rating: 5,
+        review_text: 'Nice',
+        review_created_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+        customer_id: null,
+        missing_since: null,
+        review_reply: null,
+      });
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) {
+          return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        }
+        return jsonResponse({ reviews: [{
+          name: 'accounts/1/locations/2/reviews/gid-parked-1',
+          reviewer: { displayName: 'MysteryHandle' },
+          starRating: 'FIVE',
+          comment: 'Nice',
+          createTime: db.__state.rows.google_reviews[0].review_created_at,
+        }] });
+      });
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.google_review_id === 'accounts/1/locations/2/reviews/gid-parked-1');
+      expect(review.customer_id).toBe('cust-clicker');
+      expect(review.link_source).toBe('click_auto');
+      expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
+    });
+
+    test('one click claimed by TWO unlinked reviews in its window links NEITHER (ambiguous)', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      const recent = Date.now() - 2 * 24 * 3600 * 1000;
+      const clickedAt = new Date(recent - 10 * 60000).toISOString();
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => ({
+          customerId: 'cust-clicker',
+          clickedAt,
+          clickOffsetMs: 10 * 60000,
+          clickOffsetLabel: '10m before',
+        })),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Jane', last_name: 'Doe',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      // Two unlinked reviews at the same location, both inside the click's
+      // forward window — the click cannot say which one the customer wrote.
+      for (const n of [1, 2]) {
+        db.__state.rows.google_reviews.push({
+          id: `rival-${n}`,
+          google_review_id: `accounts/1/locations/2/reviews/rival-${n}`,
+          gbp_review_name: `accounts/1/locations/2/reviews/rival-${n}`,
+          location_id: 'bradenton',
+          reviewer_name: `Handle${n}`,
+          star_rating: 5,
+          review_text: 'Nice',
+          review_created_at: new Date(recent + n * 60000).toISOString(),
+          customer_id: null,
+          missing_since: null,
+          review_reply: null,
+        });
+      }
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) {
+          return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        }
+        return jsonResponse({ reviews: [] });
+      });
+
+      await service.syncAllReviews();
+
+      const rivals = db.__state.rows.google_reviews.filter(r => String(r.id).startsWith('rival-'));
+      expect(rivals.every(r => r.customer_id == null)).toBe(true);
+      expect(db.__state.rows.customers[0].has_left_google_review).toBe(false);
+    });
   });
 });

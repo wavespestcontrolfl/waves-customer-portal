@@ -158,6 +158,16 @@ function qualifiesGoogleReview(review, policy) {
   if (!policy.eligibleSources.includes('google_review')) return false;
   if (!review || review.reviewer_name === '_stats') return false;
   if (!reviewWithinProgramWindow(review, policy)) return false;
+  // A click-tracking auto-link is probabilistic evidence, and paid payouts
+  // block later reassignment — heuristic links never mint money until a
+  // human confirms the match (manual attribution restamps link_source to
+  // 'manual', which lifts this exclusion). Pre-push P0.
+  if (review.link_source === 'click_auto') return false;
+  // 'manual_no_visit' = a human confirmed the link explicitly WITHOUT a
+  // payable visit — later-resolvable technician evidence must not silently
+  // mint the bonus that confirmation declined (pre-push P0). A human
+  // attribution WITH a visit restamps 'manual', which is payout-eligible.
+  if (review.link_source === 'manual_no_visit') return false;
   if (policy.requireCustomerMatchForGoogle && !review.customer_id) return false;
   const rating = toInt(review.star_rating, 0);
   return rating >= Math.max(1, toInt(policy.minRating, 1));
@@ -582,14 +592,39 @@ async function getAttributionQueue(options = {}) {
   const startsAt = programStart(policy);
   const effectiveSince = startsAt && startsAt > since ? startsAt : since;
 
-  if (!policy.enabled) return { items: [], policyEnabled: false };
-
-  const reviews = await conn('google_reviews')
+  // NOT gated on policy.enabled: click_auto rows must stay confirmable /
+  // correctable through this queue even when the payout program is off (GH
+  // codex #3483 r1 P1) — only the payout-driven reasons below require the
+  // policy. policyEnabled still reports the real flag for the UI.
+  // Scan by the PERIOD only — the program-start cutoff would hide click_auto
+  // rows predating the payout program from their only correction surface
+  // (pre-push P1); the payout-driven branches re-apply the cutoff below.
+  const scanned = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .whereNull('missing_since')
-    .where('review_created_at', '>=', effectiveSince.toISOString())
+    .where('review_created_at', '>=', since.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
+  // Correction rows fetched INDEPENDENTLY of the scan cap AND the reporting
+  // period: a busy period can push an older click_auto row past `limit`
+  // before eligibility filtering (GH codex #3483 r2 P2), and the UI's 90-day
+  // max period would age an unconfirmed link out of its only correction
+  // surface while the suppression flag persists forever (pre-push P1).
+  // Unresolved click_auto rows are by definition awaiting action — the set
+  // stays small because every confirm/re-match restamps them 'manual'.
+  // UNCAPPED (pre-push P1): this queue is the ONLY surface that can confirm
+  // or re-match a probabilistic link, so every unresolved row must stay
+  // reachable — any newest-first cap would suppress the oldest links
+  // forever. The result set is bounded in practice by the auto-linker
+  // itself (single-digit organic volume; the retro sweep caps at 200 per
+  // run and only unconfirmed rows accumulate).
+  const clickAutoRows = await conn('google_reviews')
+    .where({ link_source: 'click_auto' })
+    .whereNotNull('customer_id')
+    .whereNull('missing_since')
+    .orderBy('review_created_at', 'desc');
+  const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
+  const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
 
   const reviewIds = reviews.map(row => row.id).filter(Boolean);
   const paidRows = reviewIds.length
@@ -600,6 +635,24 @@ async function getAttributionQueue(options = {}) {
   const items = [];
   for (const review of reviews) {
     if (paidReviewIds.has(review.id)) continue;
+
+    // A click auto-link is excluded from payouts until a human confirms
+    // (qualifiesGoogleReview) — and confirmation happens through THIS queue.
+    // Checked BEFORE the payout-policy gates: an auto-linked review must be
+    // confirmable/correctable even when the program is disabled or the
+    // rating is below the payout bar (GH codex #3483 r1 P1), and without
+    // this row an auto-linked review with a resolvable technician would be
+    // skipped by payout sync yet absent from the only UI that can restamp
+    // it 'manual' (pre-push P0 r9): unattributable forever.
+    if (review.link_source === 'click_auto' && review.customer_id) {
+      const customer = await conn('customers').where({ id: review.customer_id }).first();
+      items.push(serializeAttributionQueueItem(review, customer, 'click_auto_confirm'));
+      continue;
+    }
+
+    if (!policy.enabled) continue;
+    // Payout-driven reasons only exist inside the program window.
+    if (!reviewWithinProgramWindow(review, policy)) continue;
     const rating = toInt(review.star_rating, 0);
     if (rating < Math.max(1, toInt(policy.minRating, 1))) continue;
 
@@ -607,6 +660,11 @@ async function getAttributionQueue(options = {}) {
       items.push(serializeAttributionQueueItem(review, null, 'missing_customer'));
       continue;
     }
+
+    // 'manual_no_visit' = a human already confirmed this link knowing there
+    // is no attributable visit — re-parking it as missing_technician would
+    // make the confirmation unresolvable forever (GH codex #3483 r4).
+    if (review.link_source === 'manual_no_visit') continue;
 
     const customer = await conn('customers').where({ id: review.customer_id }).first();
     const attribution = await resolveTechnicianForGoogleReview(review, conn);
@@ -618,7 +676,7 @@ async function getAttributionQueue(options = {}) {
   return {
     items,
     count: items.length,
-    policyEnabled: true,
+    policyEnabled: !!policy.enabled,
     period: {
       days,
       since: effectiveSince.toISOString(),
@@ -676,6 +734,35 @@ async function searchAttributionCandidates(options = {}) {
   }
 
   const customers = await query;
+  // The row's currently linked customer is ALWAYS a candidate (pre-push P1):
+  // for a click_auto/manual_no_visit row the correlation module's
+  // linked-customer suppression keeps them out of likelyReviewers, and a
+  // handle reviewer name ("SunshineGal88") matches no customer search — so
+  // the confirm queue's own subject would open with no card and no confirm
+  // button, forcing the admin to retype the displayed name. Strict
+  // active === true, matching the search filter — an inactive customer is
+  // never offered for confirmation (GH codex #3483 r5/r8).
+  if (
+    review.customer_id
+    && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')
+    && !customers.some((c) => String(c.id) === String(review.customer_id))
+  ) {
+    const current = await conn('customers')
+      .where({ id: review.customer_id, active: true })
+      .first(
+        'id',
+        'first_name',
+        'last_name',
+        'phone',
+        'email',
+        'address_line1',
+        'address_line2',
+        'city',
+        'state',
+        'zip',
+      );
+    if (current) customers.unshift(current);
+  }
   const candidates = [];
   for (const customer of customers) {
     const services = await recentServiceCandidatesForCustomer(customer.id, review, conn);
@@ -733,7 +820,6 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
 
   if (!reviewId) throw operationalError('reviewId required', 400, 'review_id_required');
   if (!customerId) throw operationalError('customerId required', 400, 'customer_id_required');
-  if (!policy.enabled) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
 
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
@@ -745,11 +831,30 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   if (review.missing_since != null) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
+  // Payout-policy checks gate the MONEY, not the correction: this endpoint is
+  // also the only UI path that confirms or re-matches a click auto-link, and
+  // that must stay available when the incentive program is disabled, the
+  // review predates it, or the rating is below the payout bar — otherwise a
+  // wrong probabilistic link (and the wrong customer's suppression flag) is
+  // permanent in those configurations (GH codex #3483 r1 P1). For a
+  // click_auto row the failures downgrade to payoutEligible=false; fresh
+  // manual matches keep the strict throws (unchanged behavior).
+  // 'manual_no_visit' stays re-correctable under the same relaxation — it is
+  // a human's earlier technician-less confirm, and re-matching it must not
+  // demand the technician the first confirm proved absent.
+  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit';
+  let payoutEligible = true;
+  if (!policy.enabled) {
+    if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');
+    payoutEligible = false;
+  }
   if (!reviewWithinProgramWindow(review, policy)) {
-    throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
+    if (!isClickAutoCorrection) throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
+    payoutEligible = false;
   }
   if (toInt(review.star_rating, 0) < Math.max(1, toInt(policy.minRating, 1))) {
-    throw operationalError('Google review does not meet the minimum rating policy', 422, 'review_below_min_rating');
+    if (!isClickAutoCorrection) throw operationalError('Google review does not meet the minimum rating policy', 422, 'review_below_min_rating');
+    payoutEligible = false;
   }
 
   const customer = await conn('customers').where({ id: customerId }).first();
@@ -766,18 +871,40 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     technicianId = technicianId || serviceRecord.technician_id || null;
   }
 
-  if (!technicianId) {
+  // Explicit no-visit intent (pre-push P0): "Confirm match (no visit on
+  // file)" means the admin is confirming WITHOUT a payable visit — automatic
+  // technician resolution must not hijack that into a paid 'manual' link
+  // (the resolver can produce a technician from a review_requests row or a
+  // nearest-prior service even when the candidate card showed no visit).
+  // Skipping resolution routes the confirm through the technician-less
+  // branch below: link_source 'manual_no_visit', payout eligibility drops.
+  // Explicit ids win over the flag — a request that names a technician or
+  // service record is a normal attribution, whatever it claims.
+  const explicitNoVisit = attrs.noVisit === true && !technicianId && !serviceRecordId;
+  if (!technicianId && !explicitNoVisit) {
     const attribution = await resolveTechnicianForGoogleReview({ ...review, customer_id: customerId }, conn);
     technicianId = attribution?.technicianId || null;
     serviceRecordId = serviceRecordId || attribution?.serviceRecordId || null;
   }
 
+  // A technician-less click_auto confirmation is always allowed — the link
+  // and reversal don't need one, and without a technician there is nobody to
+  // pay, so payout eligibility simply drops (GH codex #3483 r3: the earlier
+  // relaxation only covered payout-INELIGIBLE rows, 422ing the UI's only
+  // confirm action for an eligible no-visit customer). Non-click_auto manual
+  // attribution keeps requiring a technician (it exists to mint the payout).
   if (!technicianId) {
-    throw operationalError('technicianId required for manual attribution', 422, 'technician_id_required');
+    if (isClickAutoCorrection) {
+      payoutEligible = false;
+    } else {
+      throw operationalError('technicianId required for manual attribution', 422, 'technician_id_required');
+    }
   }
 
-  const technician = await conn('technicians').where({ id: technicianId }).first();
-  if (!technician) throw operationalError('Technician not found', 404, 'technician_not_found');
+  const technician = technicianId
+    ? await conn('technicians').where({ id: technicianId }).first()
+    : null;
+  if (technicianId && !technician) throw operationalError('Technician not found', 404, 'technician_not_found');
 
   // If a PAID payout already binds this review, payroll is closed and the
   // payout can't move — so DON'T relink google_reviews.customer_id either, or
@@ -792,7 +919,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       alreadyPaid: true,
       reviewId: review.id,
       customer: serializeCustomer(customer),
-      technician: { id: technician.id, name: technician.name || 'Technician' },
+      technician: technician ? { id: technician.id, name: technician.name || 'Technician' } : null,
     };
   }
 
@@ -804,19 +931,177 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // review about to be marked removed. Holding the lock means no cycle is in
   // flight; a busy lock is a retryable 409 BEFORE any side effect.
   const attributionOutcome = await runExclusive(`gbp-review-sync:${review.location_id}`, async () => {
+  // Live prior-state read INSIDE the lock (pre-push P1 r7): the outer
+  // `review` snapshot predates the lock, so two concurrent re-matches would
+  // both see the same original owner and the second would reverse the wrong
+  // customer. The click-auto reversal below keys off who the row points at
+  // NOW, not who it pointed at when the request loaded.
+  const prior = await conn('google_reviews')
+    .where({ id: review.id })
+    .first('customer_id', 'link_source', 'auto_linked_at');
+
+  // Reject ANY request whose live provenance/customer no longer matches the
+  // row the admin loaded (GH codex #3483 r10) — not only the payout-ineligible
+  // ones. Two admins can submit different candidate buttons for the same
+  // eligible click_auto row: the location lock merely serializes them, and the
+  // second request would otherwise overwrite the first's fresh 'manual' link
+  // while the click-auto reversal below (keyed on the LIVE link_source) skips,
+  // stranding the first replacement customer's suppression flag and thank-you
+  // enrollment. A mismatch means the admin decided off stale state — 409 so
+  // they reload and re-decide. This also subsumes the earlier payout-exemption
+  // re-validation: a click_auto row restamped 'manual' mid-flight is a
+  // provenance change.
+  const provenanceChanged = (prior?.link_source || null) !== (review.link_source || null)
+    || String(prior?.customer_id ?? '') !== String(review.customer_id ?? '');
+  if (provenanceChanged) {
+    throw operationalError('Review attribution changed while this request was in flight — reload and retry', 409, 'attribution_conflict');
+  }
+
   // Conditional write, not a snapshot re-check: a stamp can still have
   // committed before the lock was free. Zero rows updated means liveness was
   // lost — abort BEFORE any side effect (the has_left_google_review mark,
   // thank-you enrollment, and the payout).
-  const linkedCount = await conn('google_reviews')
-    .where({ id: review.id })
-    .whereNull('missing_since')
-    .update({
-      customer_id: customerId,
-      updated_at: new Date(),
-    });
+  //
+  // The reassignment and the click-auto reversal are ONE transaction
+  // (pre-push P1 r8): once the row is restamped 'manual' a failed reversal
+  // becomes unretryable (prior.link_source is gone), permanently silencing
+  // the wrongly linked customer's review asks — so a reversal failure must
+  // roll the reassignment back too. Reversal of a wrong click auto-link
+  // (pre-push P1 r6): re-matching to a DIFFERENT customer un-suppresses the
+  // previously linked one when this review was their only linked review;
+  // another linked review still proves they reviewed. Only the audit-log
+  // insert stays best-effort, outside the transaction.
+  let reversedCustomerId = null;
+  const linkedCount = await conn.transaction(async (trx) => {
+    // Paid-payout serialization INSIDE the relink transaction (pre-push
+    // P0 ×2): lock the payout row FOR UPDATE regardless of status so a
+    // concurrent markPaid queues behind this relink instead of racing it.
+    // Already paid → abort before any write (payroll is closed). Unpaid →
+    // re-attribute it HERE, in the same transaction, so a markPaid that was
+    // waiting on the lock pays the CORRECTED attribution when it resumes.
+    const existingPayout = await trx('review_incentive_payouts')
+      .where({ google_review_id: review.id })
+      .forUpdate()
+      .first('id', 'status', 'technician_id');
+    if (existingPayout?.status === 'paid') {
+      throw operationalError('A paid bonus already binds this review — payroll is closed, so the attribution cannot move', 409, 'payout_already_paid');
+    }
+    // Relink FIRST, payout patch second — both in this transaction. A
+    // review that lost liveness (removal stamped since the pre-lock check)
+    // must roll BOTH back: committing a re-attributed payout beside an
+    // un-relinked review leaves an inconsistency payroll could pay (GH
+    // codex #3483 r6 P1) — so a zero-row relink throws INSIDE the trx.
+    const count = await trx('google_reviews')
+      .where({ id: review.id })
+      .whereNull('missing_since')
+      .update({
+        customer_id: customerId,
+        // Human confirmation: a manual attribution touch (including a
+        // missing_technician repair over a click-auto link) upgrades the
+        // provenance, which lifts the click_auto payout exclusion in
+        // qualifiesGoogleReview. A technician-less confirm records
+        // 'manual_no_visit' — resolved by a human, nothing to pay — so the
+        // queue doesn't re-park it as missing_technician forever (GH codex
+        // #3483 r4).
+        link_source: technicianId ? 'manual' : 'manual_no_visit',
+        updated_at: new Date(),
+      });
+    const linked = (Array.isArray(count) ? count.length : count) > 0;
+    if (!linked) {
+      throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+    }
+    if (existingPayout) {
+      const payoutPatch = {
+        customer_id: customerId,
+        // Keep the audit snapshot consistent with the identity columns —
+        // insertPayout's later duplicate pass sees these fields already
+        // updated, concludes nothing changed, and would leave the snapshot
+        // naming the OLD attribution forever (GH codex #3483 r6).
+        attribution_snapshot: JSON.stringify({
+          method: 'manual_admin_match',
+          adminId: attrs.adminId || null,
+          customerId,
+          technicianId: technicianId || null,
+          serviceRecordId: serviceRecordId || null,
+          locationId: review.location_id || null,
+          starRating: review.star_rating || null,
+          googleReviewId: review.google_review_id || null,
+          reattributedFrom: existingPayout.technician_id || null,
+        }),
+        updated_at: new Date(),
+      };
+      // technician_id only when the correction carries one — a no-visit
+      // confirm must not null a column an earlier attribution filled. A
+      // technician-backed reassignment moves service_record_id WITH it,
+      // including to null (GH codex r9): leaving the old customer's service
+      // on the row would commit an internally inconsistent payout that a
+      // concurrent markPaid could freeze after this lock releases.
+      if (technicianId) {
+        payoutPatch.technician_id = technicianId;
+        payoutPatch.service_record_id = serviceRecordId || null;
+      }
+      await trx('review_incentive_payouts')
+        .where({ id: existingPayout.id })
+        .whereNot('status', 'paid')
+        .update(payoutPatch);
+    }
+    if (prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
+      const otherLink = await trx('google_reviews')
+        .where({ customer_id: prior.customer_id })
+        .whereNot('id', review.id)
+        .first('id');
+      // Ownership check (GH codex r6): a review_marked_at LATER than the
+      // auto-link's own stamp means a human independently confirmed this
+      // customer reviewed (Customer 360 re-confirm bumps the stamp) — that
+      // flag is not the auto-link's to clear.
+      const priorCust = await trx('customers')
+        .where({ id: prior.customer_id })
+        .first('review_marked_at');
+      const ownedByAutoLink = prior.auto_linked_at && priorCust?.review_marked_at
+        && new Date(priorCust.review_marked_at) <= new Date(prior.auto_linked_at);
+      if (!otherLink && ownedByAutoLink) {
+        // Ownership predicate IN the write (GH codex r8): a human mark
+        // landing between the read above and this update bumps
+        // review_marked_at — the conditional then no-ops and the human's
+        // confirmation survives. The sole-basis check ALSO lives in the
+        // write (GH codex r10): the per-location lock doesn't serialize an
+        // attribution linking another review to this same customer at a
+        // different location, so the otherLink pre-read can miss a link
+        // that commits between the read and this update — the subquery is
+        // re-evaluated at write time and refuses the clear once any other
+        // linked review proves the customer reviewed. The audit entry
+        // follows the actual outcome (GH codex r9): reversedCustomerId
+        // only on a real clear.
+        const cleared = await trx('customers')
+          .where({ id: prior.customer_id })
+          .where({ review_marked_at: priorCust.review_marked_at })
+          .whereNotExists(function soleBasis() {
+            this.select(1)
+              .from('google_reviews')
+              .where('google_reviews.customer_id', prior.customer_id)
+              .whereNot('google_reviews.id', review.id);
+          })
+          .update({ has_left_google_review: false, review_marked_at: null });
+        if (cleared) reversedCustomerId = prior.customer_id;
+      }
+    }
+    return count;
+  });
   if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+  }
+
+  if (reversedCustomerId) {
+    try {
+      await conn('activity_log').insert({
+        customer_id: reversedCustomerId,
+        admin_user_id: attrs.adminId || null,
+        action: 'review_automark_reversed',
+        description: 'Click auto-link re-matched to a different customer — "already left a Google review" cleared; review asks resume.',
+      });
+    } catch (revErr) {
+      logger.warn(`[review-incentives] auto-mark reversal audit log failed for customer ${reversedCustomerId}: ${revErr.message}`);
+    }
   }
 
   // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
@@ -825,22 +1110,32 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // suppression both read has_left_google_review). Runs even for
   // missing_technician repairs where the customer link is unchanged — the
   // flag can still be false there from an older import or a prior mark
-  // failure. Guarded on the loaded row so repeat repairs don't spam
-  // activity_log. Best-effort — a marking hiccup must not fail attribution.
-  if (customer.has_left_google_review !== true) {
-    try {
-      await conn('customers')
-        .where({ id: customerId })
-        .update({ has_left_google_review: true, review_marked_at: new Date() });
+  // failure. The WRITE is unconditional even when the loaded row already
+  // showed true (GH codex #3483 r10): the loaded flag may be a click-auto
+  // stamp a concurrent sole-basis reversal is about to clear — skipping the
+  // write here would leave that clear standing although THIS attribution now
+  // independently proves the customer reviewed. Always restamping
+  // review_marked_at means the reversal's conditional clear either sees the
+  // bumped stamp and no-ops, or is overwritten by this later mark — a human
+  // attribution touch is meant to claim ownership either way. Only the
+  // activity_log insert stays guarded on the loaded row so repeat repairs
+  // don't spam the log. Best-effort — a marking hiccup must not fail
+  // attribution.
+  const wasMarkedAtLoad = customer.has_left_google_review === true;
+  try {
+    await conn('customers')
+      .where({ id: customerId })
+      .update({ has_left_google_review: true, review_marked_at: new Date() });
+    if (!wasMarkedAtLoad) {
       await conn('activity_log').insert({
         customer_id: customerId,
         admin_user_id: attrs.adminId || null,
         action: 'review_manual_marked',
         description: 'Manual review match — customer marked as having left a Google review; review asks stop.',
       });
-    } catch (markErr) {
-      logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
     }
+  } catch (markErr) {
+    logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
   }
 
   // Thank-you sequence ONLY when the customer link actually changed: the
@@ -848,7 +1143,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // review already attributed, and a months-later "thanks for your review"
   // from that repair would read as noise. (Gate, 4-5-star bar, cross-location
   // once-ever dedupe all live in the shared helper; it never throws.)
-  if (review.customer_id !== customerId) {
+  // Exception: confirming a click AUTO-link with the SAME customer — the
+  // auto-link deliberately defers customer-facing copy to this human
+  // confirmation (GH codex #3483 r2 P1), so the confirm IS the attribution
+  // moment. prior = live pre-write state read under the lock.
+  if (prior?.customer_id !== customerId || prior?.link_source === 'click_auto') {
     const { enrollReviewThankYou } = require('./automation-enroll');
     await enrollReviewThankYou({
       customerId,
@@ -869,18 +1168,22 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     googleReviewId: review.google_review_id || null,
   };
 
-  let result = await insertPayout({
-    technicianId,
-    customerId,
-    serviceRecordId,
-    reviewRequestId: null,
-    googleReviewId: review.id,
-    source: 'google_review',
-    amountCents: policy.amountCents,
-    currency: policy.currency,
-    earnedAt: review.review_created_at || review.created_at || new Date(),
-    attributionSnapshot,
-  }, conn, { syncLockHeld: true });
+  // A correction under a disabled/ineligible payout policy links the review
+  // and runs the reversal but never mints money (GH codex #3483 r1 P1).
+  let result = payoutEligible
+    ? await insertPayout({
+      technicianId,
+      customerId,
+      serviceRecordId,
+      reviewRequestId: null,
+      googleReviewId: review.id,
+      source: 'google_review',
+      amountCents: policy.amountCents,
+      currency: policy.currency,
+      earnedAt: review.review_created_at || review.created_at || new Date(),
+      attributionSnapshot,
+    }, conn, { syncLockHeld: true })
+    : { created: false, skipped: true, reason: 'payout_policy_ineligible' };
 
   // Re-attribution: a payout already existed for this review (the partial
   // unique index on google_review_id dedups it), so insertPayout no-ops with
@@ -946,10 +1249,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     ...attributionOutcome,
     reviewId: review.id,
     customer: serializeCustomer(customer),
-    technician: {
+    technician: technician ? {
       id: technician.id,
       name: technician.name || 'Technician',
-    },
+    } : null,
   };
 }
 
@@ -1018,6 +1321,11 @@ async function getDashboard(options = {}) {
   let unattributedGoogleReviews = 0;
   try {
     const minRating = Math.max(1, toInt(policy.minRating, 1));
+    // The headline count is EVERY live in-window review — the client shows it
+    // as "Post-Launch Reviews", so a human-confirmed manual_no_visit link or a
+    // pending click_auto link must not decrement the apparent public-review
+    // total (GH codex #3483 r10; the r8 exclusion below now applies only to
+    // the needs-attribution derivation).
     const confirmedRow = await conn('google_reviews')
       .where('reviewer_name', '!=', '_stats')
       .whereNull('missing_since')
@@ -1027,15 +1335,29 @@ async function getDashboard(options = {}) {
       .count('* as count')
       .first();
     confirmedGoogleReviews = toInt(confirmedRow?.count, 0);
+    const payoutTrackRow = await conn('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
+      // Provenances that can never mint a payout are not "needing
+      // attribution": manual_no_visit is human-RESOLVED with nothing to
+      // pay, and click_auto waits in its own confirm queue — counting
+      // either inflates the metric forever (GH codex #3483 r8).
+      .whereRaw("(link_source IS NULL OR link_source NOT IN ('manual_no_visit', 'click_auto'))")
+      .where('review_created_at', '>=', effectivePeriodStart.toISOString())
+      .where('review_created_at', '<=', periodEnd.toISOString())
+      .where('star_rating', '>=', minRating)
+      .count('* as count')
+      .first();
     // "Needs attribution" must match the attribution QUEUE, which surfaces any
     // in-window confirmed review WITHOUT a payout — whether it's missing a
     // customer or has a customer but no resolvable technician. The old query
     // counted only missing-customer, under-reporting the queue. Every confirmed
     // review that isn't yet a payout still needs attention, so subtract the
-    // attributed reviews (each payout = one google review) from the confirmed
-    // total. Derived from `payouts` (already in window) — no extra query, and
-    // it tracks the queue rather than just the null-customer subset.
-    unattributedGoogleReviews = Math.max(0, confirmedGoogleReviews - payouts.length);
+    // attributed reviews (each payout = one google review) from the
+    // payout-track total. Derived from `payouts` (already in window) — no
+    // extra scan of the payout table, and it tracks the queue rather than
+    // just the null-customer subset.
+    unattributedGoogleReviews = Math.max(0, toInt(payoutTrackRow?.count, 0) - payouts.length);
   } catch {
     confirmedGoogleReviews = 0;
     unattributedGoogleReviews = 0;

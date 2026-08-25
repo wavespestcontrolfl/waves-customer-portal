@@ -1007,6 +1007,18 @@ const gates = {
   // in-flight enrollments (the runner only picks enabled templates).
   treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
 
+  // Confident click-tracking auto-link for unlinked Google reviews: when a
+  // review syncs in with no name match and EXACTLY ONE customer's tracked
+  // review-link click sits shortly before it (location-matched, tight
+  // window — see review-click-correlation.js findConfidentClickMatch), link
+  // the review to that customer instead of parking it in the manual-match
+  // queue. Explicit opt-in: a wrong link suppresses that customer's future
+  // review asks AND (via reviewThankYouEnroll) can text them a thank-you.
+  // Kill: unset — reviews fall back to the unlinked-review notification and
+  // the office's manual match flow; already-made links keep their
+  // link_source='click_auto' stamp for audit.
+  reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
   // unset the var, or toggle the sequence off in the tab to hold in-flight):
