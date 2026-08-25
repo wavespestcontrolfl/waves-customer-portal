@@ -2589,6 +2589,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // — caching the mismatch would serve the wrong water balance until the
     // customer's next prefs edit.
     weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed,
+    // Dedicated flag for DELIVERY: a pinned (emailed) render must not ship a
+    // payload that fell back to tech values because the prefs read blipped —
+    // unlike a pending weather week, a retry can fix this, so pdf-queue
+    // throws retryable on it instead of serving the bytes.
+    portalPrefsReadFailed: prefsReadFailed,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {

@@ -83,6 +83,16 @@ describe('failed prefs read never caches', () => {
   test('prefs read failure marks the render uncacheable', () => {
     expect(source).toMatch(/prefsReadFailed = true/);
     expect(source).toMatch(/weekWeatherUncacheable: weekWeatherUnfrozen \|\| !!weekWeatherPendingReason \|\| prefsReadFailed/);
+    expect(source).toMatch(/portalPrefsReadFailed: prefsReadFailed/);
+  });
+
+  test('pinned (emailed) delivery defers with a retryable error on a failed prefs read', () => {
+    // Uncacheable only stops STORING — the queue would still email the
+    // blipped render. The delivery gate mirrors the unfrozen-week one.
+    const queueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(queueSource).toMatch(/portalPrefsReadFailed && isDeliveryPin/);
+    expect(queueSource).toMatch(/portal_prefs_read_failed/);
+    expect(queueSource).toMatch(/portalPrefsReadFailed && isDeliveryPin\)[\s\S]{0,300}?retryable = true/);
   });
 });
 
