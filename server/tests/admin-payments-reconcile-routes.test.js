@@ -105,6 +105,11 @@ jest.mock('../models/db', () => {
       where(w) { Object.assign(builder._where, w); return builder; },
       whereIn(col, vals) { builder._whereIn = { col, vals }; return builder; },
       whereNotIn(col, vals) { builder._notIn = { col, vals }; return builder; },
+      // completeActivePlansForInvoice: FOR UPDATE settlement recheck + the
+      // settled-invoice EXISTS gates — both modeled as chainable no-ops (the
+      // staged invoice already reflects the in-trx paid flip).
+      forUpdate() { return builder; },
+      whereExists() { return builder; },
       async first() {
         const found = rowsFor().find((r) => matches(r, builder._where));
         return found ? { ...found } : undefined;
@@ -151,6 +156,7 @@ jest.mock('../models/db', () => {
       failPaymentsInsert: state.failPaymentsInsert,
     };
     const trx = (table) => makeBuilder(staged, table);
+    trx.isTransaction = true; // completeActivePlansForInvoice reuses a caller trx as-is
     trx.raw = async (sql, bindings) => {
       state.rawCalls.push({ sql, bindings });
       if (state.onLock) state.onLock(staged, { sql, bindings });

@@ -92,7 +92,9 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
         where: jest.fn(() => trxInvoiceQuery),
         forUpdate: jest.fn(() => trxInvoiceQuery),
         whereNotIn: jest.fn(() => trxInvoiceQuery),
-        first: jest.fn(async () => lockedInvoiceRow),
+        // first('status') = completeActivePlansForInvoice's FOR UPDATE
+        // settlement recheck — the same trx already flipped the row paid.
+        first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'paid' } : lockedInvoiceRow)),
         update: invoiceUpdate,
       };
       const trx = jest.fn((table) => {
@@ -116,6 +118,7 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
           // A paid confirm completes active plans on the same trx.
           const pq = {
             where: jest.fn(() => pq),
+            whereExists: jest.fn(() => pq),
             update: planUpdate,
           };
           return pq;
@@ -124,6 +127,8 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
           // Plan completion releases plan-owned dunning stops on the same trx.
           const sq = {
             where: jest.fn(() => sq),
+            whereIn: jest.fn(() => sq),
+            whereExists: jest.fn(() => sq),
             update: jest.fn(async () => 0),
           };
           return sq;
@@ -131,6 +136,7 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
         throw new Error(`Unexpected trx table: ${table}`);
       });
       trx.raw = jest.fn(async () => undefined);
+      trx.isTransaction = true; // completeActivePlansForInvoice reuses a caller trx as-is
       return cb(trx);
     });
 

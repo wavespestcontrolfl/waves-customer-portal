@@ -18,6 +18,7 @@ function chain({ first, returning, rows } = {}) {
   q.whereNotIn = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.forUpdate = jest.fn(() => q);
+  q.whereExists = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.update = jest.fn((u) => { q._update = u; return { returning: async () => (returning === undefined ? [] : returning) }; });
   q.insert = jest.fn(async () => [1]);
@@ -55,7 +56,15 @@ describe('settleInvoiceAsAnnualPrepayCovered (full coverage only)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    // completeActivePlansForInvoice reuses a caller trx as-is — without this
+    // it would open a nested transaction and desync the queued db() slots.
+    db.isTransaction = true;
     db.fn = { now: () => 'NOW' };
+  });
+  afterEach(() => {
+    // Scoped to this describe: the reopen suite below keys real behavior off
+    // conn.isTransaction (in-trx re-arm deferral) and must not inherit it.
+    delete db.isTransaction;
   });
 
   test('no add-ons → prepaid, dedicated marker set, paid_at stamped, NO payments row', async () => {
@@ -67,6 +76,7 @@ describe('settleInvoiceAsAnnualPrepayCovered (full coverage only)', () => {
       .mockReturnValueOnce(chain({ first: inv }))       // locked fetch
       .mockReturnValueOnce(chain({ first: undefined })) // in-txn payments check
       .mockReturnValueOnce(updateChain)                 // update
+      .mockReturnValueOnce(chain({ first: { status: 'prepaid' } })) // helper's FOR UPDATE settlement recheck
       .mockReturnValueOnce(plansChain)                  // payment-plan completion (same trx)
       .mockReturnValueOnce(chain());                    // plan-owned dunning-stop release (same trx)
     const res = await InvoiceService.settleInvoiceAsAnnualPrepayCovered('inv-1', 'term-1');
