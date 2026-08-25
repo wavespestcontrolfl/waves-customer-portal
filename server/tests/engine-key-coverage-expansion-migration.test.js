@@ -29,6 +29,15 @@ function fakeKnex(db) {
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
       },
+      del: async () => {
+        const hits = rowsNow().filter(rowMatch);
+        db[table] = rowsNow().filter((r) => !hits.includes(r));
+        return hits.length;
+      },
+      insert: async (row) => {
+        (db[table] = rowsNow()).push({ ...row });
+        return [1];
+      },
     };
     return q;
   };
@@ -51,6 +60,7 @@ function seedDb() {
       { id: 'svc-admin', service_key: 'foam_drill', engine_keys: null },
       { id: 'svc-wasp', service_key: 'bee_wasp_removal', engine_keys: [...WASP_ALIAS_TARGET.shipped] },
     ].filter((r, i, all) => all.findIndex((x) => x.service_key === r.service_key) === i),
+    system_settings: [],
   };
 }
 
@@ -73,6 +83,23 @@ describe('20260825000011 engine-key coverage expansion', () => {
     expect(keysOf(svc(db, 'foam_drill'))).toEqual(['adam_custom']);
     // Non-shipped array → the wasp append refuses to touch it.
     expect(svc(db, 'bee_wasp_removal').engine_keys).toEqual(['stinging_insect', 'adam_extra']);
+  });
+
+  test('up() skips a row an admin pre-stamped with the IDENTICAL array, and down() leaves it (ownership is recorded, not inferred)', async () => {
+    const db = seedDb();
+    // Admin already stamped foam_drill with exactly the seed value before
+    // the deploy — value equality must NOT read as migration ownership.
+    svc(db, 'foam_drill').engine_keys = ['foam_drill'];
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'foam_drill').engine_keys).toEqual(['foam_drill']);
+  });
+
+  test('down() with no ownership record restores nothing', async () => {
+    const db = seedDb();
+    svc(db, 'bora_care').engine_keys = ['bora_care'];
+    await migration.down(fakeKnex(db));
+    expect(svc(db, 'bora_care').engine_keys).toEqual(['bora_care']);
   });
 
   test('down() clears only exactly-seeded values and reverts the wasp append', async () => {

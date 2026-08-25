@@ -77,17 +77,39 @@ const WASP_ALIAS_TARGET = {
   append: 'wasp',
 };
 
+const STATE_KEY = 'migration.20260825000011.state';
+
+async function saveState(knex, state) {
+  if (!(await knex.schema.hasTable('system_settings'))) return;
+  await knex('system_settings').where({ key: STATE_KEY }).del();
+  await knex('system_settings').insert({ key: STATE_KEY, value: JSON.stringify(state) });
+}
+
+async function loadState(knex) {
+  if (!(await knex.schema.hasTable('system_settings'))) return null;
+  const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+  if (!row) return null;
+  try { return JSON.parse(row.value); } catch { return null; }
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
 
+  // Ownership is RECORDED, not inferred: value equality cannot prove up()
+  // wrote a mapping (an admin who pre-stamped the identical array would be
+  // clobbered by a value-guarded rollback — the exact trap the parent
+  // migration documents). down() reverses only the rows recorded here.
+  const state = { stampedKeys: [], waspAppended: false };
+
   for (const seed of ENGINE_KEY_SEEDS) {
     // Read-modify-write: only stamp rows that exist and are still unstamped,
     // so an admin edit (or a re-run) is never clobbered.
-    await knex('services')
+    const count = await knex('services')
       .where({ service_key: seed.service_key })
       .whereNull('engine_keys')
       .update({ engine_keys: JSON.stringify(seed.engine_keys), updated_at: knex.fn.now() });
+    if (count) state.stampedKeys.push(seed.service_key);
   }
 
   // Additive alias append, guarded on the exact shipped array so an
@@ -103,24 +125,32 @@ exports.up = async function up(knex) {
       && current.length === WASP_ALIAS_TARGET.shipped.length
       && WASP_ALIAS_TARGET.shipped.every((k, i) => current[i] === k);
     if (isShipped) {
-      await knex('services')
+      const count = await knex('services')
         .where({ id: row.id })
         .update({
           engine_keys: JSON.stringify([...current, WASP_ALIAS_TARGET.append]),
           updated_at: knex.fn.now(),
         });
+      state.waspAppended = count > 0;
     }
   }
+
+  await saveState(knex, state);
 };
 
-// Down mirrors the parent migration's contract: remove only values this
-// migration proved it wrote (rows whose engine_keys still equal the exact
-// seeded array revert to NULL; the wasp append reverts to the shipped pair).
+// Down reverses only what the RECORDED ownership state proves up() wrote —
+// no state row means up() never completed (or has nothing to answer for):
+// restore nothing rather than guess. Each reversal is additionally
+// value-guarded so a post-up() admin edit survives the rollback.
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
+  const state = await loadState(knex);
+  if (!state) return;
 
+  const stamped = new Set(Array.isArray(state.stampedKeys) ? state.stampedKeys : []);
   for (const seed of ENGINE_KEY_SEEDS) {
+    if (!stamped.has(seed.service_key)) continue;
     const row = await knex('services').where({ service_key: seed.service_key }).first('id', 'engine_keys');
     if (!row) continue;
     const current = Array.isArray(row.engine_keys)
@@ -135,9 +165,11 @@ exports.down = async function down(knex) {
     }
   }
 
-  const row = await knex('services')
-    .where({ service_key: WASP_ALIAS_TARGET.service_key })
-    .first('id', 'engine_keys');
+  const row = state.waspAppended
+    ? await knex('services')
+      .where({ service_key: WASP_ALIAS_TARGET.service_key })
+      .first('id', 'engine_keys')
+    : null;
   if (row) {
     const current = Array.isArray(row.engine_keys)
       ? row.engine_keys
@@ -150,6 +182,10 @@ exports.down = async function down(knex) {
       await knex('services').where({ id: row.id })
         .update({ engine_keys: JSON.stringify(WASP_ALIAS_TARGET.shipped), updated_at: knex.fn.now() });
     }
+  }
+
+  if (await knex.schema.hasTable('system_settings')) {
+    await knex('system_settings').where({ key: STATE_KEY }).del();
   }
 };
 
