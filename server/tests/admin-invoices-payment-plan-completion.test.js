@@ -78,7 +78,7 @@ const INVOICE = {
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
+  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);

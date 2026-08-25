@@ -58,7 +58,7 @@ const CREATED_PLAN = { id: 'plan-1', total_balance: '100.00', customer_id: 'cust
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'andWhere', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
+  ['where', 'whereIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);
@@ -95,6 +95,10 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...LOCKED_INVOICE })) });
     trxPlans = makeRecorder({
       insert: jest.fn(() => ({ returning: jest.fn(async () => [CREATED_PLAN]) })),
+      // first() with no args = pre-existing-plan probes (none);
+      // first('status') = the confirmation-email fence's under-lock re-read
+      // of the created plan (still active → email allowed).
+      first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'active' } : null)),
     });
     trxFollowups = makeRecorder();
     trx = jest.fn((table) => {
@@ -181,19 +185,11 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     });
   });
 
-  test('P2: a plan cancelled between commit and the post-commit email gets NO confirmation (fence re-reads status)', async () => {
+  test('P2: a plan cancelled between commit and the post-commit email gets NO confirmation (fence re-reads under the invoice lock)', async () => {
     const email = require('../services/payment-lifecycle-email');
-    // The fence's first('status') sees the concurrent cancel's write.
-    db.mockImplementation((table) => {
-      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
-      if (table === 'payment_plans') {
-        return makeRecorder({
-          first: jest.fn(async (...args) => (args[0] === 'status' ? { status: 'cancelled' } : null)),
-        });
-      }
-      if (table === 'activity_log') return makeRecorder();
-      throw new Error(`unexpected table ${table}`);
-    });
+    // The fence's under-lock first('status') sees the concurrent cancel's
+    // committed write.
+    trxPlans.first = jest.fn(async (...args) => (args[0] === 'status' ? { status: 'cancelled' } : null));
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
         method: 'POST',

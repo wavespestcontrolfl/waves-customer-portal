@@ -2335,25 +2335,32 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     // which carries the locked-row customer_id the plan was inserted with.
     const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
-    // Fence against a concurrent cancel landing between our commit and this
-    // post-commit email (codex PR r3 P2): re-read the plan's status right
-    // before sending — a "payment plan confirmed" email for a plan another
-    // admin already cancelled misleads the customer, and the mail helper
-    // never re-checks status itself. Best-effort: an unreadable status
-    // fails closed (no confirmation), the plan itself is already committed.
-    const planNow = await db('payment_plans')
-      .where({ id: paymentPlan.id })
-      .first('status')
-      .catch(() => null);
-    const emailResult = (planNow && planNow.status === 'active')
-      ? await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+    // Confirmation is MUTUALLY EXCLUSIVE with the cancel transition (codex
+    // PR r3/r4 P2): the cancel path flips the plan inside a trx whose FIRST
+    // lock is the invoice row, so holding that same lock across the status
+    // re-read AND the send removes the TOCTOU — a cancel either committed
+    // before us (we see it and suppress) or waits until this confirmation
+    // committed (confirm-then-cancel: two real events in order, and the
+    // cancel path owns its own messaging). The send runs under a short
+    // row-lock window by design; the idempotencyKey keeps retries single.
+    // Fail closed: an unreadable status suppresses the confirmation — the
+    // plan itself is already committed either way.
+    const emailResult = await db.transaction(async (trx) => {
+      await trx('invoices').where({ id }).forUpdate().first();
+      const planNow = await trx('payment_plans')
+        .where({ id: paymentPlan.id })
+        .first('status');
+      if (!planNow || planNow.status !== 'active') {
+        return { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
+      }
+      return PaymentLifecycleEmail.sendPaymentPlanConfirmed({
         customerId: planCustomerId,
         paymentPlanId: paymentPlan.id,
         paymentMethodId,
         plan: paymentPlan,
         idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
-      }).catch((err) => ({ ok: false, error: err.message }))
-      : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
+      });
+    }).catch((err) => ({ ok: false, error: err.message }));
 
     // NOTE: no post-commit pauseSequence here (codex r9 P1). The in-trx
     // stopInvoiceFollowupsForPaymentPlan above already stopped the sequence
@@ -2426,6 +2433,24 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
+        // Settlement may have won the race (codex PR r4 P2): the paid flip
+        // committed, but the webhook's post-commit plan completion hasn't
+        // run yet. Cancelling now would strand the plan-owned sequence
+        // 'stopped' forever — resumeSequence no-ops on a terminal invoice
+        // and the completion helper then finds no active plan — so a later
+        // dispute reopen would find isDunningStopped() true with no plan.
+        // Complete the plan (and release its sequence) instead: the same
+        // transition settlement itself owed, decided under the invoice lock.
+        if (['paid', 'prepaid'].includes(String(invoice.status || ''))) {
+          await PaymentPlans.completeActivePlansForInvoice(id, trx);
+          const settled = await trx('payment_plans').where({ id: plan.id }).first();
+          return {
+            invoice,
+            plan: settled || plan,
+            completedInsteadOfCancelled: true,
+            rearm: 'untouched',
+          };
+        }
         const now = new Date();
         const [cancelled] = await trx('payment_plans')
           .where({ id: plan.id, status: 'active' })
@@ -2443,7 +2468,19 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       throw err;
     }
 
-    const { invoice, plan, alreadyCancelled, rearm } = outcome;
+    const { invoice, plan, alreadyCancelled, completedInsteadOfCancelled, rearm } = outcome;
+
+    if (completedInsteadOfCancelled) {
+      // Settlement won the race — the plan was completed, not cancelled, and
+      // dunning stays released (the invoice is paid). Tell the operator what
+      // actually happened instead of confirming a cancel that didn't occur.
+      return res.json({
+        ok: true,
+        paymentPlan: plan,
+        completedInsteadOfCancelled: true,
+        message: 'This invoice settled while cancelling — the payment plan was completed (not cancelled). No reminders are armed on a paid invoice.',
+      });
+    }
 
     // No sequence row existed at cancel time (decided under the invoice lock):
     // arm one now via the existing mechanism, exactly like reverse-prepaid —

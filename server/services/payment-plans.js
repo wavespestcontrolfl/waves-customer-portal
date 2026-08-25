@@ -18,8 +18,21 @@ const logger = require('./logger');
 async function completeActivePlansForInvoice(invoiceId, conn = db) {
   if (!invoiceId) return 0;
   const now = new Date();
+  // Settlement is re-verified IN the update statement (codex PR r4 P2): a
+  // delayed post-commit caller can run after a dispute reopened the invoice
+  // and an admin created a REPLACEMENT plan — completing that plan (and its
+  // sequence) on a now-overdue invoice would silently disarm collection.
+  // The EXISTS reads the invoice's status at update time, binding the
+  // transition to a currently-settled invoice.
+  const settledInvoice = function settledInvoice() {
+    this.select(1)
+      .from('invoices')
+      .whereRaw('invoices.id = ??', ['payment_plans.invoice_id'])
+      .whereIn('invoices.status', ['paid', 'prepaid']);
+  };
   const flipped = await conn('payment_plans')
     .where({ invoice_id: invoiceId, status: 'active' })
+    .whereExists(settledInvoice)
     .update({ status: 'completed', completed_at: now, updated_at: now });
   // Release the plan-owned dunning stop too (codex PR r1 P1): the plan's
   // creation left the sequence 'stopped' with a payment_plan_created:<id>
@@ -38,6 +51,14 @@ async function completeActivePlansForInvoice(invoiceId, conn = db) {
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['stopped', 'paused'])
     .where('stopped_reason', 'like', 'payment_plan_created:%')
+    // Same settled gate as the plan flip above — releasing a replacement
+    // plan's stop on a reopened invoice would disarm its dunning ownership.
+    .whereExists(function settledInvoiceForSequence() {
+      this.select(1)
+        .from('invoices')
+        .whereRaw('invoices.id = ??', ['invoice_followup_sequences.invoice_id'])
+        .whereIn('invoices.status', ['paid', 'prepaid']);
+    })
     .update({ status: 'completed', next_touch_at: null, updated_at: now });
   return flipped;
 }
