@@ -6,7 +6,7 @@
 // fee again when its fee invoice is refunded.
 
 let mockTables = {};
-let updates = [];
+let mockUpdates = [];
 
 jest.mock('../models/db', () => {
   const makeTrx = () => {
@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
       });
       chain.first = jest.fn(async () => (Array.isArray(val) ? (val[0] ?? null) : (val ?? null)));
       chain.select = jest.fn(async () => (Array.isArray(val) ? val : (val ? [val] : [])));
-      chain.update = jest.fn(async (payload) => { updates.push({ table, payload }); return 1; });
+      chain.update = jest.fn(async (payload) => { mockUpdates.push({ table, payload }); return 1; });
       return chain;
     };
     trx.raw = jest.fn(async () => ({ rows: [] }));
@@ -56,7 +56,7 @@ function alertRow(metaOverrides = {}) {
 }
 
 beforeEach(() => {
-  updates = [];
+  mockUpdates = [];
   mockTables = {};
 });
 
@@ -73,7 +73,7 @@ test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — neve
     scheduled_services: [],
   };
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
-  expect(updates).toEqual([]); // idempotent — no rewrite, no reopened debt
+  expect(mockUpdates).toEqual([]); // idempotent — no rewrite, no reopened debt
 });
 
 test('a VOID (not refunded) fee invoice beside a live application DOES rewrite to a fee-only instruction', async () => {
@@ -88,10 +88,10 @@ test('a VOID (not refunded) fee invoice beside a live application DOES rewrite t
     scheduled_services: [],
   };
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
-  expect(updates).toHaveLength(1);
-  expect(updates[0].payload.body).toContain('do NOT bill an application again');
-  expect(updates[0].payload.body).toContain('one-time setup fee');
-  expect(updates[0].payload.read_at).toBe(null); // newly actionable — rings
+  expect(mockUpdates).toHaveLength(1);
+  expect(mockUpdates[0].payload.body).toContain('do NOT bill an application again');
+  expect(mockUpdates[0].payload.body).toContain('one-time setup fee');
+  expect(mockUpdates[0].payload.read_at).toBe(null); // newly actionable — rings
 });
 
 test('a foreign re-linked visit never reconciles another customer\'s alert', async () => {
@@ -101,5 +101,5 @@ test('a foreign re-linked visit never reconciles another customer\'s alert', asy
     scheduled_services: [],
   };
   await reconcileSetupFeeAlert({ customerId: 'c2000000-0000-0000-0000-000000000002', sourceEstimateId: EST });
-  expect(updates).toEqual([]);
+  expect(mockUpdates).toEqual([]);
 });
