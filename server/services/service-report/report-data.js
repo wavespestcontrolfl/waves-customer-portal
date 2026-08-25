@@ -307,6 +307,10 @@ function portalIrrigationInches(propertyPrefs) {
   // (same rule as the weekly email's prefsInches).
   const explicit = numberOrNull(propertyPrefs.irrigation_inches_per_week);
   if (explicit != null && explicit > 0) return explicit;
+  // Toggle OFF: the runtime entries describe a system the customer says is
+  // not running — never derive from them (same gate as the weekly email; a
+  // typed value above keeps the existing prefs-only suppression semantics).
+  if (propertyPrefs.irrigation_system === false) return null;
   return deriveIrrigationInchesPerWeek({
     runMinutes: propertyPrefs.irrigation_run_minutes,
     wateringDays: propertyPrefs.watering_days,

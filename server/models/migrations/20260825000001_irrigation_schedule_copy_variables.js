@@ -97,6 +97,12 @@ exports.up = async function up(knex) {
     const at = blocks.findIndex((b) => b && b.type === 'callout' && b.content === target.seededCallout);
     // Staff reworded the callout since seeding — leave their copy alone.
     if (at < 0) continue;
+    // A staff-authored text body that does NOT contain the seeded sentence
+    // cannot be migrated consistently: renderTemplate prefers a nonempty
+    // text_body, so publishing swapped HTML blocks beside it would leave
+    // text-part recipients on the pre-migration copy while HTML recipients
+    // get the new variable. Leave the whole version alone instead.
+    if (typeof version.text_body === 'string' && version.text_body.trim() && !version.text_body.includes(target.seededCallout)) continue;
 
     const next = blocks.map((b, i) => (i === at ? replacement : b));
     const latest = await knex('email_template_versions')

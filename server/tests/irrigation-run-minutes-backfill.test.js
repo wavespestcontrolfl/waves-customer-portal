@@ -32,6 +32,13 @@ describe('parseRunMinutesFromNotes', () => {
     ['Each zone runs 20min, zone 3 seems to run 40 minutes', 'ambiguous'],
     // A bare number with no zone phrasing is not a per-zone runtime.
     ['Waters for 20 minutes', 'not per-zone'],
+    // Qualified, negated, or disabled statements are not uniform active
+    // runtimes (GH codex P1 on #3478 r9).
+    ['Not every zone runs 20 min', 'negated'],
+    ['Each zone runs 20 min except zone 3', 'exception'],
+    ['Each zone runs 20 min, but it is disabled', 'disabled'],
+    ['System off for the winter, each zone runs 20 min', 'seasonal off'],
+    ['Each zone used to run 20 min', 'past tense'],
     // A duration in another unit is a conflicting figure the minutes scan
     // cannot see (GH codex P1 on #3478 r5).
     ['Each zone runs 20 min except zone 3 runs 1 hour', 'hour conflict'],

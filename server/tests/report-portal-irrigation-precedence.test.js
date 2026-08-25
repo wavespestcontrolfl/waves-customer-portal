@@ -29,6 +29,14 @@ describe('portalIrrigationInches', () => {
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: '0', irrigation_run_minutes: null })).toBeNull();
   });
 
+  test('toggle OFF blocks derivation — the runtime entries describe a system the customer says is not running', () => {
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: false })).toBeNull();
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: true })).toBe(2);
+    // An explicit typed value keeps the existing prefs-only suppression
+    // semantics downstream — the resolver still returns it.
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: false, irrigation_inches_per_week: 1.25 })).toBe(1.25);
+  });
+
   test('declines to null when derivation cannot be honest', () => {
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system_type: ['spray', 'rotor'] })).toBeNull();
     expect(portalIrrigationInches(null)).toBeNull();

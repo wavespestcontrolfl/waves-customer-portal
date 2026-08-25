@@ -40,6 +40,12 @@ function parseRunMinutesFromNotes(notes) {
   const text = String(notes || '');
   if (!text.trim()) return null;
 
+  // (0) Qualified, negated, or disabled statements are not uniform active
+  // runtimes: "NOT every zone runs 20 min", "except zone 3", "but it is
+  // disabled", "off for the winter". Rejecting on the vocabulary alone is
+  // deliberately overbroad — fail-closed, same rationale as the guards below.
+  if (/\b(?:not|never|no longer|except|but|however|unless|only|disabled|broken|off|shut|used to|varies|sometimes|winter|summer|seasonal|testing|disconnected)\b/i.test(text)) return null;
+
   let matched = null;
   for (const re of PER_ZONE_PATTERNS) {
     const m = text.match(re);

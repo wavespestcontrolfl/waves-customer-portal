@@ -134,6 +134,20 @@ describe('irrigation schedule-copy migration', () => {
     expect(knex.__db.email_template_versions.find((v) => v.id === 'draft0').status).toBe('draft');
   });
 
+  test('up() declines when a custom text body lacks the seeded sentence — HTML and text parts must move together', async () => {
+    // renderTemplate prefers a nonempty text_body; swapping only the HTML
+    // blocks would leave text-part recipients on pre-migration copy.
+    const f = fixture();
+    f.email_template_versions[0].text_body = 'Staff wrote this text part from scratch.';
+    const knex = makeKnex(f);
+    await migration.up(knex);
+    expect(knex.__db.email_templates[0].active_version_id).toBe('v0');
+    // The other template (no custom text body) still migrates.
+    expect(knex.__db.email_templates[1].active_version_id).not.toBe('v1');
+    // Allowlist still lands even where the publish declined.
+    expect(JSON.parse(knex.__db.email_templates[0].allowed_variables)).toContain('schedule_ask');
+  });
+
   test('down() declines when staff republished with the same blocks but a different subject', async () => {
     const knex = makeKnex(fixture());
     await migration.up(knex);

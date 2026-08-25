@@ -93,6 +93,15 @@ describe('derived schedule → confirm_schedule with a derived schedule_note', (
     const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationSystem: false });
     expect(d.reason).toBe('setup_system');
   });
+
+  test('toggle OFF with a coexisting tech reading falls through to the tech value, never the derived one', () => {
+    // Without the toggle gate, the tech reading made onlyPrefsReading false
+    // and the disabled derived schedule (2") silently won the balance over
+    // the 0.5" tech fallback (GH codex P1 on #3478 r9).
+    const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationSystem: false, turfIrrigationInchesPerWeek: 0.5, rainfallInches7d: 2.1 });
+    expect(d.payload.schedule_inches).toBe('0.5');
+    expect(d.payload.schedule_note).toContain('came from our records');
+  });
 });
 
 describe('non-convertible entries → setup_schedule with a specific schedule_ask', () => {

@@ -325,7 +325,13 @@ function buildWeeklyEmailDecision({
   // head rate is a published typical, not a measurement of their system.
   const runtimeInputs = normalizeRuntimeInputs({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
   const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
-  const derivedInches = prefsInches == null ? derived.inchesPerWeek : null;
+  // A toggle turned OFF means the runtime entries describe a system the
+  // customer says is not running — no figure may be derived from them, and
+  // any tech reading falls through as before. (A typed inches value keeps
+  // the existing prefs-only suppression semantics below; without this gate,
+  // a coexisting tech reading made onlyPrefsReading false and the disabled
+  // derived schedule silently won the balance.)
+  const derivedInches = prefsInches == null && irrigationSystem !== false ? derived.inchesPerWeek : null;
   // A technician recording irrigation_type 'none' is saying this property
   // does not irrigate. Any tech-sourced inches alongside that are
   // contradictory, and adding them to the balance would tell the customer
