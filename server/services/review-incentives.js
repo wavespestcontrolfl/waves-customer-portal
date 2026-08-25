@@ -612,15 +612,17 @@ async function getAttributionQueue(options = {}) {
   // surface while the suppression flag persists forever (pre-push P1).
   // Unresolved click_auto rows are by definition awaiting action — the set
   // stays small because every confirm/re-match restamps them 'manual'.
-  // 500 = runaway guard, not a working cap (pre-push P1): unresolved rows
-  // are cleared by every confirm/re-match, so real counts stay single-digit;
-  // a cap at the UI's default limit could still hide the oldest links.
+  // UNCAPPED (pre-push P1): this queue is the ONLY surface that can confirm
+  // or re-match a probabilistic link, so every unresolved row must stay
+  // reachable — any newest-first cap would suppress the oldest links
+  // forever. The result set is bounded in practice by the auto-linker
+  // itself (single-digit organic volume; the retro sweep caps at 200 per
+  // run and only unconfirmed rows accumulate).
   const clickAutoRows = await conn('google_reviews')
     .where({ link_source: 'click_auto' })
     .whereNotNull('customer_id')
     .whereNull('missing_since')
-    .orderBy('review_created_at', 'desc')
-    .limit(500);
+    .orderBy('review_created_at', 'desc');
   const clickAutoIds = new Set(clickAutoRows.map(r => r.id));
   const reviews = [...clickAutoRows, ...scanned.filter(r => !clickAutoIds.has(r.id))];
 
@@ -869,7 +871,17 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     technicianId = technicianId || serviceRecord.technician_id || null;
   }
 
-  if (!technicianId) {
+  // Explicit no-visit intent (pre-push P0): "Confirm match (no visit on
+  // file)" means the admin is confirming WITHOUT a payable visit — automatic
+  // technician resolution must not hijack that into a paid 'manual' link
+  // (the resolver can produce a technician from a review_requests row or a
+  // nearest-prior service even when the candidate card showed no visit).
+  // Skipping resolution routes the confirm through the technician-less
+  // branch below: link_source 'manual_no_visit', payout eligibility drops.
+  // Explicit ids win over the flag — a request that names a technician or
+  // service record is a normal attribution, whatever it claims.
+  const explicitNoVisit = attrs.noVisit === true && !technicianId && !serviceRecordId;
+  if (!technicianId && !explicitNoVisit) {
     const attribution = await resolveTechnicianForGoogleReview({ ...review, customer_id: customerId }, conn);
     technicianId = attribution?.technicianId || null;
     serviceRecordId = serviceRecordId || attribution?.serviceRecordId || null;

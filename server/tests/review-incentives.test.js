@@ -214,6 +214,53 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('an explicit no-visit confirm never auto-resolves a technician or mints a payout', async () => {
+    // The customer HAS a resolvable prior service — exactly the case where
+    // the technician resolver would otherwise hijack a "Confirm match (no
+    // visit on file)" click into a paid 'manual' link (pre-push P0).
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+      }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-click',
+        customer_id: 'customer-1',
+        link_source: 'click_auto',
+        reviewer_name: 'SunshineGal88',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/click',
+      }],
+    });
+
+    const result = await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-click',
+      customerId: 'customer-1',
+      technicianId: null,
+      serviceRecordId: null,
+      noVisit: true,
+      adminId: 'admin-1',
+    }, { conn, policy });
+
+    expect(result).toMatchObject({ created: false, skipped: true, reason: 'payout_policy_ineligible' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+    expect(conn.__state.rows.google_reviews[0]).toMatchObject({
+      customer_id: 'customer-1',
+      link_source: 'manual_no_visit',
+    });
+  });
+
   test('does not create duplicate payouts for the same Google review', async () => {
     const conn = createDbMock({
       service_records: [{

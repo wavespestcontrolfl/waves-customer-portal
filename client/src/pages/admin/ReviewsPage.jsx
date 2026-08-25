@@ -1152,6 +1152,9 @@ function ReviewIncentivesPanel() {
           customerId: candidate.id,
           technicianId: service ? service.technicianId : null,
           serviceRecordId: service ? service.serviceRecordId : null,
+          // Explicit no-visit intent: without it the server's technician
+          // resolver could turn this confirm into a paid 'manual' link.
+          noVisit: !service,
         }),
       });
       setActiveRepairId(null);
