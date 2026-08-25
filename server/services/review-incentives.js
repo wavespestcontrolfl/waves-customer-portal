@@ -827,11 +827,18 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     serviceRecordId = serviceRecordId || attribution?.serviceRecordId || null;
   }
 
-  // A payout-ineligible click_auto correction doesn't mint money, so it
-  // doesn't need a technician — requiring one would re-block the correction
-  // the payout-policy relaxation above just unblocked.
-  if (!technicianId && payoutEligible) {
-    throw operationalError('technicianId required for manual attribution', 422, 'technician_id_required');
+  // A technician-less click_auto confirmation is always allowed — the link
+  // and reversal don't need one, and without a technician there is nobody to
+  // pay, so payout eligibility simply drops (GH codex #3483 r3: the earlier
+  // relaxation only covered payout-INELIGIBLE rows, 422ing the UI's only
+  // confirm action for an eligible no-visit customer). Non-click_auto manual
+  // attribution keeps requiring a technician (it exists to mint the payout).
+  if (!technicianId) {
+    if (isClickAutoCorrection) {
+      payoutEligible = false;
+    } else {
+      throw operationalError('technicianId required for manual attribution', 422, 'technician_id_required');
+    }
   }
 
   const technician = technicianId

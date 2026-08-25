@@ -1036,7 +1036,10 @@ class GoogleBusinessService {
         }).returning('id');
         newCount++;
       }
-      const effectiveCustomerId = customerId || existing?.customer_id || null;
+      // Existing-link-first, matching the persisted field above: a late name
+      // match must not suppress customer B's asks while the row stays linked
+      // to customer A (GH codex #3483 r3).
+      const effectiveCustomerId = existing?.customer_id || customerId || null;
       if (effectiveCustomerId) {
         // Matched to a customer → they left a review; auto-exclude from outreach.
         await this._markCustomerLeftReview(effectiveCustomerId);
