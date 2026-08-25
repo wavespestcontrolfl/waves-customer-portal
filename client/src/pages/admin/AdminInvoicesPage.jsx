@@ -662,6 +662,11 @@ function InvoiceList({
   const [sort, setSort] = useState("newest");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(null);
+  // A deep-linked invoice fetched ahead of its page lives OUTSIDE the
+  // paginated collection (Codex PR r9 P2): merging it into `invoices`
+  // inflated the length and hid Load More before the real pages were
+  // exhausted. Rendered rows merge it; pagination math never sees it.
+  const [deepLinkedInvoice, setDeepLinkedInvoice] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
   const [sendModalInvoice, setSendModalInvoice] = useState(null);
@@ -737,9 +742,7 @@ function InvoiceList({
     adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
       .then((row) => {
         if (cancelled || !row?.id) return;
-        setInvoices((prev) => (prev.some((inv) => String(inv.id) === String(row.id))
-          ? prev
-          : [row, ...prev]));
+        setDeepLinkedInvoice(row);
         setExpanded(row.id);
       })
       .catch(() => setExpanded(null));
@@ -982,7 +985,10 @@ function InvoiceList({
     return { key: "sent", label: "Sent", color: D.text };
   };
 
-  const rows = invoices;
+  const rows = deepLinkedInvoice
+    && !invoices.some((inv) => String(inv.id) === String(deepLinkedInvoice.id))
+    ? [deepLinkedInvoice, ...invoices]
+    : invoices;
 
   // Group by day — date header matches "Saturday, April 18, 2026"
   const groups = [];

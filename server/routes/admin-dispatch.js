@@ -9548,13 +9548,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                // No action left — never a false unread badge (Codex PR r9 P2).
+                read_at: trx.fn.now(),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }
             return true;
           }
-          const setupFeeLabel = `$${Number(unmintedSetupFeeObligation.setupFee || 0).toFixed(2)}`;
-          const firstAppLabel = Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '';
+          // REMAINDERS, not the full charge (Codex PR r9 P1): with a
+          // partial line already live ($9.90 of $99), instructing the
+          // full amount would over-collect — the labels carry exactly
+          // what is still owed.
+          const feeRemainderCents = Math.max(0, expectedSetupFeeCents - liveFeeCentsNow);
+          const appRemainderCents = expectedAppCentsThisVisit > 0
+            ? Math.max(0, expectedAppCentsThisVisit - appCentsNow)
+            : null;
+          const setupFeeLabel = `$${(feeRemainderCents / 100).toFixed(2)}${liveFeeCentsNow > 0 ? ' remaining' : ''}`;
+          const firstAppLabel = appRemainderCents !== null && appRemainderCents > 0
+            ? ` ($${(appRemainderCents / 100).toFixed(2)}${appCentsNow > 0 ? ' remaining' : ''})`
+            : (Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '');
           // A dead acceptance invoice no suppressor can surface
           // (detector-reported) means "voided without replacement", not
           // "never minted" — say so.

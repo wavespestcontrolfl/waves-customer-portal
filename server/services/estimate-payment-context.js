@@ -311,8 +311,13 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
   // card shows only prepay context while completion parks the visit for
   // the missing fee (Codex PR round 2 P1). The annualPrepay panel above
   // still renders the term's history either way.
+  // A cancel-at-renewal term rides out its PAID window as covered
+  // (coveredTermsAsOf's decided-lapse branch) — status alone must not
+  // force standard billing while coverage stands, or the card renders
+  // "do not collect" beside "Per application" (Codex PR r9 P2).
   const termIsDead = !!term
-    && ['cancelled', 'canceled', 'refunded', 'void', 'voided'].includes(String(term.status || '').toLowerCase());
+    && ['cancelled', 'canceled', 'refunded', 'void', 'voided'].includes(String(term.status || '').toLowerCase())
+    && termCanonicallyCovered !== true;
   let acceptanceInvoice = null;
   let setupFeeMissing = null;
   // An UNCOVERED live-status term (unpaid payment_pending, clawed-back

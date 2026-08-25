@@ -1952,6 +1952,17 @@ const InvoiceService = {
         if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
+            // EVERY linked mint holds the shared advisory lock (Codex PR
+            // r9 P1): the deposit-credit path returns before the
+            // explicit-amount lock branch below, and adoptUnderMintLock
+            // is a no-op for non-replay mints — without this, a linked
+            // deposit-credit invoice can commit between a completion
+            // alert's scans and its instruction write. Re-acquire is a
+            // same-transaction no-op on the replay path.
+            if (sr.scheduled_service_id) {
+              const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+              await acquireScheduledInvoiceMintLock(trx, sr.scheduled_service_id);
+            }
             // An adopted invoice already ran its own deposit/credit flow —
             // return it untouched; the roll-forward belongs to the mint
             // that actually created the invoice.
