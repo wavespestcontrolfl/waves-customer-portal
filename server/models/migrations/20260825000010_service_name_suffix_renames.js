@@ -123,11 +123,21 @@ function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
 }
 
 // Component-wise swap on possibly-merged reminder labels ("A & B",
-// "A, B, and C") — exact-matching components only (see exemplar).
+// "A, B, and C"). NOT the exemplar's tokenizer: splitting on the list
+// delimiters cannot see a component that itself CONTAINS one — and this
+// migration renames "Lawn + Tree & Shrub", whose " & " would shatter into
+// non-matching tokens even as the reminder's sole service (codex pre-push
+// P1). Instead the FULL old name is matched with delimiter/edge boundaries
+// on both sides, so it swaps whether it stands alone or sits inside a
+// merged list, while a longer name that merely starts with it ("… Care")
+// never matches.
 function relabelReminderServiceType(value, fromName, toName) {
   if (typeof value !== 'string' || !value) return null;
-  const tokens = value.split(/(\s+&\s+|,\s+and\s+|,\s+)/);
-  const next = tokens.map((t, i) => (i % 2 === 0 && t === fromName ? toName : t)).join('');
+  if (value === fromName) return toName;
+  const escaped = fromName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundary = '(?:,\\s+and\\s+|,\\s+|\\s+&\\s+)';
+  const re = new RegExp(`(^|${boundary})${escaped}(?=$|${boundary})`, 'g');
+  const next = value.replace(re, (m, pre) => pre + toName);
   return next === value ? null : next;
 }
 

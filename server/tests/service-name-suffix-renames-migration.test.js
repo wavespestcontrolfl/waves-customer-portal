@@ -30,6 +30,9 @@ function seedDb() {
       { id: 'svc-guar', service_key: 'rodent_guarantee', name: 'Rodent Guarantee Plan (Adam)', updated_at: 'orig' },
       { id: 'svc-general', service_key: 'general_pest', name: 'General Pest Control', updated_at: 'orig' },
       { id: 'svc-bb', service_key: 'bed_bug_treatment', name: 'Bed Bug Treatment', updated_at: 'orig' },
+      // Renamed name that CONTAINS a list delimiter — the reminder relabel
+      // must handle it whole (codex pre-push P1, PR2 round 1).
+      { id: 'svc-lts', service_key: 'lawn_tree_shrub_combo', name: 'Lawn + Tree & Shrub', updated_at: 'orig' },
     ],
     scheduled_services: [
       { id: 'v-open-1', service_type: ROACH_OLD, status: 'pending', service_id: 'svc-roach', self_booking_id: 'sb-1' },
@@ -44,6 +47,7 @@ function seedDb() {
       // Open bed-bug visit sharing a reminder slot with the merged label
       // below — reached in the LATER bed_bug rename pass.
       { id: 'v-bb', service_type: 'Bed Bug Treatment', status: 'pending', service_id: 'svc-bb' },
+      { id: 'v-lts', service_type: 'Lawn + Tree & Shrub', status: 'pending', service_id: 'svc-lts' },
     ],
     self_booked_appointments: [
       { id: 'sb-1', service_type: ROACH_OLD, status: 'confirmed' },
@@ -96,6 +100,12 @@ function seedDb() {
       // sibling sweep from rem-bb's slot) — down() must unwind BOTH.
       { id: 'rem-merged', scheduled_service_id: 'v-open-1', service_type: `${ROACH_OLD} & Bed Bug Treatment`, customer_id: 'c5', appointment_time: 'T5', updated_at: 'orig' },
       { id: 'rem-bb', scheduled_service_id: 'v-bb', service_type: 'Bed Bug Treatment', customer_id: 'c5', appointment_time: 'T5', updated_at: 'orig' },
+      // Sole-service label that CONTAINS ' & ' — the exemplar's tokenizer
+      // shattered it into non-matching tokens and never relabeled it.
+      { id: 'rem-lts', scheduled_service_id: 'v-lts', service_type: 'Lawn + Tree & Shrub', customer_id: 'c6', appointment_time: 'T6', updated_at: 'orig' },
+      // The same delimiter-bearing name as ONE component of a merged label
+      // (shares rem-bb's slot so the bed_bug pass reaches it via siblings).
+      { id: 'rem-lts-merged', scheduled_service_id: 'v-lts', service_type: 'Lawn + Tree & Shrub & Bed Bug Treatment', customer_id: 'c5', appointment_time: 'T5', updated_at: 'orig' },
     ],
     service_completion_profiles: [
       { service_key: 'cockroach_control', service_name_snapshot: ROACH_OLD },
@@ -277,6 +287,10 @@ describe('20260825000010 service name suffix renames', () => {
     // Both components of the doubly-renamed label rewritten, one per pass.
     expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_NEW} & Bed Bug Treatment Service`);
     expect(reminder(db, 'rem-bb').service_type).toBe('Bed Bug Treatment Service');
+    // A renamed name CONTAINING the ' & ' list delimiter relabels both as a
+    // sole label and as one component of a merged label.
+    expect(reminder(db, 'rem-lts').service_type).toBe('Lawn + Tree & Shrub Service');
+    expect(reminder(db, 'rem-lts-merged').service_type).toBe('Lawn + Tree & Shrub Service & Bed Bug Treatment Service');
   });
 
   test('up() copies protocol aliases with the migration marker', async () => {
@@ -311,6 +325,8 @@ describe('20260825000010 service name suffix renames', () => {
     // Doubly-renamed label fully unwound (reverse-order rollback: the
     // bed_bug revert must run BEFORE the cockroach revert can match).
     expect(reminder(db, 'rem-merged').service_type).toBe(`${ROACH_OLD} & Bed Bug Treatment`);
+    expect(reminder(db, 'rem-lts').service_type).toBe('Lawn + Tree & Shrub');
+    expect(reminder(db, 'rem-lts-merged').service_type).toBe('Lawn + Tree & Shrub & Bed Bug Treatment');
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(ROACH_OLD);
 
     // The marker-owned copy is gone; the admin's pre-existing new-name
