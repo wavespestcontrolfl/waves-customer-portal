@@ -932,24 +932,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     const existingPayout = await trx('review_incentive_payouts')
       .where({ google_review_id: review.id })
       .forUpdate()
-      .first('id', 'status');
+      .first('id', 'status', 'technician_id');
     if (existingPayout?.status === 'paid') {
       throw operationalError('A paid bonus already binds this review — payroll is closed, so the attribution cannot move', 409, 'payout_already_paid');
     }
-    if (existingPayout) {
-      const payoutPatch = {
-        customer_id: customerId,
-        updated_at: new Date(),
-      };
-      // technician_id only when the correction carries one — a no-visit
-      // confirm must not null a column an earlier attribution filled.
-      if (technicianId) payoutPatch.technician_id = technicianId;
-      if (serviceRecordId) payoutPatch.service_record_id = serviceRecordId;
-      await trx('review_incentive_payouts')
-        .where({ id: existingPayout.id })
-        .whereNot('status', 'paid')
-        .update(payoutPatch);
-    }
+    // Relink FIRST, payout patch second — both in this transaction. A
+    // review that lost liveness (removal stamped since the pre-lock check)
+    // must roll BOTH back: committing a re-attributed payout beside an
+    // un-relinked review leaves an inconsistency payroll could pay (GH
+    // codex #3483 r6 P1) — so a zero-row relink throws INSIDE the trx.
     const count = await trx('google_reviews')
       .where({ id: review.id })
       .whereNull('missing_since')
@@ -966,7 +957,39 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         updated_at: new Date(),
       });
     const linked = (Array.isArray(count) ? count.length : count) > 0;
-    if (linked && prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
+    if (!linked) {
+      throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+    }
+    if (existingPayout) {
+      const payoutPatch = {
+        customer_id: customerId,
+        // Keep the audit snapshot consistent with the identity columns —
+        // insertPayout's later duplicate pass sees these fields already
+        // updated, concludes nothing changed, and would leave the snapshot
+        // naming the OLD attribution forever (GH codex #3483 r6).
+        attribution_snapshot: JSON.stringify({
+          method: 'manual_admin_match',
+          adminId: attrs.adminId || null,
+          customerId,
+          technicianId: technicianId || null,
+          serviceRecordId: serviceRecordId || null,
+          locationId: review.location_id || null,
+          starRating: review.star_rating || null,
+          googleReviewId: review.google_review_id || null,
+          reattributedFrom: existingPayout.technician_id || null,
+        }),
+        updated_at: new Date(),
+      };
+      // technician_id only when the correction carries one — a no-visit
+      // confirm must not null a column an earlier attribution filled.
+      if (technicianId) payoutPatch.technician_id = technicianId;
+      if (serviceRecordId) payoutPatch.service_record_id = serviceRecordId;
+      await trx('review_incentive_payouts')
+        .where({ id: existingPayout.id })
+        .whereNot('status', 'paid')
+        .update(payoutPatch);
+    }
+    if (prior?.link_source === 'click_auto' && prior.customer_id && prior.customer_id !== customerId) {
       const otherLink = await trx('google_reviews')
         .where({ customer_id: prior.customer_id })
         .whereNot('id', review.id)

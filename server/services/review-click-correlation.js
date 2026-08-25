@@ -163,12 +163,23 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // first click pairs with google_location (frozen at first click), the
       // latest with last_google_location. A legacy latest-click without a
       // paired location stays annotated null, never borrowed.
+      // Pair TRUST (GH codex #3483 r5): legacy /go overwrote
+      // google_location on every revisit while redirected_at stayed at the
+      // first click, so a pre-migration first-click pair may name a
+      // location that timestamp never routed to. The latest pair is stamped
+      // atomically (trustworthy by construction); the first pair is trusted
+      // only when a post-migration click corroborates the stored location.
+      // Trust gates AUTO-LINK confidence only — suggestions still list.
       const pairs = [
-        { ts: row.redirected_at, loc: row.google_location || null },
-        { ts: row.last_redirected_at, loc: row.last_google_location || null },
+        {
+          ts: row.redirected_at,
+          loc: row.google_location || null,
+          trusted: Boolean(row.last_google_location && row.last_google_location === row.google_location),
+        },
+        { ts: row.last_redirected_at, loc: row.last_google_location || null, trusted: Boolean(row.last_google_location) },
       ];
       const seenTs = new Set();
-      for (const { ts, loc } of pairs) {
+      for (const { ts, loc, trusted } of pairs) {
         if (!ts || seenTs.has(String(ts))) continue;
         seenTs.add(String(ts));
         if (reviewLocationId && loc && loc !== reviewLocationId) continue;
@@ -179,7 +190,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // picked as the click (also holds under mocked SQL layers).
         if (clickedAt < windowStart || clickedAt > windowEnd) continue;
         const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();
-        const candidate = { row, clickedAt, clickOffsetMs, pairLoc: loc };
+        const candidate = { row, clickedAt, clickOffsetMs, pairLoc: loc, pairTrusted: trusted };
         if (betterClick(candidate, byCustomer.get(row.customer_id))) {
           byCustomer.set(row.customer_id, candidate);
         }
@@ -204,7 +215,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       .filter(({ row }) => !linked.has(row.customer_id))
       .sort((a, b) => Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
       .slice(0, Math.max(1, limit))
-      .map(({ row, clickedAt, clickOffsetMs, pairLoc }) => ({
+      .map(({ row, clickedAt, clickOffsetMs, pairLoc, pairTrusted }) => ({
         customerId: row.customer_id,
         firstName: row.first_name || null,
         lastName: row.last_name || null,
@@ -225,6 +236,9 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
           ? pairLoc === review.location_id
           : null,
         alreadyFlagged: row.has_left_google_review === true,
+        // Whether this timestamp/location pair was recorded together
+        // post-migration (or corroborated) — see the trust comment above.
+        pairTrusted: pairTrusted === true,
         // false only when the customer row explicitly carries active=false.
         customerActive: row.active !== false,
       }));
@@ -284,6 +298,9 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // active customers, so this link could never be human-confirmed and
     // would sit click_auto forever (GH codex #3483 r5) — manual queue.
     if (only.customerActive === false) return null;
+    // Untrusted timestamp/location pair (legacy drift — GH codex r5): the
+    // evidence may pair a click time with a location it never routed to.
+    if (only.pairTrusted !== true) return null;
     if (only.locationMatch !== true) return null;
     if (!only.clickedBeforeReview) return null;
     if (only.clickOffsetMs > AUTO_LINK_MAX_BEFORE_MS) return null;

@@ -7,7 +7,7 @@ const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset } = re
 const REVIEW_AT = '2026-08-07T18:00:00.000Z';
 
 function clickRow(overrides = {}) {
-  return {
+  const row = {
     customer_id: 'cust-1',
     redirected_at: '2026-08-07T17:30:00.000Z',
     google_review_clicked: true,
@@ -24,6 +24,11 @@ function clickRow(overrides = {}) {
     has_left_google_review: false,
     ...overrides,
   };
+  // Post-migration reality unless a test says otherwise: every successful
+  // click stamps the latest pair atomically alongside the claim.
+  if (!('last_redirected_at' in overrides)) row.last_redirected_at = row.redirected_at;
+  if (!('last_google_location' in overrides)) row.last_google_location = row.google_location;
+  return row;
 }
 
 // Chainable capture mock: filters are SQL-side in prod, so the mock returns
@@ -256,6 +261,23 @@ describe('findConfidentClickMatch', () => {
     const match = await findConfidentClickMatch(REVIEW, { conn });
     expect(match?.customerId).toBe('cust-1');
     expect(match?.clickOffsetLabel).toBe('5m before');
+  });
+
+  test('refuses a legacy pair (no post-migration corroboration) even for a sole in-window clicker', async () => {
+    // Pre-migration row: first-click location may have been overwritten by
+    // revisits — never confident without a corroborating post-migration tap.
+    const conn = makeConn({ clickRows: [clickRow({ last_redirected_at: null, last_google_location: null })] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses when the post-migration tap routed to a DIFFERENT location than the stored first pair', async () => {
+    const conn = makeConn({
+      clickRows: [clickRow({
+        last_redirected_at: '2026-08-07T19:30:00.000Z',
+        last_google_location: 'sarasota', // drift — stored bradenton uncorroborated
+      })],
+    });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
   test('refuses a location-unstamped sole clicker (null is not a match)', async () => {

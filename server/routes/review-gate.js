@@ -186,12 +186,11 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         google_review_clicked: true,
         redirected_to_google: true,
       };
-      // google_location freezes at the FIRST click's routing so it stays
-      // paired with the immutable redirected_at claim; the latest click's
-      // routing rides last_google_location beside last_redirected_at below
-      // (GH codex #3483 r4 — correlation must never judge a timestamp
-      // against a location it was not recorded with).
-      if (!request.google_location) updates.google_location = loc.id;
+      // google_location is NOT stamped here: a failed attempt (cadence
+      // stop / claim errors fall back to the rate page) would persist a
+      // location that redirected_at never observed, and a later successful
+      // retry after routing changes would pair them falsely (GH codex
+      // #3483 r6). It is set atomically WITH the redirected_at claim below.
       if (!request.opened_at) {
         updates.opened_at = new Date();
         if (request.status === 'sent') updates.status = 'opened';
@@ -229,7 +228,10 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       const claimed = await db('review_requests')
         .where({ id: request.id })
         .whereNull('redirected_at')
-        .update({ redirected_at: new Date() });
+        // google_location pairs atomically with the first-click claim (GH
+        // codex #3483 r4/r6): one conditional write, one observation — the
+        // frozen first location can never describe a failed attempt.
+        .update({ redirected_at: new Date(), google_location: loc.id });
       firstClick = claimed > 0;
     } catch (err) {
       logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
