@@ -27,6 +27,10 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       if (f.raw) return String(r[f.raw.col] || '').toLowerCase() === String(f.raw.val).toLowerCase();
       if (f.raw_null) return r[f.raw_null] === null || r[f.raw_null] === undefined;
       if (f.not_in) return !f.not_in.vals.includes(r[f.not_in.col]);
+      if (f.raw_label) {
+        const s = String(r.service_type || '');
+        return s === f.raw_label.exact || s.startsWith(f.raw_label.prefix);
+      }
       return Object.entries(f).every(([k, v]) => r[k] === v);
     });
     const q = {
@@ -37,6 +41,11 @@ function fakeKnex(db, { missingTables = [] } = {}) {
         // 20260825000010 rename migration use.
         if (/scheduled_date\s*>=\s*CURRENT_DATE/.test(sql)) {
           // Fake rows carry no scheduled_date; treat them all as future.
+          return q;
+        }
+        if (/service_type = \? OR service_type LIKE \?/.test(sql)) {
+          const [exact, like] = bindings;
+          filters.push({ raw_label: { exact, prefix: String(like).replace(/%$/, '') } });
           return q;
         }
         const m = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(sql);
