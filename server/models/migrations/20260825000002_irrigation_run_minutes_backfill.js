@@ -47,10 +47,18 @@ function parseRunMinutesFromNotes(notes) {
   }
   if (matched == null) return null;
 
-  // Ambiguity guard: every minutes figure anywhere in the notes must agree.
+  // Ambiguity guards — anything the single per-zone-minutes column cannot
+  // faithfully represent declines to NULL for the email ask to collect:
+  // (1) every minutes figure anywhere in the notes must agree;
   const allMinuteFigures = [...text.matchAll(/(\d{1,3})\s*min(?:ute)?s?\b/gi)].map((m) => Number(m[1]));
   const distinct = [...new Set(allMinuteFigures)];
   if (distinct.length !== 1 || distinct[0] !== matched) return null;
+  // (2) a duration in any OTHER unit ("zone 3 runs 1 hour", "half an hour")
+  // is a conflicting figure the minutes scan cannot see;
+  if (/\b(?:\d+(?:\.\d+)?|an?|one|two|half)\s*(?:hour|hr)s?\b/i.test(text)) return null;
+  // (3) multiple runs per day ("twice a day", "2x daily", "3 times per day")
+  // multiply the real weekly volume beyond minutes × days.
+  if (/\b(?:twice|thrice|\d+\s*(?:x|times))\s*(?:a|per|each)?\s*(?:day|daily|morning|night|evening)\b/i.test(text)) return null;
 
   if (!Number.isInteger(matched) || matched < 1 || matched > 240) return null;
   return matched;

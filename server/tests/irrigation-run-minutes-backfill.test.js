@@ -32,6 +32,14 @@ describe('parseRunMinutesFromNotes', () => {
     ['Each zone runs 20min, zone 3 seems to run 40 minutes', 'ambiguous'],
     // A bare number with no zone phrasing is not a per-zone runtime.
     ['Waters for 20 minutes', 'not per-zone'],
+    // A duration in another unit is a conflicting figure the minutes scan
+    // cannot see (GH codex P1 on #3478 r5).
+    ['Each zone runs 20 min except zone 3 runs 1 hour', 'hour conflict'],
+    ['Each zone runs 20min, back yard half an hour', 'hour conflict'],
+    // Multiple daily runs multiply weekly volume beyond minutes × days.
+    ['Each zone runs 20min twice a day', 'multiple daily runs'],
+    ['20 min per zone, 2x daily', 'multiple daily runs'],
+    ['Each zone runs 15 minutes 3 times per day', 'multiple daily runs'],
     // Bounds: the column validates 1–240.
     ['Each zone runs 500 min', 'out of bounds'],
     ['Each zone runs 0 min', 'out of bounds'],
