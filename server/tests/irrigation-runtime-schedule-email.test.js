@@ -94,6 +94,17 @@ describe('derived schedule → confirm_schedule with a derived schedule_note', (
     expect(d.reason).toBe('setup_system');
   });
 
+  test('toggle OFF + tech-observed system + complete inputs → conflict copy, never "schedule absent"', () => {
+    // hasSystem stays true via the technician's in_ground observation while
+    // the toggle suppresses the derivation — the blocker is the switch, and
+    // the ask must say so instead of claiming the schedule is missing.
+    const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationSystem: false, turfIrrigationType: 'in_ground' });
+    expect(d.reason).toBe('setup_schedule');
+    expect(d.payload.schedule_ask).toContain('switched off');
+    expect(d.payload.schedule_ask).toContain("the schedule on file isn't being counted");
+    expect(d.payload.schedule_ask).not.toContain('but not how');
+  });
+
   test('toggle OFF with a coexisting tech reading falls through to the tech value, never the derived one', () => {
     // Without the toggle gate, the tech reading made onlyPrefsReading false
     // and the disabled derived schedule (2") silently won the balance over

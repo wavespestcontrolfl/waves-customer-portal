@@ -125,13 +125,23 @@ function joinList(parts) {
  * name what IS on file, then the ONE thing that still blocks the conversion.
  * `derived` is deriveIrrigationInchesPerWeek's result for their prefs.
  */
-function buildScheduleAsk({ derived, inputs }) {
+function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches = null }) {
   const have = [];
   if (inputs.wateringDays.length) have.push(`${inputs.wateringDays.length} watering ${inputs.wateringDays.length === 1 ? 'day' : 'days'}`);
   if (inputs.runMinutes != null) have.push(`${inputs.runMinutes} minutes per zone`);
   if (inputs.headTypes.length) have.push(joinList(inputs.headTypes.map((t) => HEAD_LABELS[t] || t)));
   const haveClause = have.length ? ` — ${joinList(have)} — ` : ' for you, ';
   const reason = derived?.reason || 'missing_minutes';
+
+  // Toggle conflict: this branch is only reachable with the toggle off when
+  // a technician's first-hand observation says a system exists (hasSystem).
+  // The blocker is the switch, not a missing field — complete inputs (or an
+  // explicit inches entry) suppressed by the toggle must never be described
+  // as absent (GH codex P1 on #3478 r13).
+  if (toggleOff) {
+    const scheduleOnFile = explicitInches != null || derived?.inchesPerWeek != null || have.length > 0;
+    return `Our technician noted an in-ground sprinkler system at your property, but your portal has the irrigation system switched off${scheduleOnFile ? ", so the schedule on file isn't being counted" : ''}. If the system is running, switch it on under Irrigation in your portal ${SETUP_CLOSER} If it truly is off, you're all set — we'll plan around the rain alone.`;
+  }
 
   // Inputs complete but unconvertible — the two declines that are not about
   // a missing field keep their own copy.
@@ -405,7 +415,7 @@ function buildWeeklyEmailDecision({
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
         // an empty optional variable renders nothing.
-        schedule_ask: hasSystem ? buildScheduleAsk({ derived, inputs: runtimeInputs }) : '',
+        schedule_ask: hasSystem ? buildScheduleAsk({ derived, inputs: runtimeInputs, toggleOff: irrigationSystem === false, explicitInches: prefsInches }) : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
