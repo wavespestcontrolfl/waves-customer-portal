@@ -10782,7 +10782,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           //    double-spend it after commit. Fail CLOSED retryably.
           try {
             const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-            await applyAccountCreditToInvoice({ invoiceId: invoiceIdResult, createdBy: 'system:prepay_accept' }, trx);
+            const inTrxPayerScopeSsId = recurringCardScopeSsId
+              || annualPrepayConversionResult?.firstScheduledServiceId || null;
+            await applyAccountCreditToInvoice({
+              invoiceId: invoiceIdResult,
+              createdBy: 'system:prepay_accept',
+              // Visit-scoped live payer guard IN the apply's own lock (hook
+              // P0 r19): a payer assignment committing after the
+              // converter's snapshot must not have this transaction consume
+              // the HOMEOWNER's credit on what is now a payer's bill — and
+              // full coverage bypasses chargeInvoiceWithSavedCard's payer
+              // re-resolution entirely, so this is the only guard.
+              ...(inTrxPayerScopeSsId ? { requireSelfPayScheduledServiceId: inTrxPayerScopeSsId } : {}),
+            }, trx);
           } catch (applyErr) {
             const staleErr = estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
             staleErr.code = 'PREPAY_QUOTE_STALE';

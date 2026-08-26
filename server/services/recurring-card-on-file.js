@@ -624,6 +624,29 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // real outcome and hand it to the office, never mark it paid.
       if (['paid', 'prepaid'].includes(invStatus)) {
         if (invStatus === 'prepaid') {
+          // Payer-ownership validation BEFORE settling credit coverage
+          // (hook P0 r19): 'prepaid' means the HOMEOWNER's account credit
+          // covered the year with no charge-time payer re-resolution — if
+          // a payer was assigned after coverage, activating the term and
+          // retiring the job would cement the homeowner funding a payer's
+          // bill. Surface it for the office and stay claimed.
+          try {
+            const coveragePayer = await require('./payer').resolveForInvoice({
+              customerId: invoice.customer_id,
+              scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+              throwOnError: true,
+            });
+            if (coveragePayer?.payerId && !invoice.payer_id) {
+              await alertUncollected(
+                'Annual prepay credit coverage needs review — payer assigned after coverage',
+                'The prepay invoice was fully covered by the homeowner\u2019s account credit, but billing now routes this account/visit to a third-party payer. Review: reverse the applied credit and re-bill the payer, or confirm the homeowner-paid coverage stands.',
+              );
+              continue;
+            }
+          } catch (payerErr) {
+            logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: payer validation failed on credit coverage (${payerErr.message})`);
+            continue;
+          }
           // Credit-covered inside the accept transaction with a crash
           // before the post-commit settlement (hook P0 r17): no Stripe
           // charge ran, so no webhook backstop exists — run the SAME

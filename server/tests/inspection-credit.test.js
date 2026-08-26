@@ -1322,12 +1322,20 @@ describe('window + receipt copy', () => {
   });
 });
 
+// Freshness-checked expiry fixtures are RELATIVE (hook P1 — fixed dates
+// roll over and start failing, as the 2026-08-26 fixture did): one year
+// out, with the expected customer-facing display derived through the SAME
+// step-back + ET formatting the production memo uses.
+const FUTURE_EXPIRY = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+const FUTURE_EXPIRY_DISPLAY = new Date(new Date(FUTURE_EXPIRY).getTime() - 1000)
+  .toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+
 describe('inspectionCreditMemoForVisit — the report-email channel (owner ruling 2026-08-12)', () => {
   it('announces an open unexpired offer with the frozen terms', async () => {
-    mockOffers = [{ amount: '125.00', expires_at: '2030-01-02T05:00:00Z' }];
+    mockOffers = [{ amount: '125.00', expires_at: FUTURE_EXPIRY }];
     const memo = await inspectionCreditMemoForVisit('svc-1');
     expect(memo).toContain('$125.00 service credit');
-    expect(memo).toContain('January 1, 2030');
+    expect(memo).toContain(FUTURE_EXPIRY_DISPLAY);
     // Scoped to THIS visit's offer, never "the customer's earliest".
     expect(mockChainCalls.some(({ m, args }) => m === 'where'
       && args[0] && typeof args[0] === 'object'
@@ -1344,7 +1352,7 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
 
   it('works while the gate is dark — the persisted offer row is the authority', async () => {
     mockGateOn = false;
-    mockOffers = [{ amount: '75.00', expires_at: '2030-01-02T05:00:00Z' }];
+    mockOffers = [{ amount: '75.00', expires_at: FUTURE_EXPIRY }];
     expect(await inspectionCreditMemoForVisit('svc-1')).toContain('service credit');
   });
 
@@ -1376,14 +1384,14 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
   });
 
   it('report verdict: a marked visit with an open offer sends the frozen terms', async () => {
-    mockOffers = [{ amount: '125.00', expires_at: '2030-01-02T05:00:00Z', status: 'offered' }];
+    mockOffers = [{ amount: '125.00', expires_at: FUTURE_EXPIRY, status: 'offered' }];
     const verdict = await inspectionCreditReportNote({
       scheduled_service_id: 'svc-1',
       service_data: JSON.stringify({ inspectionCreditOptIn: true }),
     });
     expect(verdict.retryable).toBeUndefined();
     expect(verdict.note).toContain('$125.00 service credit');
-    expect(verdict.note).toContain('January 1, 2030');
+    expect(verdict.note).toContain(FUTURE_EXPIRY_DISPLAY);
   });
 
   it('report verdict: marked but offer missing or unreadable DEFERS — the send is once-ever (pre-push P1)', async () => {
@@ -1402,7 +1410,7 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
 
   it('report verdict: a settled or lapsed offer sends clean — announcing it would be false', async () => {
     const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
-    mockOffers = [{ amount: '125.00', expires_at: '2030-01-02T05:00:00Z', status: 'redeemed' }];
+    mockOffers = [{ amount: '125.00', expires_at: FUTURE_EXPIRY, status: 'redeemed' }];
     expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
     mockOffers = [{ amount: '125.00', expires_at: '2020-01-01T05:00:00Z', status: 'offered' }];
     expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
