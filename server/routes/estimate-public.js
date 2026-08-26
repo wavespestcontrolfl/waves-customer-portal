@@ -10891,6 +10891,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               method_key: RecurringCards.prepayChargeMethodKey(prepayChargePlan.method.stripePaymentMethodId),
               authorized_total_cents: prepayChargePlan.quote.totalCents,
               authorized_base_cents: prepayChargePlan.quote.baseCents,
+              // First prepay visit — the recovery sweep re-runs the
+              // promised inspection-credit redemption against THIS booking
+              // before charging or delivering a pay link (Codex r9 P0: the
+              // quote projected that credit, but redemption is post-commit;
+              // a crash in the gap would otherwise recover at the gross
+              // amount the customer never acknowledged).
+              scheduled_service_id: annualPrepayConversionResult?.firstScheduledServiceId || null,
               status: 'pending',
               created_at: new Date().toISOString(),
             })],

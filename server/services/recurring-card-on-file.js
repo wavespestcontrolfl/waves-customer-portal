@@ -600,6 +600,28 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         continue;
       }
       if (invoice.payer_id) { await resolve('skipped', { reason: 'payer_billed' }); continue; }
+      // Reproduce the promised inspection credit BEFORE any recovery path
+      // (Codex r9 P0): the acknowledged quote projected the redeemable
+      // offer, but in-flow redemption runs post-commit — a crash in the
+      // gap leaves the offer unredeemed, so both the frozen-total charge
+      // (expectedTotal mismatch → decline) and the fallback pay link
+      // (delivers the GROSS invoice) would collect more than the customer
+      // acknowledged. Redemption is idempotent (open offers only) and a
+      // clean no-offer result is the normal case; an ERROR leaves the
+      // credit state unknown — defer (stamp stays claimed, stale-claim
+      // lease retries) rather than recover at a possibly-wrong amount.
+      if (job.scheduled_service_id) {
+        try {
+          await require('./inspection-credit').redeemInspectionCreditForBooking({
+            customerId: invoice.customer_id,
+            scheduledServiceId: job.scheduled_service_id,
+            createdBy: 'system:inspection_credit_prepay_recovery',
+          });
+        } catch (redeemErr) {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: inspection-credit redemption failed (${redeemErr.message})`);
+          continue;
+        }
+      }
       if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id')
@@ -627,7 +649,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         || (job.stripe_payment_method_id && pmRow.stripe_payment_method_id !== job.stripe_payment_method_id))) {
         pmRow = null;
       }
-      if (pmRow && Number(job.authorized_total_cents) > 0) {
+      // ZERO acknowledged cents is a legitimate authorization (Codex r9
+      // P0): projected credit fully covered the quote — the charge call
+      // with expectedTotal 0 applies the credit in-lock and settles the
+      // invoice 'prepaid' with no card charge; rejecting it here would
+      // route a fully-covered accept to a pay link instead.
+      if (pmRow && Number.isInteger(job.authorized_total_cents) && job.authorized_total_cents >= 0) {
         await StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
           expectedTotal: Number(job.authorized_total_cents) / 100,
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
