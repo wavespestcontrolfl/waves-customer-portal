@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { taxPeriodFor } = require('../utils/tax-period');
 const {
@@ -12,7 +12,7 @@ const {
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD

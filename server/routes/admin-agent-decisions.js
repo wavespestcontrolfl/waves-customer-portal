@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { upsertReplyExampleFromAgentReview, NON_HUMAN_REPLY_MESSAGE_TYPES } = require('../services/reply-training-capture');
 const { SUGGEST_WORKFLOW } = require('../services/sms-suggest-mode');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 const VALID_STATUSES = new Set(['pending_review', 'accepted', 'corrected', 'dismissed', 'all']);
 const VALID_VERDICTS = new Set(['accepted', 'corrected', 'dismissed']);

@@ -87,7 +87,7 @@ async function createReviewRequest({ customerId, locationId, techName, serviceTy
   });
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/reviews — all reviews with filters
 router.get('/', async (req, res, next) => {

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { buildPipelineResponse } = require('../services/pipeline-opportunities');
 
 const MAX_CANDIDATES = 5000;
@@ -26,7 +26,7 @@ const SAVED_VIEW_FILTERS = new Set([
   'lost',
 ]);
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 function performedBy(req) {
   return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin';

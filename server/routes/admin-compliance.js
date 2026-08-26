@@ -2,10 +2,10 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const LimitChecker = require('../services/application-limits');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etParts } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // POST /api/admin/compliance/check-limits — check proposed products
 router.post('/check-limits', async (req, res, next) => {

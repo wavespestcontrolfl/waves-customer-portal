@@ -148,6 +148,7 @@ jest.mock('../services/expense-categorizer', () => ({
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
+  requireAdmin: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 // The routes call the service's matching pass after upload; that policy has
