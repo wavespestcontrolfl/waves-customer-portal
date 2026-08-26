@@ -1308,7 +1308,7 @@ router.post('/status', async (req, res) => {
               const inbound = await db('sms_log')
                 .where({ from_phone: optOutPhone })
                 .where('created_at', '>', sentAt)
-                .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'’]?t text)\\b'")
+                .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'’]?t text)\\y'")
                 .orderBy('created_at', 'desc')
                 .limit(50)
                 .select('message_body');
@@ -1362,8 +1362,26 @@ router.post('/status', async (req, res) => {
               // appointment fanout stayed blocked forever. A 21610 is the
               // recipient's VERDICT: record declined, same as inbound STOP.
               try {
-                await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
-              } catch { /* no recipient row is the common case — never block */ }
+                // Returns a row count on success (0 = no recipient asks for
+                // this phone — the common case) and FALSE on a swallowed DB
+                // error (hook r6 P1): a failed decline leaves the row for
+                // the generic ask_failed handler, which a later START
+                // deliberately cannot confirm — fanout would stay blocked.
+                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
+                if (declined === false) {
+                  logger.warn(`[twilio-status] 21610 recipient-decline write FAILED for ${maskPhone(optOutPhone)}`);
+                  try {
+                    await require('../services/notification-service').notifyAdmin(
+                      'system',
+                      'Recipient decline write failed on 21610',
+                      `A Twilio 21610 for ${maskPhone(optOutPhone)} could not record the recipient decline. If this number had a pending opt-in ask, mark it declined manually or the next START cannot unblock their appointment texts.`,
+                      { bell: true, metadata: { source: 'twilio_status_21610' } },
+                    );
+                  } catch (nErr) {
+                    logger.error(`[twilio-status] decline-failure notify also failed: ${nErr.message}`);
+                  }
+                }
+              } catch { /* markRecipientOptin does not reject; belt only */ }
               // Prefs flip — the suppression row is the enforcement;
               // sms_enabled keeps the admin UI honest (same split as STOP).
               if (optOutCustomerId) {
