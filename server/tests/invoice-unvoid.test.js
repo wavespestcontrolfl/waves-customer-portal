@@ -114,7 +114,7 @@ describe('InvoiceService.unvoidInvoice', () => {
 
     expect(smsChain.where).toHaveBeenCalledWith({ status: 'scheduled' });
     expect(smsChain.whereRaw).toHaveBeenCalledWith(
-      "metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred')",
+      "metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')",
     );
     expect(smsChain.whereRaw).toHaveBeenCalledWith("metadata->>'invoice_id' = ?", ['inv-1']);
     expect(smsChain.update).toHaveBeenCalledWith(

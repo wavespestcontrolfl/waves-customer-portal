@@ -4670,7 +4670,7 @@ const InvoiceService = {
           next_touch_at: null,
           updated_at: new Date(),
         });
-      // Quiet-hours rails queued BEFORE the void survive it as
+      // Deferred rails queued BEFORE the void survive it as
       // status='scheduled' sms_log rows (while void, the executor's
       // staleness recheck suppresses them as terminal — but a restored
       // draft is collectible again and the frozen body/pay-link text is
@@ -4678,7 +4678,7 @@ const InvoiceService = {
       // explicit post-restore resend re-queues fresh copy (Codex #3493).
       await trx("sms_log")
         .where({ status: "scheduled" })
-        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred')")
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
         .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
         .update({
           status: "cancelled",
@@ -4696,7 +4696,7 @@ const InvoiceService = {
       // suppresses terminal statuses) or the operator retries in a minute.
       const dispatchingNow = await trx("sms_log")
         .where({ status: "sending" })
-        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred')")
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
         .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
         .first("id");
       if (dispatchingNow) {
