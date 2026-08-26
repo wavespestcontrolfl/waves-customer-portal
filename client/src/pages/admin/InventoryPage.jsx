@@ -201,6 +201,11 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   "vendors",
   "scrape",
   "margins",
+  // Content authoring (product registry copy, lawn facts/content modules)
+  // is owner-only too — its PATCH/PUT surface 403s the technician role.
+  "registry",
+  "lawnFacts",
+  "lawnContent",
 ]);
 
 export default function InventoryPage() {

@@ -39,7 +39,6 @@ const STAFF_INVENTORY_REQUEST = (req) => {
     return p === '/' || p === '/stats' || p === '/protocol-health'
       || p === '/service-usage' || p === '/waveguard-forecast'
       || p === '/unit-review' || p === '/restock-requests'
-      || p === '/lawn-outline-facts'
       || /^\/[^/]+\/movements$/.test(p);
   }
   return /^\/[^/]+\/adjust$/.test(p)
