@@ -29,6 +29,7 @@ import {
   Sparkles,
   Star,
   Tags,
+  UserPlus,
   Users,
   Wrench,
   Bot,
@@ -173,6 +174,14 @@ export const ADMIN_NAV_ITEMS = {
     icon: Camera,
     morePath: "/admin/lawn-assessments?tab=field",
   },
+  recruiting: {
+    id: "recruiting",
+    path: "/admin/recruiting",
+    label: "Recruiting",
+    icon: UserPlus,
+    // server/routes/admin-careers.js is requireAdmin on every endpoint.
+    adminOnly: true,
+  },
   agents: {
     id: "agents",
     path: "/admin/agents",
@@ -313,7 +322,7 @@ const NAV_SECTION_DEFINITIONS = [
     section: "Marketing",
     itemIds: ["email", "ppc", "seo", "social", "blog", "newsletter"],
   },
-  { section: "Team & Automation", itemIds: ["staff", "agents", "agentEstimate"] },
+  { section: "Team & Automation", itemIds: ["staff", "recruiting", "agents", "agentEstimate"] },
   {
     section: "Billing & Finance",
     itemIds: [

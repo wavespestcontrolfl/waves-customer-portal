@@ -1488,6 +1488,23 @@ violations at the severity noted.
   request-body figures are ignored. Treat the gate, the lock ordering, the
   generic-404 indistinguishability, and the no-comms contract as
   security-critical.)
+  `/api/public/careers/apply` (POST; public job-application intake for the
+  careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
+  (404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
+  + per-phone limiter (3/hr), honeypot silent-200, Turnstile shadow-verify
+  with enforcement under the shared leadTurnstile gate, strict validation
+  with 400 fail-closed (malformed shapes, non-string or over-length
+  answers, over-length city, unknown role all reject; answer keys are an
+  ALLOWLIST — unknown keys are dropped by contract, and `source` is
+  server-sanitized attribution, not applicant content). Applicants
+  are NEVER customers or leads — the route never touches either table —
+  and nothing sends applicant-facing comms (owner contacts every applicant
+  himself). Post-insert side effects are fire-and-forget: an AI ranking
+  screen that is assist-only (it never changes status or any
+  applicant-facing outcome — every decision is the owner's, which also
+  keeps us clear of automated-employment-decision law) and an owner
+  bell/push. Treat the gate, the limiters, the no-customer/no-lead rule,
+  and the no-comms contract as security-critical.)
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

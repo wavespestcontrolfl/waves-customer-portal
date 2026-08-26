@@ -306,6 +306,10 @@ const gates = {
   // 404s while off (same unobservable-when-dark contract as payerStatements).
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
+  // Public careers application funnel (POST /api/public/careers/apply).
+  // Dark until the owner turns hiring on; the admin recruiting queue works
+  // at any setting (it only reads/updates existing rows).
+  jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
 
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then

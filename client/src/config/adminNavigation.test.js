@@ -51,7 +51,7 @@ describe("admin navigation registry", () => {
         section: "Marketing",
         itemIds: ["email", "ppc", "seo", "social", "blog", "newsletter"],
       },
-      { section: "Team & Automation", itemIds: ["staff", "agents", "agentEstimate"] },
+      { section: "Team & Automation", itemIds: ["staff", "recruiting", "agents", "agentEstimate"] },
       {
         section: "Billing & Finance",
         itemIds: [

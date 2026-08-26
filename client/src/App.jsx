@@ -344,6 +344,7 @@ const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocols
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
 const AdminAssessmentsHubPage = lazyWithRetry(() => import('./pages/admin/AssessmentsHubPage'));
+const AdminRecruitingPage = lazyWithRetry(() => import('./pages/admin/RecruitingPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
@@ -570,6 +571,7 @@ export default function App() {
                 bookmarks and internal links keep working. */}
             <Route path="lawn-assessment" element={<LawnAssessmentRedirect />} />
             <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminAssessmentsHubPage /></Suspense>} />
+            <Route path="recruiting" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading recruiting...</div>}><AdminRecruitingPage /></Suspense>} />
             <Route
               path="lawn-protocol"
               element={(
