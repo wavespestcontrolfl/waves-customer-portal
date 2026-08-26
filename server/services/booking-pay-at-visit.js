@@ -166,6 +166,23 @@ function serviceKeyOf(svc) {
   return serviceKeyFor(svc);
 }
 
+// The family key wizard plan/pricing binds to for a signed funnel key:
+// normally the signed key itself — except palm. A palm-only quote
+// deliberately rides the `tree_shrub` funnel service for availability
+// (public-quote's bookingServiceId mapping) while quoting Palm Injections,
+// so binding the plan to the signed tree_shrub key would exclude palm from
+// series seeding entirely (codex #3504 r2 P1: bookedServiceKey mismatch →
+// plan never resolves). The palm identity comes from the TRUSTED handoff
+// estimate's own single priced line — never from a client label — so the
+// trust boundary is unchanged; every non-palm shape keeps the signed key.
+function wizardPlanServiceKey(estimate, signedFunnelKey) {
+  if (signedFunnelKey !== 'tree_shrub') return signedFunnelKey;
+  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
+  return picked && serviceKeyOf(picked.svc) === 'palm_injection'
+    ? 'palm_injection'
+    : signedFunnelKey;
+}
+
 // Price from a single estimate, only when its recurring service matches the
 // booked service key AND cadence, and it carries no supplemental program.
 // Returns { amount, followUpAmount, sourceEstimateId, serviceKey } or null —
@@ -255,4 +272,4 @@ function wizardDraftSelfServeBookable(row) {
   return true;
 }
 
-module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, resolveWizardSeriesPlan, wizardDraftSelfServeBookable };
+module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, resolveWizardSeriesPlan, wizardDraftSelfServeBookable, wizardPlanServiceKey };

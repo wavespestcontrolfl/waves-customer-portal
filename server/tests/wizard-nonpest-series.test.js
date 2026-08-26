@@ -3,7 +3,7 @@
 // plus source contracts pinning the booking route's all-or-nothing wiring.
 const fs = require('fs');
 const path = require('path');
-const { resolveWizardSeriesPlan, derivePerApplicationAmount } = require('../services/booking-pay-at-visit');
+const { resolveWizardSeriesPlan, derivePerApplicationAmount, wizardPlanServiceKey } = require('../services/booking-pay-at-visit');
 
 const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
 
@@ -74,10 +74,81 @@ describe('resolveWizardSeriesPlan', () => {
   });
 });
 
+// Palm-only quotes ride the tree_shrub funnel service for availability while
+// quoting Palm Injections (public-quote's bookingServiceId mapping) — the
+// plan family must follow the trusted estimate's own line (codex #3504 r2).
+function palmEstimate({ visits = 2, frequency = 'semiannual', monthly = 50, annual = 600 } = {}) {
+  return {
+    id: 'est-palm-1',
+    annual_total: annual,
+    monthly_total: monthly,
+    estimate_data: {
+      engineResult: {
+        lineItems: [{
+          service: 'palm_injection',
+          name: 'Palm Injections',
+          monthly,
+          annual,
+          perVisit: annual / visits,
+          visits,
+          frequency,
+        }],
+      },
+    },
+  };
+}
+
+describe('wizardPlanServiceKey (palm identity through the tree_shrub funnel)', () => {
+  test('a palm-only quote signed as tree_shrub binds the plan to palm_injection', () => {
+    expect(wizardPlanServiceKey(palmEstimate(), 'tree_shrub')).toBe('palm_injection');
+  });
+
+  test('a real tree/shrub quote keeps the signed tree_shrub key', () => {
+    const treeEstimate = {
+      id: 'est-ts-1',
+      annual_total: 900,
+      monthly_total: 75,
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'tree_shrub', name: 'Tree & Shrub', monthly: 75, annual: 900, perVisit: 100, visits: 9 }],
+        },
+      },
+    };
+    expect(wizardPlanServiceKey(treeEstimate, 'tree_shrub')).toBe('tree_shrub');
+  });
+
+  test('non-tree funnel keys pass through untouched', () => {
+    expect(wizardPlanServiceKey(palmEstimate(), 'mosquito')).toBe('mosquito');
+  });
+
+  test('the palm plan then resolves at the quoted semiannual cadence', () => {
+    expect(resolveWizardSeriesPlan(palmEstimate(), wizardPlanServiceKey(palmEstimate(), 'tree_shrub')))
+      .toEqual({ pattern: 'semiannual', visits: 2 });
+    // The signed key alone still refuses — the identity preservation is
+    // what makes palm reachable at all.
+    expect(resolveWizardSeriesPlan(palmEstimate(), 'tree_shrub')).toBeNull();
+  });
+});
+
 describe('booking route wiring (source contracts)', () => {
   test('the pricing divisor comes from the plan only under the trusted-handoff bind', () => {
-    expect(booking).toMatch(/if \(!bookingVisits && pricingTrusted[\s\S]{0,400}resolveWizardSeriesPlan\(pricingEstimate, bookedServiceKey\)/);
+    expect(booking).toMatch(/if \(!bookingVisits && pricingTrusted[\s\S]{0,1500}resolveWizardSeriesPlan\(pricingEstimate, wizardPlanKey\)/);
     expect(booking).toMatch(/bookedServiceKey !== 'pest_control'/);
+  });
+
+  test('palm identity is preserved from the trusted estimate and persisted on the parent', () => {
+    expect(booking).toMatch(/wizardPlanServiceKey\(pricingEstimate, bookedServiceKey\)/);
+    expect(booking).toMatch(/wizardPlanKey === 'palm_injection'[\s\S]{0,600}resolvedServiceType = 'Palm Injections';/);
+  });
+
+  test('a duplicate confirmation reads a completed activation as success, never as drift', () => {
+    // The under-lock is_recurring re-check must run BEFORE the locked-draft
+    // drift comparison, or the loser strips the winner's activated parent.
+    expect(booking).toMatch(/lockedParent && lockedParent\.is_recurring[\s\S]{0,80}alreadyActivated: true/);
+    const recheckAt = booking.indexOf('alreadyActivated: true');
+    const driftAt = booking.indexOf('freshPlan.pattern !== wizardSeriesPlan.pattern');
+    expect(recheckAt).toBeGreaterThan(0);
+    expect(driftAt).toBeGreaterThan(recheckAt);
   });
 
   test('series, price, and fee are all-or-nothing: seeding requires the priced plan', () => {
@@ -110,8 +181,12 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
   });
 
-  test('seeded occurrences run the conflict guard incl. the technician-NULL mirror', () => {
-    expect(booking).toMatch(/orWhereNull\('technician_id'\)/);
+  test('seeded occurrences run the SHARED tech-blind occupancy guard', () => {
+    // codex #3504 r2 P1: a custom tech-scoped predicate missed conflicts
+    // with a different technician's visit — the repository backstop is
+    // findConflictingVisits (services/scheduling/occupancy.js).
+    expect(booking).toMatch(/require\('\.\.\/services\/scheduling\/occupancy'\)/);
+    expect(booking).toMatch(/findConflictingVisits\(\{\s*\n\s*db: trx,/);
     expect(booking).toMatch(/office to place/);
   });
 

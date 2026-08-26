@@ -2095,7 +2095,10 @@ async function createSelfBooking(payload = {}) {
     // Internal callback bookings carry a server-owned catalog name (the
     // caller read it from the services row) — same trust level as the
     // allowlist labels, never client-influenced.
-    const resolvedServiceType = (callbackVisit && cleanBookingServiceLabel(callbackVisit.serviceType))
+    // `let`, not `const`: a trusted palm-only wizard plan overrides this to
+    // the quoted palm label below (codex #3504 r2) — still server-owned,
+    // never a client echo.
+    let resolvedServiceType = (callbackVisit && cleanBookingServiceLabel(callbackVisit.serviceType))
       || canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
@@ -2125,6 +2128,10 @@ async function createSelfBooking(payload = {}) {
         // crafted/stale payload can't pair one service's booking with another
         // service's price. service_type is client-influenced, hence the bind.
         const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+        // The family the wizard plan/pricing binds to — the signed funnel
+        // key, except palm-only quotes (resolved from the trusted estimate
+        // below; see wizardPlanServiceKey).
+        let wizardPlanKey = bookedServiceKey;
         // Bind the pricing cadence to the ACTUAL series this route creates, NOT
         // the client's recurring_pattern: a quarterly (4-visit) pest series is
         // seeded ONLY under this exact condition (mirrors
@@ -2199,8 +2206,14 @@ async function createSelfBooking(payload = {}) {
           && !isOneTimeBookingSource(source)
           && bookedServiceKey && bookedServiceKey !== 'pest_control'
           && RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === bookedServiceKey) {
-          const { resolveWizardSeriesPlan } = require('../services/booking-pay-at-visit');
-          wizardSeriesPlan = resolveWizardSeriesPlan(pricingEstimate, bookedServiceKey);
+          const { resolveWizardSeriesPlan, wizardPlanServiceKey } = require('../services/booking-pay-at-visit');
+          // Palm-only quotes ride the SIGNED tree_shrub funnel service for
+          // availability while quoting Palm Injections (public-quote's
+          // bookingServiceId mapping) — the plan/pricing family follows the
+          // trusted estimate's own line, or palm never resolves a plan
+          // (codex #3504 r2 P1). Availability scope stays the signed key.
+          wizardPlanKey = wizardPlanServiceKey(pricingEstimate, bookedServiceKey);
+          wizardSeriesPlan = resolveWizardSeriesPlan(pricingEstimate, wizardPlanKey);
           if (wizardSeriesPlan?.pattern === 'seasonal_feb_oct') {
             // The generic /book availability does not know the cadence and
             // can offer Nov-Jan dates; seeding seasonal_feb_oct from a
@@ -2211,10 +2224,21 @@ async function createSelfBooking(payload = {}) {
             const startMonth = Number(String(slot_date).slice(5, 7));
             if (!(startMonth >= 2 && startMonth <= 10)) wizardSeriesPlan = null;
           }
-          if (wizardSeriesPlan) bookingVisits = wizardSeriesPlan.visits;
+          if (wizardSeriesPlan) {
+            bookingVisits = wizardSeriesPlan.visits;
+            if (wizardPlanKey === 'palm_injection') {
+              // Persist what was QUOTED, not the funnel vehicle: the parent's
+              // service_type drives the duplicate-series guard family and the
+              // under-lock activation re-resolution, and a palm series filed
+              // as tree_shrub would both miss palm duplicates and block a
+              // real tree/shrub series later. Server-owned constant — the
+              // client's quoted_service_label is never echoed.
+              resolvedServiceType = 'Palm Injections';
+            }
+          }
         }
         const priced = pricingTrusted
-          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: bookedServiceKey, bookingVisits })
+          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: wizardPlanKey, bookingVisits })
           : (linkedEstimatePriceable
             ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
             : null);
@@ -2876,6 +2900,22 @@ async function createSelfBooking(payload = {}) {
       try {
         const outcome = await db.transaction(async (trx) => {
           await lockCustomerComms(trx, custId);
+          // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
+          // can observe the pricing draft still live BEFORE the winner's
+          // activation commits, pass the replay pre-checks, and wait here on
+          // the comms lock. By the time it proceeds the winner has archived
+          // the draft — which reads as pricing drift below and would strip
+          // the WINNER's activated parent price while its billable children
+          // survive. The parent only becomes recurring inside this
+          // activation (markParentRecurring), so an is_recurring parent
+          // under the lock IS a completed activation: return success and
+          // touch nothing.
+          const lockedParent = await trx('scheduled_services')
+            .where({ id: seriesParentRow.id })
+            .first('id', 'is_recurring');
+          if (lockedParent && lockedParent.is_recurring) {
+            return { alreadyActivated: true };
+          }
           // Re-resolve the plan and price against the LOCKED draft (codex
           // #3504 r1): /calculate refreshes drafts in place, so the
           // pre-transaction plan/price can be stale — a monthly-12 quote
@@ -2961,13 +3001,17 @@ async function createSelfBooking(payload = {}) {
             source: source || 'self_booked',
             ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
           });
-          // Conflict guard for every seeded occurrence (AGENTS.md booking
-          // conflict-check class — the WHERE must also see technician-NULL
-          // rows): the seeder only nudges weekends/blackouts and inherits
-          // the parent's tech + window, so a generated date can land on
-          // existing work. A colliding follow-up KEEPS its date but drops
-          // its technician and flags itself for office placement — never a
-          // silent double-booking, never a silently shrunken plan.
+          // Conflict guard for every seeded occurrence: the seeder only
+          // nudges weekends/blackouts and inherits the parent's window, so
+          // a generated date can land on existing work. The SHARED
+          // tech-blind occupancy guard decides what occupies (AGENTS.md
+          // booking conflict-check class; codex #3504 r2 P1 — a custom
+          // tech-scoped predicate missed a DIFFERENT technician's visit):
+          // findConflictingVisits covers every technician, live estimate
+          // holds, and the windowless-row conventions. A colliding
+          // follow-up KEEPS its date but drops its technician and flags
+          // itself for office placement — never a silent double-booking,
+          // never a silently shrunken plan.
           // Per-date occupancy advisory locks (sorted) before the clash
           // sweep, mirroring the booking transaction's date-wide locking
           // contract. Lock ORDER differs from the main booking trx (which
@@ -2982,20 +3026,27 @@ async function createSelfBooking(payload = {}) {
               : (r?.scheduled_date instanceof Date ? r.scheduled_date.toISOString().slice(0, 10) : null)))
             .filter(Boolean))].sort();
           for (const d of seededDates) await acquireOccupancyLock(trx, d);
-          for (const row of (seedResult?.insertedRows || [])) {
+          const { findConflictingVisits } = require('../services/scheduling/occupancy');
+          const seededRows = seedResult?.insertedRows || [];
+          // Exclude the series' own rows (parent + every seeded sibling) —
+          // the guard's documented batch-sweep semantics; siblings land on
+          // distinct dates, so this only prevents self-matches.
+          const sweepExcludeIds = [seriesParentRow.id, ...seededRows.map((r) => r?.id)].filter(Boolean);
+          for (const row of seededRows) {
             if (!row?.id) continue;
-            const clash = await trx('scheduled_services')
-              .whereNot('id', row.id)
-              .whereNot('status', 'cancelled')
-              .where('scheduled_date', row.scheduled_date)
-              .where(function techMirror() {
-                this.where('technician_id', row.technician_id || null)
-                  .orWhereNull('technician_id');
-              })
-              .where('window_start', '<', row.window_end)
-              .where('window_end', '>', row.window_start)
-              .first('id');
-            if (clash) {
+            const rowDate = typeof row.scheduled_date === 'string'
+              ? row.scheduled_date.slice(0, 10)
+              : (row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : null);
+            // A row the guard cannot window (missing date/window) returns no
+            // conflicts — same fail-open the guard's own input contract keeps.
+            const clashes = await findConflictingVisits({
+              db: trx,
+              date: rowDate,
+              windowStart: row.window_start,
+              windowEnd: row.window_end,
+              excludeServiceIds: sweepExcludeIds,
+            });
+            if (clashes.length > 0) {
               await trx('scheduled_services')
                 .where({ id: row.id })
                 .update({
