@@ -230,6 +230,38 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
 async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, disclosureVersion = null, trx = db }) {
+  // Reciprocal lane exclusion (PR #3496 r16 P1, deletion dropped in r20
+  // P1): an accept that pins the hold to a visit ALREADY carrying a
+  // /secure appointment-card row creates two competing card-consent
+  // lanes. NOTHING is deleted here — even a pending, SetupIntent-less row
+  // may back a customer-exposed /secure link (returned inline or with an
+  // SMS mid-dispatch), and destroying an issued tokenized link is worse
+  // than the conflict. The hold still records (the accept must not fail),
+  // the conflict is logged loudly, and every money leg (completion charge
+  // AND no-show fee) refuses the conflicted visit fail-closed with a
+  // deduped office bell — which consent owns the visit is an operator
+  // decision at billing time, never a silent winner-pick here.
+  if (scheduledServiceId) {
+    // Serialize on the scheduled_services row FIRST (pre-push r18 P1) —
+    // the same lock, in the same order, that every appointment-card lane
+    // writer takes before ITS absence check. FOR UPDATE on lane rows alone
+    // cannot serialize two absence checks (nothing exists to lock), so
+    // without this anchor both sides could observe emptiness and each
+    // insert its own lane. For a freshly-inserted accept visit this is a
+    // no-op self-lock; for an adopted existing visit it is the fence.
+    // Lock order (visit row → lane/hold rows) matches
+    // autoSecureFromSavedMethod and the request-funnel insert
+    // transactions; the hold lane never enrolls Auto Pay, so the
+    // customers-row ordering concern documented there does not apply.
+    await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
+    const laneRow = await trx('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .forUpdate()
+      .first('id', 'status', 'stripe_setup_intent_id');
+    if (laneRow) {
+      logger.error('[estimate-card-holds] hold recorded onto a visit carrying a /secure appointment-card row — competing consents; every money leg fails toward review until reconciled', { estimateId, scheduledServiceId, laneStatus: laneRow.status });
+    }
+  }
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
@@ -736,6 +768,31 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
       logger.warn('[estimate-card-holds] completion charge already in progress — hold restored for retry and this request suppresses alternate collection', { scheduledServiceId });
       return { charged: false, reason: 'charge_in_progress', error: err.message };
     }
+    // Competing /secure consent (pre-push r17 P1): both card rails refuse
+    // this visit, so without a bell the conflict recordCardHoldHeld logged
+    // at accept time would die as a generic charge_failed line while the
+    // customer silently gets a pay link. Distinct reason + the billing
+    // review bell (deduped per hold/visit pair — completions can replay);
+    // the hold returns to 'held' untouched: which consent owns the visit
+    // is an operator decision, never a retry.
+    if (err.code === 'COMPETING_CARD_CONSENT') {
+      await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+        .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
+      logger.error('[estimate-card-holds] completion charge refused — competing /secure appointment-card consent on the visit', { scheduledServiceId, holdId: hold.id });
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Two card consents on one visit — review before billing',
+          'A completed one-time visit carries BOTH an estimate card hold and a /secure appointment-card consent. Neither rail auto-charged (fail closed) and the pay-link flow proceeded. Decide which consent owns the visit, then charge manually or via the ops repair script.',
+          {
+            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, invoiceId, holdId: hold.id, source: 'competing_card_consent' },
+            dedupeKey: `competing_consent:${hold.id}:${scheduledServiceId}`,
+          },
+        );
+      } catch (e) { logger.warn('[estimate-card-holds] competing-consent alert failed', { error: e.message }); }
+      return { charged: false, reason: 'competing_consent_review', error: err.message };
+    }
     // Genuine pre-charge failure (no money moved) — safe to retry later.
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
@@ -916,6 +973,39 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
+  // Cross-lane refusal, mirroring the completion leg (pre-push r19 P0): a
+  // /secure appointment-card row on the visit — recordCardHoldHeld's
+  // logged conflict case, or a raced insert — is a competing, possibly
+  // NEWER consent, and drawing the fee from the hold's possibly older
+  // card would silently pick a winner. The hold stays 'held' (which
+  // consent owns the visit is an operator decision, never a retry), the
+  // office is belled once per pair, and NOTHING is charged. Fail closed
+  // on an unreadable table — a fee whose lane exclusivity can't be
+  // verified is never drawn.
+  try {
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (laneRow) {
+      logger.error('[estimate-card-holds] no-show fee refused — competing /secure appointment-card consent on the visit', { scheduledServiceId, holdId: hold.id });
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Two card consents on one visit — review before billing',
+          'A no-show/late-cancel fee was due, but the visit carries BOTH an estimate card hold and a /secure appointment-card row. Neither card was charged (fail closed). Decide which consent owns the visit, then bill the fee manually if it applies.',
+          {
+            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, holdId: hold.id, source: 'competing_card_consent_fee' },
+            dedupeKey: `competing_consent_fee:${hold.id}:${scheduledServiceId}`,
+          },
+        );
+      } catch (e) { logger.warn('[estimate-card-holds] competing-consent fee alert failed', { error: e.message }); }
+      return { charged: false, reason: 'competing_consent_review' };
+    }
+  } catch (err) {
+    logger.error('[estimate-card-holds] no-show fee lane-exclusivity check failed — fee refused', { scheduledServiceId, error: err.message });
+    return { charged: false, reason: 'lane_check_failed' };
+  }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
 
   // Staleness guard (sibling of the cancel branch's post-start grace — see

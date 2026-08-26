@@ -2062,7 +2062,13 @@ const StripeService = {
               .forUpdate()
               .first('id');
             if (laneRow) {
-              throw new Error('The visit carries a /secure appointment-card consent. Review which consent owns it before charging.');
+              // Coded so the hold rail can surface the conflict distinctly
+              // (pre-push r17 P1) — a competing-consent refusal is an
+              // operator decision, not a retryable charge failure.
+              throw Object.assign(
+                new Error('The visit carries a /secure appointment-card consent. Review which consent owns it before charging.'),
+                { code: 'COMPETING_CARD_CONSENT' },
+              );
             }
           }
           // Completion-lane revalidation under the locks (Codex #3153 r23

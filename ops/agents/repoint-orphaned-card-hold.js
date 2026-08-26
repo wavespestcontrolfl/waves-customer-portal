@@ -196,12 +196,21 @@ async function repoint(client) {
     // consent row could be charged in place of the one the operator ruled
     // on. Locked so a concurrent insert/transition serializes with this
     // decision.
+    // Blocking set is every status that is not affirmatively resolved-
+    // without-collection (uncapped audit r21 P0): 'charge_review' means a
+    // Stripe charge MAY already have succeeded and awaits reconciliation,
+    // and charged/charged_completion mean the visit's consent already
+    // collected — repointing another hold onto any of those risks a
+    // second collection on one visit. Only released/cancelled/failed rows
+    // may coexist with a repoint.
     const { rows: otherHolds } = await client.query(
       `SELECT id, status FROM estimate_card_holds
-       WHERE scheduled_service_id = $1 AND id <> $2 AND status IN ('held','charging')
+       WHERE scheduled_service_id = $1 AND id <> $2
+         AND status NOT IN ('released','cancelled','failed')
        FOR UPDATE`, [TO_VISIT, HOLD_ID]);
     if (otherHolds.length) {
-      throw new Error(`target visit already carries ${otherHolds.length} other active hold(s) — refusing; resolve those first`);
+      const statuses = otherHolds.map((h) => h.status).join(',');
+      throw new Error(`target visit already carries ${otherHolds.length} other unresolved/collected hold row(s) (status: ${statuses}) — refusing; reconcile those first`);
     }
 
     // No /secure appointment-card lane row on the target AT ALL (PR #3496

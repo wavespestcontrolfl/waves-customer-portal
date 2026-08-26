@@ -129,7 +129,7 @@ afterEach(() => {
 // calls consume `firstResults` in order (so hasHeldCard's lookup and the
 // webhook-pending fallback lookup can return different rows).
 let mockRescheduleLogChains = [];
-function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows = null, updateReturns = null } = {}) {
+function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows = null, laneRows = undefined, updateReturns = null } = {}) {
   const updateQueue = Array.isArray(updateReturns) ? [...updateReturns] : null;
   const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
   mockRescheduleLogChains = [];
@@ -153,6 +153,7 @@ function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows =
       mockDbInserts.push(payload);
       return Promise.resolve([{}]);
     });
+    chain.del = jest.fn(() => Promise.resolve(1));
     if (table === 'estimate_card_holds' && holdRows) {
       // The adoption candidates query awaits the chain itself (multi-row
       // select, no .first()) — same thenable treatment as reschedule_log.
@@ -160,6 +161,16 @@ function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows =
       chain.then = (resolve, reject) => (holdRows instanceof Error
         ? Promise.reject(holdRows)
         : Promise.resolve(holdRows)).then(resolve, reject);
+    }
+    if (table === 'appointment_card_requests') {
+      // Table-scoped .first(): the cross-lane exclusivity checks read this
+      // table on many money paths — serving it from the shared queue would
+      // shift every fee/charge test's stub. Default: no lane row (null),
+      // no queue consumption; a test opts into a row (or an Error) via the
+      // laneRows option.
+      chain.first = jest.fn(() => (laneRows instanceof Error
+        ? Promise.reject(laneRows)
+        : Promise.resolve(laneRows === undefined ? null : laneRows)));
     }
     if (table === 'scheduled_services' && visitRows) {
       // The adoption 1:1 sibling check awaits a scheduled_services chain
@@ -523,14 +534,14 @@ describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Pha
 
 describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec §3.2)', () => {
   it('records a hold with a null SetupIntent (fresh saved-method hold) without throwing', async () => {
-    stubDb([null]); // no existing SI-less held row → insert path
+    stubDb([null, null]); // visit lock → no existing SI-less held row → insert path (lane check is table-scoped)
     await expect(recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved',
     })).resolves.toBeUndefined();
   });
   it('updates the existing SI-less held row on a retried accept (no duplicate holds)', async () => {
-    stubDb([{ id: 'hold-existing' }]); // existing SI-less held row → update path
+    stubDb([null, { id: 'hold-existing' }]); // visit lock → existing SI-less held row → update path
     await expect(recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved',
@@ -538,9 +549,109 @@ describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec �
   });
 });
 
+describe('chargeNoShowFee — cross-lane refusal (PR #3496 r19 P0)', () => {
+  const HOLD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', no_show_fee_amount: 49, cancel_window_hours: 24 };
+
+  it('refuses the fee, leaves the hold held, and bells the office (deduped) when a /secure row exists', async () => {
+    stubDb([HOLD], { laneRows: { id: 'req-1' } });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', serviceStart: new Date(), now: new Date() });
+    expect(r).toEqual({ charged: false, reason: 'competing_consent_review' });
+    expect(mockDbUpdates).toEqual([]);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('Two card consents'),
+      expect.stringContaining('Neither card was charged'),
+      expect.objectContaining({ dedupeKey: 'competing_consent_fee:h1:svc1' }),
+    );
+  });
+
+  it('an unreadable lane table refuses the fee (fail closed) without releasing the hold', async () => {
+    stubDb([HOLD], { laneRows: new Error('table gone') });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', serviceStart: new Date(), now: new Date() });
+    expect(r).toEqual({ charged: false, reason: 'lane_check_failed' });
+    expect(mockDbUpdates).toEqual([]);
+  });
+});
+
+describe('recordCardHoldHeld — reciprocal /secure lane exclusion (PR #3496 r16 P1)', () => {
+  it('NEVER deletes a pending /secure row — its token may already be customer-exposed; the hold records and the conflict is left for the money legs to refuse', async () => {
+    let delCalled = false;
+    stubDb([
+      null, // visit row lock (serialization anchor)
+      null, // no existing SI-less held row → insert path
+    ], { laneRows: { id: 'req-1', status: 'pending', stripe_setup_intent_id: null } });
+    const base = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      chain.del = jest.fn(() => { delCalled = true; return Promise.resolve(1); });
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    expect(delCalled).toBe(false);
+    expect(mockDbInserts).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'held' })]));
+  });
+
+  it('NEVER destroys a consented /secure row (satisfied) — hold still records, conflict left for the completion rails to surface', async () => {
+    let delCalled = false;
+    stubDb([
+      null,
+      null,
+    ], { laneRows: { id: 'req-1', status: 'satisfied', stripe_setup_intent_id: null } });
+    const base = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      chain.del = jest.fn(() => { delCalled = true; return Promise.resolve(1); });
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    expect(delCalled).toBe(false);
+    expect(mockDbInserts).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'held' })]));
+  });
+
+  it('a pending row that already minted a SetupIntent is treated as in-flight consent — never deleted', async () => {
+    let delCalled = false;
+    stubDb([
+      null,
+      null,
+    ], { laneRows: { id: 'req-1', status: 'pending', stripe_setup_intent_id: 'si_live' } });
+    const base = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      chain.del = jest.fn(() => { delCalled = true; return Promise.resolve(1); });
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    expect(delCalled).toBe(false);
+  });
+});
+
+describe('recordCardHoldHeld — lane-creation serialization anchor (PR #3496 r18 P1)', () => {
+  it('locks the scheduled_services row BEFORE the lane absence check — same order as the appointment-card writers', async () => {
+    stubDb([null, null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    const tables = dbMock.mock.calls.map((c) => c[0]);
+    const visitIdx = tables.indexOf('scheduled_services');
+    const laneIdx = tables.indexOf('appointment_card_requests');
+    expect(visitIdx).toBeGreaterThanOrEqual(0);
+    expect(laneIdx).toBeGreaterThan(visitIdx);
+  });
+});
+
 describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation (Codex #3342 r1 P1)', () => {
   it('a saved-method hold from an attesting accept is sticky-capable — its only consent surface is the accept page', async () => {
-    stubDb([null]);
+    stubDb([null, null]);
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
@@ -550,7 +661,7 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
     ]));
   });
   it('a saved-method hold from a legacy/non-attesting accept stays non-sticky', async () => {
-    stubDb([null]);
+    stubDb([null, null]);
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved',
@@ -560,7 +671,7 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
     ]));
   });
   it('the retried-accept update path records the BOOKING accept\'s attestation (the consent trail belongs to the accept that booked)', async () => {
-    stubDb([{ id: 'hold-existing' }]);
+    stubDb([null, { id: 'hold-existing' }]);
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
@@ -569,8 +680,8 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
     expect(patch.sticky_window_disclosed).toBe(true);
   });
   it('the SI conflict path carries the accept attestation onto the pending row — acceptance is the sole marker writer', async () => {
-    // SI path: term lookup first() → existing pending terms row.
-    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    // SI path: visit lock → term lookup first() (lane check is table-scoped).
+    stubDb([null, { no_show_fee_amount: 49, cancel_window_hours: 24 }]);
     const merges = [];
     const prevHandler = mockDbHandler;
     mockDbHandler = (table) => {
@@ -588,7 +699,7 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
     });
     expect(merges[0].sticky_window_disclosed).toBe(true);
     // And a NON-attesting accept records false the same way.
-    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    stubDb([null, { no_show_fee_amount: 49, cancel_window_hours: 24 }]);
     const secondBase = mockDbHandler;
     const merges2 = [];
     mockDbHandler = (table) => {
@@ -610,7 +721,7 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
 
 describe('recordCardHoldHeld — freezes the accepted amount at booking (Codex #2821 P1)', () => {
   it('stamps accepted_amount onto a fresh hold row (insert path)', async () => {
-    stubDb([null]); // no existing SI-less held row → insert path
+    stubDb([null, null]); // visit lock → no existing SI-less held row → insert path (lane check is table-scoped)
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved', acceptedAmount: 250,
@@ -620,7 +731,7 @@ describe('recordCardHoldHeld — freezes the accepted amount at booking (Codex #
     ]));
   });
   it('stamps accepted_amount on the retried-accept update path too', async () => {
-    stubDb([{ id: 'hold-existing' }]);
+    stubDb([null, { id: 'hold-existing' }]);
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved', acceptedAmount: 199.995,
@@ -1604,6 +1715,26 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
       expect.anything(),
     );
     expect(mockNotifyAdmin.mock.calls[0][2]).not.toContain('pay-link flow');
+  });
+
+  test('a COMPETING_CARD_CONSENT refusal restores the hold, bells the office (deduped), and returns its own reason', async () => {
+    const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1', accepted_amount: 100 };
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
+    stubDb([hold, invoice, { id: 'pm-row-1' }]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('competing consent'), { code: 'COMPETING_CARD_CONSENT' }));
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual(expect.objectContaining({ charged: false, reason: 'competing_consent_review' }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'charging' }),
+      expect.objectContaining({ status: 'held' }),
+    ]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'charge_review' })]));
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('Two card consents'),
+      expect.stringContaining('Neither rail auto-charged'),
+      expect.objectContaining({ dedupeKey: 'competing_consent:hold-1:svc-1' }),
+    );
   });
 
   test('expectedHoldId pins the ops repair charge to the ruled row — a different resolved hold refuses untouched', async () => {
