@@ -272,7 +272,7 @@ export default function SettingsPage() {
   // hooks must run on every render path or React throws "Rendered more
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
-    if (user && user.role !== "admin" && ["service-reports", "blackout-days"].includes(tab)) {
+    if (user && user.role !== "admin" && ["service-reports", "blackout-days", "kpi-targets"].includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.
@@ -298,7 +298,13 @@ export default function SettingsPage() {
   const isAdminRole = user?.role === "admin";
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
     (g) => isAdminRole || !["service-reports", "scheduling"].includes(g.key),
-  );
+  ).map((g) => (
+    // Financials keeps only the read-only Operating Costs leaf for techs —
+    // KPI targets (revenue/margin/MRR matrix) is owner-only.
+    isAdminRole || g.key !== "financials"
+      ? g
+      : { ...g, tabs: g.tabs.filter((t) => t !== "kpi-targets") }
+  ));
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 

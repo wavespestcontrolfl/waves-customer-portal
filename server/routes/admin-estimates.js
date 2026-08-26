@@ -496,10 +496,23 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown (first-hire prep): estimates are a sales/pricing
-// surface — every MUTATION (create/edit/send/accept/delete) is owner-only.
-// Reads stay staff-wide because tech-visible surfaces (Customer 360's
-// estimates panel) render estimate data read-only.
-router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
+// surface — owner-only, with a NARROW staff read allowlist for the flows
+// tech-visible surfaces actually use: the single-estimate read (/:id) and
+// the schedule-source read the Create Appointment modal fires. The
+// collection list, analytics (actuals-variance, win-loss, source
+// performance), proposals, pricing audits, and every mutation require the
+// admin role.
+const STAFF_ESTIMATE_GET_RE = /^\/[A-Za-z0-9-]+(\/schedule-source)?$/;
+const OWNER_ONLY_NAMED_GETS = new Set([
+  '/actuals-variance', '/win-loss-slices', '/source-performance',
+]);
+router.use((req, res, next) => (
+  req.method === 'GET'
+    && STAFF_ESTIMATE_GET_RE.test(req.path)
+    && !OWNER_ONLY_NAMED_GETS.has(req.path)
+    ? next()
+    : requireAdmin(req, res, next)
+));
 
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {

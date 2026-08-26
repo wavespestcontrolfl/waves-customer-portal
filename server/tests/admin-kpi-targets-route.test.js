@@ -152,7 +152,10 @@ describe('admin kpi-targets route', () => {
     });
   });
 
-  test('PUT is admin-only; GET allows any authenticated admin-portal user', async () => {
+  // 2026-08-25 role lockdown (first-hire prep): the KPI target matrix
+  // (revenue-per-job, RPMH, margins, MRR) is owner-only end to end —
+  // reads included.
+  test('PUT and GET are both admin-only under the role lockdown', async () => {
     await withServer(async (base) => {
       const asTech = await fetch(`${base}/admin/kpi-targets`, {
         method: 'PUT',
@@ -162,7 +165,10 @@ describe('admin kpi-targets route', () => {
       expect(asTech.status).toBe(403);
 
       const read = await fetch(`${base}/admin/kpi-targets`, { headers: auth('tech') });
-      expect(read.status).toBe(200);
+      expect(read.status).toBe(403);
+
+      const adminRead = await fetch(`${base}/admin/kpi-targets`, { headers: auth('admin') });
+      expect(adminRead.status).toBe(200);
 
       // Authenticated-but-downgraded (non-staff) rows are blocked at the
       // router level (requireTechOrAdmin), even for reads.

@@ -1,11 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const CSRCoach = require('../services/csr/csr-coach');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: CSR Coach is an owner-only management surface
+// (team scoring, follow-up tasks with customer phones) — its tab is hidden
+// and the API matches.
+router.use(adminAuthenticate, requireAdmin);
 
 // POST /api/admin/csr/score — score a call
 router.post('/score', async (req, res, next) => {
