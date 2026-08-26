@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const GA4 = require('../services/analytics/google-analytics');
 const LocalPerformance = require('../services/analytics/local-performance');
 const DataManager = require('../services/ads/data-manager');
@@ -11,7 +11,7 @@ const GoogleCustomerMatch = require('../services/ads/google-customer-match');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // ── Helper: parse date range from query params ──────────────────────
 function parseDateRange(query) {
