@@ -2415,11 +2415,24 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       if (accrued) {
         throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${dateOnly(sibling.scheduled_date) || 'later'} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
       }
-      const staleInvoiceIds = await conn('invoices')
+      // Every terminal state is excluded, not just paid/prepaid/void
+      // (Codex #3505 r5 P1): re-voiding a refunded/canceled invoice would
+      // erase its refund state and can double-restore deposit credits —
+      // the mint path skips the same set.
+      const staleInvoices = await conn('invoices')
         .where({ scheduled_service_id: sibling.id })
-        .whereNotIn('status', ['paid', 'prepaid', 'void'])
+        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
         .whereNull('payer_statement_id')
-        .pluck('id');
+        .select('id', 'status');
+      // A send in flight means the pre-void invoice message can still reach
+      // the customer with the old amount and a soon-dead pay link — the
+      // canonical transition guard refuses voids in 'sending', so the
+      // reprice refuses too (Codex #3505 r5 P1; the claim is short-lived,
+      // the 409 is retryable).
+      if (staleInvoices.some((invoice) => String(invoice.status) === 'sending')) {
+        throw httpError(409, `Can't apply this price/service change to the rest of the series: an invoice for the ${dateOnly(sibling.scheduled_date) || 'later'} visit is being sent right now. Retry in a moment, or set the change to this appointment only.`);
+      }
+      const staleInvoiceIds = staleInvoices.map((invoice) => invoice.id);
       if (staleInvoiceIds.length > 0) {
         const voidUpdate = { status: 'void' };
         if (await conn.schema.hasColumn('invoices', 'updated_at').catch(() => false)) {
@@ -2438,6 +2451,20 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         if (voidedIds.length < staleInvoiceIds.length) {
           throw httpError(409, `Can't apply this price/service change to the rest of the series: a payment on the ${dateOnly(sibling.scheduled_date) || 'later'} visit's invoice is in flight. Retry after it settles, or set the change to this appointment only.`);
         }
+        // A void is a terminal exit for the invoice's collection path — an
+        // ACTIVE payment plan must not survive it (it blocks edits/credit
+        // reversal forever on a dead invoice). Mirror the canonical void
+        // path's transactional plan cancellation (Codex #3505 r5 P1; the
+        // covered check above can't see a plan that holds no money yet).
+        await conn('payment_plans')
+          .whereIn('invoice_id', voidedIds)
+          .where({ status: 'active' })
+          .update({
+            status: 'cancelled',
+            cancelled_at: new Date(),
+            cancelled_by: 'system:invoice_void',
+            updated_at: new Date(),
+          });
       }
     }
     const siblingUpdates = { updated_at: new Date() };
@@ -2457,15 +2484,15 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         sibling.pre_service_brief_type,
       );
       if (briefClear) Object.assign(siblingUpdates, briefClear);
-      // The 72h/24h reminder rows carry their own stored service label —
-      // senders render the customer-facing service name from it, and the
-      // reminder sync trigger only covers date/window/status moves — so a
-      // propagated service change must relabel the sibling's live
-      // reminders or customers get texts naming the old service (Codex
-      // #3505 r4 P1).
-      await conn('appointment_reminders')
-        .where({ scheduled_service_id: sibling.id, cancelled: false })
-        .update({ service_type: fields.service_type, updated_at: new Date() });
+      // Reminder labels are deliberately NOT touched (Codex #3505 r4/r5):
+      // the 72h/24h senders re-resolve the customer-facing label LIVE from
+      // scheduled_services at send time (liveReminderServiceLabel in
+      // appointment-reminders.js — shipped for the 08-14 stale-label
+      // incident, merging same-slot siblings via buildMergedServiceLabel),
+      // so the service_type this update writes is exactly what the next
+      // text renders. Writing appointment_reminders.service_type directly
+      // would corrupt the owner/suppressed merged-slot labels the fallback
+      // path depends on.
     }
     // Re-derived for a service change too, not just a price change: a
     // sibling whose stored appointment discount is SERVICE-SCOPED

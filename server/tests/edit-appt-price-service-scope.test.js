@@ -320,7 +320,11 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(updates[0].data.estimated_price).toBe(25);
   });
 
-  it("relabels the sibling's live reminders on a service change — senders render the stored label", async () => {
+  it('never writes appointment_reminders — senders re-resolve labels LIVE from scheduled_services', async () => {
+    // liveReminderServiceLabel (appointment-reminders.js) re-derives the
+    // customer-facing label from the visit row at send time, merging
+    // same-slot siblings; a direct stored-label write would corrupt the
+    // owner/suppressed merged-slot labels the fallback path depends on.
     const siblings = [{
       id: 's1', primary_line_price: '25.00', estimated_price: '25.00',
       pre_service_brief_type: null,
@@ -331,9 +335,7 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
       fields: { service_type: 'Pest Control Service', service_id: 9 },
       serviceChanged: true, priceChanged: false, cols: COLS,
     });
-    expect(reminderUpdates).toHaveLength(1);
-    expect(reminderUpdates[0].id).toBe('s1');
-    expect(reminderUpdates[0].data.service_type).toBe('Pest Control Service');
+    expect(reminderUpdates).toHaveLength(0);
   });
 
   it('never writes a column the schema lacks', async () => {
@@ -520,5 +522,15 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
 
   it('sibling add-on reads fail closed — only the missing-table compat case proceeds add-on-less', () => {
     expect(src).toMatch(/const addonTableExists = billingRelevant && targets\.length > 0/);
+  });
+
+  it('the void set excludes every terminal invoice state and refuses on an in-flight send', () => {
+    expect(src).toMatch(/\.whereNotIn\('status', \['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'\]\)\s*\n\s*\.whereNull\('payer_statement_id'\)/);
+    expect(src).toMatch(/String\(invoice\.status\) === 'sending'/);
+  });
+
+  it('voiding a stale invoice cancels its active payment plan, mirroring the canonical void path', () => {
+    expect(src).toMatch(/\.whereIn\('invoice_id', voidedIds\)\s*\n\s*\.where\(\{ status: 'active' \}\)/);
+    expect(src).toMatch(/cancelled_by: 'system:invoice_void'/);
   });
 });
