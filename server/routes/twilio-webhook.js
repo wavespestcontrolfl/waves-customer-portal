@@ -1284,6 +1284,32 @@ router.post('/status', async (req, res) => {
               logger.error(`[twilio-status] 21610 suppression-failure notify also failed: ${notifyErr.message}`);
             }
           }
+          // Post-write reconciliation (hook r2 P1): the clearance read and
+          // the suppression upsert are not atomic, and a START that arrived
+          // before any suppression row existed leaves no clearance marker
+          // for the pre-write guard to see. After writing, re-check the
+          // inbound log: any opt-in-shaped inbound from this number AFTER
+          // the send wins — undo the suppression and skip the downstream
+          // verdicts. Write-then-recheck converges to the recipient's
+          // newest verdict regardless of interleaving.
+          let laterOptIn = false;
+          try {
+            const inbound = await db('sms_log')
+              .where({ from_phone: optOutPhone })
+              .where('created_at', '>', sentAt || new Date(0))
+              .orderBy('created_at', 'desc')
+              .limit(10)
+              .select('message_body');
+            laterOptIn = inbound.some((r) => detectSmsOptCommand(r.message_body || '').action === 'opt_in');
+          } catch { /* unreadable log → keep the suppression (fail toward not texting) */ }
+          if (laterOptIn) {
+            try {
+              await clearSuppression({ phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo' });
+              logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression cleared`);
+            } catch (undoErr) {
+              logger.error(`[twilio-status] 21610 late-callback undo failed: ${undoErr.message}`);
+            }
+          } else {
           // Recipient double opt-in (codex #3495 r1 P1): when the failed
           // message was the opt-in ask itself, the generic ask_failed
           // handler below leaves the recipient row in a state
@@ -1307,6 +1333,7 @@ router.post('/status', async (req, res) => {
           } catch (prefsErr) {
             logger.error(`[twilio-status] 21610 prefs flip failed: ${prefsErr.message}`);
           }
+          } // end !laterOptIn
           } // end !clearedAfterSend
         }
 

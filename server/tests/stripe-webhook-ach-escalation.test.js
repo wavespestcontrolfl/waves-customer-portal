@@ -217,12 +217,17 @@ const stubKnex = (table) => {
   const q = {
     _criteria: null,
     where(criteria) { q._criteria = criteria; return q; },
-    async first() {
-      if (table !== 'payment_methods') return null;
-      return mockState.paymentMethodRows.find(
+    orderBy() { return q; },
+    _matches() {
+      if (table !== 'payment_methods') return [];
+      return mockState.paymentMethodRows.filter(
         (r) => Object.entries(q._criteria).every(([k, v]) => r[k] === v),
-      ) || null;
+      );
     },
+    // getChargeableAutopayMethod walks candidates via orderBy().select()
+    // since the multi-default fix; first() kept for other callers.
+    async select() { return q._matches(); },
+    async first() { return q._matches()[0] || null; },
   };
   return q;
 };
