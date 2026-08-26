@@ -79,6 +79,10 @@ class PaymentExpiry {
             SELECT 1 FROM payment_methods pm2
              WHERE pm2.customer_id = pm.customer_id
                AND pm2.processor = 'stripe' AND pm2.is_default = true
+               -- only another CARD default can outrank this one — a newer
+               -- default bank row must not hide the card's warning (hook P1)
+               AND (pm2.method_type IS NULL
+                    OR pm2.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
                AND (pm2.updated_at > pm.updated_at
                     OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
           )
