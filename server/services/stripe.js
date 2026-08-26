@@ -1848,7 +1848,15 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, refuseWhenDunningStopped = false } = {}) {
+  // opts.maxAuthorizedTotalCents — ceiling on the FINAL surcharged charge
+  // total (computeChargeAmount output), for callers that displayed an exact
+  // quoted total the customer authorized (e.g. the prepay-at-accept quote):
+  // the charge refuses if the in-lock surcharged total EXCEEDS the quoted
+  // cents (a lower total — more account credit applied, non-credit funding —
+  // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
+  // which caps the PRE-surcharge amount due, and from expectedTotal, which
+  // demands exact equality.
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2114,7 +2122,12 @@ const StripeService = {
             throwOnError: true,
           });
           if (resolvedPayer?.payerId) {
-            throw new Error('This appointment is payer-billed. The saved card must not be charged.');
+            const payerErr = new Error('This appointment is payer-billed. The saved card must not be charged.');
+            // Detectable refusal (Codex #3492 r10): callers that snapshot
+            // payer state pre-charge must re-route the bill to the payer
+            // instead of treating this as an ordinary decline.
+            payerErr.code = 'PAYER_BILLED_GUARD';
+            throw payerErr;
           }
         }
         // Customer-DEFAULT payer serialized with the charge (balance-sweep
@@ -2132,7 +2145,11 @@ const StripeService = {
             throwOnError: true,
           });
           if (resolvedDefaultPayer?.payerId) {
-            throw new Error('This bill routes to a third-party payer. The saved card must not be charged.');
+            const payerErr = new Error('This bill routes to a third-party payer. The saved card must not be charged.');
+            // Detectable refusal (Codex #3492 r10): see the visit-keyed
+            // guard above — same re-route contract for callers.
+            payerErr.code = 'PAYER_BILLED_GUARD';
+            throw payerErr;
           }
         }
         // The pre-lock invoice read is only an early eligibility snapshot. Use
@@ -2238,6 +2255,9 @@ const StripeService = {
         total = invTotalCents / 100;
         if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
           throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+        }
+        if (maxAuthorizedTotalCents != null && invTotalCents > Math.round(Number(maxAuthorizedTotalCents))) {
+          throw new Error('Charge total exceeds the quoted total the customer authorized. Review before charging.');
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
@@ -2536,6 +2556,13 @@ const StripeService = {
             declineCode: err.decline_code || err.code || null,
           };
         }
+        // SCA step-up (Codex r28): a declined off-session confirm (e.g.
+        // authentication_required) can leave the PI alive in
+        // requires_action — carry its identity so callers can cancel it
+        // before opening a pay-link rail beside it (the
+        // payment_intent.requires_action webhook rails may still invite
+        // the customer to complete the original intent).
+        chargeFailed.stripePaymentIntentId = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
         throw chargeFailed;
       }
 

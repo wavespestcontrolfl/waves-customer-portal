@@ -8238,12 +8238,25 @@ async function handleEstimateView(req, res, next) {
           billByInvoice: effectiveInvoiceMode,
         });
       })()
-      && (await RecurringCards.resolveRecurringCardPolicyForEstimate({
-        estimate,
-        treatAsOneTime: false,
-        billByInvoice: effectiveInvoiceMode,
-        paymentMethodPreference: null,
-      })).required;
+      && await (async () => {
+        const viewPolicy = await RecurringCards.resolveRecurringCardPolicyForEstimate({
+          estimate,
+          treatAsOneTime: false,
+          billByInvoice: effectiveInvoiceMode,
+          paymentMethodPreference: null,
+        });
+        if (viewPolicy.required) return true;
+        // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE) widens the React
+        // requirement to the auto-satisfy exemptions: a customer whose
+        // saved/autopay card makes `required` false can still pick annual
+        // prepay, and that accept round-trips the PREPAY_CHARGE_QUOTE 402 —
+        // a contract the legacy confirmBooking (DEPOSIT_REQUIRED-only)
+        // renders as a dead-end generic failure on every retry. Only the
+        // React view implements the quote acknowledgement, so lane-active
+        // estimates must land there while the prepay gate is on.
+        return RecurringCards.isPrepayCardAndChargeEnabled()
+          && ['saved_method_consented', 'autopay_already_active'].includes(viewPolicy.exemptReason || '');
+      })();
     // ?adminPreview=1 is the staff draft-preview param (the estimate tool's
     // "Customer View" + the estimates list's Preview). The param is NOT
     // authorization — GET /:token/data does the staff-JWT check. The
@@ -8571,6 +8584,12 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+  // The customer's authorization moment = SERVER RECEIPT of the submit
+  // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
+  // opt-out committed in another tab after the click — even during the
+  // membership/payer/Stripe preflights — always postdates this and WINS in
+  // enrollConsentedMethod's opted_out_after_authorization check.
+  const acceptAuthorizedAt = new Date();
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     // Every bearer-token surface fails closed on the DURABLE call-side
@@ -9287,8 +9306,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // amount matches the invoice the converter creates. A linked customer
     // resolves their real rate; a brand-new one (no row yet) defaults to the FL
     // rate, which is also what the converter's new-customer invoice resolves.
+    // The customer this accept will actually LINK (Codex r13): an unlinked
+    // estimate phone-matches an existing profile INSIDE the accept
+    // transaction, so a commercial tax rate resolved with estimate.customer_id
+    // alone can diverge from the invoice the converter mints for the matched
+    // customer (county/exemption) — the acknowledged total then fails the
+    // expectedTotal equality and the whole cohort degrades to pay-link.
+    // Same unambiguous match the policy resolver and converter run.
+    let acceptResolvedCustomerId = estimate.customer_id || null;
+    // Grouped multi-property accepts (Codex r20): the transaction resolves
+    // the customer through an accepted SIBLING (a shared phone with several
+    // profiles deliberately fails the phone match) — the quote must use the
+    // same owner or its tax/credit projection diverges and every retry
+    // rejects PREPAY_QUOTE_STALE. Read-only approximation of the trx's
+    // sibling pick; the trx re-resolves authoritatively under its lock.
+    if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.estimate_group_id) {
+      // Shared with the policy resolver (Codex r25) — the SAME sibling pick
+      // feeds recurringCardPolicy's exemptions above, so the quote's owner
+      // and the policy's owner can't diverge. Failure → phone match.
+      acceptResolvedCustomerId = await RecurringCards.resolveGroupedEstimateOwnerId(estimate);
+    }
+    if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.customer_phone) {
+      try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
+    }
     const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, {})
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, {})
       : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
@@ -9312,6 +9354,168 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         return Math.round((base + tax) * 100) / 100;
       })()
       : null;
+    // In-lane prepay charge quote (GATE_PREPAY_CARD_AND_CHARGE; pre-push
+    // Codex P0): the consent text promises "the exact surcharge and total
+    // will be shown before payment", so an accept that will immediately
+    // charge the prepay invoice must first return the exact
+    // computeChargeAmount result for the method that will actually be
+    // charged, and only proceed once the customer acknowledged that total.
+    // Round-trip mirrors RECURRING_CARD_REQUIRED: 402 with the quote, the
+    // client renders it and re-submits with prepayChargeAcknowledgedTotalCents,
+    // and the post-commit charge freezes to the acknowledged cents
+    // (maxAuthorizedTotalCents — the charge refuses anything above it).
+    let prepayChargePlan = null; // { method, quote } once acknowledged
+    if (annualPrepaySelected && recurringCardLaneActive && RecurringCards.isPrepayCardAndChargeEnabled()) {
+      // Resolved once above (with the tax-rate hoist) — the quote's method
+      // fallback and credit projections use the SAME customer the accept
+      // transaction will link.
+      const quoteCustomerId = acceptResolvedCustomerId;
+      const prepayChargeMethod = await RecurringCards.resolvePrepayChargeMethod({
+        policy: recurringCardPolicy,
+        verification: recurringCardVerification,
+        customerId: quoteCustomerId,
+      });
+      const prepayQuoteBase = Number(annualPrepayDisplayAmount);
+      if (!prepayChargeMethod || !(prepayQuoteBase > 0)) {
+        // FAIL CLOSED (Codex r9): an in-lane self-pay prepay accept that
+        // cannot resolve the method or amount to quote must NOT commit —
+        // committing here would book the year with no quote, no durable
+        // charge job, and no failed-charge alert, i.e. the exact
+        // pay-link-and-hope path that caused the 2026-08 unpaid-service
+        // incidents this gate exists to close. Every null here is a
+        // transient (Stripe retrieve blip after a verified SetupIntent, a
+        // saved-row lookup miss) — retryable, so refuse and let the
+        // customer resubmit. Payer-billed and other exempt accepts never
+        // enter this block (lane-inactive), so they keep their normal path.
+        logger.warn(`[estimate-accept] in-lane prepay quote unavailable for estimate ${estimate.id} (method=${prepayChargeMethod ? 'ok' : 'unresolved'}, base=${prepayQuoteBase}) — refusing accept (retryable)`);
+        return res.status(503).json({
+          error: 'We couldn’t confirm your payment details just now — please try again in a moment.',
+          code: 'PREPAY_QUOTE_UNAVAILABLE',
+          retryable: true,
+        });
+      }
+      {
+        // Project credit EXACTLY like the charge will (pre-push Codex P0
+        // r2/r5: quote and charge must be the same computeChargeAmount
+        // result to the cent, and a promised inspection credit must exist
+        // before the customer pays) — chargeInvoiceWithSavedCard
+        // auto-applies the customer's credit balance in-lock when the gate
+        // is on, and the post-commit flow REDEEMS the promised
+        // inspection-credit offer into that balance BEFORE the charge runs,
+        // so the projection is current balance + redeemable offer (one
+        // computeApplication, mirroring quoteInvoiceSavedCardCharge). Any
+        // projection drift is refused by the charge's expectedTotal
+        // equality check and degrades to the pay-link fallback (which
+        // auto-applies the real credit at delivery) — never a surprise
+        // amount, never a stranded promise.
+        let prepayProjectedDue = prepayQuoteBase;
+        // Historical acceptance deposit (Codex r9): the converter nets a
+        // received deposit into the minted prepay invoice as a face-value
+        // credit line (capped at the invoice total), so the quote must
+        // project the SAME ledger semantics — otherwise the customer
+        // acknowledges the gross total, the post-commit expectedTotal
+        // equality check sees the lower deposit-credited invoice, and every
+        // auto-charge for this cohort is refused back onto the pay-link
+        // path. Deposit first, account/inspection credit over the
+        // remainder (mirrors charge order: invoice mints net of deposit,
+        // then applyAccountCreditToInvoice works the amount due). The
+        // ledger read fails CLOSED exactly like the converter's own read —
+        // a quote that silently ignored a real deposit would still refuse
+        // the charge post-commit, so refuse retryably up front instead.
+        try {
+          const pendingDeposit = await require('../services/estimate-deposits').pendingDepositCredit(estimate.id);
+          const depositAmount = pendingDeposit ? Number(pendingDeposit.amount) : 0;
+          if (depositAmount > 0) {
+            prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - Math.min(depositAmount, prepayProjectedDue)) * 100) / 100);
+          }
+        } catch (ledgerErr) {
+          logger.warn(`[estimate-accept] prepay quote deposit-ledger read failed for estimate ${estimate.id} — refusing accept (retryable): ${ledgerErr.message}`);
+          return res.status(503).json({
+            error: 'We couldn’t confirm your payment details just now — please try again in a moment.',
+            code: 'PREPAY_QUOTE_UNAVAILABLE',
+            retryable: true,
+          });
+        }
+        let prepayQuoteOfferContribution = 0;
+        if (quoteCustomerId && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          try {
+            const { getBalance, computeApplication } = require('../services/customer-credit');
+            const balance = await getBalance(quoteCustomerId);
+            const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(quoteCustomerId);
+            const projection = computeApplication({ total: prepayProjectedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
+            const appliedCredit = projection.newCreditApplied || 0;
+            // The slice of the projection the UNREDEEMED offer is carrying
+            // (beyond the live balance): when > 0, the acknowledged total is
+            // only correct if the post-commit redemption actually lands —
+            // the charge block defers to the sweep when it can't confirm
+            // that (Codex r9 P0).
+            prepayQuoteOfferContribution = Math.max(0, Math.round((appliedCredit - (balance || 0)) * 100) / 100);
+            prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - appliedCredit) * 100) / 100);
+          } catch (creditErr) {
+            // FAIL CLOSED (Codex r10 P0): "quote without credit" would price
+            // the gross amount while a promised credit may exist — if the
+            // post-commit redemption then also fails inconclusively, the
+            // charge collects gross over an outstanding promise. Unknown
+            // credit state = no quote, retryable refusal.
+            logger.warn(`[estimate-accept] prepay quote credit projection failed for estimate ${estimate.id} — refusing accept (retryable): ${creditErr.message}`);
+            return res.status(503).json({
+              error: 'We couldn’t confirm your payment details just now — please try again in a moment.',
+              code: 'PREPAY_QUOTE_UNAVAILABLE',
+              retryable: true,
+            });
+          }
+        }
+        const { computeChargeAmount } = require('../services/stripe-pricing');
+        const chargeInfo = computeChargeAmount(prepayProjectedDue, prepayChargeMethod.methodType || 'card', { funding: prepayChargeMethod.funding });
+        // The acknowledgement must bind BOTH the exact cents AND the method
+        // it was quoted for (pre-push Codex P0 r3): an Auto Pay default
+        // switched between quote and resubmit can leave the total unchanged
+        // while the card differs — the method-key mismatch forces a fresh
+        // quote instead of charging a card the customer never saw.
+        const currentMethodKey = RecurringCards.prepayChargeMethodKey(prepayChargeMethod.stripePaymentMethodId);
+        const acknowledged = Number(req.body?.prepayChargeAcknowledgedTotalCents);
+        const acknowledgedMethodKey = typeof req.body?.prepayChargeAcknowledgedMethodKey === 'string'
+          ? req.body.prepayChargeAcknowledgedMethodKey : '';
+        // EVERY in-lane prepay charge requires the consent attestation
+        // (Codex r11 + hook P0 r12): auto-satisfy accepts render the v11
+        // authorization at the quote step; fresh captures rendered it at
+        // the capture checkbox and the client attests its LIVE state on
+        // the final confirm — without the universal requirement a crafted
+        // client could echo the quoted cents/method key with no
+        // attestation and the server would charge AND record a consent
+        // snapshot that was never attested.
+        const prepayConsentAccepted = req.body?.prepayChargeConsentAccepted === true;
+        if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
+          || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey
+          || !prepayConsentAccepted) {
+          return res.status(402).json({
+            code: 'PREPAY_CHARGE_QUOTE',
+            error: 'Confirm your exact annual prepay total to finish booking',
+            quote: {
+              base: chargeInfo.baseCents / 100,
+              surcharge: chargeInfo.surchargeCents / 100,
+              total: chargeInfo.totalCents / 100,
+              totalCents: chargeInfo.totalCents,
+              methodKey: currentMethodKey,
+              funding: prepayChargeMethod.funding || null,
+              methodType: prepayChargeMethod.methodType || 'card',
+              last4: prepayChargeMethod.last4 || null,
+              // Universal (hook P0 r12): the client decides WHICH consent
+              // surface satisfies it (quote-step checkbox for auto-satisfy,
+              // the live capture checkbox for fresh captures).
+              consentRequired: true,
+              // TRUE only when the quoted method is the one THIS accept
+              // captured (Codex r30 P1): the capture checkbox authorizes
+              // "this card" — a quote bound to a different saved method
+              // (e.g. Auto Pay enabled in another tab between capture and
+              // requote) must render its own quote-step authorization.
+              capturedMethod: prepayChargeMethod.source === 'fresh_capture',
+            },
+          });
+        }
+        prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo, projectedOfferAmount: prepayQuoteOfferContribution };
+      }
+    }
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
@@ -10349,6 +10553,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
       let invoiceKindResult = null;
       let annualPrepayConversionResult = null;
+      // In-trx credit fencing outcomes (Codex r16/r17) — consumed by the
+      // post-commit charge block.
+      let prepayOfferRedeemedInTxResult = false;
+      let prepayCoveredInTrxResult = false;
       // Narrow low-confidence commercial: skip the exact first-invoice mint so the
       // team invoices after on-site price confirmation (see holdFirstInvoiceFor
       // SiteConfirmation above). Acceptance still commits + books the program.
@@ -10480,6 +10688,54 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           throw overlapErr;
         }
+        // Quote revalidation INSIDE the accept transaction (Codex r15):
+        // the acknowledged total projected the balance + inspection offer +
+        // deposit credit as of the 402 round-trip — credit consumed by
+        // another invoice in between would let this accept COMMIT and then
+        // have the charge's expectedTotal equality refuse, degrading to a
+        // gross pay link above the total the customer confirmed. Re-project
+        // against live state under the per-customer advisory lock held just
+        // above (which also serializes competing prepay accepts — the
+        // overlap assertion refuses the second one outright): any drift
+        // aborts the accept retryably and the client simply re-quotes.
+        if (prepayChargePlan) {
+          let revalidatedDue = Number(annualPrepayDisplayAmount);
+          try {
+            const pendingDeposit = await require('../services/estimate-deposits').pendingDepositCredit(estimate.id, trx);
+            const depositAmount = pendingDeposit ? Number(pendingDeposit.amount) : 0;
+            if (depositAmount > 0) {
+              revalidatedDue = Math.max(0, Math.round((revalidatedDue - Math.min(depositAmount, revalidatedDue)) * 100) / 100);
+            }
+            if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+              const { getBalance, computeApplication } = require('../services/customer-credit');
+              // Reads ride THIS transaction's handle (Codex r17): a second
+              // pool checkout from inside a held connection can deadlock
+              // the pool under a burst of concurrent accepts.
+              const balance = await getBalance(customerId, trx);
+              const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: trx });
+              const projection = computeApplication({ total: revalidatedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
+              revalidatedDue = Math.max(0, Math.round((revalidatedDue - (projection.newCreditApplied || 0)) * 100) / 100);
+            }
+            const { computeChargeAmount } = require('../services/stripe-pricing');
+            const revalidated = computeChargeAmount(revalidatedDue, prepayChargePlan.method.methodType || 'card', { funding: prepayChargePlan.method.funding });
+            if (revalidated.totalCents !== prepayChargePlan.quote.totalCents) {
+              // Distinct contract (Codex r17): a bare 409 lands in the
+              // client's generic slot-conflict branch and destroys the
+              // reservation — PREPAY_QUOTE_STALE keeps it and reopens the
+              // quote confirmation with the fresh total.
+              const staleErr = estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+              staleErr.code = 'PREPAY_QUOTE_STALE';
+              throw staleErr;
+            }
+          } catch (revalErr) {
+            if (revalErr && revalErr.status) throw revalErr;
+            // Unknown credit state = unknown total — same fail-closed
+            // direction as the quote itself, retryable.
+            const staleErr = estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            staleErr.code = 'PREPAY_QUOTE_STALE';
+            throw staleErr;
+          }
+        }
         const EstimateConverter = require('../services/estimate-converter');
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
@@ -10520,6 +10776,87 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
+        // FENCE the projected credits atomically with the acceptance
+        // (Codex r16/r17): the revalidation above only READ them.
+        if (prepayChargePlan && invoiceIdResult
+          && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          // 1) Redeem the projected inspection offer IN THIS TRANSACTION
+          //    (r17): the booking row + its evidence event were written on
+          //    this connection, and redemption nests as a savepoint —
+          //    once redeemed the amount sits in the balance the apply
+          //    below consumes, so no competing booking can take the
+          //    promise between commit and collection. INCONCLUSIVE
+          //    results fall back to the existing post-commit defer path
+          //    (never a hard accept-refusal on possibly-missing booking
+          //    evidence); a conclusive no-offer proceeds on the equality
+          //    guard's drift semantics.
+          if (Number(prepayChargePlan.projectedOfferAmount) > 0
+            && annualPrepayConversionResult?.firstScheduledServiceId) {
+            try {
+              const redemption = await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+                customerId,
+                scheduledServiceId: annualPrepayConversionResult.firstScheduledServiceId,
+                createdBy: 'system:inspection_credit_estimate_accept',
+                dbh: trx,
+              });
+              prepayOfferRedeemedInTxResult = !!redemption && Number(redemption.redeemed) > 0 && !redemption.reason;
+            } catch (redeemErr) {
+              logger.warn(`[estimate-accept] in-trx inspection-credit redemption failed for estimate ${estimate.id} — deferring to the post-commit path: ${redeemErr.message}`);
+            }
+          }
+          // 2) APPLY the (now offer-inclusive) balance to the just-minted
+          //    prepay invoice (r16): consumed atomically with acceptance,
+          //    so a competing invoice waiting on the customer lock cannot
+          //    double-spend it after commit. Fail CLOSED retryably.
+          try {
+            const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+            const inTrxPayerScopeSsId = recurringCardScopeSsId
+              || annualPrepayConversionResult?.firstScheduledServiceId || null;
+            await applyAccountCreditToInvoice({
+              invoiceId: invoiceIdResult,
+              createdBy: 'system:prepay_accept',
+              // Visit-scoped live payer guard IN the apply's own lock (hook
+              // P0 r19): a payer assignment committing after the
+              // converter's snapshot must not have this transaction consume
+              // the HOMEOWNER's credit on what is now a payer's bill — and
+              // full coverage bypasses chargeInvoiceWithSavedCard's payer
+              // re-resolution entirely, so this is the only guard.
+              ...(inTrxPayerScopeSsId ? { requireSelfPayScheduledServiceId: inTrxPayerScopeSsId } : {}),
+            }, trx);
+          } catch (applyErr) {
+            const staleErr = estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            staleErr.code = 'PREPAY_QUOTE_STALE';
+            throw staleErr;
+          }
+          // 3) Full coverage detection (r17): the apply can flip the
+          //    invoice to 'prepaid' — the post-commit block must run the
+          //    credit-coverage settlement instead of a charge call that
+          //    would refuse the settled status as a decline.
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied');
+          prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
+          // 4) Verify the applied result still matches the ACKNOWLEDGED
+          //    quote BEFORE commit (hook P1 r20): applyAccountCreditToInvoice
+          //    reports an unavailable balance as a successful
+          //    { applied: 0, skipped } — committing on that would book the
+          //    plan and have the exact-total charge deterministically
+          //    decline into a gross pay link. Recompute the charge from the
+          //    invoice's actual due; drift refuses retryably (the client
+          //    re-quotes with the live credit state).
+          if (!prepayCoveredInTrxResult) {
+            const { invoiceAmountDue } = require('../services/invoice-helpers');
+            const { computeChargeAmount: verifyChargeAmount } = require('../services/stripe-pricing');
+            const verifiedCharge = verifyChargeAmount(
+              invoiceAmountDue(appliedInvoiceRow),
+              prepayChargePlan.method.methodType || 'card',
+              { funding: prepayChargePlan.method.funding },
+            );
+            if (verifiedCharge.totalCents !== prepayChargePlan.quote.totalCents) {
+              const staleErr = estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+              staleErr.code = 'PREPAY_QUOTE_STALE';
+              throw staleErr;
+            }
+          }
+        }
       }
 
       // Standard recurring conversion (Feature #5) — INSIDE the transaction
@@ -10739,6 +11076,60 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
 
+      // Durable prepay auto-charge job (pre-push Codex P0 r3): persisted
+      // ATOMICALLY with the acceptance so a crash before the post-commit
+      // executor leaves a resumable 'pending' stamp for the billing-cron
+      // sweep (sweepStrandedPrepayAutoCharges), never a silently unpaid
+      // booking. Carries the BOUND method + the exact acknowledged cents —
+      // recovery may charge only these; anything else falls back to
+      // pay-link delivery + an office alert.
+      if (prepayChargePlan && invoiceKindResult === 'annual_prepay' && invoiceIdResult) {
+        // Atomic JSON-path write (pre-push Codex P0 r5) — never a full
+        // estimate_data rewrite that could erase a concurrent writer's keys.
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{prepayAutoChargeJob}', ?::jsonb)",
+            [JSON.stringify({
+              invoice_id: invoiceIdResult,
+              stripe_payment_method_id: prepayChargePlan.method.stripePaymentMethodId,
+              payment_method_row_id: prepayChargePlan.method.paymentMethodRowId || null,
+              // Fresh captures have no payment_methods row until enrollment
+              // — the SetupIntent context lets the recovery sweep complete
+              // save/consent/enrollment idempotently before charging
+              // (Codex r6 P1).
+              setup_intent_id: recurringCardVerification?.setupIntentId || null,
+              method_key: RecurringCards.prepayChargeMethodKey(prepayChargePlan.method.stripePaymentMethodId),
+              authorized_total_cents: prepayChargePlan.quote.totalCents,
+              authorized_base_cents: prepayChargePlan.quote.baseCents,
+              // The ACTUAL acknowledgement moment (Codex r21): recovery's
+              // opt-out check must use when the customer SUBMITTED the
+              // authorization, not this stamp's later write time — an Auto
+              // Pay disable landing in the gap would otherwise read as
+              // predating authorization and be re-enabled.
+              authorized_at: acceptAuthorizedAt.toISOString(),
+              // First prepay visit — the recovery sweep re-runs the
+              // promised inspection-credit redemption against THIS booking
+              // before charging or delivering a pay link (Codex r9 P0: the
+              // quote projected that credit, but redemption is post-commit;
+              // a crash in the gap would otherwise recover at the gross
+              // amount the customer never acknowledged).
+              scheduled_service_id: annualPrepayConversionResult?.firstScheduledServiceId || null,
+              // Payer scope for the in-lock self-pay guard (Codex r13/r14):
+              // the visit the policy admitted the lane with, or — for a
+              // new-slot accept where that scope is deliberately null — the
+              // FIRST prepay visit this very transaction just created, so a
+              // visit-specific payer assigned after acceptance is seen by
+              // recovery's visit-keyed recheck instead of degrading to the
+              // customer-default check.
+              payer_scope_scheduled_service_id: recurringCardScopeSsId
+                || annualPrepayConversionResult?.firstScheduledServiceId || null,
+              status: 'pending',
+              created_at: new Date().toISOString(),
+            })],
+          ),
+        });
+      }
+
       return {
         customerId,
         reservationCommitted,
@@ -10750,6 +11141,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoiceServiceLabel: invoiceServiceLabelResult,
         invoiceKind: invoiceKindResult,
         annualPrepayConversion: annualPrepayConversionResult,
+        prepayOfferRedeemedInTx: prepayOfferRedeemedInTxResult,
+        prepayCoveredInTrx: prepayCoveredInTrxResult,
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
         standardInvoiceAttached,
@@ -10825,6 +11218,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // This flag re-opens the standard delivery path so the invoice routes to
     // the payer AP inbox like any payer-billed accept (Codex #2680 r3).
     let recurringCardPayerFallback = false;
+    // POST-COMMIT payer scope (Codex r14/r16): the visit the policy admitted
+    // the lane with, or — for slot accepts where that is null by
+    // construction — the FIRST visit this accept just created (prepay or
+    // standard conversion). Enrollment, the payer re-check, and the charge
+    // guard must all judge with THIS visit: a visit-specific payer assigned
+    // after commit is otherwise invisible to a customer-default-only check,
+    // enabling Auto Pay on the homeowner for a payer-routed job.
+    const postCommitPayerScopeSsId = recurringCardScopeSsId
+      || txResult.annualPrepayConversion?.firstScheduledServiceId
+      || txResult.standardConversion?.firstScheduledServiceId
+      || null;
+    // Enrollment outcome for the prepay auto-charge below — carries the
+    // payment_methods row id the charge runs against. Null when enrollment
+    // was skipped, refused, or errored (the charge then falls back to the
+    // delivered pay link exactly like today).
+    let recurringCardEnrollmentResult = null;
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -10850,7 +11259,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // throwOnError: the default fail-soft contract returns self-pay on a
           // lookup outage, which would silently defeat this fail-closed catch
           // (Codex #2668 round-4 P1).
-          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: recurringCardScopeSsId, throwOnError: true });
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: postCommitPayerScopeSsId, throwOnError: true });
           payerBilled = !!resolvedPayer?.payerId;
         } catch (err) {
           payerBilled = true;
@@ -10861,7 +11270,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         recurringCardPayerFallback = true;
         logger.info(`[estimate-public] recurring-cof enrollment skipped: resolved customer ${customerId} is payer-billed (estimate ${estimate.id})`);
       } else {
-        await RecurringCards.completeRecurringCardEnrollment({
+        recurringCardEnrollmentResult = await RecurringCards.completeRecurringCardEnrollment({
           customerId,
           stripePaymentMethodId: recurringCardVerification.paymentMethodId,
           setupIntentId: recurringCardVerification.setupIntentId,
@@ -10872,8 +11281,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // P1): a self_pay_override visit on a payer-billed account is
           // customer-paid — the enrollment's in-lock payer check must not
           // fall back to the account payer and refuse.
-          scheduledServiceId: recurringCardScopeSsId || null,
-        }).catch(() => {});
+          scheduledServiceId: postCommitPayerScopeSsId,
+          authorizedAt: acceptAuthorizedAt,
+          // In-lane prepay renders + records the prepay authorization
+          // (immediate 12-month charge) instead of the base card text. Keyed
+          // off what the capture UI RENDERED (in-lane prepay accept), not
+          // off whether the charge plan resolved — the snapshot must match
+          // the checkbox the customer saw even when the quote step degraded.
+          consentVariant: annualPrepaySelected && recurringCardLaneActive
+            && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
+        }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
       && recurringCardPolicy.savedMethodRowId && customerId) {
@@ -10907,12 +11324,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           source: 'estimate_accept',
           details: { via: 'saved_method_auto_enroll', estimate_id: estimate.id },
           // Same visit scope the policy resolver judged with (#3395 r13 P1).
-          scheduledServiceId: recurringCardScopeSsId || null,
+          scheduledServiceId: postCommitPayerScopeSsId,
+          // Post-acknowledgement opt-outs win (Codex r17).
+          authorizedAt: acceptAuthorizedAt,
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted
         // plan would lose its card-on-file protection (Codex #2680). Same
         // office exception the fresh-capture path raises.
+        if (enrollment.enrolled || enrollment.reason === 'already_enrolled') {
+          recurringCardEnrollmentResult = { enrolled: true, paymentMethodRowId: recurringCardPolicy.savedMethodRowId };
+        }
         if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -11246,6 +11668,691 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
     }
 
+    // Inspection credit: redeem NOW — the bookings committed above, and
+    // neither the prepay auto-charge below nor any invoice delivery has run
+    // yet (pre-push P0: the customer must never receive or pay the full
+    // invoice before the promised credit exists). Redeeming first puts the
+    // credit in the balance so BOTH collection paths consume it: the prepay
+    // auto-charge (chargeInvoiceWithSavedCard applies account credit
+    // in-lock — its quote already projected this same credit) and the
+    // send-time auto-apply (sendViaSMSAndEmail →
+    // autoApplyAccountCreditIfEnabled).
+    // Best-effort per booking — the sweep remains the durable guarantee.
+    const inspectionCreditRedemptions = new Map(); // bookingId -> result|{reason:'error'}
+    if (customerId) {
+      const creditBookingIds = [...new Set([
+        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
+        txResult.standardConversion?.firstScheduledServiceId,
+        txResult.annualPrepayConversion?.firstScheduledServiceId,
+      ].filter(Boolean))];
+      for (const bookingId of creditBookingIds) {
+        try {
+          const redemption = await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId,
+            scheduledServiceId: bookingId,
+            createdBy: 'system:inspection_credit_estimate_accept',
+          });
+          inspectionCreditRedemptions.set(String(bookingId), redemption || null);
+        } catch (creditErr) {
+          inspectionCreditRedemptions.set(String(bookingId), { redeemed: 0, reason: 'error', error: creditErr.message });
+          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+        }
+      }
+    }
+
+    // Prepay auto-charge (owner ruling 2026-08-25, GATE_PREPAY_CARD_AND_CHARGE):
+    // the card was live-verified and the exact surcharged total quoted AND
+    // acknowledged BEFORE the accept committed (prepayChargePlan is only set
+    // on an acknowledged quote — no plan, no charge), so collect the
+    // just-minted prepay invoice now instead of emailing a pay link and
+    // hoping. Runs BEFORE the acceptance SMS + invoice delivery below so
+    // both can speak to the actual outcome (pre-push Codex P1). Post-commit
+    // and non-fatal by design — the booking stands either way; a
+    // decline/skip falls through to the existing pay-link delivery plus an
+    // office alert (strictly better than the silent unpaid path that caused
+    // the 2026-08 incidents). chargeInvoiceWithSavedCard owns the
+    // surcharge/credit/ledger/receipt semantics (single surcharge
+    // authority) and refuses payer-billed invoices internally.
+    let prepayAutoCharge = null; // { status: 'paid'|'declined'|'skipped', reason? }
+    // CAS ownership of the durable job (hook P0 r19): a request stalled
+    // >15 min could otherwise resume AFTER the sweep claimed the job,
+    // delivered a pay link, and released the Stripe attempt fence — then
+    // charge on top of a payable link (sequential double collection). The
+    // in-flow executor claims 'pending' → 'claimed' with its own token;
+    // losing the CAS cedes the job (no charge, no pay link — the owner
+    // resolves), and every resolution below writes only while the token
+    // still matches.
+    let prepayJobClaimToken = null;
+    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId && !txResult.prepayCoveredInTrx) {
+      const candidateToken = require('crypto').randomUUID();
+      try {
+        const claimedRows = await db('estimates')
+          .where({ id: estimate.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'")
+          .update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({ status: 'claimed', claimed_at: new Date().toISOString(), claim_token: candidateToken })],
+            ),
+          });
+        if (claimedRows === 1) prepayJobClaimToken = candidateToken;
+      } catch (claimErr) {
+        logger.warn(`[estimate-accept] prepay job claim failed for estimate ${estimate.id} — ceding to the sweep: ${claimErr.message}`);
+      }
+    }
+    // Ownership fence for the accept executor (hook P0 r23, reworked r24):
+    // a DURABLE EXECUTION MARKER instead of a held row lock — holding a
+    // pool connection through a Stripe call (which checks out its own
+    // connections) could exhaust the pool under a burst of concurrent
+    // accepts. One atomic CAS stamps executing_at WHERE our claim token
+    // still stands (0 rows = superseded → PREPAY_JOB_NOT_OWNED, an
+    // ambiguous defer); the sweep's stale-lease takeover refuses any job
+    // whose executing_at is fresh, so a marked executor cannot be
+    // superseded mid-charge. No connection is held while the money moves.
+    const chargeUnderJobFence = async (fn) => {
+      const marked = await db('estimates')
+        .where({ id: estimate.id })
+        .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify({ executing_at: new Date().toISOString() })],
+          ),
+        });
+      if (marked !== 1) {
+        const notOwned = new Error('prepay job claim superseded');
+        notOwned.code = 'PREPAY_JOB_NOT_OWNED';
+        throw notOwned;
+      }
+      return fn();
+    };
+    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
+      && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
+      // Another executor owns the job (or the claim write failed) — never
+      // run a second collection beside it.
+      prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+      invoicePayUrl = null;
+      logger.warn(`[estimate-accept] prepay job for estimate ${estimate.id} is owned elsewhere — no in-flow charge`);
+    } else if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId) {
+      // Fresh capture resolves its payment_methods row at enrollment
+      // (post-commit); saved/autopay sources carried their row on the plan.
+      const prepayChargePmRowId = prepayChargePlan.method.paymentMethodRowId
+        || recurringCardEnrollmentResult?.paymentMethodRowId
+        || null;
+      const prepayCeilingCents = Math.round(Number(invoiceAmount || 0) * 100);
+      // Payer check on the MINTED invoice (the converter auto-resolves a
+      // default payer): never charge the homeowner's card for a bill that
+      // routes to a third-party payer. Fail closed — an unverifiable payer
+      // state skips the charge (the charge service re-refuses internally
+      // regardless). The route-level invoiceIsPayerBilled flag is computed
+      // further down; this block runs first, so it reads directly.
+      let prepayInvoicePayerBilled = false;
+      try {
+        const payerRow = await db('invoices').where({ id: invoiceId }).first('payer_id');
+        prepayInvoicePayerBilled = !!payerRow?.payer_id;
+      } catch { prepayInvoicePayerBilled = true; }
+      // The acknowledged quote leaned on the promised inspection-credit
+      // offer — the charge may only run once that credit CONCLUSIVELY
+      // landed (redeemed) or conclusively doesn't exist (the equality
+      // guard then declines at the honest amount). An INCONCLUSIVE
+      // redemption (lookup/evidence/db failure) means the customer's
+      // balance may still gain the credit: charging would mismatch and the
+      // fallback would deliver the GROSS invoice while resolving the
+      // durable job — over-collection with no recovery (Codex r9 P0).
+      // Defer instead: no charge, no pay link, stamp stays for the sweep
+      // (which re-runs this same redemption from the stamped booking).
+      const INSPECTION_CREDIT_INCONCLUSIVE = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'redemption_incomplete', 'error'];
+      let prepayCreditUnresolved = false;
+      if (Number(prepayChargePlan.projectedOfferAmount) > 0 && txResult.prepayOfferRedeemedInTx !== true) {
+        const prepayBookingId = txResult.annualPrepayConversion?.firstScheduledServiceId || null;
+        const redemption = prepayBookingId ? inspectionCreditRedemptions.get(String(prepayBookingId)) : null;
+        // A named inconclusive reason DEFERS even beside a partial mint
+        // (Codex r20): the quote projected the SUM of the open offers.
+        prepayCreditUnresolved = !redemption || INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
+      }
+      // Definitive payer routing for the fallback flags (Codex r22 + hook
+      // P0): BOTH flags include lookup-failure (fail-closed) states — an
+      // uncertain payer must never be treated as CONFIRMED payer-billed
+      // (delivery would hand the HOMEOWNER a pay link on a possibly
+      // third-party bill and retire the job). Classify payer_billed only
+      // off an existing payer_id or a successful live resolve-and-stamp
+      // (with the homeowner's in-trx credit reversed first); a confirmed
+      // self-pay resolve falls through to the normal charge chain; anything
+      // uncertain defers with NO delivery.
+      let prepayPayerRouting = null; // 'payer_billed' | 'self_pay' | 'unresolved'
+      if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
+        try {
+          const payerInvRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_service_id');
+          if (payerInvRow?.payer_id) {
+            prepayPayerRouting = 'payer_billed';
+          } else {
+            const PayerService = require('../services/payer');
+            const resolvedRouting = await PayerService.resolveForInvoice({
+              customerId,
+              scheduledServiceId: postCommitPayerScopeSsId || payerInvRow?.scheduled_service_id || null,
+              throwOnError: true,
+            });
+            if (resolvedRouting?.payerId) {
+              // Under the ownership fence (Codex r27 P1): the credit
+              // reversal + payer stamp are invoice mutations — a request
+              // stalled past the 60-minute lease could otherwise resume
+              // here AFTER the sweep replaced the claim and began
+              // collection, reclassifying an invoice the successor already
+              // charged. The fence's CAS verifies our claim token still
+              // stands (and stamps executing_at so the sweep's stale-lease
+              // takeover holds off); a superseded claim throws
+              // PREPAY_JOB_NOT_OWNED into the routing catch → cede
+              // (no stamp, no delivery, the owner resolves).
+              await chargeUnderJobFence(async () => {
+                // Atomic reverse-and-stamp (Codex r29 P1): ONE transaction
+                // locks the invoice, re-reads the CURRENT credit_applied
+                // (never the payerInvRow snapshot — credit added since is
+                // included), returns all of it, and stamps the payer — a
+                // stamp failure rolls the reversal back too. The reversal's
+                // settled/in-flight refusal (Codex r26 P1, e.g. 'prepaid'
+                // from in-trx coverage) surfaces as
+                // CREDIT_REVERSAL_INCOMPLETE, which rolls back and throws
+                // into the routing catch (→ 'unresolved': defer, no stamp,
+                // no delivery).
+                await require('../services/customer-credit').reverseCreditAndStampPayer({
+                  invoiceId,
+                  payerId: resolvedRouting.payerId,
+                  poNumber: resolvedRouting.poNumber || null,
+                  payerSnapshot: resolvedRouting.snapshot || null,
+                  createdBy: 'system:prepay_payer_reroute',
+                  note: 'Account credit returned — invoice re-routed to third-party payer',
+                });
+              });
+              prepayPayerRouting = 'payer_billed';
+            } else {
+              prepayPayerRouting = 'self_pay';
+            }
+          }
+        } catch (routingErr) {
+          // A superseded claim CEDES (Codex r27 P1) — the sweep owns the
+          // job and may be mid-collection, so this is job_not_owned
+          // 'ambiguous' (attempted-elsewhere/unknown), not a 'deferred'
+          // nothing-attempted wait. Everything else stays 'unresolved'.
+          prepayPayerRouting = routingErr.code === 'PREPAY_JOB_NOT_OWNED' ? 'ceded' : 'unresolved';
+          logger.warn(`[estimate-accept] payer routing ${prepayPayerRouting} for invoice ${invoiceId} — deferring (no delivery): ${routingErr.message}`);
+        }
+      }
+      if (prepayPayerRouting === 'ceded') {
+        prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+        invoicePayUrl = null;
+      } else if (prepayPayerRouting === 'payer_billed') {
+        prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+      } else if (prepayPayerRouting === 'unresolved') {
+        // 'deferred', not 'ambiguous' (Codex r26 P2): no charge was
+        // attempted here — the job simply waits for the recovery sweep.
+        // Pay link stays suppressed, but the copy must not claim a
+        // payment attempt is being reconciled.
+        prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
+        invoicePayUrl = null;
+      } else if (txResult.prepayCoveredInTrx) {
+        // The in-trx apply fully covered the invoice ('prepaid') — nothing
+        // to charge, and chargeInvoiceWithSavedCard would refuse the
+        // settled status as a decline (Codex r17). Coverage bypassed the
+        // charge's in-lock payer re-resolution, so RE-RESOLVE the payer
+        // HERE before settling (Codex r20): a payer assigned between the
+        // commit and this block must not have the term activated on the
+        // homeowner's credit and the job retired terminal — defer instead
+        // (the stamp stays pending, and the sweep's prepaid-branch payer
+        // validation surfaces it for the office).
+        let coveragePayerClear = false;
+        try {
+          const coveragePayer = await require('../services/payer').resolveForInvoice({
+            customerId,
+            scheduledServiceId: postCommitPayerScopeSsId || null,
+            throwOnError: true,
+          });
+          coveragePayerClear = !coveragePayer?.payerId;
+        } catch (coveragePayerErr) {
+          logger.warn(`[estimate-accept] coverage payer recheck failed for invoice ${invoiceId} — deferring settlement to the sweep: ${coveragePayerErr.message}`);
+        }
+        if (!coveragePayerClear) {
+          prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
+          invoicePayUrl = null;
+          logger.warn(`[estimate-accept] prepay coverage settlement deferred for invoice ${invoiceId} (estimate ${estimate.id}): payer ownership changed or unconfirmable`);
+        } else {
+        // Run the SAME settlement side effects the charge service's
+        // covered_by_credit path runs (best-effort, idempotent), then
+        // report the credit coverage.
+        try {
+          await require('../services/invoice-followups').stopOnPayment(invoiceId);
+        } catch (e) { logger.warn(`[estimate-accept] stopOnPayment after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        try {
+          await require('../services/payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
+        } catch (e) { logger.warn(`[estimate-accept] plan completion after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        let coverageTermSynced = false;
+        try {
+          const coveredInvoiceRow = await db('invoices').where({ id: invoiceId }).first();
+          if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
+          coverageTermSynced = true;
+        } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
+        // termSyncPending keeps the durable job UNRESOLVED on a sync
+        // failure (Codex r18): credit coverage has no Stripe webhook, so
+        // without the sweep retry only the daily reconciliation would
+        // activate the term — a same-day visit could complete and bill
+        // per-application over an already-spent year. Customer-facing
+        // outcome stays 'paid' (the money side IS settled).
+        prepayAutoCharge = {
+          status: 'paid',
+          coveredByCredit: true,
+          ...(coverageTermSynced ? {} : { termSyncPending: true }),
+        };
+        invoicePayUrl = null;
+        logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})${coverageTermSynced ? '' : ' — term sync pending, sweep will retry'}`);
+        }
+      } else if (prepayCreditUnresolved) {
+        prepayAutoCharge = { status: 'deferred', reason: 'inspection_credit_unresolved' };
+        invoicePayUrl = null;
+        logger.warn(`[estimate-accept] prepay auto-charge deferred for invoice ${invoiceId} (estimate ${estimate.id}): projected inspection credit not conclusively redeemed`);
+      } else if (!prepayChargePmRowId) {
+        // Enrollment refused/errored (already office-alerted inside the
+        // enrollment path) — the quoted method never landed as a row.
+        prepayAutoCharge = { status: 'skipped', reason: 'no_enrolled_method' };
+      } else if (!(prepayCeilingCents > 0)) {
+        // No verifiable accepted amount — never charge without a ceiling.
+        prepayAutoCharge = { status: 'skipped', reason: 'no_accepted_amount' };
+      } else if (!(await (async () => {
+        // The v11 prepay authorization must exist as an immutable
+        // payment_method_consents row BEFORE any collection (Codex r11):
+        // fresh captures recorded it at enrollment (the variant check makes
+        // this a no-op there); auto-satisfy methods — including saved BANK
+        // accounts — record here with the tender-correct prepay variant,
+        // matching the copy the quote step's checkbox rendered. FAIL
+        // CLOSED: no authorization row, no charge — defer to the sweep,
+        // which re-attempts the same idempotent record.
+        try {
+          const ConsentService = require('../services/payment-method-consents');
+          const consentMethodType = prepayChargePlan.method.methodType || 'card';
+          const already = await ConsentService.hasConsentSnapshotForVariant(
+            customerId,
+            prepayChargePlan.method.stripePaymentMethodId,
+            // Scoped to THIS acceptance's authorization (Codex r22) — a
+            // prior plan's snapshot must not suppress this plan's row.
+            { methodType: consentMethodType, variant: 'prepay_card', since: acceptAuthorizedAt },
+          );
+          if (!already) {
+            await ConsentService.recordConsent({
+              customerId,
+              paymentMethodId: prepayChargePmRowId,
+              stripePaymentMethodId: prepayChargePlan.method.stripePaymentMethodId,
+              source: 'estimate_accept',
+              methodType: consentMethodType,
+              ip: req.ip,
+              userAgent: req.get('user-agent') || null,
+              consentVariant: 'prepay_card',
+            });
+          }
+          return true;
+        } catch (consentErr) {
+          logger.warn(`[estimate-accept] prepay consent snapshot failed for invoice ${invoiceId} (estimate ${estimate.id}) — deferring charge: ${consentErr.message}`);
+          return false;
+        }
+      })())) {
+        prepayAutoCharge = { status: 'deferred', reason: 'consent_snapshot_failed' };
+        invoicePayUrl = null;
+      } else {
+        try {
+          const StripeService = require('../services/stripe');
+          const prepayChargeResult = await chargeUnderJobFence(() => StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+            // EXACT-equality freeze to the acknowledged quote (pre-push
+            // Codex P0 r2): the in-lock computeChargeAmount result must be
+            // the same cents the customer confirmed — any drift (a credit
+            // write racing the quote, an invoice edit) refuses and the
+            // pay-link fallback takes over. Never a different amount.
+            expectedTotal: prepayChargePlan.quote.totalCents / 100,
+            // Belt-and-suspenders ceilings alongside the equality check.
+            maxAuthorizedChargeCents: prepayCeilingCents,
+            maxAuthorizedTotalCents: prepayChargePlan.quote.totalCents,
+            // Serialize against a concurrently-committing pause/opt-out or
+            // method switch — enrollment just ran, but the in-lock re-check
+            // is what makes the ordering atomic.
+            requireAutopayForCustomerId: customerId,
+            // Live payer re-resolve IN the charge lock (Codex r9): the
+            // payer_id read above is a snapshot — billing can assign a
+            // customer-DEFAULT payer between the mint and this charge while
+            // the invoice's payer_id stays null. This re-resolves the
+            // default payer under the lock and refuses rather than charging
+            // the homeowner's card for a bill that now routes to a payer.
+            // VISIT-SCOPED when a scope exists (Codex r13/r14): the visit
+            // the policy admitted the lane with, or the first prepay visit
+            // this accept just created (new-slot accepts) — a
+            // self_pay_override visit on a payer-billed account is
+            // customer-paid, and a customer-only recheck would inherit the
+            // account default payer and wrongly refuse + re-route the
+            // acknowledged homeowner charge to AP; conversely a
+            // visit-specific payer assigned to the NEW visit after
+            // acceptance must be seen. The visit-keyed check folds the
+            // default payer in and honors the override.
+            ...(postCommitPayerScopeSsId
+              ? { requireSelfPayScheduledServiceId: postCommitPayerScopeSsId }
+              : { requireSelfPayCustomerId: customerId }),
+          }));
+          // The charge COMMITTED once the fenced call returned — a failed
+          // status re-read must NOT fall into the decline catch (Codex r30
+          // P1: the response + acceptance SMS would promise an invoice
+          // beside collected/collecting money). Classify ambiguous: no pay
+          // link, job unresolved, the sweep re-reads.
+          let freshInvoice = null;
+          let freshReadFailed = false;
+          try {
+            freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
+          } catch (readErr) {
+            freshReadFailed = true;
+            logger.error(`[estimate-accept] post-charge invoice read failed for ${invoiceId} (estimate ${estimate.id}) — classifying ambiguous: ${readErr.message}`);
+          }
+          const freshStatus = String(freshInvoice?.status || '').toLowerCase();
+          if (freshReadFailed) {
+            prepayAutoCharge = { status: 'ambiguous', reason: 'post_charge_status_unverified' };
+            invoicePayUrl = null;
+          } else if (['paid', 'prepaid'].includes(freshStatus)) {
+            // covered_by_credit / 'prepaid' = account credit covered the
+            // whole quoted amount and NO card charge ran (Codex r9): the
+            // charge service enqueues no receipt on that early return, so
+            // every downstream surface (SMS skip rationale, notification,
+            // success card) must confirm the credit coverage itself instead
+            // of promising a card receipt that will never arrive.
+            const coveredByCredit = prepayChargeResult?.covered_by_credit === true || freshStatus === 'prepaid';
+            prepayAutoCharge = { status: 'paid', ...(coveredByCredit ? { coveredByCredit: true } : {}) };
+            invoicePayUrl = null; // nothing left to pay — never advertise a pay link
+            logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
+          } else if (freshStatus === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') {
+            // A saved BANK method (autopay-active customers can be
+            // ACH-enrolled) debits asynchronously — 'processing' is a
+            // successfully INITIATED collection, not a decline (pre-push
+            // Codex P1 r2): no failure alert, no pay link, no invoice
+            // delivery (sendViaSMSAndEmail would refuse a non-collectible
+            // invoice anyway); the existing ACH webhook rails own the
+            // settle/fail outcome from here. The bank-tender check is
+            // load-bearing (Codex r9 P0): the charge service maps EVERY
+            // non-succeeded PaymentIntent to invoice 'processing' — a CARD
+            // intent parked in requires_action etc. is NOT collected money
+            // and must not resolve the job as an initiated debit.
+            prepayAutoCharge = { status: 'processing' };
+            invoicePayUrl = null;
+            logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
+          } else if (freshStatus === 'processing') {
+            // A non-bank 'processing' is an incomplete CARD intent — never
+            // a pay link beside it and never a resolved job. A 3DS
+            // requires_action park can NEVER complete off-session (Codex
+            // r13): cancel that definitive state now — the canceled-PI
+            // webhook reopens the invoice and releases the fence — and
+            // stamp authentication_required so the sweep routes straight
+            // to the pay-link fallback instead of deferring forever (the
+            // customer authenticates by paying on-session). Any other
+            // in-flight state stays ambiguous for the sweep to re-read.
+            let prepayCardIntentReason = 'card_intent_incomplete';
+            try {
+              // Fenced (hook P0 r23): PI revalidation, cancellation, and
+              // the job stamp run under the ownership fence — a superseded
+              // executor must not cancel a successor's PI (stamp via the
+              // fence's trx: it holds the row lock).
+              await chargeUnderJobFence(async () => {
+                const StripeSvc = require('../services/stripe');
+                const invPiRow = await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id');
+                const stuckPiId = invPiRow?.stripe_payment_intent_id;
+                const stuckPi = stuckPiId ? await StripeSvc.retrievePaymentIntent(stuckPiId) : null;
+                if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
+                  await StripeSvc.cancelPaymentIntent(stuckPiId);
+                  await db('estimates').where({ id: estimate.id })
+                    .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
+                    .update({
+                      estimate_data: db.raw(
+                        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                        [JSON.stringify({ authentication_required: true })],
+                      ),
+                    });
+                  prepayCardIntentReason = 'authentication_required';
+                }
+              });
+            } catch (stuckErr) {
+              if (stuckErr.code === 'PREPAY_JOB_NOT_OWNED') {
+                prepayCardIntentReason = 'job_not_owned';
+              }
+              logger.warn(`[estimate-accept] stuck-card-intent triage failed for invoice ${invoiceId}: ${stuckErr.message}`);
+            }
+            prepayAutoCharge = { status: 'ambiguous', reason: prepayCardIntentReason };
+            invoicePayUrl = null;
+            logger.warn(`[estimate-accept] prepay invoice ${invoiceId} card intent incomplete (${prepayCardIntentReason}) — deferring to sweep (estimate ${estimate.id})`);
+          } else {
+            // Charge call returned without throwing but the invoice is in
+            // an unexpected state (e.g. parked for reconciliation) — treat
+            // as declined for flow purposes: alert + keep the pay path
+            // (sendViaSMSAndEmail refuses a non-collectible invoice itself).
+            prepayAutoCharge = { status: 'declined', reason: `post-charge status ${freshStatus || 'unknown'}` };
+          }
+        } catch (chargeErr) {
+          // Active/ambiguous attempts mean money MAY already be moving
+          // (pre-push Codex P0 r5): never open the pay-link rail beside
+          // them, never resolve the durable stamp — the recovery sweep
+          // re-reads the invoice after the attempt/reconciliation resolves.
+          if (chargeErr.code === 'PREPAY_JOB_NOT_OWNED') {
+            // The sweep's stale-lease takeover superseded this executor
+            // before the charge — cede entirely: no charge ran, no pay
+            // link, the owner resolves (hook P0 r23).
+            prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+            invoicePayUrl = null;
+            logger.warn(`[estimate-accept] prepay charge ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
+          } else if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(chargeErr.code) || chargeErr.reconciliationRequired) {
+            prepayAutoCharge = { status: 'ambiguous', reason: chargeErr.code || chargeErr.message };
+            invoicePayUrl = null;
+            logger.warn(`[estimate-accept] prepay auto-charge outcome ambiguous for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
+          } else if (chargeErr.code === 'PAYER_BILLED_GUARD') {
+            // The in-lock guard found a payer assigned AFTER the mint while
+            // the invoice's frozen payer_id is still null (Codex r10 P0) —
+            // classifying this as a decline would let the fallback delivery
+            // below hand the HOMEOWNER a pay link for a payer's bill.
+            // Re-resolve and STAMP the live payer onto the invoice so
+            // delivery routes to the payer AP inbox (the normal
+            // payer-billed skip); if the payer can't be confirmed, defer
+            // with NO pay link and leave the durable job for the sweep.
+            let payerStamped = false;
+            try {
+              const PayerService = require('../services/payer');
+              const invoiceRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_service_id');
+              if (invoiceRow?.payer_id) {
+                payerStamped = true; // another writer already stamped it
+              } else {
+                const resolved = await PayerService.resolveForInvoice({
+                  customerId,
+                  // Same scope basis as the charge guard (Codex r13/r14) —
+                  // the invoice's own linkage as last fallback.
+                  scheduledServiceId: postCommitPayerScopeSsId || invoiceRow?.scheduled_service_id || null,
+                  throwOnError: true,
+                });
+                if (resolved?.payerId) {
+                  // Return the HOMEOWNER's account credit BEFORE the bill
+                  // becomes the payer's (Codex r17): the accept applied it
+                  // in-transaction to what was then a self-pay invoice —
+                  // delivering that invoice to AP with the credit still
+                  // netted would fund the payer's bill from the
+                  // homeowner's ledger. A failed reversal keeps the
+                  // invoice self-pay and defers (no stamp, no delivery).
+                  // Under the ownership fence (hook P0 r23): payer/credit
+                  // mutations only while this executor still owns the job.
+                  await chargeUnderJobFence(async () => {
+                    // Atomic reverse-and-stamp (Codex r29 P1): one
+                    // transaction locks the invoice, reverses its CURRENT
+                    // credit_applied in full, and stamps the payer — or
+                    // rolls both back. The settled/in-flight refusal
+                    // (Codex r26 P1) surfaces as
+                    // CREDIT_REVERSAL_INCOMPLETE out of the fence into the
+                    // payerErr catch (no stamp, defer).
+                    await require('../services/customer-credit').reverseCreditAndStampPayer({
+                      invoiceId,
+                      payerId: resolved.payerId,
+                      poNumber: resolved.poNumber || null,
+                      payerSnapshot: resolved.snapshot || null,
+                      createdBy: 'system:prepay_payer_reroute',
+                      note: 'Account credit returned — invoice re-routed to third-party payer',
+                    });
+                  });
+                  payerStamped = true;
+                }
+              }
+            } catch (payerErr) {
+              logger.warn(`[estimate-accept] payer re-stamp failed for invoice ${invoiceId} (estimate ${estimate.id}): ${payerErr.message}`);
+            }
+            if (payerStamped) {
+              prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+            } else {
+              // The payer guard refused BEFORE any money moved — this is a
+              // deferral to the sweep, not an ambiguous attempt (Codex r26
+              // P2). Pay link stays suppressed.
+              prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
+              invoicePayUrl = null;
+            }
+            logger.warn(`[estimate-accept] prepay auto-charge refused by payer guard for invoice ${invoiceId} (estimate ${estimate.id}): ${payerStamped ? 'payer stamped, invoice routes to payer' : 'payer unresolved — deferred to sweep'}`);
+          } else if (chargeErr.wavesCardDecline?.declineCode === 'authentication_required') {
+            // An SCA step-up thrown as a decline leaves the off-session PI
+            // alive in requires_action (Codex r28 P1): webhook rails can
+            // still invite the customer to complete THAT intent, so the
+            // decline fallback's pay link would open a second collection
+            // rail beside it. Mirror the r13 parked-'processing' triage:
+            // verify + cancel the intent and stamp authentication_required
+            // (fenced, token-conditioned) BEFORE allowing the fallback;
+            // anything short of a confirmed-terminal intent stays
+            // unresolved for the sweep — no pay link.
+            let scaSafeForFallback = false;
+            let scaReason = 'authentication_required_unverified';
+            try {
+              await chargeUnderJobFence(async () => {
+                const StripeSvc = require('../services/stripe');
+                const scaPiId = chargeErr.stripePaymentIntentId || null;
+                const scaPi = scaPiId ? await StripeSvc.retrievePaymentIntent(scaPiId) : null;
+                if (!scaPi) return; // no identity to verify — fail closed
+                if (['succeeded', 'processing'].includes(scaPi.status)) {
+                  // The decline replayed after the customer completed the
+                  // intent — money may be moving; reconcile, never a link.
+                  scaReason = 'authentication_required_completed';
+                  return;
+                }
+                if (scaPi.status !== 'canceled') await StripeSvc.cancelPaymentIntent(scaPiId);
+                await db('estimates').where({ id: estimate.id })
+                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
+                  .update({
+                    estimate_data: db.raw(
+                      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                      [JSON.stringify({ authentication_required: true })],
+                    ),
+                  });
+                scaSafeForFallback = true;
+              });
+            } catch (scaErr) {
+              if (scaErr.code === 'PREPAY_JOB_NOT_OWNED') scaReason = 'job_not_owned';
+              logger.warn(`[estimate-accept] SCA-decline intent triage failed for invoice ${invoiceId} (estimate ${estimate.id}): ${scaErr.message}`);
+            }
+            if (scaSafeForFallback) {
+              // Intent confirmed terminal (canceled) — the pay link is the
+              // customer's way to authenticate on-session; the stamp keeps
+              // the sweep off the doomed off-session re-charge.
+              prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
+              logger.warn(`[estimate-accept] prepay auto-charge hit 3DS off-session for invoice ${invoiceId} (estimate ${estimate.id}) — intent canceled, pay-link fallback`);
+            } else {
+              prepayAutoCharge = { status: 'ambiguous', reason: scaReason };
+              invoicePayUrl = null;
+              logger.warn(`[estimate-accept] prepay auto-charge 3DS decline unresolved for invoice ${invoiceId} (estimate ${estimate.id}): ${scaReason}`);
+            }
+          } else {
+            prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
+            logger.warn(`[estimate-accept] prepay auto-charge declined/failed for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
+          }
+        }
+      }
+      if (['ambiguous', 'deferred'].includes(prepayAutoCharge.status)) {
+        await require('../services/notification-service').notifyAdmin(
+          'billing',
+          prepayAutoCharge.status === 'deferred'
+            ? 'Annual prepay accepted — auto-charge deferred to the recovery sweep'
+            : 'Annual prepay accepted — charge outcome needs reconciliation',
+          prepayAutoCharge.reason === 'inspection_credit_unresolved'
+            ? 'The promised inspection credit could not be confirmed as redeemed, so the auto-charge was deferred to the recovery sweep. No charge was attempted and no pay link was sent.'
+            : prepayAutoCharge.reason === 'payer_unresolved'
+              ? 'The charge was refused because this bill appears to route to a third-party payer that could not be confirmed. No charge ran and no pay link was sent — the recovery sweep will retry once the payer state resolves.'
+              : prepayAutoCharge.reason === 'consent_snapshot_failed'
+                ? 'The prepay authorization snapshot could not be recorded, so no charge ran and no pay link was sent — the recovery sweep will retry the record and the charge.'
+                : prepayAutoCharge.reason === 'authentication_required'
+                  ? 'The card requires customer authentication (3DS), which an off-session charge cannot complete — the intent was canceled and the recovery sweep will deliver the pay link so the customer can authenticate by paying online.'
+                  : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
+          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+        ).catch(() => {});
+      } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
+        // The booking stands with a card on file but the year isn't
+        // collected — surface it instead of the silent unpaid path. Best-effort.
+        await require('../services/notification-service').notifyAdmin(
+          'billing',
+          'Annual prepay accepted — auto-charge did not complete',
+          `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'is being sent to the customer'} — follow up if it goes unpaid.`,
+          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+        ).catch(() => {});
+      }
+      // Resolve the durable job stamp with the in-flow outcome — the
+      // billing-cron sweep resumes only unresolved stamps. COLLECTED
+      // outcomes (paid / initiated processing) resolve here; an AMBIGUOUS
+      // outcome deliberately does NOT resolve (the sweep owns it after
+      // reconciliation); and declined/skipped resolve only AFTER the
+      // fallback pay-link delivery below actually confirms (pre-push Codex
+      // P0 r8: retiring the job before a delivery that may fail or never
+      // run would leave the booking with no payment path and no sweep).
+      // Atomic JSON-path merge, never a full estimate_data rewrite
+      // (pre-push Codex P0 r5). Best-effort: a failed update degrades to
+      // the sweep re-verifying against the live invoice.
+      // Release the claim back to 'pending' for defers with NOTHING in
+      // flight (hook P0 r19): the sweep then retries at its 15-min cadence
+      // instead of waiting out the 60-min stale-claim lease. Charge-
+      // initiated ambiguity (Stripe fence/webhook) keeps the claim —
+      // reconciliation owns that pacing.
+      if (prepayJobClaimToken
+        && ['inspection_credit_unresolved', 'payer_unresolved', 'consent_snapshot_failed'].includes(prepayAutoCharge?.reason)) {
+        try {
+          await db('estimates')
+            .where({ id: estimate.id })
+            .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken])
+            .update({
+              estimate_data: db.raw(
+                "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                [JSON.stringify({ status: 'pending', claim_token: null, claimed_at: null })],
+              ),
+            });
+        } catch (releaseErr) {
+          logger.warn(`[estimate-accept] prepay job claim release failed for estimate ${estimate.id} (stale lease recovers it): ${releaseErr.message}`);
+        }
+      }
+      if (['paid', 'processing'].includes(prepayAutoCharge.status) && prepayAutoCharge.termSyncPending !== true) {
+        try {
+          const resolveQ = db('estimates')
+            .where({ id: estimate.id })
+            .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL");
+          // Ownership-conditioned (hook P0 r19): only the executor holding
+          // the claim token may retire the job. The in-trx coverage path
+          // never claimed (it settled before any executor raced) — it
+          // resolves only a still-pending stamp.
+          if (prepayJobClaimToken) {
+            resolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken]);
+          } else {
+            resolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'");
+          }
+          await resolveQ.update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({
+                status: prepayAutoCharge.status,
+                reason: prepayAutoCharge.reason || null,
+                resolved_at: new Date().toISOString(),
+                resolved_by: 'accept',
+              })],
+            ),
+          });
+        } catch (stampErr) {
+          logger.warn(`[estimate-accept] prepay job stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
+        }
+      }
+    }
+
     // Send acceptance SMS to customer. Invoice-mode sends its own SMS
     // via InvoiceService.sendViaSMS later (pay link, not onboarding /
     // booking link) — so skip this branch entirely when bill_by_invoice
@@ -11503,8 +12610,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected) {
-          const amountText = annualPrepayQuotedAmount != null ? ` for ${fmtMoney(annualPrepayQuotedAmount)}` : '';
+        } else if (annualPrepaySelected && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)) {
+          // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
+          // Codex P1): the template promises an invoice to pay, which
+          // contradicts a year already collected/collecting — the charge
+          // path's receipt is the customer's confirmation. Declined/skipped
+          // charges keep the invoice-coming copy, which is then accurate.
+          // Quote the invoice's live amount DUE (Codex r27 P2):
+          // annualPrepayQuotedAmount is invoice.total, but account credit
+          // applied in the accept trx sits in credit_applied — the pay
+          // link this SMS promises collects total - credit_applied, so the
+          // gross figure would contradict the lower amount the customer
+          // just acknowledged. (Live read also picks up a payer-reroute
+          // reversal, where gross is once again the true due.)
+          let prepayFallbackAmount = annualPrepayQuotedAmount;
+          try {
+            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied') : null;
+            if (dueRow) prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
+          } catch { /* keep the minted figure */ }
+          const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
@@ -11583,40 +12707,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
-    // Inspection credit: redeem NOW — the bookings committed above, and
-    // the invoice has not been delivered yet (pre-push P0). Relying on the
-    // hourly sweep here let the customer receive or even pay the full
-    // invoice before the promised $75 existed; redeeming first puts the
-    // credit in the balance so the send-time auto-apply
-    // (sendViaSMSAndEmail → autoApplyAccountCreditIfEnabled) consumes it.
-    // Best-effort per booking — the sweep remains the durable guarantee.
-    if (customerId) {
-      const creditBookingIds = [...new Set([
-        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
-        txResult.standardConversion?.firstScheduledServiceId,
-        txResult.annualPrepayConversion?.firstScheduledServiceId,
-      ].filter(Boolean))];
-      for (const bookingId of creditBookingIds) {
-        try {
-          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
-            customerId,
-            scheduledServiceId: bookingId,
-            createdBy: 'system:inspection_credit_estimate_accept',
-          });
-        } catch (creditErr) {
-          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
-        }
-      }
-    }
-
     // Post-commit invoice delivery for every accept-minted invoice —
     // invoice-mode, annual prepay, and the standard conversion's setup/
     // first-application invoice (which the converter used to auto-send;
     // it is now minted in-transaction with delivery deferred here).
     // Card-on-file lane: the standard setup/first-application invoice is
     // minted as the amount anchor but NEVER advertised — completion
-    // auto-charges it. Invoice-mode and prepay accepts keep their delivery.
-    if (invoiceId && (billByInvoice || annualPrepaySelected
+    // auto-charges it. Invoice-mode and prepay accepts keep their delivery;
+    // an auto-charged (paid) prepay invoice has nothing to deliver — the
+    // charge path already handles the receipt.
+    if (invoiceId && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
       || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
@@ -11626,12 +12726,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         || recurringCardPayerFallback)))) {
       try {
         const InvoiceService = require('../services/invoice');
-        const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
+        const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,
           }),
         });
+        // Prepay job deliveries run under the ownership fence (hook P0
+        // r23): a request stalled past the lease must not send a pay link
+        // AFTER the sweep took the job and ran the authorized charge — the
+        // external send is the point of no return, so the token check and
+        // the send are one fenced critical section. Non-prepay accepts
+        // (no durable job) deliver as always.
+        let delivery = null;
+        if (annualPrepaySelected && prepayChargePlan && !txResult.prepayCoveredInTrx) {
+          try {
+            delivery = await chargeUnderJobFence(() => runDelivery());
+          } catch (fenceErr) {
+            if (fenceErr.code === 'PREPAY_JOB_NOT_OWNED') {
+              logger.warn(`[estimate-accept] prepay fallback delivery ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
+            } else {
+              throw fenceErr;
+            }
+          }
+        } else {
+          delivery = await runDelivery();
+        }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
@@ -11646,6 +12766,39 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
       logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
+
+    // Late stamp resolution for UNCOLLECTED prepay outcomes (pre-push Codex
+    // P0 r8): declined/skipped jobs resolve only once the fallback pay-link
+    // delivery above CONFIRMED — an {ok:false} delivery (or a crash before
+    // it) leaves the stamp for the recovery sweep, which re-attempts the
+    // charge and its own confirmed-delivery fallback. Mirrors the sweep's
+    // fallbackDelivered guard.
+    if (['declined', 'skipped'].includes(prepayAutoCharge?.status) && invoiceLinkDelivered) {
+      try {
+        const lateResolveQ = db('estimates')
+          .where({ id: estimate.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL");
+        if (prepayJobClaimToken) {
+          lateResolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken]);
+        } else {
+          lateResolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'");
+        }
+        await lateResolveQ.update({
+          estimate_data: db.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify({
+              status: prepayAutoCharge.status,
+              reason: prepayAutoCharge.reason || null,
+              fallback_delivered: true,
+              resolved_at: new Date().toISOString(),
+              resolved_by: 'accept',
+            })],
+          ),
+        });
+      } catch (stampErr) {
+        logger.warn(`[estimate-accept] prepay job late stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
+      }
     }
 
     // Auto-convert estimate to active customer (Feature #5) now runs INSIDE
@@ -11786,6 +12939,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
+        // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
+        // have been a CARD, so the copy must stay tender-neutral — never
+        // assert a bank debit; the one thing all three outcomes share is
+        // that nobody is asked to pay.
+        prepayChargeOutcome: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
+          ? prepayAutoCharge.status
+          : null,
+        prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -11829,12 +12990,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+      // Auto-charged prepay is settled money (an initiated ACH debit counts
+      // — isInvoiceCollectibleStatus treats 'processing' as settled too) —
+      // the success payload must say "confirmed", never "pay your prepay
+      // invoice" (same override the already-accepted retry path derives
+      // from the live invoice status).
+      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status),
+      // 'ambiguous' is preserved (Codex r6 P1) — the client renders
+      // tender-neutral "we're confirming your payment" copy for it, never
+      // a bank-debit assertion.
+      prepayChargeStatus: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
+        ? prepayAutoCharge.status
+        : null,
+      prepayChargedTotal: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
+        ? prepayChargePlan.quote.totalCents / 100
+        : null,
+      prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
     if (err && err.status >= 400 && err.status < 500) {
-      return res.status(err.status).json({ error: err.message });
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     next(err);
   }
@@ -15059,6 +16236,19 @@ function buildAcceptSuccessPayload({
   reservationCommitted = false,
   siteConfirmationHold = false,
   invoiceSettled = false,
+  // 'paid' | 'processing' | null — prepay auto-charge outcome for the
+  // success card's payment copy (GATE_PREPAY_CARD_AND_CHARGE).
+  prepayChargeStatus = null,
+  // The exact surcharged total that was acknowledged and charged — the
+  // success copy must cite THIS, never the invoice face value, which
+  // credits/surcharge can move (Codex r5 P1). Null when unknown (retries):
+  // the copy then names no number.
+  prepayChargedTotal = null,
+  // True when the 'paid' outcome was account credit fully covering the
+  // quoted amount (invoice 'prepaid', NO card charge, NO receipt job) —
+  // the success copy must confirm the credit coverage, never promise a
+  // receipt (Codex r9).
+  prepayCoveredByCredit = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -15101,6 +16291,13 @@ function buildAcceptSuccessPayload({
     billingTerm,
     prepayInvoiceAmount,
     bookingUrl,
+    // Distinguishes a PAID prepay 'confirmed' (auto-charged at accept /
+    // settled on retry) from the payer-billed 'confirmed' — the success card
+    // keys its "payment went through" copy off this.
+    invoiceSettled,
+    prepayChargeStatus,
+    prepayChargedTotal,
+    prepayCoveredByCredit,
   };
 }
 
@@ -15276,10 +16473,22 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       }
     } catch { /* keep suppression */ }
   }
+  // UNRESOLVED durable auto-charge job (hook P0 r13): after the accept
+  // committed but before the post-commit charge (or the sweep) resolved
+  // the stamp, the sweep is still AUTHORIZED to charge the frozen total —
+  // a retry that handed out a /pay link beside that authorization would
+  // let the customer pay concurrently with the recovery charge (double
+  // collection). Suppress the pay rail and render the tender-neutral
+  // "we're confirming your payment" copy until the job resolves
+  // (pending/claimed = unresolved; paid/processing/skipped/
+  // delivered_fallback are terminal outcomes with their own posture).
+  const prepayJobStamp = rawEstData && typeof rawEstData === 'object' ? rawEstData.prepayAutoChargeJob : null;
+  const prepaySweepPending = !!prepayTerm && !!invoice
+    && !!prepayJobStamp && ['pending', 'claimed'].includes(String(prepayJobStamp.status || ''));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && invoice.token
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -15290,6 +16499,46 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       : invoiceNotes.includes('(invoice-mode recurring)')
         ? 'recurring_first_visit'
         : null;
+  // Explicit payment outcome from the LIVE invoice status (Codex r5 P1):
+  // only paid/prepaid may say "payment went through", only an INITIATED
+  // bank debit may say "processing". But 'processing' is ALSO how an
+  // ambiguous saved-card attempt parks an invoice for reconciliation
+  // (same trap the recovery sweep guards — Codex r9): an unresolved
+  // charge-attempt fence or orphan charge means the attempt may have been
+  // a CARD and may already have succeeded, so the retry must render the
+  // tender-neutral 'ambiguous' copy, never assert a bank debit. Err toward
+  // 'ambiguous' on a fence-lookup failure — it asserts the least.
+  let retryPrepayChargeStatus = null;
+  let retryPrepayCoveredByCredit = false;
+  if (prepayTerm && invoice) {
+    const retryInvoiceStatus = String(invoice.status || '').toLowerCase();
+    if (['paid', 'prepaid'].includes(retryInvoiceStatus)) {
+      retryPrepayChargeStatus = 'paid';
+      // 'prepaid' is the account-credit-covered terminal state (no card
+      // charge, no receipt) — the retry copy must not promise a receipt.
+      retryPrepayCoveredByCredit = retryInvoiceStatus === 'prepaid';
+    } else if (retryInvoiceStatus === 'processing') {
+      let reconciliationPending = true;
+      try {
+        const fence = await db('stripe_invoice_charge_attempts')
+          .where({ invoice_id: invoice.id })
+          .whereIn('status', ['claimed', 'ambiguous'])
+          .whereNull('resolved_at')
+          .first('id');
+        const orphan = fence ? null : await db('stripe_orphan_charges')
+          .where({ invoice_id: invoice.id, resolved: false })
+          .first('id');
+        reconciliationPending = !!(fence || orphan);
+      } catch { /* unknown fence state — keep 'ambiguous' */ }
+      // Bank tender only (same guard as the fresh-accept and recovery
+      // paths — hook P1): a non-succeeded CARD intent also parks the
+      // invoice 'processing', possibly with its attempt fence already
+      // resolved — a reload must not tell the customer a bank payment is
+      // processing when the card attempt is merely incomplete.
+      const retryTenderIsBank = String(invoice.payment_method || '') === 'us_bank_account';
+      retryPrepayChargeStatus = (reconciliationPending || !retryTenderIsBank) ? 'ambiguous' : 'processing';
+    }
+  }
 
   return {
     ...buildAcceptSuccessPayload({
@@ -15297,7 +16546,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -15311,7 +16560,17 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
-      invoiceSettled,
+      // An unresolved auto-charge job renders as a confirmed outcome with
+      // no pay step — the sweep owns the resolution (hook P0 r13). A
+      // 'pending' stamp means no attempt is in flight (initial state, or a
+      // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
+      // may have an executor mid-charge → tender-neutral 'ambiguous'
+      // "we're confirming your payment" copy (Codex r26 P2).
+      invoiceSettled: invoiceSettled || prepaySweepPending,
+      prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
+        ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
+        : null),
+      prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     alreadyAccepted: true,
   };
@@ -15406,6 +16665,13 @@ function buildAcceptNotificationPayload({
   bookingUrl = null,
   billingTerm = 'standard',
   annualPrepayAmount = null,
+  // 'paid' | 'processing' | null — the prepay auto-charge outcome
+  // (GATE_PREPAY_CARD_AND_CHARGE); shapes the prepay copy below.
+  prepayChargeOutcome = null,
+  // 'paid' via account credit fully covering the quote (no card charge,
+  // no receipt job) — the copy must confirm the coverage, never promise
+  // a receipt (Codex r9).
+  prepayCoveredByCredit = false,
 } = {}) {
   // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
   // the homeowner gets the report and owes nothing, so never advertise a
@@ -15520,6 +16786,65 @@ function buildAcceptNotificationPayload({
 
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
+    // Auto-charged at accept (GATE_PREPAY_CARD_AND_CHARGE): the year is
+    // collected (or an ACH debit is processing) — no follow-up owed, no pay
+    // link to advertise.
+    if (prepayChargeOutcome === 'paid') {
+      // Credit coverage sends NO receipt (nothing was charged) — this
+      // notification IS the customer's confirmation, so it must say what
+      // actually happened instead of promising a receipt (Codex r9).
+      if (prepayCoveredByCredit) {
+        return {
+          adminTitle: `Estimate accepted: ${customerName}`,
+          adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — fully covered by account credit, no card charge.`,
+          customerTitle: 'Estimate accepted',
+          customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay was fully covered by your account credit — nothing was charged.`,
+          customerLink: '/?tab=billing',
+        };
+      }
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved and paid — card on file auto-charged.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay payment went through. Your receipt is on the way.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'processing') {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — bank payment processing on the saved method.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay bank payment is processing. We'll confirm when it completes.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'ambiguous') {
+      // Tender-neutral (Codex r6 P1): the attempt may have been a card and
+      // may already have succeeded — assert nothing beyond "being
+      // confirmed", and never a pay ask (reconciliation owns the outcome).
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — payment outcome pending reconciliation; NO pay link sent.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved and we're confirming your annual prepay payment. We'll follow up shortly.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'deferred') {
+      // No charge was ATTEMPTED (Codex r26 P2) — the durable job waits for
+      // the recovery sweep. Distinct from 'ambiguous': never tell the
+      // customer a payment is "being confirmed", and never tell staff an
+      // attempt needs reconciliation. Still no pay ask (the sweep owns
+      // collection).
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — auto-charge deferred to the recovery sweep (not yet attempted); NO pay link sent.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. We're finishing up your annual prepay payment on our side — no action is needed, and we'll follow up shortly.`,
+        customerLink: '/?tab=billing',
+      };
+    }
     if (!invoiceMode && !invoicePayUrl) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
@@ -21758,10 +23083,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
-    // Recurring card-on-file policy for the React capture UI — the page only
-    // enforces it on a recurring accept with the pay-per-application choice
-    // (prepay is exempt; the accept gate re-resolves authoritatively with the
-    // actual preference). Inert ({enforced:false}) while RECURRING_CARD_ON_FILE
+    // Recurring card-on-file policy for the React capture UI — the page
+    // enforces it on a recurring accept with the pay-per-application choice,
+    // and on the prepay choice too when GATE_PREPAY_CARD_AND_CHARGE is on
+    // (the payload's prepayInLane flag; the accept gate re-resolves
+    // authoritatively with the actual preference either way). Inert
+    // ({enforced:false}) while RECURRING_CARD_ON_FILE
     // is off. Structurally one-time-only estimates have no recurring lane to
     // protect, so they resolve exempt via treatAsOneTime.
     const recurringCardPolicyForData = await RecurringCards.resolveRecurringCardPolicyForEstimate({
@@ -21793,12 +23120,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringCardLaneActiveForData = recurringCardPolicyForData.required
       || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicyForData.exemptReason || '');
     if (recurringCardLaneActiveForData && depositPolicy.required) {
-      // Prepay accepts sit OUTSIDE the card lane (the resolver exempts
-      // prepay_annual before any customer checks), so their deposit is
-      // still owed at accept — preserve the pre-supersede requirement for
-      // the client's prepay branch or it skips /deposit-intent and loops
-      // on DEPOSIT_REQUIRED 402s (Codex #2680 r3).
-      depositPolicy.requiredForPrepay = true;
+      // Prepay accepts sit OUTSIDE the card lane only while the legacy
+      // carve-out is in force (the resolver exempts prepay_annual before any
+      // customer checks), so their deposit is still owed at accept —
+      // preserve the pre-supersede requirement for the client's prepay
+      // branch or it skips /deposit-intent and loops on DEPOSIT_REQUIRED
+      // 402s (Codex #2680 r3). With GATE_PREPAY_CARD_AND_CHARGE on, prepay
+      // rides the card lane like per-application and the supersede applies
+      // to it too.
+      depositPolicy.requiredForPrepay = !RecurringCards.isPrepayCardAndChargeEnabled();
       depositPolicy.required = false;
       depositPolicy.exemptReason = 'recurring_card_supersedes';
     }
@@ -22090,6 +23420,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         enforced: recurringCardPolicyForData.enforced === true,
         required: recurringCardPolicyForData.required === true,
         exemptReason: recurringCardPolicyForData.exemptReason || null,
+        // Prepay accepts ride the card lane when the prepay gate is on AND
+        // this estimate's resolved policy actually puts it in the lane —
+        // the client's prepay branch keys its capture step and "charged at
+        // confirmation" copy off this flag, so a payer-billed /
+        // payer-check-uncertain / commercial-manual-billing exemption must
+        // NOT advertise a charge the accept route deliberately skips
+        // (Codex r9). The accept gate re-resolves authoritatively either way.
+        prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled(),
       },
       estimate: {
         id: estimate.id,
