@@ -380,7 +380,14 @@ async function scheduleForInvoice(invoiceId) {
         // restore the PAUSE, not active dunning (Codex #3493 r3/r8). Same
         // conditional shape as the re-arm below so a racing admin write
         // still wins.
+        // The LEGACY migration stamp restores to PAUSED unconditionally
+        // (Codex #3493 r14 P0): the 20260601000012 backfill flattened
+        // active/paused/autopay_hold rows to one stamp, and a blank-reason
+        // legacy pause left NO recoverable signal — restoring to active
+        // could revive reminders an admin explicitly paused. The quiet
+        // state is the safe direction; the operator resumes deliberately.
         if (voidStopStamp === 'invoice_voided:prev=paused'
+          || voidStopStamp === 'invoice_terminal_status:void'
           || existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) {
           const [repaused] = await trx('invoice_followup_sequences')
             .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
@@ -1212,7 +1219,13 @@ async function releaseFromAutopayHold(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
 
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
+  // CONDITIONAL on the status the reads observed (Codex #3493 r14): an
+  // unvoid's lifecycle stop (or any other writer) can land between the
+  // unlocked reads above and this write — an unconditional update would
+  // overwrite that stop with an active cadence and dun a restored draft.
+  // A lost release is safe: the sequence stays held/stopped and the next
+  // legitimate transition owns it.
+  await db('invoice_followup_sequences').where({ id: seq.id, status: 'autopay_hold' }).update({
     updated_at: db.fn.now(),
     status: 'active',
     is_autopay_held: false,

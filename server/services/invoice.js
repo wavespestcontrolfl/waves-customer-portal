@@ -240,7 +240,7 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   // the no-show fee) — restoring one while the visit stays terminal would
   // bill work that was not performed.
   const svcStatus = String(svc.status || "").toLowerCase();
-  if (["cancelled", "canceled", "rescheduled", "no_show"].includes(svcStatus)) {
+  if (["cancelled", "canceled", "rescheduled", "no_show", "skipped"].includes(svcStatus)) {
     throw new Error(
       `Cannot unvoid — the linked service visit is ${svcStatus}; restore or re-book the visit before restoring its invoice`,
     );
@@ -4499,6 +4499,17 @@ const InvoiceService = {
     if (invoiceHasDepositCreditLine(current)) {
       throw new Error(
         "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly",
+      );
+    }
+    // A voided invoice still carrying the annual-coverage settlement stamp
+    // was settled as NON-CASH coverage before the void — its paid/prepaid
+    // stamps and 'annual_prepay_covered' follow-up stop are retained, and
+    // the coverage reopen path ignores non-'prepaid' rows. Restoring this
+    // shape would make a covered charge collectible with reminders
+    // permanently suppressed (Codex #3493 r14).
+    if (current.annual_prepay_covered_term_id) {
+      throw new Error(
+        "Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead",
       );
     }
     // Linked-visit guards, fast-fail pass (re-checked inside the restore

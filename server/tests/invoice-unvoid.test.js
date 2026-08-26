@@ -287,6 +287,27 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('refuses a skipped visit — its skip fires the same void sweep as a cancellation (Codex #3493 r14)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'skipped' } }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — the linked service visit is skipped; restore or re-book the visit before restoring its invoice',
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses an invoice settled as annual prepay COVERAGE before the void — restoring it would collect a covered charge with reminders suppressed (Codex #3493 r14)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ annual_prepay_covered_term_id: 'term-1' }) }))
+      .mockReturnValueOnce(noRow()); // canonical term pre-guard: not the term's own prepay invoice
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead',
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('refuses a visit stamped prepaid by an annual term — deterministic stamp check, never the fail-open coverage helper (Codex #3493 r3)', async () => {
     const svc = {
       id: 'svc-1',

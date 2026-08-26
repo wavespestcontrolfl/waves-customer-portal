@@ -41,7 +41,7 @@ jest.mock('../services/pay-combined', () => ({
 
 const db = require('../models/db');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { scheduleForInvoice, stopSequence } = require('../services/invoice-followups');
+const { scheduleForInvoice, stopSequence, releaseFromAutopayHold } = require('../services/invoice-followups');
 
 function voidStoppedSeq(overrides = {}) {
   return {
@@ -135,21 +135,29 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.next_touch_at).toBeTruthy();
   });
 
-  test("lifts the LEGACY migration stamp 'invoice_terminal_status:void' too — conditional UPDATE keyed on the CAPTURED stamp (Codex #3493 r12 P0 / r13 P0)", async () => {
+  test("the LEGACY migration stamp 'invoice_terminal_status:void' restores to PAUSED — the backfill flattened the prior status, so the quiet state wins (Codex #3493 r12 P0 / r13 P0 / r14 P0)", async () => {
+    // The 20260601000012 backfill stamped active, paused AND autopay_hold
+    // rows identically; a blank-reason legacy pause left no recoverable
+    // signal. Restoring to active could revive reminders an admin
+    // explicitly paused — so the legacy stamp always lands on 'paused'
+    // and the operator resumes deliberately.
     const seq = voidStoppedSeq({ stopped_reason: 'invoice_terminal_status:void' });
-    const rearmed = { ...seq, status: 'active', stopped_reason: null };
-    const { seqUpdate, seqWhere } = setupDb({ seq, invoice: sentInvoice, rearmed });
-    customerOnAutopay.mockResolvedValue(false);
+    const repaused = { ...seq, status: 'paused', stopped_reason: null };
+    const { seqUpdate, seqWhere } = setupDb({ seq, invoice: sentInvoice, rearmed: repaused });
 
     const row = await scheduleForInvoice('inv-1');
 
-    expect(row).toBe(rearmed);
-    expect(seqUpdate.mock.calls[0][0].status).toBe('active');
-    // The UPDATE's own predicate must match the row it is re-arming — a
+    expect(row).toBe(repaused);
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('paused');
+    expect(payload.next_touch_at).toBeNull();
+    // The UPDATE's own predicate must match the row it is restoring — a
     // literal 'invoice_voided' key silently updated ZERO rows here.
     expect(seqWhere).toHaveBeenCalledWith(
       expect.objectContaining({ stopped_reason: 'invoice_terminal_status:void' }),
     );
+    // Dunning never activates on this path, so autopay is not consulted.
+    expect(customerOnAutopay).not.toHaveBeenCalled();
   });
 
   test('a sequence releaseFromAutopayHold already escalated (held marker cleared) resumes its cadence even for an enrolled customer (Codex #3493 r12)', async () => {
@@ -386,5 +394,73 @@ describe('stopSequence — admin-stop attribution preservation', () => {
     const payload = seqUpdate.mock.calls[0][0];
     expect(payload.stopped_reason).toBe('invoice_voided');
     expect(payload.stopped_by_admin_id).toBeNull();
+  });
+});
+
+// releaseFromAutopayHold reads without a lock, so an unvoid's lifecycle
+// stop can land between its reads and its write — the write must be
+// conditional on the status the reads observed, or the release would
+// overwrite the stop with an active cadence and dun a restored draft
+// (Codex #3493 r14).
+describe('releaseFromAutopayHold — write conditional on the observed hold', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function setupReleaseDb({ seq, invoice }) {
+    const seqUpdate = jest.fn(async () => 1);
+    const seqWhere = jest.fn();
+    db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    db.mockImplementation((table) => {
+      if (table === 'invoice_followup_sequences') {
+        const q = {
+          where: jest.fn((...args) => { seqWhere(...args); return q; }),
+          first: jest.fn(async () => seq),
+          update: seqUpdate,
+        };
+        return q;
+      }
+      if (table === 'invoices') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => invoice) };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    return { seqUpdate, seqWhere };
+  }
+
+  test("the release UPDATE keys on status 'autopay_hold' — a raced-in stop wins and stays stopped", async () => {
+    const seq = {
+      id: 'seq-1',
+      status: 'autopay_hold',
+      anchor_at: new Date().toISOString(),
+      step_index: 0,
+    };
+    const { seqUpdate, seqWhere } = setupReleaseDb({
+      seq,
+      invoice: { id: 'inv-1', status: 'sent', created_at: new Date().toISOString() },
+    });
+
+    await releaseFromAutopayHold('inv-1');
+
+    expect(seqUpdate).toHaveBeenCalledTimes(1);
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('active');
+    expect(payload.is_autopay_held).toBe(false);
+    expect(payload.next_touch_at).toBeTruthy();
+    // The write predicate carries the observed status, so a concurrent
+    // lifecycle stop makes this UPDATE match zero rows instead of
+    // resurrecting dunning.
+    expect(seqWhere).toHaveBeenCalledWith({ id: 'seq-1', status: 'autopay_hold' });
+  });
+
+  test('a terminal (void) invoice never releases the hold', async () => {
+    const seq = { id: 'seq-1', status: 'autopay_hold', anchor_at: null, step_index: 0 };
+    const { seqUpdate } = setupReleaseDb({
+      seq,
+      invoice: { id: 'inv-1', status: 'void', created_at: new Date().toISOString() },
+    });
+
+    await releaseFromAutopayHold('inv-1');
+
+    expect(seqUpdate).not.toHaveBeenCalled();
   });
 });

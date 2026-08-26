@@ -198,6 +198,8 @@ describe('POST /:id/unvoid refusal mapping', () => {
     ['unverifiable term link', 'Could not verify the annual prepay term link — refusing to unvoid (boom)'],
     ['prepay-switch superseded', 'Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied'],
     ['cancelled linked service', 'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice'],
+    ['skipped linked service', 'Cannot unvoid — the linked service visit is skipped; restore or re-book the visit before restoring its invoice'],
+    ['annual prepay coverage settlement', 'Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead'],
     ['annual-stamped linked visit', 'Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead'],
     ['free re-service conversion', 'Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge'],
     ['orphaned annual prepay charge', 'Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment'],
