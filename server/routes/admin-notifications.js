@@ -169,7 +169,10 @@ router.get('/', async (req, res, next) => {
     const persisted = await NotificationService.getAdminNotifications(limit, offset, { role: req.techRole });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
-    const liveCtx = page === 1 && !isBellPolicyEnabled()
+    // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
+    // carry finance totals and owner-only links, matching the fail-closed
+    // persisted-feed scope (codex P1).
+    const liveCtx = page === 1 && !isBellPolicyEnabled() && req.techRole === 'admin'
       ? await liveAlertNotifications(req.technicianId)
       : { live: [], liveKeys: new Set() };
     const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
@@ -219,7 +222,11 @@ router.get('/unread-count', async (req, res, next) => {
   try {
     // Bell policy on: live overlay excluded from the badge too (dismissal
     // endpoints below stay functional — they no-op when nothing is live).
-    const liveCtx = isBellPolicyEnabled()
+    // Non-admin roles never get the live overlay (owner-only finance
+    // alerts), which also skips the persisted-dashboard dedup subtraction —
+    // dashboard_alert rows are already hidden from their scoped count and
+    // must not be re-subtracted from it (codex P1).
+    const liveCtx = isBellPolicyEnabled() || req.techRole !== 'admin'
       ? { live: [], liveKeys: new Set() }
       : await liveAlertNotifications(req.technicianId);
     let persistedCount = await NotificationService.getAdminUnreadCount({ role: req.techRole });
