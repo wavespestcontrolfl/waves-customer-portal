@@ -53,7 +53,7 @@ function makeConn(handler) {
       const calls = [];
       const b = {};
       const record = (name) => (...args) => { calls.push([name, ...args]); return b; };
-      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit']) {
+      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate']) {
         b[m] = record(m);
       }
       b.first = (...args) => {
@@ -338,6 +338,9 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(updates).toHaveLength(1);
     const dateFilters = targetQueries[0].filter(([name, col]) => name === 'where' && col === 'scheduled_date');
     expect(dateFilters).toHaveLength(0);
+    // Targets are row-locked up front so a concurrent invoice mint can't
+    // mint from the old price after the reconcile probes ran.
+    expect(targetQueries[0].some(([name]) => name === 'forUpdate')).toBe(true);
   });
 
   it('keeps an explicitly free series an explicit $0, never NULL', async () => {
@@ -470,5 +473,15 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
 
   it('invoice reconciliation and the financial re-derive run for a service change too', () => {
     expect(src).toMatch(/const billingRelevant = priceChanged \|\| serviceChanged;/);
+  });
+
+  it('a this_only free conversion refuses when the template carries priced add-ons (no add-on override mechanism)', () => {
+    expect(src).toMatch(/conversionScopedThisOnly && isTemplateEdit && reServiceConversionZeroPrice/);
+    expect(src).toMatch(/would also zero this template visit's add-on lines/);
+  });
+
+  it('the no-scope coherence refresh is VALUE-gated against the locked before-image, never presence-gated', () => {
+    expect(src).toMatch(/const legacyGroups = computePriceServiceGroupChanges\(priceServiceBeforeRow, updates\);/);
+    expect(src).toMatch(/if \(legacyGroups\.changed\) \{/);
   });
 });

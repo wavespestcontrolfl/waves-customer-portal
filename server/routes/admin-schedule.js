@@ -2366,7 +2366,15 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     .where('is_recurring', true)
     .whereIn('status', UPCOMING_VISIT_STATUSES)
     .whereNot({ id: editedId })
-    .orderBy('scheduled_date', 'asc');
+    .orderBy('scheduled_date', 'asc')
+    // Row locks up front, not implicitly at each final UPDATE (Codex #3505
+    // r3 P1): the canonical mint chain serializes mint-vs-reprice on the
+    // VISIT row lock, so a concurrent mint could otherwise lock a sibling
+    // and mint from its old price/service after this reconcile's probes
+    // found nothing — the later UPDATE would just wait, then leave that
+    // fresh invoice live and stale. Advisory locks (maintenance + comms)
+    // are already held, keeping the advisory-then-rows order.
+    .forUpdate();
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
   const targets = await targetQuery;
   // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
@@ -7183,12 +7191,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             );
           }
         }
-        // Locked before-image for the price/service series-scope block below:
-        // group changes are detected value-by-value against this row, so it
-        // must be read before this save's updates land. Reuses the tuple
-        // lock's row when that path already took it (same row, same trx —
-        // the re-acquire is reentrant).
-        if (wantsPriceServiceScope && !priceServiceBeforeRow) {
+        // Locked before-image for the price/service series-scope blocks
+        // below: group changes are detected value-by-value against this
+        // row, so it must be read before this save's updates land. Also
+        // captured for NO-scope saves that touch propagatable fields while
+        // the gate is on — the override-coherence branch must compare
+        // VALUES against this image too, because legacy surfaces echo
+        // service/price fields on every save and a presence-based merge
+        // would let a notes-only save restamp a deliberate this_only pin
+        // (Codex #3505 r3 P1). Reuses the tuple lock's row when that path
+        // already took it (same row, same trx — the re-acquire is
+        // reentrant).
+        if (!priceServiceBeforeRow
+          && (wantsPriceServiceScope
+            || (isEnabled('editApptPriceServiceScope')
+              && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key))))) {
           priceServiceBeforeRow = preTupleRow
             || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         }
@@ -7369,6 +7386,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // conversion would keep minting free callback visits. The generic
         // scope block below stands down for conversions, so the pin lives
         // here. Same per-group decision as the generic pin.
+        // The pin can preserve the template's PRIMARY fields, but a free
+        // conversion also zeroes the parent's ADD-ON rows — and extensions
+        // reload their add-on lines (and totals) from those rows, which no
+        // override mechanism covers. A this_only free conversion of a
+        // template that carries priced add-ons would silently strip the
+        // add-on charges from every future visit, so refuse it (Codex
+        // #3505 r3 P1); templates without priced add-ons pin cleanly below.
+        if (conversionScopedThisOnly && isTemplateEdit && reServiceConversionZeroPrice) {
+          let templateAddons = [];
+          try {
+            // Savepoint — a missing scheduled_service_addons table
+            // (pre-migration env) must not poison the transaction.
+            templateAddons = await trx.transaction((sp) =>
+              sp('scheduled_service_addons').where({ scheduled_service_id: req.params.id }));
+          } catch { templateAddons = []; }
+          const hasPricedAddon = templateAddons.some((addon) =>
+            Number(addon.estimated_price) > 0 || Number(addon.base_price) > 0);
+          if (hasPricedAddon) {
+            throw httpError(409, "Converting just this appointment to a free re-service would also zero this template visit's add-on lines, and future visits copy their add-on pricing from it. Convert a later visit in the plan instead, or apply the conversion to the whole series.");
+          }
+        }
         if (conversionScopedThisOnly && isTemplateEdit && priceServiceBeforeRow
           && seriesCols.recurring_template_overrides) {
           const conversionGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
@@ -7535,26 +7573,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       } else if (!wantsPriceServiceScope && !reServiceConversion && detailsChanged
         && isEnabled('editApptPriceServiceScope')
-        && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key))) {
-        // Legacy surfaces (dispatch card edits, tech saves) post no scope.
+        && priceServiceBeforeRow
+        && priceServiceBeforeRow.is_recurring && !priceServiceBeforeRow.recurring_parent_id
+        && parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides)) {
+        // Legacy surfaces (dispatch card edits, mobile saves) post no scope.
         // If the edited row is a series PARENT whose template is already
-        // pinned by overrides, keep the pin fresh with this save's values —
-        // otherwise the next extension would resurrect the pre-edit
-        // price/service the stale pin still holds.
+        // pinned by overrides, keep the pin fresh — but only for groups
+        // whose values this save actually CHANGED against the locked
+        // before-image: those surfaces echo service/price fields on every
+        // save, and a presence-based merge would let a notes- or
+        // duration-only save overwrite a deliberate this_only pin with the
+        // parent's one-off values (Codex #3505 r3 P1). Without the refresh,
+        // a genuine legacy edit of a pinned parent would let the next
+        // extension resurrect the pre-edit price/service the stale pin
+        // still holds.
         const scopeCols = await trx('scheduled_services').columnInfo();
         if (scopeCols.recurring_template_overrides) {
-          const parentRow = await trx('scheduled_services')
-            .where({ id: req.params.id })
-            .first('is_recurring', 'recurring_parent_id', 'recurring_template_overrides');
-          if (parentRow?.is_recurring && !parentRow.recurring_parent_id
-            && parseTemplateOverrides(parentRow.recurring_template_overrides)) {
-            const fresh = {};
-            for (const key of Object.keys(updates)) {
-              if (PRICE_SERVICE_OVERRIDE_KEYS.has(key)) {
-                fresh[key] = updates[key] === undefined ? null : updates[key];
-              }
-            }
-            await stampRecurringTemplateOverrides(trx, req.params.id, fresh, scopeCols);
+          const legacyGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+          if (legacyGroups.changed) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, legacyGroups.fields, scopeCols);
           }
         }
       }
