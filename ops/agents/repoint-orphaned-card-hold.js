@@ -101,7 +101,7 @@ async function scan(client) {
     // ready-made command. Candidate sets are naturally small (visits of
     // one estimate); the print is capped separately.
     const { rows: cands } = await client.query(
-      `SELECT id, status, scheduled_date, is_recurring, service_type
+      `SELECT id, status, scheduled_date, is_recurring, recurring_parent_id, recurring_pattern, service_type
        FROM scheduled_services
        WHERE customer_id = $1 AND source_estimate_id = $2
          AND id IS DISTINCT FROM $3
@@ -118,7 +118,7 @@ async function scan(client) {
     // the dead visit's (where both are known). Estimate lineage alone does
     // not prove successor-ship (same P0 as the runtime adoption); anything
     // else stays a human decision on the rows printed above.
-    const oneTime = cands.filter((c) => c.is_recurring !== true);
+    const oneTime = cands.filter((c) => !(c.is_recurring === true || c.recurring_parent_id || c.recurring_pattern));
     const identityOk = (c) => !r.linked_service_type || !c.service_type
       || String(c.service_type) === String(r.linked_service_type);
     if (oneTime.length === 1 && identityOk(oneTime[0])) {
@@ -167,7 +167,7 @@ async function repoint(client) {
     // requireSelfPayScheduledServiceId into chargeInvoiceWithSavedCard),
     // so the binding cannot go stale between this COMMIT and the charge.
     const { rows: [visit] } = await client.query(
-      `SELECT id, customer_id, source_estimate_id, status, is_recurring, scheduled_date
+      `SELECT id, customer_id, source_estimate_id, status, is_recurring, recurring_parent_id, recurring_pattern, scheduled_date
        FROM scheduled_services WHERE id = $1 FOR UPDATE`, [TO_VISIT]);
     if (!visit) throw new Error('target visit not found');
     if (String(visit.customer_id) !== String(hold.customer_id)) throw new Error('target visit belongs to a different customer — refusing');
@@ -182,7 +182,12 @@ async function repoint(client) {
     } else if (!ALLOW_NO_LINEAGE) {
       throw new Error('target visit has no source_estimate_id — re-run with --allow-no-lineage if you have ruled it the successor');
     }
-    if (visit.is_recurring === true) throw new Error('target visit is recurring — the hold rail is one-time only, refusing');
+    // Canonical recurring-lineage test (pay-v2.js; PR #3496 r3 P1): a
+    // series booster carries is_recurring=false with recurring_parent_id
+    // set — any of the three markers disqualifies the target.
+    if (visit.is_recurring === true || visit.recurring_parent_id || visit.recurring_pattern) {
+      throw new Error('target visit has recurring lineage — the hold rail is one-time only, refusing');
+    }
     if (!LIVE_TARGET.includes(visit.status)) throw new Error(`target visit is '${visit.status}' — not a live/completed target, refusing`);
 
     // No OTHER active hold may already sit on the target (pre-push r11

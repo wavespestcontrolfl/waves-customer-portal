@@ -2027,7 +2027,7 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring', 'status');
+            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
           // Completed-one-time eligibility under the SAME lock (hold-rail
           // pre-push r9 P0): a completion charge is only authorized for a
@@ -2040,7 +2040,10 @@ const StripeService = {
             if (String(lockedSvc.status || '') !== 'completed') {
               throw new Error('The visit is no longer completed. Review before charging.');
             }
-            if (lockedSvc.is_recurring === true) {
+            // Canonical recurring-lineage test (pay-v2.js; PR #3496 r3
+            // P1): a series booster carries is_recurring=false with
+            // recurring_parent_id set — all three markers must be clear.
+            if (lockedSvc.is_recurring === true || lockedSvc.recurring_parent_id || lockedSvc.recurring_pattern) {
               throw new Error('The visit is no longer one-time. Review before charging.');
             }
           }

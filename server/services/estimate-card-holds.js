@@ -415,14 +415,25 @@ function isRescheduleAdoptEnabled() {
 }
 
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
+// Sibling filtering uses the FULL non-live set (PR #3496 review r3 P2):
+// skipped/no_show/completed siblings are terminal (migration
+// 20260615000005) and cannot claim the hold — treating them as live made
+// an otherwise-unambiguous reschedule stay silent. The hold's ORIGINAL
+// visit keeps the stricter cancelled/rescheduled test above: only those
+// two states say "the booking moved", which is the orphan premise.
+const NON_LIVE_VISIT_STATUSES = ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'];
+// Canonical recurring-lineage test (pay-v2.js): a series "booster" visit
+// deliberately carries is_recurring=false with recurring_parent_id set —
+// a bare is_recurring check admits it as one-time (r3 P1).
+const isRecurringLineageVisit = (v) => !!(v && (v.is_recurring === true || v.recurring_parent_id || v.recurring_pattern));
 
 async function detectOrphanedHoldForCompletion(scheduledServiceId) {
   if (!isRescheduleAdoptEnabled()) return null;
   try {
     const visit = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'source_estimate_id', 'is_recurring', 'service_type');
-    if (!visit || !visit.customer_id || !visit.source_estimate_id || visit.is_recurring === true) return null;
+      .first('id', 'customer_id', 'source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'service_type');
+    if (!visit || !visit.customer_id || !visit.source_estimate_id || isRecurringLineageVisit(visit)) return null;
     const candidates = await db('estimate_card_holds')
       .where({ estimate_id: visit.source_estimate_id, customer_id: visit.customer_id, status: 'held' })
       .orderBy('held_at', 'desc')
@@ -442,11 +453,11 @@ async function detectOrphanedHoldForCompletion(scheduledServiceId) {
     const siblings = await db('scheduled_services')
       .where({ customer_id: visit.customer_id, source_estimate_id: visit.source_estimate_id })
       .whereNot('id', scheduledServiceId)
-      .select('id', 'status', 'is_recurring');
+      .select('id', 'status', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     for (const sib of siblings || []) {
       if (cand.scheduled_service_id && String(sib.id) === String(cand.scheduled_service_id)) continue;
-      if (sib.is_recurring === true) continue;
-      if (!DEAD_VISIT_STATUSES.includes(String(sib.status || ''))) return null;
+      if (isRecurringLineageVisit(sib)) continue;
+      if (!NON_LIVE_VISIT_STATUSES.includes(String(sib.status || ''))) return null;
     }
     return { holdId: cand.id, fromScheduledServiceId: cand.scheduled_service_id, customerId: visit.customer_id };
   } catch (err) {
@@ -457,15 +468,38 @@ async function detectOrphanedHoldForCompletion(scheduledServiceId) {
 
 // Office bell for a detected orphan — the operator moves the money, never
 // this lane. Best-effort, same posture as the other withheld-charge alerts.
-async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId = null }) {
+// The collection claim in the body follows the ACTUAL caller/settlement
+// state (PR #3496 review r3 P2): the dispatch path inspects the invoice —
+// an already-settled bill must not be described as a pay link, and the
+// recap path mints no invoice at all (its appointment-card fallback may
+// still bill), so each context gets an honest sentence instead of one
+// hard-coded story.
+async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId = null, context = 'dispatch' }) {
   logger.warn('[estimate-card-holds] completion found a stranded card hold — routed to operator review', {
-    scheduledServiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId,
+    scheduledServiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, context,
   });
+  let outcomeLine;
+  if (context === 'recap') {
+    outcomeLine = 'The hold rail charged nothing; this recap closeout mints no invoice on the no-hold path, and the /secure appointment-card fallback may still bill the visit — review which consent should own collection.';
+  } else {
+    outcomeLine = 'The hold rail charged nothing.';
+    if (invoiceId) {
+      try {
+        const inv = await db('invoices').where({ id: invoiceId }).first('status');
+        const st = String(inv?.status || '').toLowerCase();
+        if (['paid', 'prepaid'].includes(st)) {
+          outcomeLine = `The hold rail charged nothing, and the visit's invoice is already settled (status: ${st}) — another rail or payment covered it; review whether the stranded hold should simply be released.`;
+        } else if (inv) {
+          outcomeLine = `The hold rail charged nothing — the visit's invoice (status: ${st}) proceeded on the pay-link flow.`;
+        }
+      } catch (e) { logger.warn('[estimate-card-holds] orphan-alert invoice read failed — neutral copy', { error: e.message }); }
+    }
+  }
   try {
     await require('./notification-service').notifyAdmin(
       'billing',
       'Stranded card hold matches this completion — review',
-      'A completed one-time visit has no card hold of its own, but the same estimate holds a saved-card consent stranded on a cancelled/rescheduled visit (the cancel+recreate reschedule pattern). Nothing was charged — the pay-link flow proceeded. To collect on the hold, verify the successor and run ops/agents/repoint-orphaned-card-hold.js (dry-run first).',
+      `A completed one-time visit has no card hold of its own, but the same estimate holds a saved-card consent stranded on a cancelled/rescheduled visit (the cancel+recreate reschedule pattern). ${outcomeLine} To collect on the hold, verify the successor and run ops/agents/repoint-orphaned-card-hold.js (dry-run first).`,
       {
         link: orphan.customerId ? `/admin/customers/${orphan.customerId}` : '/admin/dispatch',
         metadata: { scheduledServiceId, invoiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, source: 'reschedule_orphan_detection' },
@@ -806,7 +840,7 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
     if (prepaidProbe && Number(prepaidProbe.prepaid_amount) > 0) return { charged: false, reason: 'no_hold' };
     const orphan = await detectOrphanedHoldForCompletion(scheduledServiceId);
     if (orphan) {
-      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId });
+      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, context: 'recap' });
       // Still no_hold (pre-push r6 P1): pest-recap's appointment-card
       // fallback only runs on no_hold/feature_disabled, and a recreated
       // visit with its own /secure consent must keep that rail — the

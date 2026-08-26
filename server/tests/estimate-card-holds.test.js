@@ -1481,6 +1481,7 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
       null,                      // primary hold lookup (miss)
       visit,                     // completing visit read
       { status: 'cancelled' },   // the candidate's linked visit is dead
+      { status: 'sent' },        // the alert inspects the invoice for honest copy
     ], { holdRows: [orphanCandidate], visitRows: [] });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'orphan_hold_review' });
@@ -1490,7 +1491,7 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
     expect(mockNotifyAdmin).toHaveBeenCalledWith(
       'billing',
       expect.stringContaining('Stranded card hold'),
-      expect.stringContaining('Nothing was charged'),
+      expect.stringContaining('proceeded on the pay-link flow'),
       expect.objectContaining({
         link: '/admin/customers/cust-1',
         metadata: expect.objectContaining({ holdId: 'hold-1', fromScheduledServiceId: 'svc-old', scheduledServiceId: 'svc-new' }),
@@ -1557,26 +1558,52 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
     process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
     stubDb([null, visit, { status: 'cancelled' }], {
       holdRows: [orphanCandidate],
-      visitRows: [{ id: 'svc-sibling', status: 'scheduled', is_recurring: false }],
+      visitRows: [{ id: 'svc-sibling', status: 'confirmed', is_recurring: false }],
     });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_hold' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('gate ON: a recurring sibling or the dead visit itself does NOT block detection', async () => {
+  test('gate ON: recurring-lineage, terminal (skipped/no_show/completed), and the dead visit itself do NOT block detection', async () => {
     process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
-    stubDb([null, visit, { status: 'cancelled' }], {
+    stubDb([null, visit, { status: 'cancelled' }, { status: 'sent' }], {
       holdRows: [orphanCandidate],
       visitRows: [
-        { id: 'svc-old', status: 'cancelled', is_recurring: false },   // the dead visit itself
-        { id: 'svc-rec', status: 'scheduled', is_recurring: true },    // recurring lane — not this rail's
+        { id: 'svc-old', status: 'cancelled', is_recurring: false },     // the dead visit itself
+        { id: 'svc-rec', status: 'confirmed', is_recurring: true },      // recurring lane — not this rail's
+        { id: 'svc-boost', status: 'confirmed', is_recurring: false, recurring_parent_id: 'svc-rec' }, // series booster = recurring lineage
+        { id: 'svc-skip', status: 'skipped', is_recurring: false },      // terminal — cannot claim the hold
+        { id: 'svc-ns', status: 'no_show', is_recurring: false },        // terminal
+        { id: 'svc-done', status: 'completed', is_recurring: false },    // terminal — its own completion already ran
       ],
     });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'orphan_hold_review' });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('gate ON: a series-booster completing visit (recurring_parent_id, is_recurring=false) stays silent', async () => {
+    process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
+    stubDb([null, { ...visit, recurring_parent_id: 'svc-parent' }], { holdRows: [orphanCandidate], visitRows: [] });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'no_hold' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: an already-settled invoice gets the honest "already settled" bell, never a pay-link claim', async () => {
+    process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
+    stubDb([null, visit, { status: 'cancelled' }, { status: 'paid' }], { holdRows: [orphanCandidate], visitRows: [] });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'orphan_hold_review' });
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.anything(),
+      expect.stringContaining('already settled'),
+      expect.anything(),
+    );
+    expect(mockNotifyAdmin.mock.calls[0][2]).not.toContain('pay-link flow');
   });
 
   test('expectedHoldId pins the ops repair charge to the ruled row — a different resolved hold refuses untouched', async () => {
