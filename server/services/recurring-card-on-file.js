@@ -632,6 +632,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           expectedTotal: Number(job.authorized_total_cents) / 100,
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
           requireAutopayForCustomerId: invoice.customer_id,
+          // Live payer re-resolve IN the charge lock (Codex r9): the
+          // payer_id check above is a snapshot, and a delayed recovery is
+          // exactly when billing may have assigned a customer-DEFAULT
+          // payer while the invoice's payer_id stayed null — re-resolve
+          // under the lock and refuse rather than charge the homeowner's
+          // card for a bill that now routes to a third-party payer.
+          requireSelfPayCustomerId: invoice.customer_id,
         });
         const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status');
         const freshStatus = String(freshInvoice?.status || '').toLowerCase();

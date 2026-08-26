@@ -3032,6 +3032,12 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               // already have succeeded; assert nothing beyond confirmation.
               return `We're confirming your annual prepay payment${chargedText} — we'll follow up shortly.`;
             }
+            if (acceptResult?.prepayCoveredByCredit) {
+              // Account credit covered the whole quoted amount — no card
+              // charge ran and no receipt is coming (Codex r9): confirm the
+              // coverage instead of promising one.
+              return 'Your annual prepay was fully covered by your account credit — nothing was charged.';
+            }
             return `Your annual prepay payment${chargedText} went through — your receipt is on the way.`;
           })()}
         </div>
