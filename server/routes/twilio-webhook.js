@@ -1330,7 +1330,7 @@ router.post('/status', async (req, res) => {
               // recipient asks, the common case) and FALSE on a swallowed
               // DB error.
               try {
-                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
+                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined', { dbh: trx });
                 if (declined === false) outcome.declineFailed = true;
               } catch { /* markRecipientOptin does not reject; belt only */ }
               // Prefs flip — the suppression row is the enforcement;
@@ -1347,15 +1347,10 @@ router.post('/status', async (req, res) => {
             outcome.failed = suppressErr.code || suppressErr.name || 'db_error';
           }
           // ── Post-commit reporting (never inside the transaction) ──
-          if (outcome.applied) {
-            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
-          } else if (outcome.undone) {
-            // Best-effort line-type cache drop mirrors clearSuppression's
-            // follow-up (it ran with dbh=trx; the cache del is idempotent).
-            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression not kept`);
-          } else if (outcome.deferred) {
-            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred (${outcome.deferred})`);
-          } else if (outcome.failed) {
+          // failed wins over any flag set inside the callback: a COMMIT
+          // rejection lands in the catch AFTER applied/undone were set, and
+          // nothing persisted (hook r11 P1).
+          if (outcome.failed) {
             logger.warn(`[twilio-status] 21610 opt-out handling FAILED for ${maskPhone(optOutPhone)}: ${outcome.failed}`);
             try {
               await require('../services/notification-service').notifyAdmin(
@@ -1367,8 +1362,16 @@ router.post('/status', async (req, res) => {
             } catch (notifyErr) {
               logger.error(`[twilio-status] 21610 failure notify also failed: ${notifyErr.message}`);
             }
+          } else if (outcome.applied) {
+            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
+          } else if (outcome.undone) {
+            // Best-effort line-type cache drop mirrors clearSuppression's
+            // follow-up (it ran with dbh=trx; the cache del is idempotent).
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression not kept`);
+          } else if (outcome.deferred) {
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred (${outcome.deferred})`);
           }
-          if (outcome.declineFailed) {
+          if (outcome.declineFailed && !outcome.failed) {
             logger.warn(`[twilio-status] 21610 recipient-decline write FAILED for ${maskPhone(optOutPhone)}`);
             try {
               await require('../services/notification-service').notifyAdmin(

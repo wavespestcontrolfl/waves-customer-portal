@@ -65,7 +65,7 @@ async function getRecipientOptin(phone, customerId = null) {
 // Webhook hook: the sender replied YES (status 'confirmed') or STOP
 // ('declined'). No-op when the phone has no row — a plain customer opt-in/
 // opt-out is not recipient state.
-async function markRecipientOptin(phone, status) {
+async function markRecipientOptin(phone, status, { dbh = db } = {}) {
   const key = recipientPhoneKey(phone);
   if (!key) return false;
   try {
@@ -78,7 +78,7 @@ async function markRecipientOptin(phone, status) {
     // ask_failed rows are excluded from confirmation (that property's ask
     // never reached them — the save-triggered retry must still run) but ARE
     // declined on STOP (they said stop; never re-ask).
-    const q = db('recipient_optin').where({ phone_key: key });
+    const q = dbh('recipient_optin').where({ phone_key: key });
     // A YES can only confirm rows whose ask actually went out: ask_failed
     // (delivery failed) and undispatched pending rows (claim committed,
     // dispatch not yet run/crashed) are excluded — the recovery sweep or
@@ -95,9 +95,9 @@ async function markRecipientOptin(phone, status) {
       // Per-row reconciliation: only a row whose OWN property's ask was
       // accepted (customer-scoped sms_log) confirms — property B's
       // undispatched pending row stays pending when only A's ask went out.
-      const pendingRows = await db('recipient_optin').where({ phone_key: key, status: 'pending' });
+      const pendingRows = await dbh('recipient_optin').where({ phone_key: key, status: 'pending' });
       for (const row of pendingRows) {
-        const priorAskRow = await db('sms_log')
+        const priorAskRow = await dbh('sms_log')
           .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
           .where({ customer_id: row.customer_id })
           .where(function optinAsk() {
@@ -109,7 +109,7 @@ async function markRecipientOptin(phone, status) {
           .catch(() => null);
         const { isFailureStatus } = require('./twilio-failure-alerts');
         if (priorAskRow && !isFailureStatus(priorAskRow.status)) {
-          updated += await db('recipient_optin')
+          updated += await dbh('recipient_optin')
             .where({ phone_key: key, customer_id: row.customer_id, status: 'pending' })
             .update({
               ...stamp,
