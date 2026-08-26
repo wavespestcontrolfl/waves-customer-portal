@@ -279,28 +279,49 @@ async function clearSuppression({ phone, source, dbh = db }) {
     // the GLOBAL connection: errors are swallowed, and inside a caller's
     // transaction a swallowed failure would still ABORT it, silently
     // rolling back the clearance above (codex #3495).
+    // Cleanup runs in its OWN short transaction that reacquires the
+    // per-phone lock and re-verifies the clearance still owns the row
+    // (hook #3495 r16): by post-commit time the caller's lock is released,
+    // so a NEWER 30006/line-type verdict can have recorded and cached in
+    // between — an unguarded delete would wipe that newer cache. Under the
+    // lock, a standing ACTIVE row means someone newer owns the phone:
+    // leave their caches alone. The brief window where a post-START send
+    // reads the not-yet-cleared cache is self-healing (the next send
+    // re-evaluates fresh) — correctness only needs the ownership check.
     const runCacheCleanup = async () => {
       try {
-        await db('phone_line_types').where({ phone }).del();
-      } catch (cacheErr) {
-        if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
-          logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
-        }
-      }
-      try {
-        const digits = String(phone).replace(/\D/g, '').slice(-10);
-        if (digits.length === 10) {
-          const holders = await db('customers')
-            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
-            .whereNull('deleted_at')
-            .whereNotNull('line_type')
-            .select('id');
-          if (holders.length === 1) {
-            await db('customers').where({ id: holders[0].id }).update({ line_type: null });
+        await db.transaction(async (ctrx) => {
+          await ctrx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [phone]);
+          const standing = await ctrx('messaging_suppression').where({ phone }).first('active');
+          if (standing && standing.active === true) return; // newer verdict owns the phone
+          try {
+            // SAVEPOINT (nested trx), not a bare try/catch: the table may
+            // not exist yet, and a swallowed error would leave this trx
+            // ABORTED — the legacy clear below must still run (try/catch
+            // in a trx ≠ fail-open; rolling back to the savepoint keeps
+            // the outer transaction healthy).
+            await ctrx.transaction(async (sp) => {
+              await sp('phone_line_types').where({ phone }).del();
+            });
+          } catch (cacheErr) {
+            if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
+              logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
+            }
           }
-        }
-      } catch (legacyErr) {
-        logger.warn(`[messaging:suppression] legacy line_type clear failed: ${legacyErr.message}`);
+          const digits = String(phone).replace(/\D/g, '').slice(-10);
+          if (digits.length === 10) {
+            const holders = await ctrx('customers')
+              .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+              .whereNull('deleted_at')
+              .whereNotNull('line_type')
+              .select('id');
+            if (holders.length === 1) {
+              await ctrx('customers').where({ id: holders[0].id }).update({ line_type: null });
+            }
+          }
+        });
+      } catch (cleanupErr) {
+        logger.warn(`[messaging:suppression] cache cleanup skipped: ${cleanupErr.message}`);
       }
     };
     if (dbh.isTransaction && dbh.executionPromise) {
