@@ -6,10 +6,12 @@ const db = require('../models/db');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the review-request queue (reads return customer
-// name/phone) is owner-only. The ONLY technician exemption is POST /trigger
-// — the field completion flow on the tech-visible Dispatch surface fires it.
+// name/phone) is owner-only. Technician exemptions are the two field
+// completion triggers only: POST /trigger (Dispatch surface) and
+// POST /tech-trigger (deployed native tech app — breaking it is a P0).
+const TECH_TRIGGER_PATHS = new Set(['/trigger', '/tech-trigger']);
 router.use((req, res, next) => (
-  req.method === 'POST' && req.path === '/trigger' ? next() : requireAdmin(req, res, next)
+  req.method === 'POST' && TECH_TRIGGER_PATHS.has(req.path) ? next() : requireAdmin(req, res, next)
 ));
 
 // GET /stats
