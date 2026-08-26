@@ -2567,6 +2567,24 @@ const AppointmentReminders = {
       // phone only) so future appointment texts skip SMS and go straight to email
       // at send time.
       if (String(errorCode) === '30006' && primaryDigits && primaryDigits === targetDigits && customer.line_type !== 'landline') {
+        // Freshness gate (codex #3495): a delayed 30006 whose send predates
+        // a newer clearance (START) is stale evidence — same rule as the
+        // suppression store. Undatable bounces defer to any standing
+        // clearance; only a fresh verdict may cache the landline.
+        let staleVerdict = false;
+        try {
+          const bounceLog = sid ? await db('sms_log').where({ twilio_sid: sid }).first('created_at') : null;
+          const supPhone = String(to || '').replace(/[^\d+]/g, '');
+          const supRow = supPhone
+            ? await db('messaging_suppression').where({ phone: supPhone }).first('active', 'cleared_at')
+            : null;
+          staleVerdict = !!(supRow && supRow.active === false && supRow.cleared_at
+            && (!bounceLog?.created_at || new Date(supRow.cleared_at) > new Date(bounceLog.created_at)));
+        } catch { /* unreadable → treat as fresh (cache write is reversible via START) */ }
+        if (staleVerdict) {
+          logger.info(`[appt-remind] 30006 for customer ${customerId} predates a newer opt-in clearance — line_type cache untouched`);
+          return;
+        }
         await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
         logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
       }

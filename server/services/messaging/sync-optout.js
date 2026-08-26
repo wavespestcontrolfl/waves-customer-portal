@@ -17,11 +17,19 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { recordSuppression, clearSuppression } = require('./validators/suppression');
 const { detectSmsOptCommand } = require('./opt-out-detector');
+const { toE164 } = require('../../utils/phone');
 
-const maskPhone = (p) => String(p || '').replace(/(\d{3})\d{4}(\d{2})$/, '$1••••$2');
+// Last-two-digits-only mask (codex #3495): the earlier middle-four mask
+// left seven digits of an 11-digit number in Railway logs.
+const maskPhone = (p) => String(p || '').replace(/\d(?=\d{2})/g, '•');
 
 async function recordSyncProviderOptOut({ phone, attemptAt, source = 'twilio_send_21610' } = {}) {
-  const optOutPhone = String(phone || '').replace(/[^\d+]/g, '');
+  // Canonical E.164 first (codex #3495): direct sendSMS callers pass
+  // provider-accepted local formats ('(941) 555-1234'), and a row keyed
+  // '9415551234' would never match the webhook's '+1941…' clears or the
+  // send-path suppression candidates. toE164 returns raw on garbage —
+  // the strip below keeps that path storable.
+  const optOutPhone = String(toE164(phone) || phone || '').replace(/[^\d+]/g, '');
   if (!optOutPhone) return { recorded: false, reason: 'no_phone' };
   const anchoredAt = attemptAt instanceof Date && !Number.isNaN(attemptAt.getTime()) ? attemptAt : new Date();
   const outcome = {};
