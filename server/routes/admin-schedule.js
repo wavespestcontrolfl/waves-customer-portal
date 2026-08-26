@@ -2300,24 +2300,105 @@ async function stampRecurringTemplateOverrides(conn, parentId, fields, cols) {
   return true;
 }
 
-// Rewrite the still-upcoming BASE-series visits on/after the edited visit's
-// date. Boosters (is_recurring=false) keep their own pricing and are never
-// touched; each sibling's estimated_price/discount_dollars are re-derived
-// from its OWN add-on rows through the same calculateStoredVisitFinancials
-// math the spawn paths use — a flat copy of the edited visit's total would
-// stomp siblings whose add-on lines fall on a different cadence.
+// Which changed groups a parent-only ('this_only') edit still needs to PIN
+// on the template. A group counts as already stamped when ANY of its keys
+// is present — earlier stamps write a whole group's posted keys together,
+// and mixing a group's old values with its previously stamped new ones
+// would manufacture a hybrid template nobody chose (Codex #3505 r1 P1:
+// the pin decision is per group, never for the JSON object as a whole —
+// a price-only stamp must not stop a later service pin, and vice versa).
+function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow) {
+  const existing = existingOverrides || {};
+  const pinned = {};
+  const groupsToPin = [];
+  if (groups.serviceChanged && !PRICE_SERVICE_SERVICE_KEYS.some((key) => key in existing)) {
+    groupsToPin.push(PRICE_SERVICE_SERVICE_KEYS);
+  }
+  if (groups.priceChanged && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
+    groupsToPin.push(PRICE_SERVICE_PRICE_KEYS);
+  }
+  for (const keys of groupsToPin) {
+    for (const key of keys) {
+      if (key in groups.fields) {
+        pinned[key] = beforeRow?.[key] === undefined ? null : beforeRow[key];
+      }
+    }
+  }
+  return pinned;
+}
+
+// Rewrite the still-upcoming BASE-series visits of the series — on/after
+// `fromDateStr` when the edit came from a mid-series visit, or ALL of them
+// when it came from the series parent (fromDateStr null): the parent is
+// the series start, so "following" means the whole remaining plan, and a
+// date threshold there would race the cadence rewrite that re-dates
+// pending children AFTER this block runs (Codex #3505 r1 P1). Boosters
+// (is_recurring=false) keep their own pricing and are never touched; each
+// sibling's estimated_price/discount_dollars are re-derived from its OWN
+// add-on rows through the same calculateStoredVisitFinancials math the
+// spawn paths use — a flat copy of the edited visit's total would stomp
+// siblings whose add-on lines fall on a different cadence.
+//
+// Money safety (Codex #3505 r1 P1): a repricing refuses outright (409,
+// trx rolls back) when a target visit already holds money — prepaid,
+// annual-term, card-hold, or a money-bearing/statement-accrued invoice —
+// and voids the remaining safe open invoices so completion re-mints at
+// the new price instead of collecting a stale amount (completion reuses a
+// non-void invoice by scheduled_service_id).
 async function propagatePriceServiceToFollowingSiblings(conn, {
   editedId, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
 }) {
-  const targets = await conn('scheduled_services')
+  const targetQuery = conn('scheduled_services')
     .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
     .where('is_recurring', true)
     .whereIn('status', UPCOMING_VISIT_STATUSES)
-    .where('scheduled_date', '>=', fromDateStr)
     .whereNot({ id: editedId })
     .orderBy('scheduled_date', 'asc');
+  if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
+  const targets = await targetQuery;
+  let invoiceLinkColumn = false;
+  if (priceChanged && targets.length > 0) {
+    // Same refusal contract as the plan trim (findBillingCoveredVisits
+    // rationale): a partially applied reprice would leave the office
+    // believing a series was repriced while paid visits kept old numbers.
+    const covered = await findBillingCoveredVisits(conn, targets);
+    if (covered.size > 0) {
+      const [firstId, reason] = [...covered.entries()][0];
+      const when = targets.find((visit) => visit.id === firstId);
+      throw httpError(409, `Can't apply this price to the rest of the series: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
+    }
+    invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+  }
   const updatedIds = [];
   for (const sibling of targets) {
+    if (priceChanged && invoiceLinkColumn) {
+      // Statement-accrued lines belong to a third-party payer's monthly
+      // statement — repricing underneath one needs the payer flow, not a
+      // silent row update. Fail closed like the covered check above.
+      const accrued = await conn('invoices')
+        .where({ scheduled_service_id: sibling.id })
+        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
+        .whereNotNull('payer_statement_id')
+        .first('id');
+      if (accrued) {
+        throw httpError(409, `Can't apply this price to the rest of the series: the ${dateOnly(sibling.scheduled_date) || 'later'} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
+      }
+      const staleInvoiceIds = await conn('invoices')
+        .where({ scheduled_service_id: sibling.id })
+        .whereNotIn('status', ['paid', 'prepaid', 'void'])
+        .whereNull('payer_statement_id')
+        .pluck('id');
+      if (staleInvoiceIds.length > 0) {
+        const voidUpdate = { status: 'void' };
+        if (await conn.schema.hasColumn('invoices', 'updated_at').catch(() => false)) {
+          voidUpdate.updated_at = conn.fn.now();
+        }
+        // The helper locks each row and SKIPS anything with recorded or
+        // in-flight money (those shapes were refused above), restoring
+        // consumed deposit/account credit on the ones it voids.
+        await voidConversionInvoicesRestoringCredits({ trx: conn, ids: staleInvoiceIds, voidUpdate });
+      }
+    }
     const siblingUpdates = { updated_at: new Date() };
     for (const [key, value] of Object.entries(fields)) {
       if (!cols[key]) continue;
@@ -2347,7 +2428,16 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       const overlaid = { ...sibling, ...fields };
       const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
       const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
-      if (cols.estimated_price) siblingUpdates.estimated_price = financials.price;
+      // calculateStoredVisitFinancials returns NULL for a zero subtotal,
+      // and a NULL estimate lets non-callback billing fall back to the
+      // customer's monthly rate — an explicitly free series must stay an
+      // explicit $0 on every propagated row (Codex #3505 r1 P1). The
+      // caller normalizes fields.estimated_price to 0 for that case.
+      if (cols.estimated_price) {
+        siblingUpdates.estimated_price = financials.price != null
+          ? financials.price
+          : (fields.estimated_price === 0 ? 0 : financials.price);
+      }
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
     }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
@@ -6721,8 +6811,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // acquires maintenance→comms, and the reverse order here would let an
       // alert action and an edit save on one customer deadlock on each other's
       // held key.
+      // A posted price/service scope joins the same per-parent lock: the
+      // 'following' propagation rewrites sibling rows and the template
+      // overrides that auto-extend / top-up / alert-extend read, so it must
+      // serialize against those writers (and against a concurrent scoped
+      // save merging the same override JSON) — Codex #3505 r1 P1.
       const wantsExistingPlanMutation = wantsVisitCountReconcile
-        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false);
+        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
+        || wantsPriceServiceScope;
       if (wantsExistingPlanMutation && commsPeek) {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
       }
@@ -7220,11 +7316,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
           : null;
         // ONLY a parent/template edit converts the whole series. Service edits
-        // expose no apply-scope and the cadence rewrite below is parent-only, so
-        // converting a single child occurrence must not flip its siblings and
-        // stop billing the rest of the regular series.
+        // historically exposed no apply-scope and the cadence rewrite below is
+        // parent-only, so converting a single child occurrence must not flip
+        // its siblings and stop billing the rest of the regular series.
+        //
+        // A POSTED scope must still be honored, not silently ignored (Codex
+        // #3505 r1 P1) — this conversion is billing-relevant (invoice voiding,
+        // $0 stamps), so doing a different scope than selected is worse than
+        // refusing:
+        //   • child + 'following' — the conversion has no child-driven series
+        //     propagation; refuse (trx rolls back) and point the operator at
+        //     the series' first appointment or 'this appointment only'.
+        //   • template + explicit 'this_only' — skip the series-wide
+        //     propagation entirely: only the edited template visit converts.
+        // No posted scope keeps today's behavior byte-for-byte.
+        if (wantsPriceServiceScope && self?.recurring_parent_id
+          && normalizePriceServiceScope(priceServiceScope) === 'following') {
+          throw httpError(409, "Converting to a re-service can't be applied to following visits from a mid-series appointment — open the series' first appointment to convert the whole plan, or set the change to this appointment only.");
+        }
+        const conversionScopedThisOnly = wantsPriceServiceScope
+          && normalizePriceServiceScope(priceServiceScope) === 'this_only';
         const isTemplateEdit = !!seriesCols.recurring_parent_id && !self?.recurring_parent_id;
-        if (isTemplateEdit) {
+        if (isTemplateEdit && !conversionScopedThisOnly) {
           const seriesUpdates = {};
           if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
           if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
@@ -7316,19 +7429,43 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Re-service conversions keep their own bespoke series propagation
       // above — this block stands down rather than double-writing. Add-on
       // lines and visit durations stay per-visit by design.
+      // Boosters share recurring_parent_id but deliberately carry
+      // is_recurring=false and their OWN pricing — a booster edit must never
+      // rewrite the base series or stamp booster values into the template
+      // (Codex #3505 r1 P1). Refuse rather than silently applying per-visit;
+      // the modal hides the selector on boosters, so this only stops a
+      // hand-posted scope.
+      if (wantsPriceServiceScope && priceServiceBeforeRow
+        && !priceServiceBeforeRow.is_recurring && priceServiceBeforeRow.recurring_parent_id
+        && normalizePriceServiceScope(priceServiceScope) === 'following') {
+        throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
+      }
       if (wantsPriceServiceScope && !reServiceConversion && priceServiceBeforeRow
-        && (priceServiceBeforeRow.is_recurring || priceServiceBeforeRow.recurring_parent_id)) {
+        && priceServiceBeforeRow.is_recurring) {
         const scopeCols = await trx('scheduled_services').columnInfo();
         const groups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
         const scopeParentId = priceServiceBeforeRow.recurring_parent_id || req.params.id;
+        const editedIsParent = !priceServiceBeforeRow.recurring_parent_id;
+        // Explicit $0: the price handlers store NULL for a zero-subtotal
+        // visit, and a NULL estimate lets non-callback billing fall back to
+        // the customer's monthly rate — keep the operator's zero explicit on
+        // everything this scope writes (Codex #3505 r1 P1).
+        if (groups.priceChanged && updates.primary_line_price !== undefined
+          && Number(updates.primary_line_price) === 0 && updates.estimated_price == null) {
+          groups.fields.estimated_price = 0;
+        }
         if (groups.changed && normalizePriceServiceScope(priceServiceScope) === 'following') {
-          const fromDateStr = dateOnly(updates.scheduled_date !== undefined
-            ? updates.scheduled_date
-            : priceServiceBeforeRow.scheduled_date) || etDateString();
           const propagatedIds = await propagatePriceServiceToFollowingSiblings(trx, {
             editedId: req.params.id,
             parentId: scopeParentId,
-            fromDateStr,
+            // A parent edit covers the WHOLE remaining plan — a date
+            // threshold there would race the cadence rewrite that re-dates
+            // pending children after this block (see the helper's contract).
+            fromDateStr: editedIsParent
+              ? null
+              : (dateOnly(updates.scheduled_date !== undefined
+                ? updates.scheduled_date
+                : priceServiceBeforeRow.scheduled_date) || etDateString()),
             fields: groups.fields,
             serviceChanged: groups.serviceChanged,
             priceChanged: groups.priceChanged,
@@ -7336,14 +7473,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           });
           await stampRecurringTemplateOverrides(trx, scopeParentId, groups.fields, scopeCols);
           priceServicePropagatedCount = propagatedIds.length;
-        } else if (groups.changed && !priceServiceBeforeRow.recurring_parent_id
-          && scopeCols.recurring_template_overrides
-          && !parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides)) {
-          const pinned = {};
-          for (const key of Object.keys(groups.fields)) {
-            pinned[key] = priceServiceBeforeRow[key] === undefined ? null : priceServiceBeforeRow[key];
+        } else if (groups.changed && editedIsParent && scopeCols.recurring_template_overrides) {
+          // this_only on the template: pin the CHANGED groups that no earlier
+          // stamp already covers at their pre-edit values, so a deliberate
+          // one-off template edit stops leaking into future extension rows.
+          const pinned = pickUnpinnedGroupFields(
+            parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
+            groups,
+            priceServiceBeforeRow,
+          );
+          if (Object.keys(pinned).length > 0) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, pinned, scopeCols);
           }
-          await stampRecurringTemplateOverrides(trx, req.params.id, pinned, scopeCols);
         }
       } else if (!wantsPriceServiceScope && !reServiceConversion && detailsChanged
         && isEnabled('editApptPriceServiceScope')
@@ -14932,6 +15073,7 @@ router._test = {
   resolveSeriesCreateInvoiceOnComplete,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
+  pickUnpinnedGroupFields,
   parseTemplateOverrides,
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,

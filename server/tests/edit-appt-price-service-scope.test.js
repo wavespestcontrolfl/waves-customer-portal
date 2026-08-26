@@ -20,6 +20,7 @@ const adminScheduleRouter = require('../routes/admin-schedule');
 const {
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
+  pickUnpinnedGroupFields,
   parseTemplateOverrides,
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
@@ -58,14 +59,26 @@ function makeConn(handler) {
         calls.push(['first', ...args]);
         return Promise.resolve(handler({ table, calls, op: 'first' }));
       };
+      b.pluck = (...args) => {
+        calls.push(['pluck', ...args]);
+        return Promise.resolve(handler({ table, calls, op: 'pluck' }) || []);
+      };
       b.update = (data) => {
         calls.push(['update', data]);
         return { then: (res, rej) => Promise.resolve(handler({ table, calls, op: 'update', data })).then(res, rej) };
       };
-      b.then = (res, rej) => Promise.resolve(handler({ table, calls, op: 'await' })).then(res, rej);
+      b.then = (res, rej) => Promise.resolve(handler({ table, calls, op: 'await', args: calls })).then(res, rej);
       return b;
     };
     fn.transaction = (cb) => Promise.resolve().then(() => cb(make()));
+    // Schema probes (invoice reconciliation + billing-covered checks): a
+    // pre-migration "table/column absent" answer keeps those paths inert so
+    // each test opts into them explicitly.
+    fn.schema = {
+      hasTable: async () => false,
+      hasColumn: async () => false,
+    };
+    fn.fn = { now: () => new Date() };
     return fn;
   };
   return make();
@@ -237,8 +250,12 @@ describe('stampRecurringTemplateOverrides', () => {
 describe('propagatePriceServiceToFollowingSiblings', () => {
   function propagationScenario({ siblings, addonsByVisit = {} }) {
     const updates = [];
+    const targetQueries = [];
     const conn = makeConn(({ table, calls, op, data }) => {
-      if (op === 'await' && table === 'scheduled_services') return siblings;
+      if (op === 'await' && table === 'scheduled_services') {
+        targetQueries.push(calls);
+        return siblings;
+      }
       if (op === 'await' && table === 'scheduled_service_addons') {
         const whereCall = calls.find(([name, arg]) => name === 'where' && arg && arg.scheduled_service_id);
         return addonsByVisit[whereCall?.[1]?.scheduled_service_id] || [];
@@ -250,7 +267,7 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
       }
       return null;
     });
-    return { conn, updates };
+    return { conn, updates, targetQueries };
   }
 
   it('re-derives each sibling price from its OWN add-on rows instead of copying the edited total', async () => {
@@ -307,6 +324,79 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(updates[0].data.line_discount_dollars).toBeUndefined();
     expect(updates[0].data.primary_line_price).toBe(50);
   });
+
+  it('a parent-sourced edit covers the whole remaining plan — no date threshold to race the cadence rewrite', async () => {
+    const siblings = [{ id: 's1', primary_line_price: '25.00', estimated_price: '25.00' }];
+    const { conn, updates, targetQueries } = propagationScenario({ siblings });
+    await propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'p1', parentId: 'p1', fromDateStr: null,
+      fields: { primary_line_price: 50, estimated_price: 50 },
+      serviceChanged: false, priceChanged: true, cols: COLS,
+    });
+    expect(updates).toHaveLength(1);
+    const dateFilters = targetQueries[0].filter(([name, col]) => name === 'where' && col === 'scheduled_date');
+    expect(dateFilters).toHaveLength(0);
+  });
+
+  it('keeps an explicitly free series an explicit $0, never NULL', async () => {
+    const siblings = [{ id: 's1', primary_line_price: '25.00', estimated_price: '25.00' }];
+    const { conn, updates } = propagationScenario({ siblings });
+    await propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited', parentId: 'p1', fromDateStr: '2098-01-15',
+      // The route normalizes the price handlers' NULL-for-zero to an
+      // explicit 0 before calling — the helper must persist that zero.
+      fields: { primary_line_price: 0, estimated_price: 0 },
+      serviceChanged: false, priceChanged: true, cols: COLS,
+    });
+    expect(updates[0].data.estimated_price).toBe(0);
+  });
+
+  it('refuses to reprice a visit that already holds money (fail-closed, same contract as the plan trim)', async () => {
+    const siblings = [
+      { id: 's1', scheduled_date: '2098-02-15', primary_line_price: '25.00', estimated_price: '25.00', prepaid_amount: '25.00' },
+    ];
+    const { conn, updates } = propagationScenario({ siblings });
+    await expect(propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited', parentId: 'p1', fromDateStr: '2098-01-15',
+      fields: { primary_line_price: 50, estimated_price: 50 },
+      serviceChanged: false, priceChanged: true, cols: COLS,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(updates).toHaveLength(0);
+  });
+});
+
+describe('pickUnpinnedGroupFields — per-GROUP pin decision', () => {
+  const before = { service_type: 'Lawn Care Visit', service_id: 7, primary_line_price: '25.00', estimated_price: '25.00' };
+
+  it('pins a changed group only while no key of that group is stamped yet', () => {
+    const groups = {
+      serviceChanged: false,
+      priceChanged: true,
+      fields: { primary_line_price: 30, estimated_price: 30 },
+    };
+    expect(pickUnpinnedGroupFields(null, groups, before))
+      .toEqual({ primary_line_price: '25.00', estimated_price: '25.00' });
+    // A price key already stamped means the price group is series-owned —
+    // never overwrite it with a hybrid of old values.
+    expect(pickUnpinnedGroupFields({ primary_line_price: 30 }, groups, before)).toEqual({});
+  });
+
+  it('an existing PRICE stamp must not stop a later SERVICE pin (and vice versa)', () => {
+    const serviceGroups = {
+      serviceChanged: true,
+      priceChanged: false,
+      fields: { service_type: 'Pest Control Service', service_id: 9 },
+    };
+    expect(pickUnpinnedGroupFields({ primary_line_price: 30, estimated_price: 30 }, serviceGroups, before))
+      .toEqual({ service_type: 'Lawn Care Visit', service_id: 7 });
+    const priceGroups = {
+      serviceChanged: false,
+      priceChanged: true,
+      fields: { primary_line_price: 30, estimated_price: 30 },
+    };
+    expect(pickUnpinnedGroupFields({ service_type: 'Pest Control Service' }, priceGroups, before))
+      .toEqual({ primary_line_price: '25.00', estimated_price: '25.00' });
+  });
 });
 
 describe('source-pattern guards — wiring that unit tests cannot drive', () => {
@@ -331,5 +421,20 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
 
   it('make-this-recurring clears stale overrides so a re-anchored series follows its fresh values', () => {
     expect(src).toMatch(/spawnScopeCols\.recurring_template_overrides && parent\.recurring_template_overrides/);
+  });
+
+  it('a scoped save serializes on the per-parent recurring-series maintenance lock', () => {
+    expect(src).toMatch(/\|\| wantsPriceServiceScope;\s*\n\s*if \(wantsExistingPlanMutation && commsPeek\)/);
+  });
+
+  it('re-service conversions honor a posted scope instead of silently ignoring it', () => {
+    expect(src).toMatch(/const conversionScopedThisOnly = wantsPriceServiceScope/);
+    expect(src).toMatch(/isTemplateEdit && !conversionScopedThisOnly/);
+    expect(src).toMatch(/Converting to a re-service can't be applied to following visits from a mid-series appointment/);
+  });
+
+  it("a booster can never be a 'following' propagation source", () => {
+    expect(src).toMatch(/!priceServiceBeforeRow\.is_recurring && priceServiceBeforeRow\.recurring_parent_id/);
+    expect(src).toMatch(/Booster visits keep their own pricing/);
   });
 });

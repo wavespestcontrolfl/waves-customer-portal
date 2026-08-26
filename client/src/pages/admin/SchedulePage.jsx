@@ -1749,8 +1749,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     String(form.price ?? "") !== String(initialPrimaryRef.current.price ?? "");
   const primaryServiceDirty =
     (form.serviceType || "") !== (initialPrimaryRef.current.serviceType || "");
+  // Base-series rows only: boosters share recurring_parent_id but carry
+  // is_recurring=false and their OWN pricing — a booster edit must stay
+  // per-visit, never rewrite the base series (the server refuses a posted
+  // 'following' from a booster for the same reason).
+  const isBaseSeriesRow = !!(service.isRecurring ?? service.is_recurring);
   const priceServiceScopeActive =
     serviceHasSeries &&
+    isBaseSeriesRow &&
     seriesSummary?.canScopePriceService === true &&
     (primaryPriceDirty || primaryServiceDirty);
 
