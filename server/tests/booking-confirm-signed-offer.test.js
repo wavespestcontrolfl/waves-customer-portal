@@ -402,7 +402,9 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
           first: jest.fn().mockResolvedValue(CUST),
         };
       }
-      if (table === 'notification_prefs') {
+      if (table === 'notification_prefs' || table === 'property_preferences') {
+        // Both rows are seeded via createDefaultCustomerRows for every
+        // resolved customer (canonical NULL-consent seeding).
         return { insert: () => ({ onConflict: () => ({ ignore: () => Promise.resolve() }) }) };
       }
       if (table === 'service_zones') {

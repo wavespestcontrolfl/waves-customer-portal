@@ -1984,10 +1984,16 @@ async function createSelfBooking(payload = {}) {
         }
       }
     }
-    await db('notification_prefs')
-      .insert({ customer_id: custId })
-      .onConflict('customer_id')
-      .ignore();
+    // Canonical seeding for EVERY resolved customer — a returning booker
+    // whose record predates the prefs rows must get the same NULL marketing
+    // flags + property_preferences as a fresh create; a bare insert here
+    // would take the legacy true column defaults (fabricated marketing
+    // consent) and skip property_preferences. Idempotent for the
+    // just-created path above (onConflict-ignore).
+    {
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(db, custId);
+    }
 
     // A unit submitted on a no-backfill path must not vanish: the customer row
     // stays untouched, but the visit's notes and the confirmation still carry
