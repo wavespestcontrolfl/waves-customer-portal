@@ -205,64 +205,8 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     };
   } catch (err) {
     const failure = classifyProviderFailure(err);
-    // A SYNCHRONOUS 21610 — Twilio rejecting messages.create() before any
-    // SID exists — never reaches the delivery-status callback, so the
-    // callback-side opt-out recording can't see it (codex #3495 P1). It is
-    // the recipient's CURRENT carrier verdict (no delayed-callback ordering
-    // to reconcile): feed the canonical suppression store here, fail-LOUD
-    // like the callback and dropped-call paths — a swallowed write means
-    // every other lane keeps texting an opted-out number.
-    if (failure.twilioCode === '21610') {
-      const optOutPhone = String(input.to || '').replace(/[^\d+]/g, '');
-      // Same serialization as the delivery-callback path: per-phone
-      // advisory lock + write-then-recheck, with sentAt = this attempt's
-      // own start, so a concurrent inbound START (which logs BEFORE it
-      // clears) either precedes us (we defer to its clearance) or lands in
-      // the post-write recheck and undoes us inside the same transaction.
-      const attemptAt = new Date();
-      try {
-        const db = require('../../../models/db');
-        const { recordSuppression, clearSuppression } = require('../validators/suppression');
-        const { detectSmsOptCommand } = require('../opt-out-detector');
-        await db.transaction(async (trx) => {
-          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
-          const supRow = await trx('messaging_suppression')
-            .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at');
-          if (supRow && supRow.active === false && supRow.cleared_at
-              && new Date(supRow.cleared_at) > attemptAt) return; // newer opt-in wins
-          const res = await recordSuppression({
-            phone: optOutPhone, reason: 'opt_out', source: 'twilio_send_21610', dbh: trx,
-          });
-          if (res?.ok === false) {
-            throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
-          }
-          const inbound = await trx('sms_log')
-            .where({ from_phone: optOutPhone })
-            .where('created_at', '>', attemptAt)
-            .orderBy('created_at', 'desc')
-            .limit(50)
-            .select('message_body');
-          const newest = inbound
-            .map((r) => detectSmsOptCommand(r.message_body || '').action)
-            .find((a) => a === 'opt_in' || a === 'opt_out');
-          if (newest === 'opt_in') {
-            const cleared = await clearSuppression({ phone: optOutPhone, source: 'twilio_send_21610_undo', dbh: trx });
-            if (cleared?.ok === false) {
-              throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
-            }
-          }
-        });
-      } catch (suppressErr) {
-        try {
-          await require('../../notification-service').notifyAdmin(
-            'system',
-            'Opt-out suppression write failed',
-            `A synchronous Twilio 21610 rejection for ${optOutPhone.replace(/(\d{3})\d{4}(\d{2})$/, '$1••••$2')} could not be saved to the suppression list (send-time rejection). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
-            { bell: true, metadata: { source: 'twilio_send_21610', error: suppressErr.code || suppressErr.name || 'db_error' } },
-          );
-        } catch { /* notify best-effort — the failure result below still surfaces */ }
-      }
-    }
+    // A synchronous 21610 is recorded inside TwilioService.sendSMS (the
+    // choke point every sender passes through) — see messaging/sync-optout.js.
     return {
       sent: false,
       provider: 'twilio',

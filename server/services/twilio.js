@@ -319,6 +319,9 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
+    // Captured BEFORE the provider call: the sync-21610 recorder orders a
+    // concurrent START against this instant (messaging/sync-optout.js).
+    const smsAttemptAt = new Date();
     let attemptedFrom = options.fromNumber || null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
@@ -696,6 +699,19 @@ const TwilioService = {
             `[twilio-alerts] async notification failed: ${alertErr.message}`,
           );
         });
+      // Send-time 21610 = the recipient's carrier opt-out verdict with no
+      // SID and no delivery callback to ever record it — persist it HERE,
+      // the choke point every sender passes through (codex #3495; the
+      // provider wrapper and all direct callers funnel into sendSMS).
+      if (String(err.code) === '21610') {
+        try {
+          await require('./messaging/sync-optout').recordSyncProviderOptOut({
+            phone: to, attemptAt: smsAttemptAt, source: 'twilio_send_21610',
+          });
+        } catch (optoutErr) {
+          logger.error(`[twilio] sync-optout recording threw: ${optoutErr.message}`);
+        }
+      }
       const wrapped = new Error(`Failed to send SMS: ${providerError}`);
       wrapped.providerError = providerError;
       wrapped.code = err.code;

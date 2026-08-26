@@ -1287,10 +1287,14 @@ router.post('/status', async (req, res) => {
               const supRow = await trx('messaging_suppression')
                 .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
               // A clearance newer than this send wins (late/redelivered
-              // callback after a START) — and an unknown send timestamp
-              // still applies the opt-out (fail toward not texting).
+              // callback after a START). An UNDATED callback (no sms_log
+              // row for the SID) cannot order itself against a STANDING
+              // clearance — the clearance is explicit recent intent, the
+              // callback's age is unknown: defer to it (codex #3495).
+              // With no clearance at all, an undated callback still applies
+              // the opt-out (fail toward not texting).
               if (supRow && supRow.active === false && supRow.cleared_at
-                  && sentAtFloor && new Date(supRow.cleared_at) > sentAtFloor) {
+                  && (!sentAtFloor || new Date(supRow.cleared_at) > sentAtFloor)) {
                 outcome.deferred = 'cleared-after-send'; return;
               }
               // A standing row authored by a callback for a NEWER send owns
