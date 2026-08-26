@@ -48,9 +48,11 @@ jest.mock('../services/payer', () => ({
 }));
 const mockCustomerOnAutopay = jest.fn(async () => false);
 const mockIsPaused = jest.fn(() => false);
+const mockGetChargeableAutopayMethod = jest.fn(async () => null);
 jest.mock('../services/autopay-eligibility', () => ({
   customerOnAutopay: (...a) => mockCustomerOnAutopay(...a),
   isPaused: (...a) => mockIsPaused(...a),
+  getChargeableAutopayMethod: (...a) => mockGetChargeableAutopayMethod(...a),
 }));
 const mockHasConsentFor = jest.fn(async () => false);
 // Enrollment-scoped twin (r6 P1): the enrollment path now consults THIS —
@@ -228,6 +230,10 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     it('falls back to the ACTIVE Auto Pay method for autopay_already_active (pre-push P0: these accepts previously skipped the charge)', async () => {
       mockDbFixtures.customers = { autopay_payment_method_id: 'pmrow-7' };
       mockDbFixtures.payment_methods = { id: 'pmrow-7', customer_id: 'cust-1', stripe_payment_method_id: 'pm_7', method_type: 'card', card_funding: 'credit', last_four: '7777' };
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true, autopay_payment_method_id: null };
+      // Codex r15: the CANONICAL resolver picks the method — a null/stale
+      // customers.autopay_payment_method_id pointer must not matter.
+      mockGetChargeableAutopayMethod.mockResolvedValue({ id: 'pmrow-7' });
       const m = await resolvePrepayChargeMethod({ policy: { exemptReason: 'autopay_already_active' }, customerId: 'cust-1' });
       expect(m.paymentMethodRowId).toBe('pmrow-7');
       expect(m.stripePaymentMethodId).toBe('pm_7');

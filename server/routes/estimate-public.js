@@ -10651,6 +10651,43 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           throw overlapErr;
         }
+        // Quote revalidation INSIDE the accept transaction (Codex r15):
+        // the acknowledged total projected the balance + inspection offer +
+        // deposit credit as of the 402 round-trip — credit consumed by
+        // another invoice in between would let this accept COMMIT and then
+        // have the charge's expectedTotal equality refuse, degrading to a
+        // gross pay link above the total the customer confirmed. Re-project
+        // against live state under the per-customer advisory lock held just
+        // above (which also serializes competing prepay accepts — the
+        // overlap assertion refuses the second one outright): any drift
+        // aborts the accept retryably and the client simply re-quotes.
+        if (prepayChargePlan) {
+          let revalidatedDue = Number(annualPrepayDisplayAmount);
+          try {
+            const pendingDeposit = await require('../services/estimate-deposits').pendingDepositCredit(estimate.id, trx);
+            const depositAmount = pendingDeposit ? Number(pendingDeposit.amount) : 0;
+            if (depositAmount > 0) {
+              revalidatedDue = Math.max(0, Math.round((revalidatedDue - Math.min(depositAmount, revalidatedDue)) * 100) / 100);
+            }
+            if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+              const { getBalance, computeApplication } = require('../services/customer-credit');
+              const balance = await getBalance(customerId);
+              const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId);
+              const projection = computeApplication({ total: revalidatedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
+              revalidatedDue = Math.max(0, Math.round((revalidatedDue - (projection.newCreditApplied || 0)) * 100) / 100);
+            }
+            const { computeChargeAmount } = require('../services/stripe-pricing');
+            const revalidated = computeChargeAmount(revalidatedDue, prepayChargePlan.method.methodType || 'card', { funding: prepayChargePlan.method.funding });
+            if (revalidated.totalCents !== prepayChargePlan.quote.totalCents) {
+              throw estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+            }
+          } catch (revalErr) {
+            if (revalErr && revalErr.status) throw revalErr;
+            // Unknown credit state = unknown total — same fail-closed
+            // direction as the quote itself, retryable.
+            throw estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+          }
+        }
         const EstimateConverter = require('../services/estimate-converter');
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,

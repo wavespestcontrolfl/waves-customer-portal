@@ -439,8 +439,18 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
     }
     let rowId = policy.savedMethodRowId || null;
     if (!rowId && policy.exemptReason === 'autopay_already_active' && customerId) {
-      const customer = await db('customers').where({ id: customerId }).first('autopay_payment_method_id');
-      rowId = customer?.autopay_payment_method_id || null;
+      // CANONICAL resolver (Codex r15): customers.autopay_payment_method_id
+      // can be null or stale for a legacy Auto Pay customer whose default
+      // payment_methods row is perfectly chargeable — the same
+      // getChargeableAutopayMethod that customerOnAutopay used to admit the
+      // policy must pick the method here, or a null pointer 503s every
+      // retry and a stale one quotes a tender the final canonical-method
+      // guard then refuses post-commit.
+      const customer = await db('customers').where({ id: customerId }).first();
+      const canonicalPm = customer
+        ? await require('./autopay-eligibility').getChargeableAutopayMethod(customer)
+        : null;
+      rowId = canonicalPm?.id || null;
     }
     if (!rowId) return null;
     const row = await db('payment_methods').where({ id: rowId }).first();
@@ -748,6 +758,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           setupIntentId: job.setup_intent_id,
           estimateId: row.id,
           consentVariant: 'prepay_card',
+          // Same stamped payer scope as the existing-row enrollment and the
+          // charge guard (Codex r15): a self_pay_override visit on a
+          // payer-billed account must not have this recovery enrollment
+          // resolve the account-default payer, refuse, and retire the job
+          // to a pay link instead of the authorized charge.
+          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
         });
         if (enrollment?.paymentMethodRowId) {
           pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type');
