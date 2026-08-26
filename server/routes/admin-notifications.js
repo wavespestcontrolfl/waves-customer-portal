@@ -329,7 +329,10 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 router.put('/read-all', async (req, res, next) => {
   try {
     await NotificationService.markAllReadAdmin({ role: req.techRole });
-    await dismissLiveAlerts(req.technicianId);
+    // Live-alert dismissal is admin-only: the overlay never renders for
+    // other roles, and its helper also marks persisted dashboard_alert
+    // rows read — rows the fail-closed feed hides from them (codex P1).
+    if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -445,6 +448,11 @@ router.put('/:id/read', async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (id.startsWith('live:')) {
+      // Same admin-only rule as read-all: non-admins never see live alerts
+      // and must not be able to clear their persisted twins (codex P1).
+      if (req.techRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
       const alertId = id.slice('live:'.length);
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
