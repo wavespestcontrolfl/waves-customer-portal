@@ -237,6 +237,9 @@ describe('new_job_application bell', () => {
       'appointment_reschedule_intent',
       'customer_voicemail_callback',
       'job_complete',
+      // techVisible while /admin/leads is requireTechOrAdmin on this base;
+      // flips to adminRoleOnly after the #3501 role lockdown lands.
+      'new_lead',
       'service_report_delivery_failed',
       'service_report_pdf_failed',
       'sms_reply',
@@ -246,9 +249,6 @@ describe('new_job_application bell', () => {
       if (key === '__private') continue;
       expect(Boolean(t.adminRoleOnly && t.techVisible)).toBe(false);
     }
-    // Triggers whose linked surface is owner-only (role lockdown #3501)
-    // are owner-only end to end — push AND bell.
-    expect(TRIGGER_REGISTRY.new_lead.adminRoleOnly).toBe(true);
   });
 
   test('push tag is per-application so pushes never collapse', () => {

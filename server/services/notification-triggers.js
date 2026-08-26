@@ -132,11 +132,11 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
-    // Owner-only end to end: the linked /admin/leads surface is owner-only
-    // under the 2026-08-25 role lockdown (PR #3501 — sales is not a
-    // technician surface), so neither the bell row nor the push goes to
-    // non-admin staff. Keeps push and feed visibility consistent.
-    adminRoleOnly: true,
+    // Tech-visible TODAY: /admin/leads is requireTechOrAdmin on this base.
+    // NOTE: the role-lockdown PR (#3501) makes leads owner-only — once both
+    // land, flip this to adminRoleOnly: true (follow-up, tracked in the PR
+    // body) so push and feed visibility follow the surface.
+    techVisible: true,
     build: (p) => {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
