@@ -243,6 +243,7 @@ describe('new_job_application bell', () => {
       'service_report_delivery_failed',
       'service_report_pdf_failed',
       'sms_reply',
+      'twilio_failure',
     ]);
     // Owner-only triggers must never be both adminRoleOnly and techVisible.
     for (const [key, t] of Object.entries(TRIGGER_REGISTRY)) {

@@ -295,6 +295,10 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
+    // Tech-visible: urgent comms failures link to /admin/communications,
+    // a technician-allowed surface — a failed customer call/SMS is exactly
+    // what field staff must see and acknowledge.
+    techVisible: true,
     // Owner ruling (Adam, 2026-07-30): fully-masked failure bells ("from
     // ***5598 — CA...a76a0e") were untriageable. This trigger is exempt from
     // contact masking: the bell shows the real numbers and, when the remote
@@ -713,9 +717,14 @@ async function triggerNotification(triggerKey, payload = {}) {
     let activeAdmins = [];
     try {
       let recipientQuery = db('technicians').where({ active: true });
-      // Triggers whose linked surface is requireAdmin scope delivery to
-      // admin-role users — other staff would get a bell with a dead 403 link.
-      if (trigger.adminRoleOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
+      // Delivery follows the same fail-closed model as the persisted feed
+      // (notification-service scopeAdminFeedToRole): non-admin staff receive
+      // ONLY triggers classified techVisible — everything else, including
+      // unclassified finance/estimate alerts carrying customer names and
+      // amounts, goes to admin-role users alone. adminRoleOnly remains as
+      // explicit documentation on owner-only triggers; techVisible is the
+      // operative flag for both push recipients and bell visibility.
+      if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
