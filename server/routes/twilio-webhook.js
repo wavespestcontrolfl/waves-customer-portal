@@ -5,6 +5,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
@@ -631,8 +632,7 @@ router.post('/sms', async (req, res) => {
           crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
         })).returning('*');
 
-        await db('property_preferences').insert({ customer_id: newCust.id });
-        await db('notification_prefs').insert({ customer_id: newCust.id });
+        await createDefaultCustomerRows(db, newCust.id);
 
         try {
           const { triggerNotification } = require('../services/notification-triggers');

@@ -124,11 +124,15 @@ jest.mock('../models/db', () => {
     b.insert = (row) => {
       const stored = { id: row.id || `${table}-${rows().length + 1}`, ...row };
       rows().push(stored);
-      return {
+      const result = {
         returning: async () => [{ ...stored }],
         then: (res, rej) => Promise.resolve([{ ...stored }]).then(res, rej),
         catch: () => Promise.resolve([{ ...stored }]),
       };
+      // onConflict().ignore() — the default-rows helper chains it; the fake
+      // has no unique indexes, so ignore just resolves the insert.
+      result.onConflict = () => ({ ...result, ignore: () => result });
+      return result;
     };
     b.del = async () => 0;
     b.pluck = async () => [];

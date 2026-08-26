@@ -19,9 +19,35 @@ const path = require('path');
 const { _internals } = require('../services/slot-reservation');
 const { ENGINE_KEY_SEEDS } = require('../models/migrations/20260810000002_services_engine_key');
 
-const { catalogServiceIdForProfile } = _internals;
+const {
+  ENGINE_KEY_SEEDS: EXPANSION_SEEDS,
+  ALIAS_APPENDS,
+  CONDITIONAL_SEEDS,
+} = require('../models/migrations/20260825000011_engine_key_coverage_expansion');
 
-const ALL_SEEDED_KEYS = ENGINE_KEY_SEEDS.flatMap((s) => s.engine_keys);
+const { catalogLinkForProfile } = _internals;
+// id-only view used throughout this suite — the link {id, name, service_key}
+// is the single resolver surface since #3485 (the wrapper was removed).
+const catalogServiceIdForProfile = async (conn, profile) => {
+  const link = await catalogLinkForProfile(conn, profile);
+  return link ? link.id : null;
+};
+
+// The 2026-08-25 coverage expansion seeds ride on top of the original four
+// rows; the alias appends (wasp, pre_slab_termidor) join their parent
+// rows' arrays. The combined view is what the LIVE catalog carries after
+// both migrations.
+const appendsFor = (key) => ALIAS_APPENDS.filter((t) => t.service_key === key).map((t) => t.append);
+const COMBINED_SEEDS = [
+  ...ENGINE_KEY_SEEDS.map((s) => ({ ...s, engine_keys: [...s.engine_keys, ...appendsFor(s.service_key)] })),
+  ...EXPANSION_SEEDS,
+  // Conditional seeds land on whichever candidate row the environment has —
+  // represented here by their preferred candidate; the DB-backed tests below
+  // assert resolution on the LIVE catalog regardless of which row won.
+  ...CONDITIONAL_SEEDS.map((s) => ({ service_key: s.service_key_candidates[0], engine_keys: s.engine_keys })),
+];
+
+const ALL_SEEDED_KEYS = COMBINED_SEEDS.flatMap((s) => s.engine_keys);
 
 // Every engine key that can reach a one-time accept for a service observed on
 // accepted estimates in prod (audit 2026-08-10), INCLUDING the engine's current
@@ -43,13 +69,39 @@ const ENGINE_KEYS_REACHING_ACCEPT = [
 // that later gets seeded will fail the "no key is both mapped and declared
 // unmapped" test below, forcing this list to stay honest.
 const KNOWN_UNMAPPED_ENGINE_KEYS = [
-  'bora_care', 'dethatching', 'exclusion', 'exclusion_v2', 'flea_knockdown_single',
-  'flea_package', 'foam_drill', 'one_time_lawn', 'one_time_mosquito', 'one_time_pest',
-  'palm_injection', 'pest_initial_roach', 'plugging', 'rodent_bait_setup',
-  'rodent_bird_box', 'rodent_exclusion', 'rodent_guarantee', 'rodent_guarantee_combo',
-  'rodent_inspection', 'rodent_plugging', 'rodent_sanitation', 'rodent_trapping',
-  'rodent_trapping_followup', 'rodent_wire_mesh', 'termite_foam', 'trap_only_retainer',
-  'trap_only_setup', 'trenching', 'wasp', 'wdo_inspection',
+  // ONE key for four sanitation tier rows — no tier discriminator on the line.
+  'rodent_sanitation',
+  // Shared raw key: the engine reuses one_time_lawn for the distinct
+  // "Lawn Pest Knockdown" identity, so it cannot name one catalog row.
+  'one_time_lawn',
+  // Exclusion + bait + guarantee bundle — mapping it to the payment-only
+  // guarantee row would hide the sold field work from completion.
+  'rodent_guarantee_combo',
+  // Retainers are billing plans with no schedulable catalog rows by design
+  // (estimate-converter.js: deliberately NO branch), and their surcharge/
+  // callback riders bill on the parent line.
+  'trap_only_retainer', 'trap_only_setup', 'trap_only_extra_callback',
+  'rodent_trapping_emergency_surcharge', 'rodent_trapping_extra_callback',
+  // Priced rider with no catalog row of its own.
+  'rodent_plugging',
+  // One line can carry an AGGREGATE follow-up count while the slot profile
+  // books one appointment — unmapped until conversion is count-aware.
+  'rodent_trapping_followup',
+  // ONE engine key sells TWO plans (Standard: two included callbacks;
+  // Unlimited) while the catalog row's completion contract is the
+  // unlimited 14-day chaining window — a Standard sale stamped with it
+  // would generate callbacks beyond the two purchased (codex r18 P1).
+  'rodent_trapping',
+  // Active only in prod (admin-reactivated after the 20260519000003
+  // archive) — a seed would target an archived row in migration-built
+  // databases; the label resolves the row by unique name where it is live.
+  'palm_injection',
+  // Two-visit program vs one-visit catalog contract — a durable identity
+  // would erase the treatment-count difference (flea package's priced
+  // follow-up; roach knockdown vs cockroach_control's fixed two-treatment
+  // 14-day-follow-up lane). Label resolution keeps status-quo behavior.
+  'flea_package',
+  'pest_initial_roach',
 ];
 
 // Load the knexfile BEFORE deciding to skip — it resolves the Railway
@@ -68,7 +120,7 @@ describe('accept-path engine-key mapping (static)', () => {
 
   test('no engine key is claimed by two catalog rows', () => {
     const seen = new Map();
-    for (const seed of ENGINE_KEY_SEEDS) {
+    for (const seed of COMBINED_SEEDS) {
       for (const key of seed.engine_keys) {
         expect(seen.has(key)
           ? `${key} claimed by both ${seen.get(key)} and ${seed.service_key}`
@@ -91,10 +143,20 @@ describe('accept-path engine-key mapping (static)', () => {
     expect(owner('german_roach_initial')).toBe('german_roach_initial');
   });
 
-  test('both stinging-insect engine versions resolve to ONE catalog row', () => {
-    const owner = (key) => ENGINE_KEY_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
+  test('all three stinging-insect engine versions resolve to ONE catalog row', () => {
+    const owner = (key) => COMBINED_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
     expect(owner('stinging_insect')).toBe('bee_wasp_removal');
     expect(owner('stinging_insect_v2')).toBe('bee_wasp_removal');
+    // The legacy v1 'wasp' key (service-pricing.js:7842) is the third alias —
+    // missed by the original seed, appended by 20260825000011.
+    expect(owner('wasp')).toBe('bee_wasp_removal');
+  });
+
+  test('legacy pre_slab_termidor stays on the certificate lane', () => {
+    // It wraps pricePreSlabTermiticide — same FDACS-certificate service, so
+    // it must resolve termite_slab_pretreat, never termite_pretreatment.
+    const owner = (key) => COMBINED_SEEDS.find((s) => s.engine_keys.includes(key))?.service_key;
+    expect(owner('pre_slab_termidor')).toBe('termite_slab_pretreat');
   });
 });
 
@@ -119,6 +181,32 @@ describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
     const services = profile?.services || [];
     return services.find((s) => s?.service === 'pest_control') || services[0] || null;
   };
+
+  test('the rodent_guarantee payment-only rider never enters the profile (codex r21 P1)', () => {
+    // The engine emits the guarantee before later services; if it entered
+    // the profile it would become the PRIMARY and stamp the field visit
+    // with a duration-zero internal-only billing identity, hiding the sold
+    // plugging work from its completion lane. It stays on billing only.
+    const estimate = {
+      id: 'est-guarantee',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_guarantee', name: 'Rodent Guarantee', price: 349 },
+              { service: 'plugging', name: 'Lawn Plugging', price: 480 },
+            ],
+            total: 829,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = profile?.services || [];
+    expect(services.some((s) => s?.engineKey === 'rodent_guarantee')).toBe(false);
+    expect(services.some((s) => s?.engineKey === 'plugging')).toBe(true);
+  });
 
   test.each([
     ['german_roach', 'German Roach Cleanout'],
@@ -191,13 +279,20 @@ describe('catalogServiceIdForProfile', () => {
   test('picks the SAME primary the display label picks (pest_control wins)', async () => {
     // canonicalServiceTypeForProfile prefers a pest_control line over
     // services[0]; the id must describe the same service as the label, or one
-    // row would claim two different services.
-    let bindings = null;
+    // row would claim two different services. The family category resolves
+    // through its cadence key (family keys are never containment-queried),
+    // so the cadence lookup firing for pest proves pest_control won.
+    let where = null;
+    const conn = () => ({
+      whereRaw: () => { throw new Error('family key must not be containment-queried'); },
+      where: (cond) => { where = cond; return { limit: () => ({ select: async () => [{ id: 'svc-pest', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }; },
+    });
+    conn.transaction = async (cb) => cb(conn);
     await catalogServiceIdForProfile(
-      makeConn((b) => { bindings = b; return [{ id: 'svc-pest' }]; }),
-      { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control' }] },
+      conn,
+      { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control', visitsPerYear: 12 }] },
     );
-    expect(bindings).toEqual([JSON.stringify(['pest_control'])]);
+    expect(where).toEqual({ service_key: 'pest_general_monthly', is_active: true });
   });
 
   test('only ACTIVE catalog rows are eligible', async () => {
@@ -219,6 +314,158 @@ describe('catalogServiceIdForProfile', () => {
     expect(await catalogServiceIdForProfile(
       makeConn(() => []), { services: [{ service: 'not_a_real_key' }] },
     )).toBeNull();
+  });
+
+  // Cadence families share one engine key across per-cadence rows, so
+  // containment can never resolve them; the resolver falls back to the
+  // cadence-specific service_key — environment-proof where the label
+  // whitelist is not (fresh DBs carry different NAMES for the same rows,
+  // e.g. "Mosquito Control Service (Monthly)" — codex #3485 r3 P1).
+  describe('cadence-keyed fallback', () => {
+    const makeCadenceConn = (keyRows, capture = {}) => {
+      const builder = () => ({
+        whereRaw: () => ({ andWhere: () => ({ limit: () => ({ select: async () => [] }) }) }),
+        where: (cond) => {
+          capture.where = cond;
+          return { limit: () => ({ select: async () => keyRows }) };
+        },
+      });
+      builder.transaction = async (cb) => cb(builder);
+      return builder;
+    };
+
+    test('a 12-visit mosquito profile resolves mosquito_monthly by service_key', async () => {
+      const capture = {};
+      const row = { id: 'svc-mm', name: 'Mosquito Control Service (Monthly)', service_key: 'mosquito_monthly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'mosquito', visitsPerYear: 12 }] },
+      );
+      expect(link).toEqual(row);
+      expect(capture.where).toEqual({ service_key: 'mosquito_monthly', is_active: true });
+    });
+
+    test('a quarterly pest profile resolves pest_general_quarterly', async () => {
+      const capture = {};
+      const row = { id: 'svc-pq', name: 'Quarterly Pest Control Service', service_key: 'pest_general_quarterly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'pest_control', visitsPerYear: 4 }] },
+      );
+      expect(link).toEqual(row);
+    });
+
+    test('a legacy 4-application lawn profile resolves lawn_care_quarterly', async () => {
+      const capture = {};
+      const row = { id: 'svc-lq', name: 'Quarterly Lawn Care Service', service_key: 'lawn_care_quarterly' };
+      const link = await catalogLinkForProfile(
+        makeCadenceConn([row], capture),
+        { services: [{ service: 'lawn_care', visitsPerYear: 4 }] },
+      );
+      expect(link).toEqual(row);
+      expect(capture.where).toEqual({ service_key: 'lawn_care_quarterly', is_active: true });
+    });
+
+    test('off-catalog visit counts stay unlinked (exact match, never bucketed)', async () => {
+      // 8 pest visits are NOT the 6-visit bi-monthly row; bucketing would
+      // stamp an unrelated durable identity (codex #3485 r8 P2).
+      const capture = {};
+      for (const [service, visits] of [['pest_control', 8], ['lawn_care', 10], ['mosquito', 10], ['tree_shrub', 5]]) {
+        expect(await catalogLinkForProfile(
+          makeCadenceConn([{ id: 'x' }], capture),
+          { services: [{ service, visitsPerYear: visits }] },
+        )).toBeNull();
+      }
+      expect(capture.where).toBeUndefined();
+    });
+
+    test('one_time mode and unknown cadence never trigger the keyed lookup', async () => {
+      const capture = {};
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { serviceMode: 'one_time', services: [{ service: 'pest_control', visitsPerYear: 4 }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { services: [{ service: 'pest_control' }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+    });
+
+    test('cadence profiles resolve by cadence key EXCLUSIVELY — a shared family mapping never wins', async () => {
+      // An admin-authored 'pest_control' engine key on the quarterly row
+      // must not stamp a 12-visit monthly accept (codex #3485 r13 P1).
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-quarterly' }] }) }) }; },
+        where: (cond) => ({ limit: () => ({ select: async () => [{ id: 'svc-monthly', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      const link = await catalogLinkForProfile(conn, {
+        services: [{ service: 'pest_control', visitsPerYear: 12 }],
+      });
+      expect(link).toMatchObject({ id: 'svc-monthly', service_key: 'pest_general_monthly' });
+      expect(containmentQueried).toBe(false);
+    });
+
+    test('an off-cadence family profile NEVER falls through to containment', async () => {
+      // 8-visit pest, cadence-less lawn, 10-visit mosquito: the shared
+      // family key spans multiple catalog rows, so a single admin-authored
+      // family mapping would stamp every off-cadence accept with that one
+      // row's identity (pre-push P1). They stay unlinked instead.
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-admin-mapped' }] }) }) }; },
+        where: () => ({ limit: () => ({ select: async () => [] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      for (const services of [
+        [{ service: 'pest_control', visitsPerYear: 8 }],
+        [{ service: 'lawn_care' }],
+        [{ service: 'mosquito', visitsPerYear: 10 }],
+        [{ service: 'tree_shrub', visitsPerYear: 12 }],
+      ]) {
+        expect(await catalogLinkForProfile(conn, { services })).toBeNull();
+      }
+      expect(containmentQueried).toBe(false);
+    });
+
+    test('commercial plans never stamp residential cadence rows', async () => {
+      const capture = {};
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'x' }], capture),
+        { services: [{ service: 'pest_control', engineKey: 'commercial_pest', visitsPerYear: 4, name: 'Commercial Pest Control' }] },
+      )).toBeNull();
+      expect(capture.where).toBeUndefined();
+    });
+
+    test('commercial profiles never resolve through CONTAINMENT either (termite bait collapse)', async () => {
+      // resolveEstimateSlotProfile collapses commercial_termite_bait to
+      // service 'termite_bait' with commercial: true — containment would
+      // otherwise stamp the RESIDENTIAL bait row (pre-push P1).
+      let containmentQueried = false;
+      const conn = () => ({
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-resi-bait' }] }) }) }; },
+        where: () => ({ limit: () => ({ select: async () => [] }) }),
+      });
+      conn.transaction = async (cb) => cb(conn);
+      expect(await catalogLinkForProfile(conn, {
+        services: [{ service: 'termite_bait', commercial: true, visitsPerYear: 4 }],
+      })).toBeNull();
+      // Raw-identity fallback when the flag is absent but the text says so.
+      expect(await catalogLinkForProfile(conn, {
+        services: [{ service: 'termite_bait', name: 'Commercial Termite Bait Stations', visitsPerYear: 4 }],
+      })).toBeNull();
+      expect(containmentQueried).toBe(false);
+    });
+
+    test('an ambiguous cadence key FAILS CLOSED', async () => {
+      expect(await catalogLinkForProfile(
+        makeCadenceConn([{ id: 'a' }, { id: 'b' }]),
+        { services: [{ service: 'mosquito', visitsPerYear: 12 }] },
+      )).toBeNull();
+    });
   });
 
   test('FAILS OPEN when the lookup throws (pre-migration deploy)', async () => {

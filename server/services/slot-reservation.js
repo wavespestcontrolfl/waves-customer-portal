@@ -120,6 +120,24 @@ function cappedServiceType(value, fallback = 'Estimate service') {
   return `${label.slice(0, MAX_SERVICE_TYPE_LENGTH - 3).trimEnd()}...`;
 }
 
+// Catalog row NAMES are admin-mutable, and appointment-tagger's classifier
+// consumes ONLY service_type — an admin rename that drops the family tokens
+// (a WDO row renamed "Real Estate Report") would classify the visit and
+// every seeded follow-up 'general' and skip type-specific automation like
+// WDO prep, even though id + snapshot still identify the service exactly
+// (codex #3485 r20 P1). Adopt the linked row's name only when it classifies
+// the same as the stable canonical label; otherwise keep the canonical
+// label — the durable identity still rides service_id + the key snapshot.
+function classifierStableServiceType(linkName, canonicalLabel) {
+  const linkLabel = cappedServiceType(linkName);
+  const canon = String(canonicalLabel || '').trim();
+  if (!canon) return linkLabel;
+  const tagger = require('./appointment-tagger');
+  const linkTag = tagger.classifyAppointmentType(linkLabel).tag;
+  const canonTag = tagger.classifyAppointmentType(canon).tag;
+  return (linkTag === canonTag || canonTag === 'general') ? linkLabel : cappedServiceType(canon);
+}
+
 function serviceKeyForLabel(value = '') {
   const raw = String(value || '').toLowerCase();
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
@@ -135,11 +153,53 @@ function serviceKeyForLabel(value = '') {
   return '';
 }
 
+// Cadence labels are EXACT catalog `services.name` values — the completion
+// resolver's name fallback and the protocol-button alias table both match by
+// string, and the old bare forms ("Quarterly Pest Control") matched nothing:
+// 152 estimate-born visits in 90 days booked with no catalog identity at all
+// (2026-08-25 audit). Every literal here must stay equal to its catalog row.
+// EXACT catalog visit counts only, same contract as the keyed resolver
+// (codex #3485 r9 P2): these labels are catalog-resolvable by name, so a
+// bucketed label would put an off-catalog plan (8 pest visits) onto a
+// catalog row's billing/completion lane by NAME despite the null id. A
+// KNOWN off-catalog count gets the deliberately ambiguous legacy label
+// (fails closed); an UNKNOWN count keeps the historical family default.
 function pestServiceTypeFromVisits(visitsPerYear) {
   const visits = Number(visitsPerYear);
-  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Pest Control';
-  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Pest Control';
-  return 'Quarterly Pest Control';
+  if (!Number.isFinite(visits) || visits <= 0) return 'Quarterly Pest Control Service';
+  if (visits === 12) return 'Monthly Pest Control Service';
+  if (visits === 6) return 'Bi-Monthly Pest Control Service';
+  if (visits === 4) return 'Quarterly Pest Control Service';
+  // Semiannual (2/yr) had NO branch and mislabeled as quarterly — the one
+  // cadence where the wrong prefix misstates the plan the customer bought.
+  if (visits === 2) return 'Semiannual Pest Control Service';
+  return 'Pest Control';
+}
+
+function lawnServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return 'Lawn Care';
+  if (visits === 12) return 'Monthly Lawn Care Service';
+  if (visits === 9) return 'Every 6 Weeks Lawn Care Service';
+  if (visits === 6) return 'Bi-Monthly Lawn Care Service';
+  return 'Lawn Care';
+}
+
+function mosquitoServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return 'Mosquito Treatment';
+  if (visits === 12) return 'Monthly Mosquito Control Service';
+  if (visits === 9) return 'Seasonal Mosquito Control Service';
+  return 'Mosquito Treatment';
+}
+
+function treeShrubServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return 'Tree & Shrub';
+  if (visits === 9) return 'Every 6 Weeks Tree & Shrub Care Service';
+  if (visits === 6) return 'Bi-Monthly Tree & Shrub Care Service';
+  if (visits === 4) return 'Quarterly Tree & Shrub Care Service';
+  return 'Tree & Shrub';
 }
 
 function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service', opts = {}) {
@@ -154,12 +214,24 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   // profile at commit can't re-derive the cadence prefix from a stale fallback.
   const isOneTime = opts.serviceMode === 'one_time' || serviceProfile?.serviceMode === 'one_time';
 
+  // One-time branches deliberately keep the LEGACY ambiguous labels: the
+  // category collapses every pest/lawn specialty into one key, so a
+  // canonical one-time name here would resolve the generic one-time row
+  // for work that is actually a specialty (a "Lawn Pest Knockdown" line
+  // carries the shared one_time_lawn key — codex #3485 r1 P1). Canonical
+  // one-time names come ONLY from the engine-key catalog link, which
+  // resolves the specific row or nothing.
   if (key === 'pest_control') return isOneTime ? 'Pest Control' : pestServiceTypeFromVisits(primary?.visitsPerYear);
-  if (key === 'lawn_care') return 'Lawn Care';
-  if (key === 'mosquito') return 'Mosquito Treatment';
-  if (key === 'tree_shrub') return 'Tree & Shrub';
+  if (key === 'lawn_care') return isOneTime ? 'Lawn Care' : lawnServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'mosquito') return isOneTime ? 'Mosquito Treatment' : mosquitoServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'tree_shrub') return treeShrubServiceTypeFromVisits(primary?.visitsPerYear);
+  // Legacy short-name form: the catalog row's NAME is admin-editable (prod
+  // already diverges from the migration-shipped value), so the fallback
+  // keeps the unique "Termite Bait" short-name lookup that already worked;
+  // the canonical name comes from the engine-key link (codex #3485 r1 P1).
   if (key === 'termite_bait') return 'Termite Bait';
   if (key === 'foam_recurring') return 'Recurring Termite Foam Service';
+  if (key === 'foam_drill') return 'Termite Foam Service';
   if (key === 'palm_injection') return 'Palm Injection';
   if (key === 'rodent_trapping') return 'Rodent Trapping Service';
   if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
@@ -200,7 +272,65 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // transaction is aborted" and take down estimate acceptance itself: the exact
 // opposite of the fail-open contract this helper promises. The savepoint
 // confines any failure to this read.
-async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
+// Cadence families share ONE engine key across their per-cadence catalog
+// rows, so containment can never resolve them — but the cadence rows have
+// stable service_keys, and (category × visits/yr) names exactly one. Keyed
+// resolution is environment-proof where the label whitelist is not: the
+// rows' NAMES are admin-editable and already diverge between prod and
+// migration-built databases (codex #3485 r3 P1, monthly mosquito). Only
+// finite visit counts map; an unknown cadence stays unlinked (fail open).
+const CADENCE_FAMILY_KEYS = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+
+function cadenceCatalogKeyForProfile(primary, isOneTime) {
+  if (isOneTime || !primary) return null;
+  // Commercial plans collapse to the residential categories in the slot
+  // profile (commercial_pest → 'pest_control'), but they must never stamp
+  // a residential cadence row's identity — no commercial catalog rows
+  // exist, so they stay unlinked (codex #3485 r10 P1).
+  const rawIdentity = [primary.engineKey, primary.key, primary.serviceKey, primary.service_key, primary.name, primary.label, primary.displayName]
+    .filter(Boolean).join(' ');
+  // primary.commercial is the profile builder's pre-collapse flag — the
+  // label alone can't be trusted to say "commercial" (codex r12 P1).
+  if (primary.commercial || /commercial/i.test(rawIdentity)) return null;
+  const visits = Number(primary.visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return null;
+  // EXACT catalog visit counts only (codex #3485 r8 P2): bucketing would
+  // stamp an unrelated durable identity for legacy/admin-authored profiles
+  // (8 pest visits are NOT the 6-visit bi-monthly row) — an off-catalog
+  // cadence stays unlinked, exactly as the fail-open contract promises.
+  const key = String(primary.service || '');
+  if (key === 'pest_control') {
+    if (visits === 12) return 'pest_general_monthly';
+    if (visits === 6) return 'pest_general_bimonthly';
+    if (visits === 4) return 'pest_general_quarterly';
+    if (visits === 2) return 'pest_general_semiannual';
+    return null;
+  }
+  if (key === 'lawn_care') {
+    if (visits === 12) return 'lawn_care_monthly';
+    if (visits === 9) return 'lawn_care_6week';
+    if (visits === 6) return 'lawn_care_recurring';
+    // 4-application Basic tier: the PUBLIC accept path 409s this retired
+    // cadence, but legacy/admin-carried 4-visit lawn profiles still reach
+    // commit and the lawn_care_quarterly row is active (codex P1).
+    if (visits === 4) return 'lawn_care_quarterly';
+    return null;
+  }
+  if (key === 'mosquito') {
+    if (visits === 12) return 'mosquito_monthly';
+    if (visits === 9) return 'mosquito_seasonal';
+    return null;
+  }
+  if (key === 'tree_shrub') {
+    if (visits === 9) return 'tree_shrub_6week';
+    if (visits === 6) return 'tree_shrub_program';
+    if (visits === 4) return 'tree_shrub_quarterly';
+    return null;
+  }
+  return null;
+}
+
+async function catalogLinkForProfile(conn, serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
@@ -214,6 +344,26 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
   // leaving it null and failing open.
   const engineKey = String(primary?.engineKey || primary?.service || '').trim();
   if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
+  // Commercial profiles never stamp catalog identity — ANY lane, not just
+  // the cadence families: the profile builder collapses commercial keys to
+  // their residential category (commercial_termite_bait → 'termite_bait')
+  // while keeping the commercial flag, so containment would otherwise
+  // resolve the RESIDENTIAL row and put a commercial accept on residential
+  // billing/completion (pre-push P1). Same two-signal check the cadence
+  // helper uses: the pre-collapse flag plus the raw identity text.
+  const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
+    .filter(Boolean).join(' ');
+  if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
+  const isOneTime = serviceProfile?.serviceMode === 'one_time';
+  const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
+  // The four cadence-family category keys intentionally span MULTIPLE
+  // catalog rows, so containment can never name one row for them. When no
+  // exact cadence key resolves (off-catalog visit count, commercial,
+  // unknown cadence, or a category-keyed one-time with no engine key), the
+  // profile stays unlinked — falling through to containment would let a
+  // single admin-authored family mapping stamp every off-cadence accept
+  // with that one row's identity (pre-push P1).
+  if (!cadenceKey && CADENCE_FAMILY_KEYS.has(engineKey)) return null;
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
@@ -230,13 +380,28 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
       // no stamp, which merely reverts to today's behavior. Take two and resolve
       // only on exactly one. The DB-backed contract test catches drift at CI
       // time; this is the runtime guard that CI cannot provide.
+      // Cadence profiles resolve by their cadence-specific service_key
+      // EXCLUSIVELY (codex #3485 r13 P1): the shared family keys
+      // (pest_control/lawn_care/mosquito/tree_shrub) intentionally span
+      // multiple cadence rows, so an admin-authored family mapping on ONE
+      // cadence row would otherwise stamp every other cadence with that
+      // row's identity (a 12-visit accept labeled quarterly). One-time and
+      // specialty profiles keep engine-key containment.
+      if (cadenceKey) {
+        const cadenceRows = await sp('services')
+          .where({ service_key: cadenceKey, is_active: true })
+          .limit(2)
+          .select('id', 'name', 'service_key');
+        if (cadenceRows.length === 1) resolved = cadenceRows[0];
+        return;
+      }
       const rows = await sp('services')
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select('id');
+        .select('id', 'name', 'service_key');
       if (rows.length === 1) {
-        resolved = rows[0].id;
+        resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
       }
@@ -251,6 +416,7 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
   }
   return resolved;
 }
+
 
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
   const label = String(serviceProfile?.serviceLabel || fallback || '')
@@ -609,13 +775,22 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
-      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
-      // Catalog link — see catalogServiceIdForProfile. Stamped on the HOLD so
-      // the graduated visit carries it even if the profile can't be re-resolved
+      // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
+      // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
-      const catalogServiceId = await catalogServiceIdForProfile(trx, serviceProfile);
+      // When the engine key resolves a unique catalog row, THAT row's name is
+      // the visit label — one source of truth instead of a parallel
+      // whitelist; the whitelist handles cadence families whose shared engine
+      // key can't resolve a single row, and unmapped keys keep the legacy
+      // service_interest fallback.
+      const catalogLink = await catalogLinkForProfile(trx, serviceProfile);
+      const catalogServiceId = catalogLink ? catalogLink.id : null;
+      const holdCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
+      const serviceType = catalogLink?.name
+        ? classifierStableServiceType(catalogLink.name, holdCanonicalLabel)
+        : holdCanonicalLabel;
 
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
@@ -876,6 +1051,10 @@ async function reserveSlot({
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
         ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
+        // Durable identity evidence: the completion resolver checks
+        // service_key_snapshot right after service_id, so the stamp
+        // survives even a later admin repoint of the catalog row.
+        ...(catalogLink?.service_key ? { service_key_snapshot: catalogLink.service_key } : {}),
         // Geo stamp (best-effort): coords make the hold a real route anchor
         // for find-time's detour math; the zone slug lets the zone-capacity
         // conflict check see holds directly instead of via the (absent)
@@ -1153,7 +1332,6 @@ async function commitReservation({
     if (windowEnd) {
       updates.window_end = windowEnd;
       updates.estimated_duration_minutes = effectiveDurationMinutes;
-      updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
       // The catalog link is RESTAMPED from the accepted profile, in the same
       // block that recomputes the label — id and label must describe the same
@@ -1174,7 +1352,15 @@ async function commitReservation({
       //
       // Assigned unconditionally, including null: if the accepted profile
       // resolves to nothing, a stale specialty id must be CLEARED, not kept.
-      updates.service_id = await catalogServiceIdForProfile(client, serviceProfile);
+      // Same rule for the snapshot and the label: id, key, and label must
+      // describe the same accepted service.
+      const commitLink = await catalogLinkForProfile(client, serviceProfile);
+      const commitCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
+      updates.service_id = commitLink ? commitLink.id : null;
+      updates.service_key_snapshot = commitLink?.service_key || null;
+      updates.service_type = commitLink?.name
+        ? classifierStableServiceType(commitLink.name, commitCanonicalLabel)
+        : commitCanonicalLabel;
     }
 
     const [updated] = await client('scheduled_services')
@@ -1251,13 +1437,113 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
  */
 async function releaseExpiredReservations() {
   const now = new Date();
+  // Only uncommitted holds (customer_id NULL — the module's own hold
+  // discriminator) are deletable. A row that carries a customer with a stale
+  // reservation_expires_at is a COMMITTED booking whose commit didn't clear
+  // the timestamp (commitReservation clears it in the same UPDATE, but any
+  // other writer — or a partial legacy row — can leave it behind): deleting
+  // it here would silently destroy a real visit. Rescue it instead by
+  // clearing the stray timestamp, and say so loudly.
+  // Rescue runs per-date under the SAME occupancy advisory lock the booking
+  // paths take (hook r2 P1): clearing the timestamp turns an invisible
+  // expired row back into active occupancy, and doing that outside the lock
+  // races a booking transaction that already passed its conflict check —
+  // the probe below could run before that booking commits and miss the
+  // overlap. Lock → re-verify → clear → probe, all in one transaction per
+  // date, so the rescue and every booking serialize on the date.
+  const { acquireOccupancyLock } = require('./scheduling/occupancy');
+  const expiredCommitted = await db('scheduled_services')
+    .where('reservation_expires_at', '<', now)
+    .whereNotNull('customer_id')
+    .select('id', 'scheduled_date');
+  const byDate = new Map();
+  for (const r of expiredCommitted) {
+    const d = typeof r.scheduled_date === 'string'
+      ? r.scheduled_date.slice(0, 10)
+      : (r.scheduled_date ? new Date(r.scheduled_date).toISOString().slice(0, 10) : null);
+    if (!byDate.has(d)) byDate.set(d, []);
+    byDate.get(d).push(r.id);
+  }
+  let rescued = 0;
+  const collisions = [];
+  for (const dateStr of [...byDate.keys()].sort()) {
+    try {
+      // Results accumulate LOCALLY and merge only after commit (hook r3
+      // P1): a later probe throwing rolls the rescue back, and the outer
+      // state must not report rows Postgres never kept.
+      const { txRescued, txCollisions } = await db.transaction(async (trx) => {
+        if (dateStr) await acquireOccupancyLock(trx, dateStr);
+        const rows = await trx('scheduled_services')
+          .whereIn('id', byDate.get(dateStr))
+          .where('reservation_expires_at', '<', now)
+          .whereNotNull('customer_id')
+          // Re-verify the date UNDER the lock (hook r3 P1): a concurrent
+          // reschedule can move the row after the unlocked snapshot; the
+          // rescue must never reactivate occupancy on a date whose lock it
+          // does not hold — a moved row is left for the next 15-min tick.
+          .modify((qb) => {
+            if (dateStr) qb.whereRaw('scheduled_date::date = ?', [dateStr]);
+            else qb.whereNull('scheduled_date');
+          })
+          .update({ reservation_expires_at: null, updated_at: now })
+          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
+        const localCollisions = [];
+        for (const row of rows) {
+          if (!row.scheduled_date || !row.window_start) continue;
+          // findConflictingVisits requires windowEnd — derive it from the
+          // duration when the row has none (legacy admin edits).
+          const ws = String(row.window_start).slice(0, 8);
+          let we = row.window_end ? String(row.window_end).slice(0, 8) : null;
+          if (!we) {
+            const [h, m] = ws.split(':').map(Number);
+            const end = h * 60 + (m || 0) + (Number(row.estimated_duration_minutes) || 60);
+            we = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00`;
+          }
+          const clash = await findConflictingVisits({
+            db: trx,
+            date: dateStr,
+            windowStart: ws,
+            windowEnd: we,
+            excludeServiceIds: [row.id],
+            includeHolds: false,
+          });
+          if (Array.isArray(clash) && clash.length) {
+            localCollisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
+          }
+        }
+        return { txRescued: rows.length, txCollisions: localCollisions };
+      });
+      rescued += txRescued;
+      collisions.push(...txCollisions);
+    } catch (rescueErr) {
+      logger.error(`[slot-reservation] rescue transaction failed for ${dateStr}: ${rescueErr.message}`);
+    }
+  }
+  if (rescued > 0) {
+    logger.warn(`[slot-reservation] cleared stale reservation_expires_at on ${rescued} COMMITTED visit(s) — a committed row is never deleted by this sweep`);
+  }
+  // Bells fire post-commit — a notify failure must not roll back a rescue.
+  for (const c of collisions) {
+    logger.warn(`[slot-reservation] rescued visit ${c.id} now COLLIDES with ${c.conflicts.length} other visit(s) booked while it was expired`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'schedule',
+        'Rescued reservation collides with a newer booking',
+        `Visit ${c.id} was rescued from the expired-reservation sweep, but another booking took its window while it looked dead. One of the two needs a new slot.`,
+        { bell: true, metadata: { scheduledServiceId: c.id, conflicts: c.conflicts } },
+      );
+    } catch (notifyErr) {
+      logger.error(`[slot-reservation] rescue-collision notify failed: ${notifyErr.message}`);
+    }
+  }
   const released = await db('scheduled_services')
     .where('reservation_expires_at', '<', now)
+    .whereNull('customer_id')
     .del();
   if (released > 0) {
     logger.info(`[slot-reservation] released ${released} expired reservation(s)`);
   }
-  return { released };
+  return { released, rescued };
 }
 
 module.exports = {
@@ -1273,13 +1559,14 @@ module.exports = {
   // appointment path (estimate-public adoptedAppointmentCatalogStamp) reuses
   // it so identity has exactly one resolver — never re-implement the
   // engine-key containment lookup.
-  catalogServiceIdForProfile,
+  catalogLinkForProfile,
   _internals: {
     parseSlotId,
     addMinutesToTime,
     cappedServiceType,
     canonicalServiceTypeForProfile,
+    classifierStableServiceType,
     notesWithServiceMix,
-    catalogServiceIdForProfile,
+    catalogLinkForProfile,
   },
 };

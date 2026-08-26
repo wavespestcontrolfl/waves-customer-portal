@@ -499,14 +499,36 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   let primaryCategory = null;
   if (showOneTimeOption && typeof serviceCategoryForOneTimeChoice === 'function') {
     primaryCategory = serviceCategoryForOneTimeChoice(estData) || null;
-    if (primaryCategory) add(primaryCategory, labelForCategory(primaryCategory) || 'One-time service');
+    // The synthetic primary must carry the RAW one-time engine key: the
+    // priced choice row is deliberately skipped below, and a category-only
+    // primary queries the unkeyed family ('pest_control'/'mosquito') so the
+    // toggled accept keeps null identity and misses the one-time completion
+    // invoice / card-hold charge (codex #3485 r3 P1). Lawn stays keyless —
+    // one_time_lawn is a shared identity (see the engine-key migration).
+    const ONE_TIME_CHOICE_ENGINE_KEYS = { pest_control: 'one_time_pest', mosquito: 'one_time_mosquito' };
+    if (primaryCategory) {
+      add(
+        primaryCategory,
+        labelForCategory(primaryCategory) || 'One-time service',
+        ONE_TIME_CHOICE_ENGINE_KEYS[primaryCategory] || null,
+      );
+    }
   }
 
   // Setup fees and discounts carry no dispatchable service. A positive
   // one_time_adjustment ("Other one-time services") is intentionally NOT here — it
   // is a real billable charge that dispatch must perform, so it stays visible
   // (negative adjustments are dropped by the discount/amount guards below).
-  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount'];
+  // rodent_guarantee is the payment-only guarantee RIDER (its catalog row
+  // is a duration-zero internal-only billing construct) — never a
+  // dispatchable visit. Letting it into the profile can make it the
+  // PRIMARY (the engine emits it before later services), so a guarantee +
+  // plugging estimate would stamp the field visit with the payment-only
+  // identity and hide the sold plugging work from its completion/report
+  // lane (codex #3485 r21 P1). It stays on the invoice/billing side; the
+  // rodent_guarantee_combo bundle is NOT excluded — it carries real field
+  // work.
+  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee'];
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
     if (item.quoteRequired === true || item.kind === 'discount') continue;
@@ -647,10 +669,17 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
       .map((row) => {
         const key = serviceKeyFor(row);
         const label = labelForService(row);
+        // The category collapse erases the commercial identity
+        // (commercial_pest → 'pest_control'), and an operator-authored
+        // label need not say "commercial" — carry the fact as data so the
+        // cadence catalog link can refuse residential rows (codex r12 P1).
+        const rawIdentity = [row.service, row.serviceKey, row.service_key, row.key, row.name, row.label, row.displayName]
+          .filter(Boolean).join(' ');
         return {
           service: key,
           label,
           visitsPerYear: visitsForService(row),
+          commercial: /commercial/i.test(rawIdentity) || undefined,
         };
       })
       .filter((row) => row.service && row.label);

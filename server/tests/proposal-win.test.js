@@ -13,11 +13,14 @@ jest.mock('../services/payer', () => ({
 }));
 jest.mock('../routes/admin-customers', () => ({
   ensureCustomerAccount: jest.fn(),
+}));
+jest.mock('../services/customer-default-rows', () => ({
   createDefaultCustomerRows: jest.fn().mockResolvedValue(),
 }));
 
 const InvoiceService = require('../services/invoice');
 const adminCustomers = require('../routes/admin-customers');
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const {
   buildProposalFirstInvoice,
   proposalNetTermDays,
@@ -370,7 +373,7 @@ function makeTrx() {
 describe('ensureCustomerForProposalWin', () => {
   beforeEach(() => {
     adminCustomers.ensureCustomerAccount.mockReset();
-    adminCustomers.createDefaultCustomerRows.mockClear();
+    createDefaultCustomerRows.mockClear();
   });
 
   test('creates a new commercial customer when no account matches', async () => {
@@ -392,7 +395,7 @@ describe('ensureCustomerForProposalWin', () => {
       active: true,
       email: 'board@example.com',
     });
-    expect(adminCustomers.createDefaultCustomerRows).toHaveBeenCalledWith(trx, 'new-cust');
+    expect(createDefaultCustomerRows).toHaveBeenCalledWith(trx, 'new-cust');
   });
 
   test('NEVER reuses a phone-matched customer — creates a new commercial profile under the matched account (phone != property; money-correctness)', async () => {

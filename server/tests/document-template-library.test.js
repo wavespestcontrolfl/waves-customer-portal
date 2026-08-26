@@ -367,12 +367,12 @@ describe('document template library', () => {
       phone: '(941) 555-0101',
       sms_enabled: true,
       seasonal_tips: false,
-    }, ['sms'], { smsPurpose: 'marketing' })).toEqual([]);
+    }, ['sms'], { smsPurpose: 'marketing_seasonal' })).toEqual([]);
     expect(BulkDocumentSend._internals.channelsForCustomer({
       phone: '(941) 555-0101',
       sms_enabled: true,
       seasonal_tips: true,
-    }, ['sms'], { smsPurpose: 'marketing' })).toEqual(['sms']);
+    }, ['sms'], { smsPurpose: 'marketing_seasonal' })).toEqual(['sms']);
     expect(BulkDocumentSend._internals.marketingSmsConsentBasis({
       phone: '(941) 555-0101',
       sms_enabled: true,
@@ -411,7 +411,7 @@ describe('document template library', () => {
       customer: { first_name: 'Alice' },
       signingUrl: 'https://portal.example/contract/token',
       action: 'send',
-      smsPurpose: 'marketing',
+      smsPurpose: 'marketing_seasonal',
     })).toContain('Reply STOP to opt out. Msg & data rates may apply.');
     await expect(DocumentContractDelivery._internals.deliveryOptionsForContract(bulkMarketingContract, {
       channel: 'email',
@@ -433,7 +433,7 @@ describe('document template library', () => {
     expect(bulkSendService).toContain("status: 'draft'");
     expect(bulkSendService).toContain('bulk_send_cancelled');
     expect(bulkSendService).toContain('requires_signature_snapshot');
-    expect(bulkSendService).toContain("smsPurpose: 'marketing'");
+    expect(bulkSendService).toContain("smsPurpose: 'marketing_seasonal'");
     expect(deliveryService).toContain('MARKETING_GUIDE_EMAIL_DISABLED');
     expect(deliveryService).toContain('MARKETING_SMS_OPT_IN_REQUIRED');
     expect(deliveryService).toContain('deliveryOptionsForContract');

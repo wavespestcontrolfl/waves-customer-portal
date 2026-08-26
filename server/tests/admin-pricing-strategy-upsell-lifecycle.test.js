@@ -56,13 +56,27 @@ describe('POST /trigger-upsell/:customerId lifecycle re-check', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('live customer proceeds to the upsell lookup', async () => {
-    setupCustomer({ id: 'c1', phone: '+15550000001', deleted_at: null, active: true });
+  test('live opted-in customer proceeds to the upsell lookup', async () => {
+    // The single mocked row doubles as the notification_prefs row: an
+    // upsell is marketing-grade, so it must carry EXPLICIT consent
+    // (marketing_offers === true — upsell = Promotions lane) to reach the lookup.
+    setupCustomer({ id: 'c1', phone: '+15550000001', deleted_at: null, active: true, sms_enabled: true, marketing_offers: true });
     mockFindBestUpsell.mockResolvedValue(null);
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/pricing-strategy/trigger-upsell/c1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       expect(res.status).toBe(404); // "No upsell opportunity" — lookup ran
     });
     expect(mockFindBestUpsell).toHaveBeenCalledWith('c1');
+  });
+
+  test('live customer with NULL marketing_offers (default-seeded/backfilled row — never asked) → 422, no lookup', async () => {
+    setupCustomer({ id: 'c1', phone: '+15550000001', deleted_at: null, active: true, sms_enabled: true, marketing_offers: null });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/pricing-strategy/trigger-upsell/c1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(422);
+      expect((await res.json()).code).toBe('NO_MARKETING_CONSENT');
+    });
+    expect(mockFindBestUpsell).not.toHaveBeenCalled();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });

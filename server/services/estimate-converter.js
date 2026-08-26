@@ -29,6 +29,7 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
+const { visitsPerYearForCadence } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
@@ -709,6 +710,34 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
     if (matching.length === 1) rewrites.push({ row: matching[0], combo });
   }
   return rewrites;
+}
+
+// The UPDATE a combo rewrite applies to the reserved row. The reserve path
+// stamps the STANDALONE cadence id + snapshot; the promotion must move the
+// durable identity with the label — and when the combined catalog row is
+// missing (or the lookup failed and the caller passes null), the standalone
+// identity must be CLEARED, not retained: completion resolution prioritizes
+// id/snapshot over the label, so a combined-labeled visit that kept its
+// standalone identity silently drops the companion completion lane
+// (pre-push P1). Null identity falls back to label resolution, which knows
+// the combined name.
+function combinedRewriteUpdate(combo, catalogRow) {
+  const update = {
+    service_type: combo.route.name,
+    service_id: null,
+    service_key_snapshot: null,
+    updated_at: new Date(),
+  };
+  if (catalogRow) {
+    update.service_id = catalogRow.id;
+    // Snapshot moves with the id, or a later id outage resolves the visit
+    // standalone (codex #3485 r6 P2).
+    update.service_key_snapshot = combo.route.catalogServiceKey;
+    if (catalogRow.default_duration_minutes) {
+      update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+    }
+  }
+  return update;
 }
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
@@ -1876,12 +1905,66 @@ function coalesceRecurringServiceRows(existing = {}, next = {}) {
   return merged;
 }
 
+// Raw engine bond lines carry service 'termite_bond' + bondTerm — normalize
+// to the term-keyed service so scheduling routes and the catalogServiceKey
+// lookup match term-specific rows. When bondTerm is absent (older
+// snapshots, agent drafts), derive it from ANY supported label field —
+// serviceName/service_name are accepted display sources everywhere else,
+// so they must feed the parser too (codex #3485 r5 P1). A line with
+// neither term source stays unrewritten (no guessed term). Applied at the
+// merge choke point so EVERY input representation (stored
+// recurring.services rows AND raw lineItems) normalizes identically —
+// normalizing only one list split formerly-coalesced duplicates into two
+// scheduled bond visits (codex #3485 r5 P1).
+function normalizeBondTermService(li) {
+  if (!li || typeof li !== 'object') return li;
+  // The bond identity can ride any of the key aliases recurringServiceKey
+  // accepts (service / serviceKey / service_key) — normalizing only
+  // `service` left alias-keyed stored rows deduplicating separately from
+  // raw rows and scheduling two bond visits (codex #3485 r8 P1). Every
+  // present alias field is rewritten so identity resolution agrees.
+  // Blank aliases (null/''/undefined) are ABSENT — recurringServiceKey's
+  // `||` chain treats them that way, so a { service: null } name-only row
+  // must take the name-only path, not skip normalization (codex r12 P1).
+  const keyFields = ['service', 'serviceKey', 'service_key', 'key']
+    .filter((f) => li[f] != null && String(li[f]).trim() !== '');
+  const labelText = String(li.name || li.label || li.displayName || li.serviceName || li.service_name || '');
+  const isBareBond = keyFields.some((f) => li[f] === 'termite_bond');
+  // NAME-ONLY legacy rows ("Termite Bond (5-Year Term)" with no key field
+  // at all) must normalize too: recurringServiceKey derives a name-based
+  // identity for them ('termite_bond_5_year_term') that deduplicates
+  // separately from the raw row's term key, scheduling the bond twice
+  // (codex #3485 r11 P1). Only rows with NO key evidence qualify — a row
+  // keyed to anything else is never reinterpreted from its label.
+  const isNameOnlyBond = keyFields.length === 0 && /^termite\s+bond\b/i.test(labelText.trim());
+  if (!isBareBond && !isNameOnlyBond) return li;
+  // bondYears is emitted alongside bondTerm by the pricing engine and
+  // preserved by the estimate adapters — an older persisted row that lost
+  // bondTerm but kept the numeric field must not stay bare 'termite_bond'
+  // (that shape joins no term-specific route/row, and syncTermiteBonds
+  // would default the sold 5/10-year warranty to one year — codex #3485
+  // r20 P1). Label parsing stays the last resort.
+  const bondYears = Number(li.bondYears);
+  const bondTerm = li.bondTerm
+    || (Number.isFinite(bondYears) && bondYears > 0 ? `${bondYears}yr` : null)
+    || (labelText.match(/(\d+)\s*-\s*Year/i) || [])[1]?.concat('yr')
+    || null;
+  if (!bondTerm) return li;
+  const out = { ...li };
+  for (const f of keyFields) {
+    if (out[f] === 'termite_bond') out[f] = `termite_bond_${bondTerm}`;
+  }
+  if (isNameOnlyBond) out.service = `termite_bond_${bondTerm}`;
+  return out;
+}
+
 function mergeRecurringServiceLists(...lists) {
   const byIdentity = new Map();
   for (const list of lists) {
     if (!Array.isArray(list)) continue;
-    for (const svc of list) {
-      if (!svc || typeof svc !== 'object') continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const svc = normalizeBondTermService(raw);
       const identity = recurringServiceIdentityKey(svc);
       const existing = byIdentity.get(identity);
       byIdentity.set(identity, existing ? coalesceRecurringServiceRows(existing, svc) : { ...svc });
@@ -1935,9 +2018,13 @@ function recurringLinesFromEngineResult(data = {}) {
       // Raw engine bond lines carry service 'termite_bond' + bondTerm —
       // normalize to the term-keyed service so the combined bait+bond
       // scheduling routes match exactly like mapped saves (codex #2915 r2).
-      const base = li.service === 'termite_bond' && li.bondTerm
-        ? { ...li, service: `termite_bond_${li.bondTerm}` }
-        : li;
+      // When bondTerm is absent (older snapshots, agent drafts), derive it
+      // from the engine name ("Termite Bond (5-Year Term)") — a bare
+      // 'termite_bond' key matches NO catalog row, so the visit scheduled
+      // name-only and the warranty defaulted to a 1-year term (2026-08-25
+      // audit). A line with neither term source stays unrewritten and keeps
+      // today's name-only behavior rather than guessing a term.
+      const base = normalizeBondTermService(li);
       if (base.name || base.label || base.displayName || base.serviceName || base.service_name) return base;
       const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(base)];
       return synthesized ? { ...base, name: synthesized } : base;
@@ -2030,9 +2117,29 @@ function estimateOperatorSetupFeeWaived(estimateData = {}) {
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
 }
 
+// The one place the setup-fee DOLLAR amount is resolved for charging: the
+// amount the quote froze at disclosure time (estimate_data.setupFeeQuote,
+// stamped by /public/quote/calculate), cents-exact, with the live constant
+// only as the legacy fallback for estimates that predate the freeze. Every
+// invoicing path — the converter's internal draft invoice, public
+// acceptance's invoice/notes, and the acceptedSetupFeeAmount stamp — must
+// price through this resolver so an in-flight quote can never display one
+// fee and charge another after the constant changes.
+function frozenSetupFeeAmount(estimateData = {}) {
+  const raw = Number(normalizeEstimateData(estimateData)?.setupFeeQuote?.amount);
+  return (Number.isFinite(raw) && raw > 0)
+    ? Math.round(raw * 100) / 100
+    : WAVEGUARD_SETUP_FEE;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
+  // Frozen wizard waiver: /public/quote/calculate persists setupFeeQuote on
+  // the draft — amount 0 means the quote DISCLOSED no fee (active member at
+  // quote time), and conversion must not re-add one the customer never saw.
+  const frozenQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
+  if (frozenQuote && !(Number(frozenQuote.amount) > 0)) return false;
   // Existing customers never pay the WaveGuard setup again — mirrors the
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
@@ -3272,6 +3379,26 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
       || (cadenceField && cadenceField !== inferred)) return PREPAY_COVERAGE_INVALID;
   }
   return inferred;
+}
+
+// Visits/year the derived annual-prepay coverage records. Cadence→count goes
+// through the shared prepay-cadence authority (the same mapping
+// annual-prepay-renewals points to) so coverage aligns with the seeded
+// series. A residential-pest accepted selection outranks the
+// line's stale quote-time count (the acceptedPestSelectionVisits doctrine
+// above — the fee choke point got that fix after incident 2026-08-18; this
+// derivation didn't, so a quarterly-built quote accepted bi-monthly minted a
+// bimonthly term covering only 4 visits and payment-time coverage would seed
+// an 8-month series inside the 12-month term). The accepted count applies
+// only when it matches the cadence the series will actually seed: a line
+// whose own cadence FIELD contradicts the acceptance still resolves that
+// field's cadence, coverage must track the real series, and the line count
+// keeps deciding there.
+function annualPrepayCoverageVisits(svc = {}, cadence, acceptedPlanFrequency) {
+  const cadenceVisits = visitsPerYearForCadence(cadence);
+  const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
+  if (acceptedVisits && acceptedVisits === cadenceVisits) return acceptedVisits;
+  return visitsPerYearForRecurringService(svc) || cadenceVisits || null;
 }
 
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
@@ -4643,20 +4770,19 @@ const EstimateConverter = {
           }
         }
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
-          const update = { service_type: combo.route.name, updated_at: new Date() };
+          // Identity contract lives in combinedRewriteUpdate (pre-push P1:
+          // a missing row / failed lookup CLEARS the standalone identity).
+          let catalogRow = null;
           try {
-            const catalogRow = await database('services')
+            catalogRow = await database('services')
               .where({ service_key: combo.route.catalogServiceKey })
               .first('id', 'default_duration_minutes');
-            if (catalogRow) {
-              update.service_id = catalogRow.id;
-              if (catalogRow.default_duration_minutes) {
-                update.estimated_duration_minutes = catalogRow.default_duration_minutes;
-                combo.service.estimatedDurationMinutes = catalogRow.default_duration_minutes;
-              }
-            }
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
+          }
+          const update = combinedRewriteUpdate(combo, catalogRow);
+          if (update.estimated_duration_minutes) {
+            combo.service.estimatedDurationMinutes = update.estimated_duration_minutes;
           }
           await database('scheduled_services').where({ id: row.id }).update(update);
           // The public accept route registers the 72h/24h reminder BEFORE
@@ -4676,7 +4802,10 @@ const EstimateConverter = {
           // parent OBJECT, not the DB (pre-push P1). reservedStart is the
           // same object reference when ids match.
           row.service_type = combo.route.name;
-          if (update.service_id) row.service_id = update.service_id;
+          // Mirror includes the CLEARED identity on the failure path —
+          // follow-up seeding copies these from the parent object.
+          row.service_id = update.service_id;
+          row.service_key_snapshot = update.service_key_snapshot;
           if (update.estimated_duration_minutes) row.estimated_duration_minutes = update.estimated_duration_minutes;
           if (reservedStart && row.id === reservedStart.id) {
             reservedSeedSvc = combo.service;
@@ -5234,6 +5363,10 @@ const EstimateConverter = {
       const setupFeeApplies = billingTerm === 'standard'
         ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
         : false;
+      // Frozen wizard disclosure — single resolver shared with public
+      // acceptance (frozenSetupFeeAmount below), so every charging path
+      // bills exactly what the quote disclosed.
+      const setupFeeAmount = frozenSetupFeeAmount(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
@@ -5262,7 +5395,7 @@ const EstimateConverter = {
               : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99.00 setup fee waived per WaveGuard membership policy.`;
+            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -5420,13 +5553,7 @@ const EstimateConverter = {
               // closed like the seasonal case.
               recurringPrepayCoverageInvalid = true;
             } else {
-              // Visits/year: prefer the line's explicit count (the series' own
-              // source); else map from cadence. Values mirror inferCoverageCadence
-              // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
-              const CADENCE_VISITS = {
-                monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
-              };
-              const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
+              const visits = annualPrepayCoverageVisits(coverageSvc, cadence, acceptedPlanFrequency);
               if (svcType && visits > 0) {
                 coverageServiceType = svcType;
                 coverageVisitCount = visits;
@@ -5571,7 +5698,7 @@ const EstimateConverter = {
             lineItems.push({
               description: 'WaveGuard Membership — one-time setup fee',
               quantity: 1,
-              unit_price: WAVEGUARD_SETUP_FEE,
+              unit_price: setupFeeAmount,
             });
           }
           if (firstApplicationAmount > 0) {
@@ -5594,14 +5721,14 @@ const EstimateConverter = {
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          const invoiceSubtotal = (setupFeeApplies ? WAVEGUARD_SETUP_FEE : 0) + firstApplicationAmount;
+          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
           const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
           const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee plus first application.`
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee plus first application.`
             : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee only.`
                 : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
           let inv = null;
           let appliedDepositCredit = 0;
@@ -6130,6 +6257,7 @@ module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
+module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary
@@ -6154,6 +6282,7 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
+module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
@@ -6181,6 +6310,7 @@ module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFe
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
+module.exports.annualPrepayCoverageVisits = annualPrepayCoverageVisits;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.riderAwareSingleRecurringUnit = riderAwareSingleRecurringUnit;
 module.exports.acceptedPestSelectionVisits = acceptedPestSelectionVisits;

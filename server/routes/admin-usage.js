@@ -81,7 +81,7 @@ const KNOWN_PAGE_KEYS = new Set([
   'inventory', 'invoices', 'knowledge', 'lawn-assessment', 'lawn-assessments',
   'leads', 'more', 'newsletter', 'payers', 'phone-numbers', 'pipeline',
   'ppc', 'price-change', 'price-match', 'pricing', 'pricing-logic',
-  'pricing-reality-check', 'projects', 'referrals', 'revenue', 'reviews',
+  'pricing-reality-check', 'projects', 'recruiting', 'referrals', 'revenue', 'reviews',
   'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
   'timetracking', 'tool-health', 'turf-height',
 ]);

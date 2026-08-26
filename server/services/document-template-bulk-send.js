@@ -390,6 +390,10 @@ async function loadAudience(options, templateKey = null) {
 }
 
 function hasMarketingSmsConsent(row = {}) {
+  // Customer guides are seasonal/educational content — OWNER RULING 08-25:
+  // the two marketing toggles are independent permissions, so this lane
+  // requires seasonal_tips === true specifically (a promotions-only opt-in
+  // does not authorize it). Matches the 'marketing_seasonal' policy.
   return Boolean(clean(row.phone))
     && row.sms_enabled !== false
     && row.seasonal_tips === true;
@@ -405,7 +409,7 @@ function marketingSmsConsentBasis(row = {}) {
 }
 
 function channelsForCustomer(row, requestedChannels, { smsPurpose = 'document_request' } = {}) {
-  const marketing = smsPurpose === 'marketing';
+  const marketing = smsPurpose === 'marketing' || smsPurpose === 'marketing_seasonal';
   return requestedChannels.filter((channel) => {
     if (channel === 'email') return Boolean(clean(row.email)) && row.email_enabled !== false;
     if (channel === 'sms' && marketing) return hasMarketingSmsConsent(row);
@@ -416,7 +420,7 @@ function channelsForCustomer(row, requestedChannels, { smsPurpose = 'document_re
 
 function customerEligibility(row, requestedChannels, options = {}) {
   const availableChannels = channelsForCustomer(row, requestedChannels, options);
-  const marketing = options.smsPurpose === 'marketing';
+  const marketing = options.smsPurpose === 'marketing' || options.smsPurpose === 'marketing_seasonal';
   return {
     channels: availableChannels,
     sendable: availableChannels.length > 0 && !row.duplicate_contract_id,
@@ -609,7 +613,7 @@ function buildCounts(rows, requestedChannels) {
     missingAnyRequestedChannel: 0,
   };
   rows.forEach((row) => {
-    const eligibility = customerEligibility(row, requestedChannels, { smsPurpose: 'marketing' });
+    const eligibility = customerEligibility(row, requestedChannels, { smsPurpose: 'marketing_seasonal' });
     if (eligibility.sendable) counts.sendable += 1;
     if (eligibility.duplicate) counts.duplicateSkipped += 1;
     if (eligibility.hasEmail) counts.emailEligible += 1;
@@ -896,7 +900,7 @@ async function sendBulkDocument(templateKey, input = {}, req = {}) {
       continue;
     }
 
-    const sendChannels = channelsForCustomer(customer, requestedChannels, { smsPurpose: 'marketing' });
+    const sendChannels = channelsForCustomer(customer, requestedChannels, { smsPurpose: 'marketing_seasonal' });
     if (!sendChannels.length) {
       summary.skippedMissingContact += 1;
       results.push({ customer: serializedCustomer, status: 'skipped_missing_contact' });
@@ -918,7 +922,7 @@ async function sendBulkDocument(templateKey, input = {}, req = {}) {
       const delivery = await deliverDocumentRequestChannels(contract.id, req, {
         channels: sendChannels,
         action: 'send',
-        smsPurpose: 'marketing',
+        smsPurpose: 'marketing_seasonal',
         smsConsentBasis: marketingSmsConsentBasis(customer),
         smsEntryPoint: 'bulk_product_safety_guide_send',
         smsMetadata: {

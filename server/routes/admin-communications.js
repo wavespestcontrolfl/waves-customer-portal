@@ -1482,7 +1482,7 @@ router.post('/ai-auto-reply', async (req, res) => {
 // mapping resolves to marketing or retention. Reusing the scheduler's
 // mapper here (instead of a local regex) guarantees the route can't drift
 // from the cron's classification.
-const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
+const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'marketing_seasonal', 'retention']);
 
 function csvEscape(value) {
   if (value == null) return '';

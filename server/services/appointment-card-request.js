@@ -326,6 +326,18 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       if (!live || !LIVE_VISIT_STATUSES.includes(live.status)) {
         return skip(`visit_not_live_at_secure:${live ? live.status : 'missing'}`);
       }
+      // Hold-lane exclusion UNDER THE VISIT LOCK (PR #3496 review P0): the
+      // stranded-hold repair script repoints estimate holds while holding
+      // this same scheduled_services row FOR UPDATE, so checking here —
+      // not before the transaction — is what makes the two mechanisms
+      // serialize instead of race. A hold row in ANY status marks the
+      // visit as the hold rail's; auto-securing would mint a second
+      // competing card consent. A thrown lookup rolls back and skips
+      // (fail closed).
+      const holdLane = await trx('estimate_card_holds')
+        .where({ scheduled_service_id: visit.id })
+        .first('id');
+      if (holdLane) return skip('card_hold_lane');
       const { enrollConsentedMethod } = require('./autopay-enrollment');
       const enrollment = await enrollConsentedMethod({
         customerId: visit.customer_id,
@@ -459,6 +471,27 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     } catch (err) {
       logger.warn(`[appt-card-request] saved-method check failed — proceeding to request: ${err.message}`);
     }
+    // Hold-rail lane exclusion AT CREATION (PR #3496 review P0), checked
+    // BEFORE every branch that can mint a lane row (auto-secure included):
+    // a visit already carrying an estimate_card_holds row — including one
+    // an operator repointed onto it after a cancel+recreate reschedule —
+    // is the hold rail's, and a /secure request would create a second
+    // competing card-consent lane. Same ANY-status posture as the fee
+    // rail's exclusion (chargeAppointmentCardNoShowFee). This unlocked
+    // read is the cheap fast-path; the AUTHORITATIVE re-checks run under
+    // the scheduled_services row lock inside each writer (auto-secure's
+    // transaction, and the insert transactions below) — the same row the
+    // repair script locks while repointing, which is what closes the
+    // check/insert race. Fail closed on an unreadable table.
+    try {
+      const holdRow = await db('estimate_card_holds')
+        .where({ scheduled_service_id: visit.id })
+        .first('id');
+      if (holdRow) return skip('card_hold_lane');
+    } catch (err) {
+      logger.error(`[appt-card-request] card-hold lane check failed for visit ${visit.id} — request fails closed: ${err.message}`);
+      return skip('hold_lookup_failed');
+    }
     if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
 
     // delivery 'none' = the caller wanted ONLY the non-messaging work above
@@ -574,17 +607,28 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // customer abandons the step, the visit is still eligible for exactly
     // one text later (an office/AI trigger through this same funnel).
     if (delivery === 'inline') {
-      const inserted = await db('appointment_card_requests')
-        .insert({
-          scheduled_service_id: visit.id,
-          customer_id: visit.customer_id,
-          status: 'pending',
-          trigger,
-          token,
-        })
-        .onConflict('scheduled_service_id')
-        .ignore()
-        .returning('id');
+      // Lane insert under the visit lock (PR #3496 review P0): re-check
+      // the hold rail immediately before the row lands, serialized on the
+      // same scheduled_services row the repair script locks to repoint.
+      const inserted = await db.transaction(async (trx) => {
+        await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+        const holdRow = await trx('estimate_card_holds')
+          .where({ scheduled_service_id: visit.id })
+          .first('id');
+        if (holdRow) return 'card_hold_lane';
+        return trx('appointment_card_requests')
+          .insert({
+            scheduled_service_id: visit.id,
+            customer_id: visit.customer_id,
+            status: 'pending',
+            trigger,
+            token,
+          })
+          .onConflict('scheduled_service_id')
+          .ignore()
+          .returning('id');
+      });
+      if (inserted === 'card_hold_lane') return skip('card_hold_lane');
       if (!inserted || !inserted.length) {
         const raced = await db('appointment_card_requests')
           .where({ scheduled_service_id: visit.id })
@@ -705,17 +749,31 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // died-before-send from sent (Codex #2771 r4).
     try {
       if (!reuseToken) {
-        const inserted = await db('appointment_card_requests')
-          .insert({
-            scheduled_service_id: visit.id,
-            customer_id: visit.customer_id,
-            status: 'pending',
-            trigger,
-            token,
-          })
-          .onConflict('scheduled_service_id')
-          .ignore()
-          .returning('id');
+        // Same in-lock re-check as the inline branch (PR #3496 review P0):
+        // the row must not land after a repoint that committed since the
+        // fast-path check — serialize on the visit row the script locks.
+        const inserted = await db.transaction(async (trx) => {
+          await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+          const holdRow = await trx('estimate_card_holds')
+            .where({ scheduled_service_id: visit.id })
+            .first('id');
+          if (holdRow) return 'card_hold_lane';
+          return trx('appointment_card_requests')
+            .insert({
+              scheduled_service_id: visit.id,
+              customer_id: visit.customer_id,
+              status: 'pending',
+              trigger,
+              token,
+            })
+            .onConflict('scheduled_service_id')
+            .ignore()
+            .returning('id');
+        });
+        if (inserted === 'card_hold_lane') {
+          await releaseClaim();
+          return skip('card_hold_lane');
+        }
         if (!inserted || !inserted.length) {
           // A row landed between check 3 and the claim — funnel already ran.
           await releaseClaim();

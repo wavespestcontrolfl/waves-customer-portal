@@ -166,10 +166,13 @@ router.get('/', async (req, res, next) => {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit, offset);
+    const persisted = await NotificationService.getAdminNotifications(limit, offset, { role: req.techRole });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
-    const liveCtx = page === 1 && !isBellPolicyEnabled()
+    // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
+    // carry finance totals and owner-only links, matching the fail-closed
+    // persisted-feed scope (codex P1).
+    const liveCtx = page === 1 && !isBellPolicyEnabled() && req.techRole === 'admin'
       ? await liveAlertNotifications(req.technicianId)
       : { live: [], liveKeys: new Set() };
     const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
@@ -219,10 +222,14 @@ router.get('/unread-count', async (req, res, next) => {
   try {
     // Bell policy on: live overlay excluded from the badge too (dismissal
     // endpoints below stay functional — they no-op when nothing is live).
-    const liveCtx = isBellPolicyEnabled()
+    // Non-admin roles never get the live overlay (owner-only finance
+    // alerts), which also skips the persisted-dashboard dedup subtraction —
+    // dashboard_alert rows are already hidden from their scoped count and
+    // must not be re-subtracted from it (codex P1).
+    const liveCtx = isBellPolicyEnabled() || req.techRole !== 'admin'
       ? { live: [], liveKeys: new Set() }
       : await liveAlertNotifications(req.technicianId);
-    let persistedCount = await NotificationService.getAdminUnreadCount();
+    let persistedCount = await NotificationService.getAdminUnreadCount({ role: req.techRole });
     if (liveCtx.liveKeys.size > 0) {
       try {
         const unreadDashboardAlerts = await db('notifications')
@@ -321,8 +328,11 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin();
-    await dismissLiveAlerts(req.technicianId);
+    await NotificationService.markAllReadAdmin({ role: req.techRole });
+    // Live-alert dismissal is admin-only: the overlay never renders for
+    // other roles, and its helper also marks persisted dashboard_alert
+    // rows read — rows the fail-closed feed hides from them (codex P1).
+    if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -438,12 +448,17 @@ router.put('/:id/read', async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (id.startsWith('live:')) {
+      // Same admin-only rule as read-all: non-admins never see live alerts
+      // and must not be able to clear their persisted twins (codex P1).
+      if (req.techRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
       const alertId = id.slice('live:'.length);
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id);
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
     res.json({ success: true, updated });
   } catch (err) { next(err); }
 });

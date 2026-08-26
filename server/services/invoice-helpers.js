@@ -82,6 +82,14 @@ function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'processing') {
     throw new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
   }
+  // 'sending' is a live send claim: the provider call may still be in
+  // flight, and its finalize accepts draft/scheduled/sending rows — voiding
+  // here (and possibly unvoiding to draft) would let that in-flight send
+  // deliver the stale pre-void message and flip the restored draft back to
+  // sent. The claim clears in seconds; refuse and retry (Codex #3493 r10).
+  if (currentStatus === 'sending') {
+    throw new Error('Cannot void this invoice — a send is already in progress; wait a moment and retry');
+  }
 }
 
 /**

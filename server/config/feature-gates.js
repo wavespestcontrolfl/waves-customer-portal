@@ -37,6 +37,7 @@
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
+ *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
@@ -122,6 +123,22 @@ const gates = {
   // completion invoices go out as pay links exactly as today. Kill switch:
   // unset or any non-'true' value.
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
+
+  // Reschedule-orphan hold DETECTION (owner lane 2026-08-25): an operator
+  // reschedule composed as cancel + fresh create strands the one-time card
+  // hold on the dead visit id, so the completion charge misses and a pay
+  // link goes out despite a consent-backed hold — silently. With this gate
+  // on, a completion whose primary hold lookup misses detects the
+  // customer's surviving 'held' hold from the SAME estimate stranded on a
+  // cancelled/rescheduled visit (unambiguous 1:1 shape only) and BELLS the
+  // office with the operator repair command (ops/agents/
+  // repoint-orphaned-card-hold.js). NO money moves and nothing is
+  // repointed under this gate — estimate lineage is not a durable
+  // reschedule link, so collecting on the hold stays a per-case operator
+  // decision through the dry-run-default ops script. Fail-closed ==='true'
+  // in EVERY environment. Gate off: completions are byte-identical to
+  // today. Kill switch: unset or any non-'true' value.
+  cardHoldRescheduleAdopt: process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT === 'true',
 
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
   // invoice EMAIL carries a "previous balance" note when the customer has
@@ -296,6 +313,10 @@ const gates = {
   // 404s while off (same unobservable-when-dark contract as payerStatements).
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
+  // Public careers application funnel (POST /api/public/careers/apply).
+  // Dark until the owner turns hiring on; the admin recruiting queue works
+  // at any setting (it only reads/updates existing rows).
+  jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
 
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then

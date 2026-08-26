@@ -1856,7 +1856,7 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2035,8 +2035,50 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring');
+            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          // Completed-one-time eligibility under the SAME lock (hold-rail
+          // pre-push r9 P0): a completion charge is only authorized for a
+          // visit that IS completed and still one-time at the moment of
+          // the Stripe submission — a caller's preflight verdict can be
+          // outrun by a concurrent cancel/reschedule or a recurring
+          // conversion, and the collected money would then belong to no
+          // delivered one-time visit. Opt-in.
+          if (requireCompletedOneTimeVisit) {
+            if (String(lockedSvc.status || '') !== 'completed') {
+              throw new Error('The visit is no longer completed. Review before charging.');
+            }
+            // Canonical recurring-lineage test (pay-v2.js; PR #3496 r3
+            // P1): a series booster carries is_recurring=false with
+            // recurring_parent_id set — all three markers must be clear.
+            if (lockedSvc.is_recurring === true || lockedSvc.recurring_parent_id || lockedSvc.recurring_pattern) {
+              throw new Error('The visit is no longer one-time. Review before charging.');
+            }
+          }
+          // Cross-lane exclusion at the money move (hold-rail pre-push r13
+          // P0): a /secure appointment-card row appearing on the visit —
+          // e.g. one whose insert raced an operator's stranded-hold
+          // repoint — is a competing, possibly NEWER card consent, and
+          // charging the estimate hold would suppress it and draw the old
+          // card. Any-status refusal under this transaction's visit lock,
+          // matching the creation-time exclusion in
+          // appointment-card-request.js; a throw rolls back with nothing
+          // consumed and the completion falls to its pay-link path.
+          if (requireNoAppointmentCardLane) {
+            const laneRow = await trx('appointment_card_requests')
+              .where({ scheduled_service_id: requireSelfPayScheduledServiceId })
+              .forUpdate()
+              .first('id');
+            if (laneRow) {
+              // Coded so the hold rail can surface the conflict distinctly
+              // (pre-push r17 P1) — a competing-consent refusal is an
+              // operator decision, not a retryable charge failure.
+              throw Object.assign(
+                new Error('The visit carries a /secure appointment-card consent. Review which consent owns it before charging.'),
+                { code: 'COMPETING_CARD_CONSENT' },
+              );
+            }
+          }
           // Completion-lane revalidation under the locks (Codex #3153 r23
           // P1): a billing-mode change (membership/prepay/per-application)
           // or the visit turning recurring after the caller's snapshot
@@ -2060,6 +2102,18 @@ const StripeService = {
           // state and then charge the OLD customer's invoice and card.
           if (String(lockedSvc.customer_id) !== String(lockedInvoice.customer_id)) {
             throw new Error('The appointment was reassigned to a different customer. Review before charging.');
+          }
+          // Invoice↔visit binding under the SAME locks (hold-rail pre-push
+          // r6 P0): shared customer + self-pay does not prove the invoice
+          // is THIS visit's bill — a concurrent rebind between a caller's
+          // preflight and this transaction could point the charge at
+          // another of the customer's invoices. Opt-in, because some
+          // legitimate callers charge ad-hoc invoices that carry no visit
+          // link; a caller that asserts the binding refuses any invoice
+          // not linked to exactly the supplied visit.
+          if (requireInvoiceScheduledServiceBinding
+            && String(lockedInvoice.scheduled_service_id || '') !== String(requireSelfPayScheduledServiceId)) {
+            throw new Error('The invoice is no longer bound to this appointment. Review before charging.');
           }
           const resolvedPayer = await require('./payer').resolveForInvoice({
             database: trx,

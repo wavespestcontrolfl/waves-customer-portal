@@ -45,12 +45,22 @@ describe('conversational sends with NO notification_prefs row', () => {
     expect(res).toEqual({ ok: true });
   });
 
-  test('customer with NO inbound history: cold-start still blocks as NO_CONSENT_RECORD', async () => {
+  test('KNOWN customer with NO inbound history: allowed — missing row = table defaults (owner ruling 2026-08-25)', async () => {
     const policy = resolvePolicy('customer', 'conversational');
     const res = await checkConsentForPurpose(
       smsInput(),
       policy,
       { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: false, suppressionLoaded: true },
+    );
+    expect(res).toEqual({ ok: true });
+  });
+
+  test('UNKNOWN recipient (no customer record) with no inbound history: cold-start still blocks as NO_CONSENT_RECORD', async () => {
+    const policy = resolvePolicy('customer', 'conversational');
+    const res = await checkConsentForPurpose(
+      smsInput(),
+      policy,
+      { prefs: null, customer: null, lookupFailed: false, hasInboundHistory: false, suppressionLoaded: true },
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('NO_CONSENT_RECORD');
@@ -94,7 +104,17 @@ describe('conversational sends with NO notification_prefs row', () => {
     expect(res).toEqual({ ok: true });
   });
 
-  test('non-conversational purposes still require a prefs row even with inbound history', async () => {
+  test('non-conversational purpose to a KNOWN customer: allowed via table defaults once suppression state is loaded', async () => {
+    const policy = resolvePolicy('customer', 'billing');
+    const res = await checkConsentForPurpose(
+      smsInput({ purpose: 'billing' }),
+      policy,
+      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: false, suppressionLoaded: true },
+    );
+    expect(res).toEqual({ ok: true });
+  });
+
+  test('non-conversational purpose to a KNOWN customer WITHOUT loaded suppression state: retryable, never a send', async () => {
     const policy = resolvePolicy('customer', 'billing');
     const res = await checkConsentForPurpose(
       smsInput({ purpose: 'billing' }),
@@ -102,7 +122,69 @@ describe('conversational sends with NO notification_prefs row', () => {
       { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: true },
     );
     expect(res.ok).toBe(false);
+    expect(res.code).toBe('CONSENT_LOOKUP_FAILED');
+  });
+
+  test('non-conversational purpose to an UNKNOWN recipient still requires a prefs row', async () => {
+    const policy = resolvePolicy('customer', 'billing');
+    const res = await checkConsentForPurpose(
+      smsInput({ purpose: 'billing' }),
+      policy,
+      { prefs: null, customer: null, lookupFailed: false, hasInboundHistory: true, suppressionLoaded: true },
+    );
+    expect(res.ok).toBe(false);
     expect(res.code).toBe('NO_CONSENT_RECORD');
+  });
+
+  test('marketing purpose to a KNOWN no-row customer: defaults do NOT bypass the marketing consentBasis gate', async () => {
+    const policy = resolvePolicy('customer', 'marketing');
+    const res = await checkConsentForPurpose(
+      smsInput({ purpose: 'marketing' }),
+      policy,
+      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, suppressionLoaded: true },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('NO_MARKETING_CONSENT');
+  });
+
+  test('marketing purpose with a manufactured opted_in basis but NULL stored flag → NO_MARKETING_CONSENT (stored opt-in is required centrally)', async () => {
+    const policy = resolvePolicy('customer', 'retention');
+    const res = await checkConsentForPurpose(
+      smsInput({
+        purpose: 'retention',
+        consentBasis: { status: 'opted_in', source: 'customer_retention_preferences', capturedAt: '2026-08-01T00:00:00Z' },
+      }),
+      policy,
+      { prefs: { sms_enabled: true, seasonal_tips: null }, customer: { id: 'c1' }, lookupFailed: false, suppressionLoaded: true },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('NO_MARKETING_CONSENT');
+  });
+
+  test('promotions opt-in alone (marketing_offers=true, seasonal_tips NULL) satisfies purpose "marketing"', async () => {
+    const policy = resolvePolicy('customer', 'marketing');
+    const res = await checkConsentForPurpose(
+      smsInput({
+        purpose: 'marketing',
+        consentBasis: { status: 'opted_in', source: 'notification_prefs.marketing_offers', capturedAt: '2026-08-01T00:00:00Z' },
+      }),
+      policy,
+      { prefs: { sms_enabled: true, seasonal_tips: null, marketing_offers: true }, customer: { id: 'c1' }, lookupFailed: false, suppressionLoaded: true },
+    );
+    expect(res).toEqual({ ok: true });
+  });
+
+  test('marketing purpose with stored seasonal_tips=true AND an opted_in basis → allowed', async () => {
+    const policy = resolvePolicy('customer', 'retention');
+    const res = await checkConsentForPurpose(
+      smsInput({
+        purpose: 'retention',
+        consentBasis: { status: 'opted_in', source: 'notification_prefs.seasonal_tips', capturedAt: '2026-08-01T00:00:00Z' },
+      }),
+      policy,
+      { prefs: { sms_enabled: true, seasonal_tips: true }, customer: { id: 'c1' }, lookupFailed: false, suppressionLoaded: true },
+    );
+    expect(res).toEqual({ ok: true });
   });
 
   test('a real opt-out (sms_enabled=false on the prefs row) still blocks conversational', async () => {

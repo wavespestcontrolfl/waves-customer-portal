@@ -603,3 +603,172 @@ describe('codex #2915 r6 hardening', () => {
     expect(parsed.result.summary.recurringAnnualAfterDiscount).toBe(before + 60);
   });
 });
+
+// 2026-08-25 bridge audit: bond identity must not depend on lucky strings.
+describe('bond term identity (2026-08-25 bridge fixes)', () => {
+  const { recurringServicesFromEstimateData } = require('../services/estimate-converter');
+
+  test('a raw termite_bond line with NO bondTerm derives the term key from its name', () => {
+    // Older snapshots/agent drafts drop bondTerm; the bare 'termite_bond'
+    // key matches no catalog row, so the visit scheduled name-only and the
+    // warranty minted at the 1-year default regardless of the term sold.
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [
+          { name: 'Termite Bait', service: 'termite_bait', annual: 420, visitsPerYear: 4 },
+          { name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 },
+        ],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_5yr');
+  });
+
+  test('a bond row that lost bondTerm but kept numeric bondYears synthesizes the term key', () => {
+    // bondYears is emitted alongside bondTerm by the pricing engine and
+    // preserved by the estimate adapters; with a GENERIC label there is no
+    // parseable term, and bare 'termite_bond' joins no term-specific
+    // route/row — the sold 10-year warranty would mint at the 1-year
+    // default (codex #3485 r20 P1).
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [
+          { name: 'Termite Bond', service: 'termite_bond', bondYears: 10, annual: 216, visitsPerYear: 4 },
+        ],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_10yr');
+  });
+
+  test('the same term-less bond row in stored AND raw lists still coalesces to ONE service', () => {
+    // Normalization must run at the merge choke point: rewriting only the
+    // raw lineItems representation split formerly-coalesced duplicates into
+    // a bare-bond visit AND a term-keyed bond visit (codex #3485 r5 P1).
+    const bondRow = { name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 };
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ ...bondRow }] },
+      result: { lineItems: [{ ...bondRow }] },
+    });
+    const bonds = rows.filter((r) => String(r.service).startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service).toBe('termite_bond_5yr');
+  });
+
+  test('alias-keyed stored rows (serviceKey/service_key) normalize and coalesce with raw rows', () => {
+    // recurringServiceKey accepts all three key aliases; the choke-point
+    // normalizer must too, or the formerly identical rows deduplicate
+    // under termite_bond AND termite_bond_5yr and schedule two bond
+    // visits (codex #3485 r8 P1).
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ name: 'Termite Bond (5-Year Term)', serviceKey: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+      result: { lineItems: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+    });
+    const bonds = rows.filter((r) => String(r.service || r.serviceKey || '').startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service || bonds[0].serviceKey).toBe('termite_bond_5yr');
+  });
+
+  test('a NAME-ONLY legacy stored bond row coalesces with the keyed raw row', () => {
+    // No key field at all — recurringServiceKey would derive a name-based
+    // identity that deduplicates separately (codex #3485 r11 P1).
+    const rows = recurringServicesFromEstimateData({
+      recurring: { services: [{ name: 'Termite Bond (5-Year Term)', annual: 216, visitsPerYear: 4 }] },
+      result: { lineItems: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond', annual: 216, visitsPerYear: 4 }] },
+    });
+    const bonds = rows.filter((r) => String(r.service || '').startsWith('termite_bond'));
+    expect(bonds).toHaveLength(1);
+    expect(bonds[0].service).toBe('termite_bond_5yr');
+  });
+
+  test('the term parses from serviceName/service_name label fields too', () => {
+    const rows = recurringServicesFromEstimateData({
+      result: {
+        lineItems: [{ serviceName: 'Termite Bond (10-Year Term)', service: 'termite_bond', annual: 180, visitsPerYear: 4 }],
+      },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond_10yr');
+  });
+
+  test('a term-less, name-less bond line stays unrewritten (no guessed term)', () => {
+    const rows = recurringServicesFromEstimateData({
+      result: { lineItems: [{ name: 'Termite Bond', service: 'termite_bond', annual: 240, visitsPerYear: 4 }] },
+    });
+    const bond = rows.find((r) => String(r.service).startsWith('termite_bond'));
+    expect(bond.service).toBe('termite_bond');
+  });
+
+  test('termYearsForVisit prefers durable identity over the label regex', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // The LINKED catalog row wins — same precedence as completion identity
+    // (service_id first); pre-fix combined promotions could leave a stale
+    // snapshot disagreeing with the id (codex #3485 r10 P1).
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bond_5yr',
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (1-Year Term)',
+    })).toBe(5);
+    // Snapshot second, still ahead of the label regex.
+    expect(termYearsForVisit({
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (1-Year Term)',
+    })).toBe(10);
+    // Label regex stays the legacy fallback…
+    expect(termYearsForVisit({ service_type: 'Termite Bond (10-Year Term)' })).toBe(10);
+    // …and the historical 1-year default only applies when NOTHING names a term.
+    expect(termYearsForVisit({ service_type: 'Termite Bond' })).toBe(1);
+  });
+
+  test('a linked NON-bond catalog row disproves the bond — stale snapshot/label never mint', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // A repointed visit (service_id now names quarterly pest) keeps its old
+    // snapshot and label; the authoritative link must veto the warranty
+    // (pre-push P1), not fall through to the stale evidence.
+    expect(termYearsForVisit({
+      catalog_service_key: 'pest_general_quarterly',
+      service_key_snapshot: 'termite_bond_10yr',
+      service_type: 'Termite Bond (10-Year Term)',
+    })).toBeNull();
+  });
+
+  test('combined bait+bond visits (termite_bait link BY DESIGN) derive the term from the label', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // COMBINED_SERVICE_ROUTES links these to the BAIT row — no combined
+    // catalog row exists — and the bond term lives only in the name.
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bait',
+      service_type: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)',
+    })).toBe(5);
+    // A PLAIN bait visit is not a bond — even with a stale bond snapshot.
+    expect(termYearsForVisit({
+      catalog_service_key: 'termite_bait',
+      service_key_snapshot: 'termite_bond_1yr',
+      service_type: 'Termite Bait Station Service',
+    })).toBeNull();
+  });
+
+  test('with NO identity at all, only a label that names a termite bond can mint', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // termYearsFrom defaults to 1 on any parse miss — a visit reclassified
+    // under the lock (identity cleared, label now non-bond) must not
+    // become a 1-year bond (codex #3485 r20 P2).
+    expect(termYearsForVisit({ service_type: 'Pest Control' })).toBeNull();
+    expect(termYearsForVisit({ service_type: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)' })).toBe(5);
+  });
+
+  test('with no link, a NON-bond snapshot vetoes a stale bond label', () => {
+    const { termYearsForVisit } = sweepPrivate;
+    // Snapshot is the durable identity when the catalog FK is gone; a
+    // leftover "Termite Bond" label must not out-vote it (pre-push P1).
+    expect(termYearsForVisit({
+      service_key_snapshot: 'pest_general_quarterly',
+      service_type: 'Termite Bond (10-Year Term)',
+    })).toBeNull();
+    // The combined bait+bond snapshot keeps its label-derived term.
+    expect(termYearsForVisit({
+      service_key_snapshot: 'termite_bait',
+      service_type: 'Quarterly Termite Bait Station + Termite Bond Service (10-Year Term)',
+    })).toBe(10);
+  });
+});

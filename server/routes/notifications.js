@@ -178,6 +178,11 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
     techArrived: prefs.tech_arrived !== false,
     autoFlipEnRoute: prefs.auto_flip_en_route !== false,
     serviceCompleted: prefs.service_completed !== false,
+    // seasonal_tips renders like the seasonal-content senders read it
+    // (opt-OUT semantics: NULL = not opted out) so the UI never claims
+    // seasonal messages are off while the weekly lawn email still sends.
+    // The flip-only write guard below keeps a NULL row's ON rendering
+    // from round-tripping into a stored true (fabricated SMS consent).
     seasonalTips: prefs.seasonal_tips !== false,
     weatherAlerts: prefs.weather_alerts !== false,
     smsEnabled: prefs.sms_enabled !== false,
@@ -222,7 +227,15 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
   if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
   if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
-  if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
+  if (updates.seasonalTips !== undefined) {
+    // Tri-state consent flag: persist only real flips vs the rendered
+    // (opt-out style) state — an unchanged echo of the serializer's ON
+    // rendering over a stored NULL must not mint a true (fabricated SMS
+    // consent), and never-asked stays NULL on unrelated saves.
+    if (updates.seasonalTips !== (existing.seasonal_tips !== false)) {
+      dbUpdates.seasonal_tips = updates.seasonalTips;
+    }
+  }
   if (updates.weatherAlerts !== undefined) dbUpdates.weather_alerts = updates.weatherAlerts;
   if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
   if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
@@ -382,20 +395,11 @@ function sendAccountUpdatedForPrefs({ req, targetCustomerId, propertyLabel, item
 async function ensurePrefs(customerId) {
   let prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   if (!prefs) {
-    [prefs] = await db('notification_prefs').insert({
-      customer_id: customerId,
-      appointment_confirmation: true,
-      service_reminder_72h: true,
-      service_reminder_24h: true,
-      tech_en_route: true,
-      tech_arrived: true,
-      service_completed: true,
-      seasonal_tips: true,
-      sms_enabled: true,
-      email_enabled: true,
-      appointment_notify_primary: true,
-      service_report_notify_primary: true,
-    }).returning('*');
+    // Canonical helper: transactional defaults on, marketing-grade flags
+    // NULL — an implicit row-mint must never fabricate marketing consent.
+    const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+    await createDefaultCustomerRows(db, customerId);
+    prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   }
   return prefs;
 }
@@ -790,12 +794,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       });
     }
 
+    // ensurePrefs creates any missing row through the canonical helper
+    // (marketing flags NULL), so this is always an update — a bare insert
+    // here would take the legacy true defaults and mint marketing consent.
     const existing = await ensurePrefs(req.params.customerId);
-    if (existing) {
-      await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
-    } else {
-      await db('notification_prefs').insert({ customer_id: req.params.customerId, ...dbUpdates });
-    }
+    await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');
       void dispatchRecipientOptins(pendingOptinDispatch.claims, pendingOptinDispatch.customer)

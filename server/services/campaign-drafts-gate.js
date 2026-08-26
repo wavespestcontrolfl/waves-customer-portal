@@ -103,17 +103,27 @@ function parseOpportunityRef(sourceRef) {
 }
 
 /**
- * sms_enabled / seasonal_tips must not be explicitly false. A missing
- * notification_prefs row passes here (both columns default true, and the
- * default-row backfill covers existing customers) — the consent validator
- * re-checks at send time and fails closed regardless.
+ * Marketing-grade gate — OWNER RULING 08-25: the two marketing toggles are
+ * INDEPENDENT permissions, so the campaign's OWN consent column must be
+ * EXPLICITLY true (reactivation = seasonal content → seasonal_tips; upsell
+ * = promotions → marketing_offers). Campaign sending asserts an opted_in
+ * consentBasis downstream, so NULL flags (system-seeded default row or
+ * backfill — the customer was never asked), a missing row, or an unmapped
+ * campaign type is NOT captured consent and fails closed. Keep this map in
+ * step with the split 'marketing' / 'marketing_seasonal' policies.
  */
-async function prefsAllowMarketingSms(customerId) {
+const CAMPAIGN_CONSENT_COLUMN = {
+  upsell: 'marketing_offers',
+  reactivation: 'seasonal_tips',
+};
+async function prefsAllowMarketingSms(customerId, campaignType) {
+  const consentColumn = CAMPAIGN_CONSENT_COLUMN[campaignType];
+  if (!consentColumn) return false;
   const prefs = await db('notification_prefs')
     .where({ customer_id: customerId })
-    .first('sms_enabled', 'seasonal_tips');
-  if (!prefs) return true;
-  return prefs.sms_enabled !== false && prefs.seasonal_tips !== false;
+    .first('sms_enabled', 'seasonal_tips', 'marketing_offers');
+  if (!prefs) return false;
+  return prefs.sms_enabled !== false && prefs[consentColumn] === true;
 }
 
 /**
@@ -212,7 +222,7 @@ async function evaluateCampaignSendGate({
       }
     }
 
-    if (!(await prefsAllowMarketingSms(customerId))) {
+    if (!(await prefsAllowMarketingSms(customerId, campaignType))) {
       return { ok: false, code: 'prefs_opted_out', customer: cust };
     }
 

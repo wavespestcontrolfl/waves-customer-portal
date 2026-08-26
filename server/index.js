@@ -257,6 +257,14 @@ app.use('/api/public/lawn-assessment', (req, res, next) => {
   }
   next();
 });
+// Careers funnel: same unobservable-when-dark contract — 404 while
+// GATE_JOB_APPLICATIONS is off, even for a limiter-exhausted IP.
+app.use('/api/public/careers', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('jobApplications')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/public/pest-identifier', (req, res, next) => {
   // Tokenized report READS stay available while the funnel is dark — sent
   // reports are owner-initiated communications (admin manual send), and an
@@ -602,6 +610,7 @@ app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
+app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
@@ -696,6 +705,8 @@ app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
 // Photo-assessment lead magnets (lawn + pest) — admin list/detail/send surface.
 app.use('/api/admin/photo-assessments', require('./routes/admin-photo-assessments'));
+// Recruiting queue — job applications from the public careers funnel.
+app.use('/api/admin/careers', require('./routes/admin-careers'));
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/treatment-plans', require('./routes/admin-treatment-plans'));

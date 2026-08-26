@@ -39,7 +39,8 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   if (type.includes('review')) return 'review_request';
   if (type.includes('referral')) return 'referral';
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
-  if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
+  if (type.includes('seasonal')) return 'marketing_seasonal';
+  if (type.includes('marketing') || type.includes('promo')) return 'marketing';
   // 'prep' covers prep_info — the deferred booking-time prep text requeued
   // from a quiet-hours hold replays under the same appointment policy the
   // immediate send enforced.
@@ -3068,10 +3069,62 @@ function initScheduledJobs() {
           // instead of falling through to 'conversational'. Bounded to the
           // known purpose enum; every validator still re-runs at dispatch.
           const { MESSAGE_PURPOSES } = require('./messaging/policy');
-          const purpose = (typeof claimMeta.replay_purpose === 'string'
+          let purpose = (typeof claimMeta.replay_purpose === 'string'
             && MESSAGE_PURPOSES.includes(claimMeta.replay_purpose))
             ? claimMeta.replay_purpose
             : purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
+          // Legacy-row normalization (consent split, owner ruling 08-25):
+          // rows enqueued before the marketing/marketing_seasonal split
+          // stored replay_purpose 'marketing' for SEASONAL-lane content.
+          // Left as-is they would validate against marketing_offers —
+          // sending seasonal content on a promotions-only opt-in and
+          // blocking seasonal-only recipients. The content's truth is the
+          // message type (seasonal_* / reactivation) or, for deferred
+          // customer-guide document sends (message_type document_request*),
+          // the guide entry point. Promotions rows ('upsell') match none of
+          // these and stay on marketing_offers.
+          if (purpose === 'marketing') {
+            const legacyType = String(msg.message_type || '');
+            const legacyEntry = String(claimMeta.entry_point || '');
+            // document_request* rows only ever stored replay_purpose
+            // 'marketing' when the content was a marketing customer guide
+            // (plain document requests store 'document_request'), and the
+            // deferred reminder lane discards the guide entry point — the
+            // stored marketing purpose is itself the guide marker.
+            if (legacyType.includes('seasonal')
+              || legacyType.includes('reactivation')
+              || legacyType.startsWith('document_request')
+              || legacyEntry.includes('guide')) {
+              purpose = 'marketing_seasonal';
+            }
+          }
+          // Marketing-grade replays (retention/marketing) lose their
+          // enqueue-time consentBasis — reconstruct it from the STORED
+          // opt-in only, at fire time: the policy's prefsColumn must be
+          // exactly true on the CURRENT notification_prefs row (the consent
+          // validator independently re-requires both the stored flag and
+          // the basis). No stored opt-in → no basis → the validator blocks
+          // the replay, same as an immediate send. Never forward an
+          // enqueue-time basis snapshot — consent can be revoked overnight.
+          let replayConsentBasis;
+          if (msg.customer_id) {
+            const { resolvePolicy } = require('./messaging/policy');
+            const replayPolicy = resolvePolicy('customer', purpose);
+            const consentCols = [].concat(replayPolicy?.consentColumns || replayPolicy?.prefsColumn || []);
+            if (replayPolicy?.requireConsent === 'marketing' && consentCols.length) {
+              try {
+                const prefsRow = await db('notification_prefs').where({ customer_id: msg.customer_id }).first();
+                const matched = prefsRow && consentCols.find((c) => prefsRow[c] === true);
+                if (matched) {
+                  replayConsentBasis = {
+                    status: 'opted_in',
+                    source: `notification_prefs.${matched}`,
+                    capturedAt: new Date(prefsRow.updated_at || prefsRow.created_at || Date.now()).toISOString(),
+                  };
+                }
+              } catch { /* leave undefined — the consent validator fails closed */ }
+            }
+          }
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -3315,13 +3368,14 @@ function initScheduledJobs() {
             // only honors a consentBasis on transactional-grade policies for the
             // lead audience; marketing/retention purposes still require a real
             // stored consent record regardless of what a row's metadata claims.
-            consentBasis: (claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
-              ? claimMeta.consent_basis
-              : undefined,
-            // NOTE: marketing/retention scheduled sends must arrive with a real
-            // stored consent record — we no longer manufacture opted_in here.
-            // Routes that queue marketing-grade types are responsible for
-            // gating against `messaging_consent`.
+            // Marketing-grade replays take the basis reconstructed above from
+            // the CURRENT stored opt-in (never a metadata snapshot — consent
+            // can be revoked overnight, and one consolidated property means
+            // the persisted basis can't overwrite the reconstruction).
+            consentBasis: replayConsentBasis
+              || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
+                ? claimMeta.consent_basis
+                : undefined),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
@@ -4238,9 +4292,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // DAILY 8:23AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // 8:23 not 8:00: it shared the 8:00:00 minute with the monthly-billing
+  // sweep and pool exhaustion failed it 4 runs straight (job_health:
+  // "Timeout acquiring a connection"). One minute per job — #3208 rule.
   // =========================================================================
-  cron.schedule('0 8 * * *', async () => {
+  cron.schedule('23 8 * * *', async () => {
     logger.info('Running: tax deadline alert check');
     try {
       await runExclusive('tax-deadline-alerts', async () => {
@@ -5613,8 +5670,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Card-expiry warnings — Monday 9 AM, cards expiring within 60 days
-  cron.schedule('0 9 * * 1', async () => {
+  // Card-expiry warnings — Monday 9:17 AM, cards expiring within 60 days.
+  // 9:17 not 9:00: three jobs shared the 9:00:00 minute (autopay pre-charge,
+  // payment-expiry, this) and pool exhaustion failed this one silently every
+  // Monday since 2026-08-03 (job_health: "Timeout acquiring a connection").
+  // Same one-minute-per-job rule as the #3208 watcher outage.
+  cron.schedule('17 9 * * 1', async () => {
     try {
       await runExclusive('card-expiry-warnings', async () => {
         const { sendCardExpiryWarnings } = require('./autopay-notifications');

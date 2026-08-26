@@ -57,6 +57,16 @@ describe('autopay eligibility', () => {
     }, { db: knexReturning(null) })).resolves.toBe(false);
   });
 
+  test('a payment_methods read error reads as not-on-autopay by default, but THROWS under failClosed — hold-lifting call sites must not mistake a broken read for unenrollment (Codex #3493 r16)', async () => {
+    const brokenKnex = () => ({
+      where() { return this; },
+      first() { return Promise.reject(new Error('read failed')); },
+    });
+    const customer = { id: 'customer-1', autopay_enabled: true };
+    await expect(customerOnAutopay(customer, { db: brokenKnex })).resolves.toBe(false);
+    await expect(customerOnAutopay(customer, { db: brokenKnex, failClosed: true })).rejects.toThrow('read failed');
+  });
+
   test('requires the payment method row to match the monthly autopay charge contract', () => {
     expect(isChargeableAutopayMethod(chargeableCard)).toBe(true);
     expect(isChargeableAutopayMethod({ ...chargeableCard, processor: 'legacy' })).toBe(false);

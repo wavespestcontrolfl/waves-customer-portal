@@ -8,7 +8,7 @@
  *    same customer+service both skip
  *  - unified 30d cooldown: campaign drafts, campaign-grade sms_log types, and
  *    prepay renewal notices all suppress
- *  - prefs guard: sms_enabled=false or seasonal_tips=false skips
+ *  - prefs guard: sms_enabled=false or marketing_offers not true skips (upsell = Promotions lane)
  *  - gate off = shadow mode: candidate count only, zero drafts
  *  - deterministic GSM-7 copy with a reply CTA; no LLM
  */
@@ -83,7 +83,15 @@ beforeEach(() => {
   inserts.length = 0;
   builders.length = 0;
   queues = {};
-  db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  // Default prefs row = explicit marketing opt-in: the campaign gate now
+  // requires marketing_offers === true (NULL/absent = never asked, not consent),
+  // so tests exercising other predicates get an opted-in row unless they
+  // enqueue their own.
+  db.mockImplementation((table) => makeBuilder(
+    table,
+    (queues[table] || []).shift()
+      || (table === 'notification_prefs' ? { first: { sms_enabled: true, marketing_offers: true } } : {}),
+  ));
   db.raw.mockImplementation((expr) => expr);
   isEnabled.mockReturnValue(true);
 });
@@ -186,7 +194,7 @@ describe('guards', () => {
     enqueue('upsell_opportunities as uo', { rows: [opportunity()] });
     enqueue('message_drafts', { first: undefined });
     enqueue('upsell_opportunities', { first: undefined });
-    enqueue('notification_prefs', { first: { sms_enabled: false, seasonal_tips: true } });
+    enqueue('notification_prefs', { first: { sms_enabled: false, marketing_offers: true } });
 
     const result = await generateUpsellDrafts();
 
@@ -194,11 +202,11 @@ describe('guards', () => {
     expect(inserts).toEqual([]);
   });
 
-  test('seasonal_tips=false skips', async () => {
+  test('marketing_offers=false skips', async () => {
     enqueue('upsell_opportunities as uo', { rows: [opportunity()] });
     enqueue('message_drafts', { first: undefined });
     enqueue('upsell_opportunities', { first: undefined });
-    enqueue('notification_prefs', { first: { sms_enabled: true, seasonal_tips: false } });
+    enqueue('notification_prefs', { first: { sms_enabled: true, marketing_offers: false } });
 
     const result = await generateUpsellDrafts();
 

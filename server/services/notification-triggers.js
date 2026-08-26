@@ -132,6 +132,11 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
+    // Tech-visible TODAY: /admin/leads is requireTechOrAdmin on this base.
+    // NOTE: the role-lockdown PR (#3501) makes leads owner-only — once both
+    // land, flip this to adminRoleOnly: true (follow-up, tracked in the PR
+    // body) so push and feed visibility follow the surface.
+    techVisible: true,
     build: (p) => {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
@@ -146,6 +151,29 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Fired by the public careers funnel (routes/public-careers.js) on a new
+  // job application. Applicants are never customers/leads; the owner calls
+  // or texts every applicant himself from the recruiting queue.
+  // NO applicant PII in the notification: bell/push fans out to every
+  // active staff user, but the recruiting API is requireAdmin — name/city/
+  // phone must not cross that boundary (codex P0). Details live behind the
+  // link, in the admin-only queue.
+  new_job_application: {
+    label: 'New job application',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    // Recruiting is requireAdmin — a technician receiving this bell/push
+    // would land on a 403. Deliver to admin-role users only (codex P1).
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: `Job application: ${p.role || 'technician'}`,
+      body: 'New applicant — open the recruiting queue to review.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
   // Fired by reschedule-intent-flagger when an inbound SMS reads as a
   // reschedule/away request while a visit is still armed — the automation
   // does not act on these, so the owner must (2026-08-05 incident class:
@@ -155,6 +183,9 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'urgent',
     group: 'Communication',
+    // Schedule-surface alert a field tech must see (their visit may still
+    // be armed) — one of the few triggers in the non-admin bell feed.
+    techVisible: true,
     build: (p) => ({
       title: `Reschedule request: ${p.name || 'customer'}`,
       body: [
@@ -170,6 +201,9 @@ const TRIGGER_REGISTRY = {
     label: 'SMS reply received',
     category: 'inbound_sms',
     priority: 'high',
+    // Communications is a tech-visible surface — inbound customer texts
+    // belong in the non-admin bell feed (fail-closed allowlist).
+    techVisible: true,
     group: 'Communication',
     build: (p) => ({
       title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
@@ -185,6 +219,8 @@ const TRIGGER_REGISTRY = {
   // this, such voicemails end terminal and are only visible by scrolling
   // the comms inbox.
   customer_voicemail_callback: {
+    // Tech-visible: links to a day-to-day surface (comms) a field tech works in.
+    techVisible: true,
     label: 'Voicemail needs callback',
     category: 'voicemail_callback',
     priority: 'high',
@@ -227,6 +263,8 @@ const TRIGGER_REGISTRY = {
   // Fired by the service-report delivery queue when an email report has
   // exhausted its retries — the customer never received their report.
   service_report_delivery_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
     label: 'Service report email failed to send',
     category: 'system',
     priority: 'high',
@@ -240,6 +278,8 @@ const TRIGGER_REGISTRY = {
   // Fired by the PDF render queue when a report PDF can't be generated. The
   // report link still works; the attachment/share copy is missing until re-rendered.
   service_report_pdf_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
     label: 'Service report PDF render failed',
     category: 'system',
     priority: 'normal',
@@ -255,6 +295,10 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
+    // Tech-visible: urgent comms failures link to /admin/communications,
+    // a technician-allowed surface — a failed customer call/SMS is exactly
+    // what field staff must see and acknowledge.
+    techVisible: true,
     // Owner ruling (Adam, 2026-07-30): fully-masked failure bells ("from
     // ***5598 — CA...a76a0e") were untriageable. This trigger is exempt from
     // contact masking: the bell shows the real numbers and, when the remote
@@ -339,6 +383,8 @@ const TRIGGER_REGISTRY = {
     }),
   },
   job_complete: {
+    // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
+    techVisible: true,
     label: 'Tech marked job complete',
     category: 'service',
     priority: 'low',
@@ -619,6 +665,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // the first push silently (renotify:false in the service worker).
     return `waves-appointment_reschedule_intent-${payload.customerId || 'unknown-customer'}-${payload.decisionId || 'x'}`;
   }
+  if (triggerKey === 'new_job_application') {
+    // Per-application tag: two applications arriving before the owner opens
+    // notifications must not collapse into one push (same-tag replacement).
+    return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
+  }
   return `waves-${triggerKey}`;
 }
 
@@ -665,7 +716,16 @@ async function triggerNotification(triggerKey, payload = {}) {
 
     let activeAdmins = [];
     try {
-      activeAdmins = await db('technicians').where({ active: true }).select('id');
+      let recipientQuery = db('technicians').where({ active: true });
+      // Delivery follows the same fail-closed model as the persisted feed
+      // (notification-service scopeAdminFeedToRole): non-admin staff receive
+      // ONLY triggers classified techVisible — everything else, including
+      // unclassified finance/estimate alerts carrying customer names and
+      // amounts, goes to admin-role users alone. adminRoleOnly remains as
+      // explicit documentation on owner-only triggers; techVisible is the
+      // operative flag for both push recipients and bell visibility.
+      if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
+      activeAdmins = await recipientQuery.select('id');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
     }

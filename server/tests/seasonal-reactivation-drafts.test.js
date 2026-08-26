@@ -91,7 +91,15 @@ beforeEach(() => {
   inserts.length = 0;
   builders.length = 0;
   queues = {};
-  db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  // Default prefs row = explicit marketing opt-in: the campaign gate now
+  // requires seasonal_tips === true (NULL/absent = never asked, not consent),
+  // so tests exercising other predicates get an opted-in row unless they
+  // enqueue their own.
+  db.mockImplementation((table) => makeBuilder(
+    table,
+    (queues[table] || []).shift()
+      || (table === 'notification_prefs' ? { first: { sms_enabled: true, seasonal_tips: true } } : {}),
+  ));
   db.raw.mockImplementation((expr) => expr);
   // Pin the clock: July → seasonal type 'pest' (non-general hook path).
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
@@ -168,7 +176,7 @@ describe('gate on — pending campaign drafts', () => {
       customer_id: 'cust-1',
       status: 'pending',
       campaign_type: 'reactivation',
-      purpose: 'marketing',
+      purpose: 'marketing_seasonal',
       source_ref: 'customers:cust-1',
     });
     // toGsm7Safe: em-dash → '-', ellipsis → '...'

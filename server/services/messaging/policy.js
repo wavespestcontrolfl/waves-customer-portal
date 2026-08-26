@@ -96,6 +96,7 @@ const MESSAGE_PURPOSES = [
   'referral',
   'retention',
   'marketing',
+  'marketing_seasonal',
   'internal_briefing',
   'support_resolution',
 ];
@@ -406,7 +407,21 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
+  // OWNER RULING 08-25: the two marketing toggles are INDEPENDENT
+  // permissions — Promotions & Offers SMS requires marketing_offers === true,
+  // Seasonal Tips SMS requires seasonal_tips === true, and neither toggle
+  // authorizes (or kills) the other category. 'marketing' = promotions;
+  // 'marketing_seasonal' = seasonal campaigns/tips/reactivation/guides.
   marketing: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'marketing',
+    prefsColumn: 'marketing_offers',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  marketing_seasonal: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,

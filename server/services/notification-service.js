@@ -15,6 +15,36 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'weather_alerts',
 ]);
 
+// Admin-feed role scoping, FAIL CLOSED: the persisted admin bell is shared
+// (one recipient-less row) and carries owner-only content — estimate and
+// finance alerts with customer names and amounts, plus adminRoleOnly
+// triggers linking to requireAdmin surfaces. A NON-ADMIN reader therefore
+// sees ONLY rows whose triggerKey is explicitly marked techVisible in the
+// registry; everything else — including legacy rows with no metadata — is
+// hidden and its read state untouchable. Lazy require avoids the
+// notification-triggers ↔ notification-service cycle. A caller that passes
+// no role (internal jobs, tests) sees the full feed, unchanged.
+function scopeAdminFeedToRole(query, role) {
+  if (!role || role === 'admin') return query;
+  let keys = [];
+  try {
+    const { TRIGGER_REGISTRY } = require('./notification-triggers');
+    keys = Object.entries(TRIGGER_REGISTRY)
+      .filter(([, trigger]) => trigger.techVisible)
+      .map(([key]) => key);
+  } catch (err) {
+    logger.warn(`[notifications] role-scope registry load failed: ${err.message}`);
+  }
+  if (!keys.length) {
+    // No tech-visible triggers resolvable → non-admin sees nothing.
+    return query.whereRaw('1 = 0');
+  }
+  return query.whereRaw(
+    `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
+    keys,
+  );
+}
+
 async function customerPreferenceEnabled(customerId, preferenceKey) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
@@ -127,7 +157,41 @@ const NotificationService = {
 
   // Create admin notification (no recipient_id needed)
   async notifyAdmin(category, title, body, opts = {}) {
-    return this.create({ recipientType: 'admin', category, title, body, ...opts });
+    // Opt-in dedupe, mirroring notifyCustomer's mechanism (PR #3496 review
+    // P1: replayed emitters — e.g. repeated recap edits re-detecting the
+    // same stranded card hold — must not crowd the billing feed with
+    // identical bells). Same advisory-lock + metadata dedupeKey shape so
+    // both recipient types share one mechanism; no dedupeKey = unchanged
+    // behavior for every existing caller. Fail closed: an unprovably-new
+    // event skips the bell rather than risking a duplicate.
+    const { dedupeKey, ...createOpts } = opts;
+    if (!dedupeKey) {
+      return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
+    }
+    const metadata = { ...(createOpts.metadata || {}), dedupeKey };
+    try {
+      const persisted = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+        const existing = await trx('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first();
+        if (existing) return { notification: existing, deduped: true };
+        const created = await this.create({
+          recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
+        });
+        // create() returns null on an insert failure (PR #3496 review P1):
+        // spreading that null would report {deduped:false} as if a row
+        // landed. Throw inside the transaction so the failure surfaces as
+        // the null return below, never as success.
+        if (!created) throw new Error('admin notification insert failed');
+        return { notification: created, deduped: false };
+      });
+      return { ...persisted.notification, deduped: persisted.deduped };
+    } catch (err) {
+      logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
+      return null;
+    }
   },
 
   // Create customer notification
@@ -204,17 +268,21 @@ const NotificationService = {
   },
 
   // Get notifications for admin
-  async getAdminNotifications(limit = 50, offset = 0) {
-    return db('notifications')
-      .where({ recipient_type: 'admin' })
+  async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
+    return scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    )
       .orderBy('created_at', 'desc')
       .limit(limit).offset(offset);
   },
 
   // Get unread count for admin
-  async getAdminUnreadCount() {
-    const [{ count }] = await db('notifications')
-      .where({ recipient_type: 'admin' })
+  async getAdminUnreadCount({ role } = {}) {
+    const [{ count }] = await scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    )
       .whereNull('read_at')
       .count('* as count');
     return parseInt(count);
@@ -248,16 +316,22 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId) {
-    const updated = await db('notifications')
-      .where({ id: notificationId, recipient_type: 'admin' })
-      .update({ read_at: new Date() });
+  async markReadAdmin(notificationId, { role } = {}) {
+    // Same role predicate as the reads: a technician must not be able to
+    // mark a hidden adminRoleOnly row read before the owner sees it.
+    const updated = await scopeAdminFeedToRole(
+      db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
+      role,
+    ).update({ read_at: new Date() });
     return updated > 0;
   },
 
   // Mark all read for admin
-  async markAllReadAdmin() {
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at').update({ read_at: new Date() });
+  async markAllReadAdmin({ role } = {}) {
+    await scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    ).whereNull('read_at').update({ read_at: new Date() });
   },
 
   // Mark all read for customer
