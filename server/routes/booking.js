@@ -1658,6 +1658,12 @@ async function createSelfBooking(payload = {}) {
         }
         if (gateShapeOk) {
           gatePass = await bindGateEstimate(pricing_estimate_id);
+          // A customer-less consumed draft deliberately yields NO custId
+          // here: bindGateEstimate validates only the draft's stored
+          // contact, and a forwarded handoff plus that stale contact must
+          // not replay someone else's booking. The shared gate-independent
+          // recovery below assigns the identity — bound to the CURRENT
+          // consuming customer's contact (Codex #3500).
         }
       }
       if (!gatePass.valid && source_estimate_id && accept_token
@@ -1679,6 +1685,51 @@ async function createSelfBooking(payload = {}) {
     }
 
     const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
+    // Customer-less draft replay recovery — GATE-INDEPENDENT (Codex #3500):
+    // when the quote's customer mirror failed, the first signed booking
+    // created the customer and consumed the draft; an identical retry must
+    // resolve that customer BEFORE the phone-on-file check 409s it away
+    // from the idempotent replay. Token + exact slot tuple prove identity
+    // (same binding as the customers-only gate exception).
+    if (!custId && pricing_estimate_id) {
+      try {
+        const { verifyEstimateHandoffToken: verifyReplayToken } = require('../utils/estimate-handoff-token');
+        if (verifyReplayToken(pricing_estimate_id, estimate_token)) {
+          const consumed = await db('scheduled_services as ss')
+            .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
+            .where('ss.source_estimate_id', pricing_estimate_id)
+            .where('sba.date', slot_date)
+            .where('sba.start_time', slot_start)
+            .whereNot('sba.status', 'cancelled')
+            .first('ss.customer_id');
+          if (consumed?.customer_id) {
+            // Contact binding (Codex #3500 r4): the token proves the LINK,
+            // not the caller — a forwarded/stale handoff plus a guessed
+            // slot tuple must not resolve someone else's identity and pull
+            // their confirmation/notes/card URL through the replay. The
+            // SUBMITTED contact must match the consuming booking's
+            // customer (same last-10-phone / email rule as
+            // bindGateEstimate) before the replay identity is assigned.
+            const consumedCust = await db('customers')
+              .where({ id: consumed.customer_id })
+              .first('phone', 'email');
+            const last10 = (v) => {
+              const digits = String(v || '').replace(/\D/g, '');
+              return digits.length >= 10 ? digits.slice(-10) : '';
+            };
+            const submitted10 = last10(new_customer?.phone);
+            const submittedEmail = String(new_customer?.email || '').trim().toLowerCase();
+            const contactMatches = submitted10
+              ? submitted10 === last10(consumedCust?.phone)
+              : (!!submittedEmail
+                && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase());
+            if (contactMatches) custId = consumed.customer_id;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[booking:confirm] consumed-handoff customer recovery failed (continuing): ${err.message}`);
+      }
+    }
     if (!custId && phoneDigits) {
       const existing = await db('customers')
         .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
@@ -2597,6 +2648,196 @@ async function createSelfBooking(payload = {}) {
       }
     };
 
+    // WaveGuard setup fee (frozen wizard disclosure) - shared stamp helper.
+    // Runs under a SAVEPOINT with FOR UPDATE re-reads (draft shape,
+    // ownership, frozen amount, membership, account-wide queued claim) so
+    // the amount stamped is the fee the committed draft actually discloses.
+    // Called (a) inside the quarterly-pest seeding transaction - stamp and
+    // series commit together or not at all - and (b) in its own transaction
+    // for solo non-pest recurring wizard bookings (e.g. mosquito), which
+    // have no pest seeding to ride (Codex #3489 follow-up: the disclosed
+    // mosquito fee was never assessed).
+    const { verifyEstimateHandoffToken: verifyFeeHandoffToken } = require('../utils/estimate-handoff-token');
+    const setupFeeHandoffEligible = !!pricing_estimate_id
+      && verifyFeeHandoffToken(pricing_estimate_id, estimate_token);
+    const stampDisclosedSetupFee = async (outerTrx, { allowStamp = true, stampServiceRow = null } = {}) => {
+            await outerTrx.transaction(async (sp) => {
+                const freshPricingEst = await sp('estimates')
+                  .where({ id: pricing_estimate_id })
+                  .forUpdate()
+                  .first('*');
+                const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+                if (!freshPricingEst || !wizardDraftSelfServeBookable(freshPricingEst)) return;
+                // Ownership: a mirrored draft carries this customer's id; a
+                // draft whose best-effort customer upsert failed carries
+                // NULL — the verified handoff token plus a fresh contact
+                // match (same last-10-phone / email rule as the
+                // source_estimate_id gate above) proves it is still this
+                // booker's own quote, so the DISCLOSED fee stays billable
+                // (Codex #3489: null !== custId silently dropped the
+                // stamp). A draft linked to a DIFFERENT customer never
+                // stamps.
+                if (freshPricingEst.customer_id) {
+                  if (String(freshPricingEst.customer_id) !== String(custId)) return;
+                } else {
+                  const last10 = (v) => {
+                    const digits = String(v || '').replace(/\D/g, '');
+                    return digits.length >= 10 ? digits.slice(-10) : '';
+                  };
+                  const bookerRow = await sp('customers').where({ id: custId }).first('phone', 'email');
+                  const estPhone10 = last10(freshPricingEst.customer_phone);
+                  const estEmail = String(freshPricingEst.customer_email || '').trim().toLowerCase();
+                  const contactMatches = estPhone10
+                    ? last10(bookerRow?.phone) === estPhone10
+                    : (!!estEmail && String(bookerRow?.email || '').trim().toLowerCase() === estEmail);
+                  if (!contactMatches) return;
+                }
+                const estData = typeof freshPricingEst.estimate_data === 'string'
+                  ? JSON.parse(freshPricingEst.estimate_data)
+                  : (freshPricingEst.estimate_data || {});
+                const frozenFee = Number(estData?.setupFeeQuote?.amount);
+                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) return;
+                // Bind the stamp to the QUOTED plan: the handoff token and
+                // the slot signature verify independently, so a fee-bearing
+                // quote could otherwise be submitted with an unrelated
+                // signed slot (e.g. a lawn booking) and stamp the fee on a
+                // visit the quote never priced (Codex #3500). The signed
+                // service must intersect the draft's own line services; on
+                // a mismatch nothing stamps and the draft stays LIVE for
+                // the real plan's booking.
+                const draftServices = new Set(
+                  (estData?.engineResult?.lineItems || [])
+                    .map((l) => l && l.service)
+                    .filter(Boolean),
+                );
+                const signedFeeComponents = String(serviceKey || '').split('+').filter(Boolean);
+                // EVERY signed component must be in the quoted plan — a
+                // composite slot (e.g. lawn+pest) paired with a solo pest
+                // quote would otherwise pass on the one overlapping
+                // component and stamp/archive a quote that never priced the
+                // composite visit (Codex #3500 r3).
+                if (draftServices.size > 0
+                  && (signedFeeComponents.length === 0
+                    || !signedFeeComponents.every((c) => draftServices.has(c)))) return;
+                const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+                const freshCustomer = await sp('customers')
+                  .where({ id: custId })
+                  .forUpdate()
+                  .first();
+                const activeMember = !!freshCustomer
+                  && freshCustomer.active !== false
+                  && isMembershipCustomerRow(freshCustomer);
+                // Waiver disposition: an invoiceable booking CONSUMED the
+                // draft, so a waived fee retires it (left open, a later
+                // staff send/accept would invoice the frozen fee this
+                // booking just waived — conversion does not consult the
+                // live customer row). A NON-invoiceable solo visit is
+                // different (Codex #3500 r2): the draft is the only path
+                // staff can still invoice the SERVICE through — keep it
+                // LIVE but freeze the ZERO-waiver into it, so conversion
+                // bills the plan without ever re-adding the fee.
+                const retireOrWaiveDraft = async (waivedReason) => {
+                  if (allowStamp) {
+                    await sp('estimates')
+                      .where({ id: freshPricingEst.id })
+                      .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
+                  } else {
+                    await sp('estimates')
+                      .where({ id: freshPricingEst.id })
+                      .update({
+                        estimate_data: { ...estData, setupFeeQuote: { amount: 0, waived: waivedReason } },
+                        updated_at: sp.fn.now(),
+                      });
+                  }
+                };
+                if (activeMember) {
+                  await retireOrWaiveDraft('existing_member');
+                  return;
+                }
+                // Stamp the obligation AND correlate it: source_estimate_id
+                // links the parent to the quote that disclosed the fee (the
+                // unminted-setup-fee obligation machinery keys off it), and
+                // the draft is RETIRED (archived_at) under the same row lock
+                // — a consumed quote must not stay open for staff to later
+                // send/accept and have conversion charge the same fee twice.
+                // A fresh wizard run revives it (/calculate clears
+                // archived_at), minting a new live decision.
+                // Cross-family race re-check (Codex #3489): another pest or
+                // mosquito activation can queue a pending_setup_fee between
+                // this quote's /calculate and this booking, while tier
+                // enrollment is still asynchronous (the member check above
+                // reads non-member) and a different service family bypasses
+                // the same-family duplicate-series guard. ONE account setup
+                // fee: any other nonzero claim in flight — the same
+                // predicate decideSetupFeeQuote waives on — waives this
+                // stamp too. The draft is still retired below so the
+                // consumed quote cannot re-charge via a later staff accept.
+                // A claim only counts while it can still be CONSUMED: the
+                // claim row itself is live, or a non-cancelled series child
+                // can still complete and mint it. A fully-cancelled series
+                // otherwise waives every future plan forever (Codex #3489
+                // follow-up).
+                const queuedElsewhere = await sp('scheduled_services as claim')
+                  .where('claim.customer_id', custId)
+                  .modify((qb) => { if (stampServiceRow?.id) qb.whereNot('claim.id', stampServiceRow.id); })
+                  .whereNotNull('claim.pending_setup_fee')
+                  .whereNot('claim.pending_setup_fee', 0)
+                  .where(function consumable() {
+                    // A NEGATIVE stamp is completion's in-progress/crash-recovery
+                    // marker — resume may still mint or heal it regardless of the
+                    // row's status, so it ALWAYS suppresses a second claim. A
+                    // positive claim consumes only while its row can still
+                    // complete; a completed/skipped/terminal parent's claim is
+                    // recoverable only through a live child (the EXISTS arm).
+                    this.where('claim.pending_setup_fee', '<', 0)
+                      .orWhereIn('claim.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+                      // ...or while a PENDING completion attempt can still
+                      // resume and mint it: a worker can commit the parent
+                      // 'completed' and die before the claim step, leaving a
+                      // positive claim that the resume will consume (Codex
+                      // #3500 r3) — a second quote must keep waiving until
+                      // that attempt resolves.
+                      .orWhereExists(function pendingCompletion() {
+                        this.select(sp.raw('1'))
+                          .from('service_completion_attempts as sca')
+                          .whereIn('sca.status', ['pending', 'side_effects_pending', 'side_effects_running'])
+                          .whereRaw('(sca.service_id = claim.id OR sca.service_id IN (SELECT id FROM scheduled_services WHERE recurring_parent_id = claim.id))');
+                      })
+                      .orWhereExists(function liveChild() {
+                        this.select(sp.raw('1'))
+                          .from('scheduled_services as child')
+                          .whereRaw('child.recurring_parent_id = claim.id')
+                          // Only statuses that can still COMPLETE consume a
+                          // claim — completed/skipped/no_show children are
+                          // done and cannot mint it (Codex #3500).
+                          .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+                      });
+                  })
+                  .first('claim.id');
+                if (queuedElsewhere) {
+                  await retireOrWaiveDraft('fee_already_queued');
+                  return;
+                }
+                // A visit that cannot mint the fee (price-less solo
+                // booking) must not carry a stranded stamp NOR consume the
+                // draft — but every waiver above (membership race,
+                // queued-elsewhere) has already run and retired the draft
+                // where owed. The fee stays recoverable via staff
+                // conversion of the still-live draft (Codex #3500).
+                if (!allowStamp || !stampServiceRow?.id) return;
+                await sp('scheduled_services')
+                  .where({ id: stampServiceRow.id })
+                  .update({
+                    pending_setup_fee: frozenFee,
+                    source_estimate_id: freshPricingEst.id,
+                    updated_at: sp.fn.now(),
+                  });
+                await sp('estimates')
+                  .where({ id: freshPricingEst.id })
+                  .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
+              });
+    };
+
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
@@ -2614,6 +2855,22 @@ async function createSelfBooking(payload = {}) {
         }
       }
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      // Waiver disposition on the REPLAY too (Codex #3500 r6): the first
+      // request can commit and die before its post-commit waiver recheck,
+      // leaving the consumed draft live with a positive setupFeeQuote that
+      // staff conversion would charge even though this booking's
+      // membership/queued waiver applies. Never a stamp from a replay
+      // (allowStamp:false); idempotent — an archived or already-waived
+      // draft no-ops at the shape check.
+      if (setupFeeHandoffEligible) {
+        try {
+          await db.transaction(async (trx) => {
+            await stampDisclosedSetupFee(trx, { allowStamp: false });
+          });
+        } catch (err) {
+          logger.warn(`[booking:confirm] replay setup-fee waiver recheck failed for ${txResult.existing.id} (continuing): ${err.message}`);
+        }
+      }
       // Re-offer the inline card step on replay (Codex #2771 r2): if the
       // first response was lost after the pending card row landed, this
       // retry must still carry the /secure link — inline delivery
@@ -2729,6 +2986,7 @@ async function createSelfBooking(payload = {}) {
     // sees the winner's committed series. A guard ERROR never rolls anything
     // back (the helper's savepoint absorbs it) — seeding proceeds as before.
     let duplicateSeriesKept = null;
+
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
@@ -2790,102 +3048,13 @@ async function createSelfBooking(payload = {}) {
           // directly (cheap, pure HMAC), and every trust condition the
           // pricing path checks (draft shape, customer ownership) is
           // re-read fresh under the savepoint below.
-          const { verifyEstimateHandoffToken: verifyFeeHandoffToken } = require('../utils/estimate-handoff-token');
-          const setupFeeHandoffEligible = !!pricing_estimate_id
-            && verifyFeeHandoffToken(pricing_estimate_id, estimate_token);
           if (setupFeeHandoffEligible) {
-            await trx.transaction(async (sp) => {
-                const freshPricingEst = await sp('estimates')
-                  .where({ id: pricing_estimate_id })
-                  .forUpdate()
-                  .first('*');
-                const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
-                if (!freshPricingEst || !wizardDraftSelfServeBookable(freshPricingEst)) return;
-                // Ownership: a mirrored draft carries this customer's id; a
-                // draft whose best-effort customer upsert failed carries
-                // NULL — the verified handoff token plus a fresh contact
-                // match (same last-10-phone / email rule as the
-                // source_estimate_id gate above) proves it is still this
-                // booker's own quote, so the DISCLOSED fee stays billable
-                // (Codex #3489: null !== custId silently dropped the
-                // stamp). A draft linked to a DIFFERENT customer never
-                // stamps.
-                if (freshPricingEst.customer_id) {
-                  if (String(freshPricingEst.customer_id) !== String(custId)) return;
-                } else {
-                  const last10 = (v) => {
-                    const digits = String(v || '').replace(/\D/g, '');
-                    return digits.length >= 10 ? digits.slice(-10) : '';
-                  };
-                  const bookerRow = await sp('customers').where({ id: custId }).first('phone', 'email');
-                  const estPhone10 = last10(freshPricingEst.customer_phone);
-                  const estEmail = String(freshPricingEst.customer_email || '').trim().toLowerCase();
-                  const contactMatches = estPhone10
-                    ? last10(bookerRow?.phone) === estPhone10
-                    : (!!estEmail && String(bookerRow?.email || '').trim().toLowerCase() === estEmail);
-                  if (!contactMatches) return;
-                }
-                const estData = typeof freshPricingEst.estimate_data === 'string'
-                  ? JSON.parse(freshPricingEst.estimate_data)
-                  : (freshPricingEst.estimate_data || {});
-                const frozenFee = Number(estData?.setupFeeQuote?.amount);
-                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) return;
-                const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
-                const freshCustomer = await sp('customers')
-                  .where({ id: custId })
-                  .forUpdate()
-                  .first();
-                const activeMember = !!freshCustomer
-                  && freshCustomer.active !== false
-                  && isMembershipCustomerRow(freshCustomer);
-                if (activeMember) return;
-                // Stamp the obligation AND correlate it: source_estimate_id
-                // links the parent to the quote that disclosed the fee (the
-                // unminted-setup-fee obligation machinery keys off it), and
-                // the draft is RETIRED (archived_at) under the same row lock
-                // — a consumed quote must not stay open for staff to later
-                // send/accept and have conversion charge the same fee twice.
-                // A fresh wizard run revives it (/calculate clears
-                // archived_at), minting a new live decision.
-                // Cross-family race re-check (Codex #3489): another pest or
-                // mosquito activation can queue a pending_setup_fee between
-                // this quote's /calculate and this booking, while tier
-                // enrollment is still asynchronous (the member check above
-                // reads non-member) and a different service family bypasses
-                // the same-family duplicate-series guard. ONE account setup
-                // fee: any other nonzero claim in flight — the same
-                // predicate decideSetupFeeQuote waives on — waives this
-                // stamp too. The draft is still retired below so the
-                // consumed quote cannot re-charge via a later staff accept.
-                const queuedElsewhere = await sp('scheduled_services')
-                  .where({ customer_id: custId })
-                  .whereNot({ id: serviceRow.id })
-                  .whereNotNull('pending_setup_fee')
-                  .whereNot('pending_setup_fee', 0)
-                  .first('id');
-                if (queuedElsewhere) {
-                  await sp('estimates')
-                    .where({ id: freshPricingEst.id })
-                    .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
-                  return;
-                }
-                await sp('scheduled_services')
-                  .where({ id: serviceRow.id })
-                  .update({
-                    pending_setup_fee: frozenFee,
-                    source_estimate_id: freshPricingEst.id,
-                    updated_at: sp.fn.now(),
-                  });
-                await sp('estimates')
-                  .where({ id: freshPricingEst.id })
-                  .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
-              });
-            // NO catch: a legitimately fee-less outcome is an early `return`
-            // above (waived, member, draft no longer eligible); an ERROR
-            // while deciding/stamping must abort this whole seeding
-            // transaction — series and fee obligation commit together or
-            // not at all, never a series with a silently lost fee. The
-            // outer seeding catch logs it; the booked visit itself stays.
+            await stampDisclosedSetupFee(trx, { stampServiceRow: serviceRow });
+            // NO catch here: an ERROR while deciding/stamping must abort
+            // this whole seeding transaction - series and fee obligation
+            // commit together or not at all, never a series with a
+            // silently lost fee. The outer seeding catch logs it; the
+            // booked visit itself stays.
           }
           return { seedResult };
         });
@@ -2893,6 +3062,31 @@ async function createSelfBooking(payload = {}) {
         else followUpRows = outcome.seedResult.insertedRows || [];
       } catch (err) {
         logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
+      }
+    }
+    if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
+      // Solo non-pest recurring wizard booking (e.g. mosquito): stamp the
+      // disclosed fee in its own transaction — but ONLY when the committed
+      // visit can actually mint it (priced + invoice-on-complete). A
+      // price-less visit would strand the stamp forever while archiving
+      // the one estimate staff could convert (Codex #3500) — leave the
+      // draft LIVE instead so conversion still bills the fee. The booking
+      // is already committed; a stamp error must not fail it.
+      try {
+        // The stamp is EXCLUSIVE to the atomic quarterly-pest seeding path
+        // above: a solo booking creates one visit and does NOT activate the
+        // quoted recurring plan (plan activation + setup-fee billing ride
+        // staff conversion of the draft), so charging the fee here would
+        // bill an obligation whose plan was never created (Codex #3500).
+        // The helper still ALWAYS runs with allowStamp:false — the locked
+        // membership recheck and queued-elsewhere waiver must freeze the
+        // zero-waiver into the live draft, so a fee this customer no
+        // longer owes can never be re-added at conversion.
+        await db.transaction(async (trx) => {
+          await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: serviceRow });
+        });
+      } catch (err) {
+        logger.error(`[booking:confirm] setup-fee waiver recheck failed for solo booking ${serviceRow.id} (booking kept): ${err.message}`);
       }
     }
     if (duplicateSeriesKept) {
