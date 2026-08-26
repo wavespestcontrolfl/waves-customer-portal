@@ -68,26 +68,50 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
         'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
       );
-    // The customer-level ACH rule participates in the walk (hook r2 P1):
-    // with ACH suspended, a verified bank row must not shadow a chargeable
-    // card — stripe.js and the SQL predicate both skip bank rows in that
-    // state and accept the card. Callers commonly pass a bare { id }
-    // (completion/quote paths), so an absent ach_status is LOOKED UP, never
-    // assumed healthy (codex #3495 P1); a failed lookup treats ACH as
-    // blocked (fail toward the card) — or rethrows for failClosed callers,
-    // same contract as the outer catch.
+    // The customer-level ACH rule and the ENROLLMENT POINTER both
+    // participate, mirroring StripeService.charge() exactly (codex #3495
+    // P0): customers.autopay_payment_method_id is "the method actually in
+    // charge" — with legacy duplicate defaults, ignoring it could hand a
+    // completion caller a different method than the enrolled one. Callers
+    // commonly pass a bare { id } (completion/quote paths), so absent
+    // fields are LOOKED UP, never assumed (a failed lookup treats ACH as
+    // blocked and the pointer as unset — fail toward the walk) — or
+    // rethrows for failClosed callers, same contract as the outer catch.
     let achStatus = customer.ach_status;
-    if (achStatus === undefined) {
+    let pointerId = customer.autopay_payment_method_id;
+    if (achStatus === undefined || pointerId === undefined) {
       try {
-        achStatus = (await knex('customers').where({ id: customer.id }).first('ach_status'))?.ach_status ?? null;
-      } catch (achErr) {
-        if (rethrow) throw achErr;
-        achStatus = 'suspended';
+        const custRow = await knex('customers').where({ id: customer.id })
+          .first('ach_status', 'autopay_payment_method_id');
+        if (achStatus === undefined) achStatus = custRow?.ach_status ?? null;
+        if (pointerId === undefined) pointerId = custRow?.autopay_payment_method_id ?? null;
+      } catch (lookupErr) {
+        if (rethrow) throw lookupErr;
+        if (achStatus === undefined) achStatus = 'suspended';
+        if (pointerId === undefined) pointerId = null;
       }
     }
     const achBlockedForCustomer = !!(achStatus && achStatus !== 'active');
-    return (candidates || []).find((m) => isChargeableAutopayMethod(m, now)
-      && !(achBlockedForCustomer && isBankMethodType(m.method_type))) || null;
+    const eligible = (m) => isChargeableAutopayMethod(m, now)
+      && !(achBlockedForCustomer && isBankMethodType(m.method_type));
+    // Pointer first — charge() honors it before the default fallback; an
+    // ineligible pointer falls through to the walk, same as charge()'s
+    // "falling back to default lookup" branch.
+    if (pointerId) {
+      const pointerRow = (candidates || []).find((m) => String(m.id) === String(pointerId))
+        || await knex('payment_methods')
+          .where({ id: pointerId, customer_id: customer.id, processor: 'stripe', autopay_enabled: true })
+          .first(
+            'id', 'processor', 'method_type', 'stripe_payment_method_id',
+            'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
+          );
+      if (pointerRow && eligible({ ...pointerRow, is_default: true })) {
+        // charge() accepts the pointer regardless of is_default (the
+        // pointer normally IS the default; enrollment repoints both).
+        return pointerRow;
+      }
+    }
+    return (candidates || []).find(eligible) || null;
   } catch (err) {
     // Swallowed by default (a broken read means "no chargeable method" for
     // display/scheduling call sites). Callers whose SAFE direction is

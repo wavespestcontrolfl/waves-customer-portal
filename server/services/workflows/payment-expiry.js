@@ -31,6 +31,10 @@ class PaymentExpiry {
     const expiringCards = await db('payment_methods as pm')
       .join('customers as c', 'pm.customer_id', 'c.id')
       .where('pm.processor', 'stripe')
+      // CARD rows only (hook P1): a bank/ACH row with populated legacy
+      // expiry fields must never receive a "card expiring" notice. NULL
+      // method_type = legacy card rows, kept.
+      .whereRaw(`(pm.method_type IS NULL OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))`)
       .where('c.active', true)
       .whereNull('c.deleted_at')
       .where(function () {
