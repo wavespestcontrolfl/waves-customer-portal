@@ -131,42 +131,73 @@ async function sendCardExpiryWarnings() {
 
   logger.info(`[autopay-notifications] Card expiry warnings — scanning next 60 days`);
 
-  // Active autopay customers with a designated autopay payment method expiring soon
-  const rows = await db('payment_methods')
-    .join('customers', 'customers.id', 'payment_methods.customer_id')
-    .where('customers.active', true)
-    .where('customers.autopay_enabled', true)
-    .whereNull('customers.deleted_at')
-    .where('payment_methods.autopay_enabled', true)
-    // Guarded casts + legacy 2-digit normalization (codex #3495): a raw
-    // '26' hit make_date as year 0026 and new Date as 1926, staging a valid
-    // card as expired — and a non-numeric value made ::int THROW. Every
-    // cast sits inside a CASE THEN whose WHEN is regex-only (AND conjuncts
-    // may reorder; CASE arms may not).
-    .whereRaw(
-      `CASE
-         WHEN NULLIF(BTRIM(payment_methods.exp_month), '') ~ '^[0-9]{1,2}$'
-           AND NULLIF(BTRIM(payment_methods.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
-         THEN CASE
-                WHEN NULLIF(BTRIM(payment_methods.exp_month), '')::int BETWEEN 1 AND 12
-                THEN make_date(
-                       (CASE WHEN NULLIF(BTRIM(payment_methods.exp_year), '')::int < 100
-                             THEN NULLIF(BTRIM(payment_methods.exp_year), '')::int + 2000
-                             ELSE NULLIF(BTRIM(payment_methods.exp_year), '')::int END),
-                       NULLIF(BTRIM(payment_methods.exp_month), '')::int, 1) <= ?
-                ELSE FALSE
-              END
-         ELSE FALSE
-       END`,
-      [etDateString(sixty)]
-    )
-    .select(
-      'customers.id as customer_id', 'customers.first_name', 'customers.phone',
-      'payment_methods.id as payment_method_id',
-      'payment_methods.card_brand as brand',
-      'payment_methods.last_four as last4',
-      'payment_methods.exp_month', 'payment_methods.exp_year',
-    );
+  // Current-method selection, charge-path semantics (codex #3495 r17): the
+  // old scan warned on EVERY autopay_enabled payment_methods row inside the
+  // expiry window — replaced non-default cards and legacy bank rows with
+  // populated expiry fields all generated false customer warnings. The one
+  // method that matters is the method charge() would use, so reuse the
+  // existing walk (getChargeableAutopayMethod) instead of a third SQL
+  // mirror of the pointer/default predicate:
+  //   - chargeable CURRENT method is a card  → warn if it expires soon;
+  //   - chargeable CURRENT method is a bank  → the customer is charged via
+  //     ACH — a card notice is noise, skip;
+  //   - NOTHING chargeable → the card charge() WOULD have wanted (pointer
+  //     first, else newest default card) is expired/expiring — that is
+  //     exactly the "autopay will fail" warning this job exists for.
+  const { getChargeableAutopayMethod, isBankMethodType } = require('./autopay-eligibility');
+  const customers = await db('customers')
+    .where({ active: true, autopay_enabled: true })
+    .whereNull('deleted_at')
+    .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
+
+  const rows = [];
+  for (const customer of customers) {
+    try {
+      let target = null;
+      const current = await getChargeableAutopayMethod(customer, db, { now });
+      if (current) {
+        if (!isBankMethodType(current.method_type)) {
+          // The walk's select has no display columns — refetch for the SMS.
+          target = await db('payment_methods')
+            .where({ id: current.id })
+            .first('id', 'method_type', 'card_brand', 'last_four', 'exp_month', 'exp_year') || current;
+        }
+      } else {
+        // Nothing chargeable — surface the card charge() would have used.
+        const methods = await db('payment_methods')
+          .where({ customer_id: customer.id, processor: 'stripe', autopay_enabled: true })
+          .whereNotNull('stripe_payment_method_id')
+          .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'id', order: 'asc' }])
+          .select('id', 'method_type', 'is_default', 'card_brand', 'last_four', 'exp_month', 'exp_year');
+        const pointer = methods.find((m) => String(m.id) === String(customer.autopay_payment_method_id));
+        if (pointer && !isBankMethodType(pointer.method_type)) target = pointer;
+        else target = methods.find((m) => m.is_default === true && !isBankMethodType(m.method_type)) || null;
+      }
+      if (!target) continue;
+      // Same guarded parsing as the charge path — malformed expiry fields
+      // are payment-expiry's unchargeable story, not a dated card warning.
+      const expMonth = Number(target.exp_month);
+      const rawYear = Number(target.exp_year);
+      const expYear = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
+      if (!Number.isInteger(expMonth) || expMonth < 1 || expMonth > 12 || !Number.isInteger(expYear)) continue;
+      // Window: first day of the expiry month within the next 60 ET days
+      // (expired cards stay included — daysUntil goes negative).
+      const firstOfExpMonth = new Date(Date.UTC(expYear, expMonth - 1, 1));
+      if (firstOfExpMonth > new Date(`${etDateString(sixty)}T00:00:00Z`)) continue;
+      rows.push({
+        customer_id: customer.id,
+        first_name: customer.first_name,
+        phone: customer.phone,
+        payment_method_id: target.id,
+        brand: target.card_brand,
+        last4: target.last_four,
+        exp_month: target.exp_month,
+        exp_year: target.exp_year,
+      });
+    } catch (walkErr) {
+      logger.error(`[autopay-notifications] expiry candidate walk failed for ${customer.id}: ${walkErr.message}`);
+    }
+  }
 
   let sent = 0;
   let skipped = 0;
