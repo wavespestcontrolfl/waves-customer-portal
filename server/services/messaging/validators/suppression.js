@@ -224,7 +224,12 @@ async function clearSuppression({ phone, source, dbh = db }) {
     // would stay blocked forever despite the clear. Next send re-evaluates fresh.
     // Best-effort: the table may not exist yet, and a cache miss is harmless.
     try {
-      await dbh('phone_line_types').where({ phone }).del();
+      // Deliberately the GLOBAL connection even when dbh is a transaction:
+      // this delete is best-effort and its error is swallowed — inside a
+      // caller's transaction a swallowed failure would still ABORT the
+      // transaction, silently rolling back the clearance above (codex
+      // #3495). Outside it, a cache-delete failure costs nothing.
+      await db('phone_line_types').where({ phone }).del();
     } catch (cacheErr) {
       if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
         logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
