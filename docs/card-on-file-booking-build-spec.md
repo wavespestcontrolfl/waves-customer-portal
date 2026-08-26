@@ -14,6 +14,19 @@
 > (`server/services/recurring-card-on-file.js`); decline/skip falls back to the
 > delivered pay link + an office alert. Other Phase 2 exemptions (payer-billed,
 > invoice-mode, existing plan member, commercial site-confirmation hold) stand.
+>
+> ⚠ **Rollout prerequisite — the flip is THREE env vars, not one.**
+> `isPrepayCardAndChargeEnabled()` is a conjunction: `GATE_PREPAY_CARD_AND_CHARGE`
+> does nothing unless `RECURRING_CARD_ON_FILE=true` (the master card lane) **and**
+> `GATE_AUTO_APPLY_ACCOUNT_CREDIT=true` (prod default **false** —
+> `server/config/feature-gates.js` `autoApplyAccountCredit`) are also set. The
+> credit gate is load-bearing, not incidental: the prepay quote projects account
+> balance + promised inspection credit and the post-commit charge relies on the
+> in-lock auto-apply to consume them, so with it off an in-lane accept would quote
+> and charge the GROSS annual over a promised credit (Codex #3492 r11 P0). Setting
+> only the prepay gate silently retains the legacy invoice-and-pay-link behavior.
+> Kill switch: unset `GATE_PREPAY_CARD_AND_CHARGE` alone — committed charge jobs
+> still drain via the recovery sweep's pay-link fallback.
 
 **Owner decision (Adam, 2026-07-12, working session):** completing a booking in the
 estimate flow requires a **card on file** — for both one-time and recurring services.

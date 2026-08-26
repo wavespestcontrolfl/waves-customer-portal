@@ -69,6 +69,40 @@ function isPrepayCardAndChargeEnabled() {
     && require('../config/feature-gates').gates.autoApplyAccountCredit === true;
 }
 
+// Grouped multi-property owner (Codex #3492 r25): the accept transaction
+// resolves an unlinked grouped estimate's customer through an accepted
+// SIBLING before any phone matching (a second property's address
+// deliberately fails the phone-match disambiguation), so every read-only
+// approximation of "the customer this accept will land on" must try the
+// sibling FIRST too — otherwise the policy computes its plan-member /
+// payer / autopay / saved-card exemptions against no customer (or a
+// different shared-phone profile) and either demands a SetupIntent the
+// standing exemption waives or quotes a saved method the ownership check
+// then rejects on every retry. Read-only approximation of the trx's
+// sibling pick (same query shape, minus the advisory lock); the trx
+// re-resolves authoritatively under its lock. Lookup failure returns null
+// — callers fall through to the phone match, exactly like the trx.
+async function resolveGroupedEstimateOwnerId(estimate, database = db) {
+  if (!estimate?.estimate_group_id) return null;
+  try {
+    const sibling = await database('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereNotNull('customer_id')
+      .orderBy('accepted_at', 'asc')
+      .first('customer_id');
+    if (!sibling?.customer_id) return null;
+    const live = await database('customers')
+      .where({ id: sibling.customer_id })
+      .whereNull('deleted_at')
+      .first('id');
+    return live?.id || null;
+  } catch (err) {
+    logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
+    return null;
+  }
+}
+
 // What a recurring accept requires. Exempt lanes:
 //  - one-time accepts (the card-hold lane owns those),
 //  - invoice-mode (admin opted into manual/auto invoicing — its own billing
@@ -117,6 +151,11 @@ async function resolveRecurringCardPolicyForEstimate({
   // through a fresh SetupIntent (auto-satisfy contract, spec §3.2). A
   // failed lookup keeps the card required (fail toward protection).
   let resolvedCustomerId = estimate?.customer_id || null;
+  // Grouped sibling BEFORE the phone match — mirrors the accept
+  // transaction's resolution order (see resolveGroupedEstimateOwnerId).
+  if (!resolvedCustomerId) {
+    resolvedCustomerId = await resolveGroupedEstimateOwnerId(estimate);
+  }
   if (!resolvedCustomerId && estimate?.customer_phone) {
     try {
       const gates = require('../routes/estimate-public');
@@ -1126,6 +1165,7 @@ module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   resolveRecurringCardPolicyForEstimate,
+  resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,

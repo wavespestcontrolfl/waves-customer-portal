@@ -6,15 +6,20 @@
 
 let mockDbFixtures = {};
 jest.mock('../models/db', () => {
-  const chain = (table) => ({
-    where: () => ({
+  // Self-returning chain so the grouped-sibling lookup's longer chain
+  // (where → whereNot → whereNotNull → orderBy → first) resolves from the
+  // same per-table fixture as the simple where().first() reads.
+  const chain = (table) => {
+    const c = {
       first: async (...args) => {
         const v = mockDbFixtures[table];
         if (typeof v === 'function') return v(...args);
         return v ?? null;
       },
-    }),
-  });
+    };
+    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereNull', 'orderBy']) c[m] = () => c;
+    return c;
+  };
   const mock = jest.fn((table) => chain(table));
   mock.fn = { now: jest.fn(() => 'NOW') };
   return mock;
@@ -368,6 +373,45 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
   it('requires the card for a plain new recurring accept (and with no linked customer)', async () => {
     expect((await resolveRecurringCardPolicyForEstimate({ estimate: EST })).required).toBe(true);
     expect((await resolveRecurringCardPolicyForEstimate({ estimate: { id: 'est-2', customer_id: null } })).required).toBe(true);
+  });
+
+  // Codex #3492 r25: the accept transaction links an unlinked grouped
+  // estimate through an accepted SIBLING before any phone matching, so the
+  // policy's customer-dependent exemptions must see the sibling's owner —
+  // not "no customer" (which would demand a SetupIntent the standing
+  // exemption waives) and not a different shared-phone profile.
+  describe('grouped multi-property owner resolution', () => {
+    const GROUPED = { id: 'est-g1', customer_id: null, estimate_group_id: 'grp-1' };
+
+    it("honors the grouped sibling owner's saved-card exemption (no re-ask)", async () => {
+      mockDbFixtures.estimates = { customer_id: 'cust-sib' };
+      mockDbFixtures.customers = { id: 'cust-sib' };
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-sib', stripe_payment_method_id: 'pm_sib' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: GROUPED });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('saved_method_consented');
+      expect(p.savedMethodRowId).toBe('pmrow-sib');
+      expect(mockFindConsentedChargeableCard).toHaveBeenCalledWith('cust-sib');
+    });
+
+    it('keeps the card required when no sibling has resolved a customer yet', async () => {
+      mockDbFixtures.estimates = null;
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: GROUPED });
+      expect(p.required).toBe(true);
+    });
+
+    it('keeps the card required when the sibling owner is soft-deleted (helper returns null)', async () => {
+      mockDbFixtures.estimates = { customer_id: 'cust-gone' };
+      mockDbFixtures.customers = null;
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: GROUPED });
+      expect(p.required).toBe(true);
+    });
+
+    it('fails soft on a sibling lookup error — card stays required, no throw', async () => {
+      mockDbFixtures.estimates = () => { throw new Error('db down'); };
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: GROUPED });
+      expect(p.required).toBe(true);
+    });
   });
 });
 

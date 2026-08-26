@@ -9313,18 +9313,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // rejects PREPAY_QUOTE_STALE. Read-only approximation of the trx's
     // sibling pick; the trx re-resolves authoritatively under its lock.
     if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.estimate_group_id) {
-      try {
-        const quoteSibling = await db('estimates')
-          .where({ estimate_group_id: estimate.estimate_group_id })
-          .whereNot({ id: estimate.id })
-          .whereNotNull('customer_id')
-          .orderBy('accepted_at', 'asc')
-          .first('customer_id');
-        if (quoteSibling?.customer_id) {
-          const liveSiblingCustomer = await db('customers').where({ id: quoteSibling.customer_id }).whereNull('deleted_at').first('id');
-          acceptResolvedCustomerId = liveSiblingCustomer?.id || null;
-        }
-      } catch { /* fall through to the phone match */ }
+      // Shared with the policy resolver (Codex r25) — the SAME sibling pick
+      // feeds recurringCardPolicy's exemptions above, so the quote's owner
+      // and the policy's owner can't diverge. Failure → phone match.
+      acceptResolvedCustomerId = await RecurringCards.resolveGroupedEstimateOwnerId(estimate);
     }
     if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.customer_phone) {
       try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
