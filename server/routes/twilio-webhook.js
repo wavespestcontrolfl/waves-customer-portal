@@ -467,6 +467,26 @@ router.post('/sms', async (req, res) => {
       // the same transaction. The opt-in itself must never fail: any
       // transaction error falls back to the plain (unlocked) clear.
       const optInPhone = normalizedFrom || From;
+      // Derived consent state (recipient confirm + prefs restore) applies
+      // INSIDE the same advisory-locked transaction as the clear (hook P1):
+      // written afterwards unlocked, a newer 21610 could take the lock,
+      // suppress, decline the recipient, and flip prefs off — and these
+      // stale START writes would then overwrite that newer verdict. In-trx
+      // fail-loud: markRecipientOptin returns FALSE on a swallowed SQL
+      // error that has already aborted the transaction (hook r12 trap).
+      const applyStartDerivedState = async (dbh, { failLoud }) => {
+        const confirmed = await require('../services/recipient-optin')
+          .markRecipientOptin(optInPhone, 'confirmed', { dbh });
+        if (failLoud && confirmed === false) {
+          throw Object.assign(new Error('recipient confirm write reported failure'), { code: 'recipient_confirm_failed' });
+        }
+        if (customer) {
+          await dbh('notification_prefs')
+            .insert({ customer_id: customer.id, sms_enabled: true })
+            .onConflict('customer_id')
+            .merge({ sms_enabled: true });
+        }
+      };
       try {
         await db.transaction(async (trx) => {
           await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
@@ -490,6 +510,7 @@ router.post('/sms', async (req, res) => {
           if (cleared?.ok === false) {
             throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
           }
+          await applyStartDerivedState(trx, { failLoud: true });
         });
       } catch (optInErr) {
         // Retry UNDER THE SAME LOCK without the marker insert (hook P1: an
@@ -510,32 +531,24 @@ router.post('/sms', async (req, res) => {
             if (cleared?.ok === false) {
               throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
             }
+            await applyStartDerivedState(trx, { failLoud: true });
           });
         } catch (retryErr) {
           // Both locked attempts failed — the DB itself is misbehaving (a
           // concurrent 21610 writer is in the same storm). The opt-in must
-          // never be dropped: land the plain clear as the last resort.
+          // never be dropped: land the plain clear as the last resort,
+          // with the derived state best-effort behind it.
           logger.error(`[sms-optin] locked retry also failed (${retryErr.code || retryErr.message}) — last-resort plain clear`);
           await clearSuppression({
             phone: optInPhone,
             source: `twilio_webhook_${optCommand.detectionMethod}`,
           });
+          try {
+            await applyStartDerivedState(db, { failLoud: false });
+          } catch (e) { logger.error(`[sms-optin] derived-state fallback failed: ${e.message}`); }
         }
       }
-      // Recipient double opt-in: YES from a pending third-party recipient
-      // confirms them (no-op when no recipient row exists).
-      try {
-        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'confirmed');
-      } catch { /* never block the opt-in path */ }
-      try {
-        if (customer) {
-          await db('notification_prefs')
-            .insert({ customer_id: customer.id, sms_enabled: true })
-            .onConflict('customer_id')
-            .merge({ sms_enabled: true });
-        }
-        logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
-      } catch (e) { logger.error(`[sms-optin] Failed to update prefs: ${e.message}`); }
+      logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
 
       // (inbound sms_log row inserted above, BEFORE the clear — see the
       // ordering comment at the top of this branch.)
@@ -1312,25 +1325,22 @@ router.post('/status', async (req, res) => {
           try {
             await db.transaction(async (trx) => {
               await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
-              const logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at');
+              const logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
               const sentAt = logRow?.created_at || null;
-              // The primary send path stamps created_at PRE-handoff, but
-              // other outbound writers still log after messages.create()
-              // returns — so created_at can postdate the actual Twilio
-              // handoff by the API latency. Shave that race window when
-              // comparing against a START: a clearance inside it keeps
-              // winning (don't re-suppress an opted-in recipient), and the
-              // recheck below scans the same widened window so the raced
-              // START is seen. Kept to seconds (codex r7 P1): the primary
-              // path needs no grace at all and straggler writers' insert
-              // latency is single-digit seconds — a wide backdate would
-              // instead discard the carrier's CURRENT verdict for a START
-              // sent shortly before a genuinely-later send. Self-healing
-              // either way: the next send bounces with a clearly-newer
-              // sentAt, and the d18 daily reconciler backstops prefs drift.
+              // The primary send path stamps created_at PRE-handoff and
+              // marks the row (metadata.pre_handoff_stamp) — those rows
+              // need NO grace, and backdating them misorders a START at T
+              // against a genuinely-later send at T+3s (hook P1). Legacy
+              // writers still log after messages.create() returns, so
+              // UNSTAMPED rows keep the seconds-scale shave: a clearance
+              // inside that window keeps winning, and the recheck below
+              // scans the same widened window so a raced START is seen.
+              // Self-healing either way: the next send bounces with a
+              // clearly-newer sentAt, and the d18 reconciler backstops.
               const SEND_RACE_GRACE_MS = 5 * 1000;
+              const { hasPreHandoffStamp } = require('../services/messaging/suppression-ownership');
               const sentAtFloor = sentAt
-                ? new Date(new Date(sentAt).getTime() - SEND_RACE_GRACE_MS)
+                ? new Date(new Date(sentAt).getTime() - (hasPreHandoffStamp(logRow) ? 0 : SEND_RACE_GRACE_MS))
                 : null;
               const optOutCustomerId = logRow?.customer_id || null;
               const supRow = await trx('messaging_suppression')

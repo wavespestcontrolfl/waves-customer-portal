@@ -641,16 +641,21 @@ const TwilioService = {
           // scheduled_sms_log_id ties this provider row back to the queued
           // row that dispatched it, so stale-claim recovery can prove the
           // send happened instead of retrying (double-send) or reopening.
-          metadata: (options.media || options.agentDecisionId || options.scheduledSmsLogId || (Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length))
-            ? JSON.stringify({
-              ...(options.media ? { media: options.media } : {}),
-              ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
-              ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
-                ? { parked_decision_ids: options.parkedDecisionIds }
-                : {}),
-              ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
-            })
-            : null,
+          // pre_handoff_stamp marks created_at as the PRE-handoff capture
+          // above — the delayed-callback readers (21610/30006 ordering)
+          // apply their race grace only to rows WITHOUT it (hook P1: the
+          // grace exists for legacy post-handoff writers; backdating a
+          // pre-stamped row misorders a START received between handoff and
+          // the carrier verdict).
+          metadata: JSON.stringify({
+            pre_handoff_stamp: true,
+            ...(options.media ? { media: options.media } : {}),
+            ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+            ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+              ? { parked_decision_ids: options.parkedDecisionIds }
+              : {}),
+            ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+          }),
         });
       } catch (logErr) {
         logger.error(`SMS log failed: ${logErr.message}`);

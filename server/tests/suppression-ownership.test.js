@@ -12,7 +12,7 @@ jest.mock('../services/recipient-optin', () => ({ markRecipientOptin: jest.fn(as
 
 const db = require('../models/db');
 const { recordSuppression } = require('../services/messaging/validators/suppression');
-const { standingVerdictTime } = require('../services/messaging/suppression-ownership');
+const { standingVerdictTime, hasPreHandoffStamp } = require('../services/messaging/suppression-ownership');
 const { recordSyncProviderOptOut } = require('../services/messaging/sync-optout');
 
 describe('standingVerdictTime', () => {
@@ -39,6 +39,17 @@ describe('standingVerdictTime', () => {
     await expect(standingVerdictTime({ active: true, source: 'twilio_send_21610' }, { dbh })).resolves.toBeNull();
     await expect(standingVerdictTime(null, { dbh })).resolves.toBeNull();
     expect(dbh).not.toHaveBeenCalled();
+  });
+});
+
+describe('hasPreHandoffStamp (hook #3495 P1 — grace only for post-handoff legacy rows)', () => {
+  test('recognizes the stamp in string and object metadata; everything else is unstamped', () => {
+    expect(hasPreHandoffStamp({ metadata: JSON.stringify({ pre_handoff_stamp: true }) })).toBe(true);
+    expect(hasPreHandoffStamp({ metadata: { pre_handoff_stamp: true, media: ['x'] } })).toBe(true);
+    expect(hasPreHandoffStamp({ metadata: JSON.stringify({ media: ['x'] }) })).toBe(false);
+    expect(hasPreHandoffStamp({ metadata: null })).toBe(false);
+    expect(hasPreHandoffStamp({ metadata: 'not json' })).toBe(false);
+    expect(hasPreHandoffStamp(null)).toBe(false);
   });
 });
 

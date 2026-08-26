@@ -34,4 +34,22 @@ async function standingVerdictTime(supRow, { dbh, excludeSid = null } = {}) {
   return null;
 }
 
-module.exports = { standingVerdictTime };
+// True when an sms_log row's created_at was captured BEFORE the Twilio
+// handoff (TwilioService.sendSMS stamps every row it writes with
+// metadata.pre_handoff_stamp). Delayed-callback readers apply their
+// send-race grace only to rows WITHOUT the stamp: the grace compensates
+// legacy writers that log after messages.create() returns, and backdating
+// an accurately-stamped row instead misorders a START received between
+// the handoff and the carrier verdict (hook #3495 P1).
+function hasPreHandoffStamp(row) {
+  const meta = row?.metadata;
+  if (!meta) return false;
+  try {
+    const obj = typeof meta === 'string' ? JSON.parse(meta) : meta;
+    return obj?.pre_handoff_stamp === true;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { standingVerdictTime, hasPreHandoffStamp };
