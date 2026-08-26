@@ -2424,15 +2424,27 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
         .whereNull('payer_statement_id')
         .select('id', 'status');
-      // A send in flight means the pre-void invoice message can still reach
-      // the customer with the old amount and a soon-dead pay link — the
-      // canonical transition guard refuses voids in 'sending', so the
-      // reprice refuses too (Codex #3505 r5 P1; the claim is short-lived,
-      // the 409 is retryable).
-      if (staleInvoices.some((invoice) => String(invoice.status) === 'sending')) {
-        throw httpError(409, `Can't apply this price/service change to the rest of the series: an invoice for the ${dateOnly(sibling.scheduled_date) || 'later'} visit is being sent right now. Retry in a moment, or set the change to this appointment only.`);
+      let staleInvoiceIds = staleInvoices.map((invoice) => invoice.id);
+      if (staleInvoiceIds.length > 0) {
+        // Re-check UNDER invoice row locks (Codex #3505 r5+r6 P1): a sender
+        // can claim a draft invoice between the probe above and the void
+        // helper's own lock, and the helper's skip set doesn't include
+        // 'sending' — the canonical transition guard refuses voids mid-send
+        // because the pre-void message can still reach the customer with
+        // the old amount and a dead pay link. Money appearing under the
+        // lock refuses the same way (retryable 409); rows that turned
+        // terminal drop out of the void set (nothing left to retire).
+        const lockedStale = await conn('invoices')
+          .whereIn('id', staleInvoiceIds)
+          .forUpdate()
+          .select('id', 'status');
+        if (lockedStale.some((invoice) => ['sending', 'paid', 'prepaid', 'processing'].includes(String(invoice.status)))) {
+          throw httpError(409, `Can't apply this price/service change to the rest of the series: an invoice for the ${dateOnly(sibling.scheduled_date) || 'later'} visit is being sent or paid right now. Retry in a moment, or set the change to this appointment only.`);
+        }
+        staleInvoiceIds = lockedStale
+          .filter((invoice) => !['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status)))
+          .map((invoice) => invoice.id);
       }
-      const staleInvoiceIds = staleInvoices.map((invoice) => invoice.id);
       if (staleInvoiceIds.length > 0) {
         const voidUpdate = { status: 'void' };
         if (await conn.schema.hasColumn('invoices', 'updated_at').catch(() => false)) {

@@ -524,9 +524,12 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
     expect(src).toMatch(/const addonTableExists = billingRelevant && targets\.length > 0/);
   });
 
-  it('the void set excludes every terminal invoice state and refuses on an in-flight send', () => {
+  it('the void set excludes every terminal invoice state and re-checks UNDER row locks before voiding', () => {
     expect(src).toMatch(/\.whereNotIn\('status', \['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'\]\)\s*\n\s*\.whereNull\('payer_statement_id'\)/);
-    expect(src).toMatch(/String\(invoice\.status\) === 'sending'/);
+    // Locked re-check: a post-probe 'sending' claim (or money appearing)
+    // refuses; rows that turned terminal drop out of the void set.
+    expect(src).toMatch(/const lockedStale = await conn\('invoices'\)\s*\n\s*\.whereIn\('id', staleInvoiceIds\)\s*\n\s*\.forUpdate\(\)/);
+    expect(src).toMatch(/\['sending', 'paid', 'prepaid', 'processing'\]\.includes\(String\(invoice\.status\)\)/);
   });
 
   it('voiding a stale invoice cancels its active payment plan, mirroring the canonical void path', () => {

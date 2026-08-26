@@ -1748,7 +1748,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const primaryPriceDirty =
     String(form.price ?? "") !== String(initialPrimaryRef.current.price ?? "");
   const primaryServiceDirty =
-    (form.serviceType || "") !== (initialPrimaryRef.current.serviceType || "");
+    (form.serviceType || "") !== (initialPrimaryRef.current.serviceType || "") &&
+    // An ID-less fallback pick (the services-dropdown fetch failed, so the
+    // picker never recorded a serviceId) posts a label-only change, which
+    // the server deliberately does NOT propagate — don't offer a series
+    // scope the save can't honor.
+    form.serviceId !== undefined;
   // The appointment discount is part of the propagatable price group on the
   // server, and the Discount control always opens empty (it never seeds the
   // stored discount), so a non-empty selection is always a change made in
