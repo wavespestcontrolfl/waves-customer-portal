@@ -326,7 +326,11 @@ async function sendPaymentMethodUpdated({
 
 function expiryStageFor(method, now = new Date()) {
   const month = Number(method?.exp_month);
-  const year = Number(method?.exp_year);
+  // Legacy rows store 2-digit expiry years — normalize like the charge
+  // path's normalizeLegacyExpiry, or new Date(26, ...) reads as 1926 and a
+  // valid card stages as 'expired'.
+  const rawYear = Number(method?.exp_year);
+  const year = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
   if (!month || !year) return null;
   const expirationEnd = new Date(year, month, 0, 23, 59, 59);
   const daysUntil = Math.ceil((expirationEnd.getTime() - now.getTime()) / 86400000);

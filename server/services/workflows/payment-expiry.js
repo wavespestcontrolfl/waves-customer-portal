@@ -68,7 +68,14 @@ class PaymentExpiry {
 
     let notified = 0;
 
-    for (const card of expiringCards) {
+    for (const rawCard of expiringCards) {
+      // Normalize legacy 2-digit years for EVERY downstream consumer — the
+      // email path's expiry-stage math runs new Date(year, ...), where a raw
+      // '26' reads as 1926 and the card emails as already expired.
+      const rawYear = parseInt(rawCard.exp_year, 10);
+      const card = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100
+        ? { ...rawCard, exp_year: rawYear + 2000 }
+        : rawCard;
       try {
         const customer = await db('customers').where({ id: card.customer_id }).first();
         if (!customer) continue;
