@@ -75,6 +75,7 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
+import { useOutletContext } from "react-router-dom";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
@@ -219,25 +220,32 @@ const TABS = [
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   { key: "triage", label: "Triage", Icon: Inbox },
+  // Management tabs below are owner-only (2026-08-25 role lockdown):
+  // template/routing/notification CONFIG and staff-performance scoring are
+  // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
   {
     key: "templates",
     label: "Message Templates",
     Icon: FileText,
+    adminOnly: true,
   },
   {
     key: "csr",
     label: "CSR Coach",
     Icon: Headphones,
+    adminOnly: true,
   },
   {
     key: "call_routing",
     label: "Call Routing",
     Icon: Bot,
+    adminOnly: true,
   },
   {
     key: "notifications",
     label: "Notifications",
     Icon: Bell,
+    adminOnly: true,
   },
 ];
 const SMS_LOG_PAGE_SIZE = 500;
@@ -2886,7 +2894,16 @@ export default function CommunicationsPageV2() {
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
   const [prepSendOpen, setPrepSendOpen] = useState(false);
-  const tabs = TABS;
+  // Server-verified role from the shell's Outlet context (never localStorage).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
+  const tabs = TABS.filter((t) => !t.adminOnly || isAdminRole);
+
+  // A hash deep link (or stale state) to a hidden management tab must not
+  // strand a non-admin on a blank/unauthorized view.
+  useEffect(() => {
+    if (!tabs.some((t) => t.key === tab)) setTab("sms");
+  }, [tabs, tab]);
 
   useEffect(() => {
     const applyHashTab = () => {

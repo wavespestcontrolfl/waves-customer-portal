@@ -19,9 +19,17 @@ const { SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: every draft MUTATION (approve/send, revise,
 // reject) is owner-only — approving a draft sends a customer SMS, and the
-// owner sends all customer comms. Reads stay staff-wide: the tech-visible
-// Communications surface loads draft cards inline (GET /:id).
-router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
+// owner sends all customer comms. The ONLY staff-wide read is the single-
+// draft lookup the tech-visible Communications surface uses (GET /:id);
+// list/enumeration reads are owner-only like the Agent Ops page they back.
+const SINGLE_DRAFT_GET_RE = /^\/[A-Za-z0-9_-]+$/;
+router.use((req, res, next) => (
+  req.method === 'GET'
+    && SINGLE_DRAFT_GET_RE.test(req.path)
+    && req.path !== '/stats' // named GET siblings of /:id stay owner-only
+    ? next()
+    : requireAdmin(req, res, next)
+));
 
 function parseFlags(value) {
   if (!value) return {};

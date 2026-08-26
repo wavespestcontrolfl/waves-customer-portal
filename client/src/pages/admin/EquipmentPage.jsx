@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -200,10 +200,27 @@ function normalizeEquipmentTab(value) {
   return EQUIPMENT_TAB_KEYS.has(key) ? key : "assets";
 }
 
+// Job Costing + Analytics carry financial data (labor cost, margins) —
+// owner-only under the 2026-08-25 role lockdown. Techs keep assets,
+// maintenance, calibrations, and tank mixes.
+const OWNER_ONLY_EQUIPMENT_TABS = new Set(["job-costs", "analytics"]);
+
 export default function EquipmentPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  // Server-verified role from the shell's Outlet context (never localStorage).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
+  const normalizeForRole = (value) => {
+    const normalized = normalizeEquipmentTab(value);
+    return !isAdminRole && OWNER_ONLY_EQUIPMENT_TABS.has(normalized)
+      ? "assets"
+      : normalized;
+  };
+  const visibleGroups = EQUIPMENT_TAB_GROUPS.filter(
+    (g) => isAdminRole || !g.tabs.every((t) => OWNER_ONLY_EQUIPMENT_TABS.has(t)),
+  );
   const [tab, setTab] = useState(() =>
-    normalizeEquipmentTab(searchParams.get("tab")),
+    normalizeForRole(searchParams.get("tab")),
   );
   const [toast, setToast] = useState("");
   const [editing, setEditing] = useState(null);
@@ -212,10 +229,10 @@ export default function EquipmentPage() {
     setTimeout(() => setToast(""), 3500);
   };
   const activeGroup =
-    EQUIPMENT_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
-    EQUIPMENT_TAB_GROUPS[0];
+    visibleGroups.find((g) => g.tabs.includes(tab)) ||
+    visibleGroups[0];
   const selectLeaf = (nextTab) => {
-    const normalized = normalizeEquipmentTab(nextTab);
+    const normalized = normalizeForRole(nextTab);
     const params = new URLSearchParams(searchParams);
     if (normalized === "assets") params.delete("tab");
     else params.set("tab", normalized);
@@ -223,14 +240,15 @@ export default function EquipmentPage() {
     setSearchParams(params, { replace: true });
   };
   const handleSectionChange = (key) => {
-    const g = EQUIPMENT_TAB_GROUPS.find((x) => x.key === key);
+    const g = visibleGroups.find((x) => x.key === key);
     if (g) selectLeaf(g.tabs[0]);
   };
 
   useEffect(() => {
-    const nextTab = normalizeEquipmentTab(searchParams.get("tab"));
+    const nextTab = normalizeForRole(searchParams.get("tab"));
     setTab((current) => (current === nextTab ? current : nextTab));
-  }, [searchParams]);
+    // eslint reads only errors here; normalizeForRole is stable per role.
+  }, [searchParams, isAdminRole]);
 
   // Report the leaf that actually RENDERS: /admin/equipment falls back to
   // 'assets' and legacy links (?tab=fleet) normalize to 'maintenance' —
@@ -243,7 +261,7 @@ export default function EquipmentPage() {
       <AdminCommandHeader
         title="Equipment"
         icon={Wrench}
-        sections={EQUIPMENT_TAB_GROUPS.map((g) => ({
+        sections={visibleGroups.map((g) => ({
           key: g.key,
           label: g.label,
           Icon: g.Icon,
