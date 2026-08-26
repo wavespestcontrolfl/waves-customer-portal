@@ -517,6 +517,10 @@ describe('deferred-replay registry', () => {
     const res = await sweepPendingTerminalHooks({ now: new Date('2026-08-08T12:00:00Z') });
     expect(res).toEqual({ candidates: 1, reran: 1 });
     expect(mockVmClaims.clearLeadClaim).toHaveBeenCalledWith('lead-9');
+    // 'cancelled' is swept too: an invoice unvoid cancels completion/decline
+    // replays with the terminal_pending stamp — a crash before its
+    // post-commit hook pass must land here (Codex #3493 r15).
+    expect(selectChain.whereIn).toHaveBeenCalledWith('status', ['blocked', 'failed', 'cancelled']);
 
     // Lost claim race (r24): another pod's guarded UPDATE won — this pod
     // must NOT run the hook or burn an attempt.

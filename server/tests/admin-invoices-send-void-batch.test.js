@@ -20,6 +20,7 @@ jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(),
   sendViaSMSAndEmail: jest.fn(),
   voidInvoice: jest.fn(),
+  unvoidInvoice: jest.fn(),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -156,6 +157,7 @@ describe('POST /:id/void refusal mapping', () => {
     ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before voiding'],
     ['PI money in flight', 'A payment is already in flight (requires_capture); wait for it to settle or refund it before voiding'],
     ['PI cancel failed', "Couldn't cancel the open payment session pi_abc (boom); resolve it before voiding"],
+    ['live send claim', 'Cannot void this invoice — a send is already in progress; wait a moment and retry'],
     ['status changed mid-void', 'Invoice status changed while voiding — re-check and retry'],
     ['new payment session mid-void', 'A new payment session started for this invoice — re-check and retry the void'],
     ['payment applied mid-void', 'A payment was applied to this invoice while voiding — issue a refund instead'],
@@ -180,6 +182,69 @@ describe('POST /:id/void refusal mapping', () => {
     InvoiceService.voidInvoice.mockRejectedValue(new Error('connection refused'));
     await withServer(async (baseUrl) => {
       const response = await post(baseUrl, '/inv-1/void');
+      expect(response.status).toBe(500);
+    });
+  });
+});
+
+// Same contract for the undo: every business refusal InvoiceService.unvoidInvoice
+// throws must surface as an operator-actionable 409 toast, pinned VERBATIM.
+describe('POST /:id/unvoid refusal mapping', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each([
+    ['not void', 'Only a voided invoice can be unvoided (current status: sent)'],
+    ['annual prepay term', 'Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead'],
+    ['unverifiable term link', 'Could not verify the annual prepay term link — refusing to unvoid (boom)'],
+    ['prepay-switch superseded', 'Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied'],
+    ['cancelled linked service', 'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice'],
+    ['skipped linked service', 'Cannot unvoid — the linked service visit is skipped; restore or re-book the visit before restoring its invoice'],
+    ['annual prepay coverage settlement', 'Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead'],
+    ['annual-stamped linked visit', 'Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead'],
+    ['free re-service conversion', 'Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge'],
+    ['orphaned annual prepay charge', 'Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment'],
+    ['unverifiable linked service', 'Could not verify the linked service visit — refusing to unvoid (boom)'],
+    ['deferred send mid-dispatch', 'Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute'],
+    ['delivered send still finalizing', 'Cannot unvoid — a delivered message for this invoice is still finalizing; retry in a few minutes'],
+    ['saved-card charge pending', 'Invoice already has a saved-card charge in progress or awaiting reconciliation'],
+    ['ambiguous charge attempt', 'Invoice has an unresolved charge attempt with an ambiguous Stripe outcome'],
+    ['orphan Stripe charge', 'Invoice has an unresolved Stripe charge pi_abc'],
+    ['deposit credit returned', "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly"],
+    ['finalized payer statement', 'This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one'],
+    ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before unvoiding'],
+    ['live payment session', 'This invoice still has a live payment session (requires_capture); resolve it before unvoiding'],
+    ['payment landed after void', 'Cannot unvoid an invoice with payment already applied (payment pay-9)'],
+    ['status changed mid-unvoid', 'Invoice status changed while unvoiding — re-check and retry'],
+  ])('surfaces the %s refusal as a 409 conflict', async (_label, message) => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error(message));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ error: message });
+    });
+  });
+
+  test('a missing invoice maps to 404', async () => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error('Invoice not found'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(404);
+    });
+  });
+
+  test('a successful restore returns the draft invoice', async () => {
+    InvoiceService.unvoidInvoice.mockResolvedValue({ id: 'inv-1', status: 'draft' });
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ id: 'inv-1', status: 'draft' });
+    });
+  });
+
+  test('a non-refusal failure still surfaces as a server error (mapper is not over-broad)', async () => {
+    InvoiceService.unvoidInvoice.mockRejectedValue(new Error('connection refused'));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/inv-1/unvoid');
       expect(response.status).toBe(500);
     });
   });

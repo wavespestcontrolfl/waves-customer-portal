@@ -14,6 +14,7 @@ const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
+const { WAVEGUARD_SETUP_FEE, recurringMixHasMembershipFeeService } = require('../services/estimate-converter');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -1418,10 +1419,124 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // estimate_data is jsonb — pass the object directly so the ->>'lead_id'
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
+    // WaveGuard setup-fee disclosure, decided ONCE and frozen onto the draft:
+    // the converter's service-type predicate (solo recurring pest OR solo
+    // mosquito; bundles waived) + the existing-member waiver (the wizard
+    // resolves matching customers above, so it is not necessarily anonymous —
+    // an active plan member never pays the setup again), commercial always
+    // suppressed. The frozen amount is what the widget discloses AND what the
+    // self-booking handoff later stamps — never the live constant, so a
+    // constant change between disclosure and booking can't bill an amount
+    // the customer never saw.
+    // Disclosure tracks CONVERSION billing exactly: the converter's own
+    // service-mix predicate (solo recurring pest at any cadence, or solo
+    // mosquito — bundles waived), so every quote the converter would charge
+    // the fee on discloses it, and none that it waives does. Self-booking is
+    // a SEPARATE, narrower decision (booking.js): only the seeded quarterly
+    // pest series creates a plan at booking time and stamps the frozen fee;
+    // every other self-book books a single visit, not the plan — the plan
+    // and its fee arise at estimate conversion, where the converter's full
+    // predicate (incl. this frozen disclosure's member waiver) applies.
+    let setupFeeQuote = null;
+    let setupFeeMixQualifies = false;
+    try {
+      setupFeeMixQualifies = !commercialDetected && !quoteRequired
+        && recurringMixHasMembershipFeeService(recurringQuoteLines(estimate));
+    } catch (feeErr) {
+      // Can't even establish the service mix — leave the quote ABSENT
+      // (legacy behavior for this draft; nothing new disclosed or charged).
+      logger.warn(`[public-quote] setup-fee mix derivation failed: ${feeErr.message}`);
+    }
+    // The decision itself runs INSIDE the draft upsert transaction (below),
+    // with the existing draft row locked FOR UPDATE — the self-booking path
+    // stamps pending_setup_fee and archives the draft under the same row
+    // lock, so a /calculate racing a booking always sees the committed stamp
+    // and persists a waiver instead of reviving a second chargeable quote.
+    // A qualifying mix ALWAYS persists a decision — never "absent", which
+    // downstream code reads as a legacy draft and prices at the live
+    // constant. Membership is read with errors visible; if any read fails,
+    // the decision fails CLOSED in the customer's favor: a zero-waiver is
+    // persisted, so nothing is disclosed and conversion charges nothing —
+    // a bounded miss on a transient error, never a surprise $99.
+    const decideSetupFeeQuote = async (q) => {
+      if (!setupFeeMixQualifies) return null;
+      try {
+        let activeMember = false;
+        let feeAlreadyQueued = false;
+        if (customerId) {
+          const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+          const memberRow = await q('customers').where({ id: customerId }).first();
+          activeMember = !!memberRow && memberRow.active !== false && isMembershipCustomerRow(memberRow);
+          // An outstanding setup-fee claim anywhere on the account also
+          // waives: ANY nonzero pending_setup_fee counts — completion
+          // temporarily flips the durable claim negative, and a failed mint
+          // can leave the claim on a completed parent for a later series
+          // visit to recover — and tier enrollment is asynchronous, so a
+          // just-booked customer can still read as non-member here. A
+          // revived draft must never be able to invoice a SECOND fee while
+          // the first is anywhere in flight.
+          // A claim only counts while it can still be CONSUMED: the claim
+          // row itself is live, or a non-cancelled series child can still
+          // complete and mint it. A fully-cancelled wizard series would
+          // otherwise waive this customer's setup fee on every future plan
+          // forever (Codex #3489 follow-up).
+          const queued = await q('scheduled_services as claim')
+            .where('claim.customer_id', customerId)
+            .whereNotNull('claim.pending_setup_fee')
+            .whereNot('claim.pending_setup_fee', 0)
+            .where(function consumable() {
+              // A NEGATIVE stamp is completion's in-progress/crash-recovery
+                    // marker — resume may still mint or heal it regardless of the
+                    // row's status, so it ALWAYS suppresses a second claim. A
+                    // positive claim consumes only while its row can still
+                    // complete; a completed/skipped/terminal parent's claim is
+                    // recoverable only through a live child (the EXISTS arm).
+                    this.where('claim.pending_setup_fee', '<', 0)
+                      .orWhereIn('claim.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+                // ...or while a PENDING completion attempt can still
+                // resume and mint it: a worker can commit the parent
+                // 'completed' and die before the claim step, leaving a
+                // positive claim that the resume will consume (Codex #3500
+                // r3) — a second quote must keep waiving until that attempt
+                // resolves.
+                .orWhereExists(function pendingCompletion() {
+                  this.select(q.raw('1'))
+                    .from('service_completion_attempts as sca')
+                    .whereIn('sca.status', ['pending', 'side_effects_pending', 'side_effects_running'])
+                    .whereRaw('(sca.service_id = claim.id OR sca.service_id IN (SELECT id FROM scheduled_services WHERE recurring_parent_id = claim.id))');
+                })
+                .orWhereExists(function liveChild() {
+                  this.select(q.raw('1'))
+                    .from('scheduled_services as child')
+                    .whereRaw('child.recurring_parent_id = claim.id')
+                    // Only statuses that can still COMPLETE consume a claim
+                    // — completed/skipped/no_show children are done and
+                    // cannot mint it (Codex #3500).
+                    .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+                });
+            })
+            .first('claim.id');
+          feeAlreadyQueued = !!queued;
+        }
+        // Persist the WAIVER too, not just the fee: a waived draft carries
+        // amount 0, and shouldIncludeWaveGuardSetupFeeForRecurring consumes
+        // it — so conversion of this same draft can never re-add a fee that
+        // /calculate disclosed as absent.
+        return activeMember || feeAlreadyQueued
+          ? { amount: 0, waived: activeMember ? 'existing_member' : 'fee_already_queued' }
+          : { amount: WAVEGUARD_SETUP_FEE };
+      } catch (memberErr) {
+        logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
+        return { amount: 0, waived: 'membership_undetermined' };
+      }
+    };
+
     let draftEstimateId = null;
     try {
       const estimateDataObj = {
         lead_id: lead.id,
+        // setupFeeQuote is injected just before each write, decided under
+        // the same transaction/row lock as the write — see applySetupFeeQuote.
         services,
         monthly,
         annual,
@@ -1530,9 +1645,43 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
       };
+      // Decide + inject the frozen fee, then write — all under the caller's
+      // transaction with the target draft row locked, so a booking that
+      // stamps pending_setup_fee and archives the draft (same row lock)
+      // fully serializes with this refresh: the post-booking decision sees
+      // the stamp and revives the draft with a WAIVER, never a second
+      // chargeable quote.
+      const applySetupFeeQuote = async (q) => {
+        setupFeeQuote = await decideSetupFeeQuote(q);
+        if (setupFeeQuote) estimateDataObj.setupFeeQuote = setupFeeQuote;
+        else delete estimateDataObj.setupFeeQuote;
+      };
       if (existingEst) {
-        await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
-        draftEstimateId = existingEst.id;
+        // archived_at: null revives a draft the self-booking path retired
+        // after consuming it (booking.js stamps the fee + archives) — a
+        // fresh wizard run is a new live quote with a new frozen decision.
+        // Revalidated under the row lock: only the wizard's own DRAFT may
+        // be refreshed (mirror of the duplicate-path hard block), and the
+        // archive is cleared ONLY when a consuming self-booking exists
+        // (source_estimate_id correlation) — a STAFF-archived draft stays
+        // archived and untouched: the response still carries this run's
+        // pricing, it just mints no self-book handoff for it.
+        await db.transaction(async (trx) => {
+          const lockedEst = await trx('estimates')
+            .where({ id: existingEst.id })
+            .forUpdate()
+            .first('id', 'source', 'status', 'archived_at');
+          if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
+          if (lockedEst.archived_at) {
+            const consumedBy = await trx('scheduled_services')
+              .where({ source_estimate_id: existingEst.id })
+              .first('id');
+            if (!consumedBy) return;
+          }
+          await applySetupFeeQuote(trx);
+          await trx('estimates').where({ id: existingEst.id }).update({ ...estFields, archived_at: null, updated_at: new Date() });
+          draftEstimateId = existingEst.id;
+        });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
           const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
@@ -1547,15 +1696,40 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // or a wizard draft already promoted to sent/viewed — keeps the
             // hard block so wizard data never clobbers a working estimate.
             if (shouldRefreshWizardDraft(duplicateBlock)) {
-              await trx('estimates')
-                .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
-                .update({ ...estFields, updated_at: new Date() });
-              draftEstimateId = duplicateBlock.existingEstimateId;
-              logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+              // Re-validate under the row lock, not the pre-lock snapshot:
+              // staff can promote or archive this draft between the
+              // duplicate read and FOR UPDATE. A promoted/archived row must
+              // not mint a handoff — the guarded update would affect zero
+              // rows (or overwrite an archived row that stays archived)
+              // while draftEstimateId still disclosed a fee and minted a
+              // token whose live shape confirmation then rejects (Codex
+              // #3489 follow-up). draftEstimateId is set ONLY when the
+              // locked row is still the wizard's own live draft and the
+              // update actually landed.
+              const lockedDup = await trx('estimates')
+                .where({ id: duplicateBlock.existingEstimateId })
+                .forUpdate()
+                .first('id', 'source', 'status', 'archived_at');
+              if (lockedDup && lockedDup.source === 'quote_wizard'
+                && lockedDup.status === 'draft' && !lockedDup.archived_at) {
+                await applySetupFeeQuote(trx);
+                const refreshed = await trx('estimates')
+                  .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
+                  .update({ ...estFields, updated_at: new Date() });
+                if (refreshed === 1) {
+                  draftEstimateId = duplicateBlock.existingEstimateId;
+                  logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+                }
+              } else {
+                logger.info(`[public-quote] Wizard draft ${duplicateBlock.existingEstimateId} changed under lock (promoted/archived) — refresh skipped, no handoff minted for lead ${lead.id}`);
+              }
             } else {
               logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
             }
           } else {
+            // New draft: nothing to lock (no row, no handoff token exists
+            // yet), but the queued-obligation check still rides this trx.
+            await applySetupFeeQuote(trx);
             const [inserted] = await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' }).returning('id');
             draftEstimateId = inserted?.id || inserted || null;
           }
@@ -1879,11 +2053,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
     }
 
-    // has_setup_fee flags the $99 WaveGuard initial fee (recurring pest only).
-    // UI notes this is waivable with annual prepay. Commercial accounts are
-    // non-members with NO WaveGuard setup fee (owner directive), so suppress it
-    // even though commercial pest sets services.pest.
-    const hasSetupFee = !!services.pest && !commercialDetected;
+    // has_setup_fee reads the frozen setupFeeQuote decided (and persisted on
+    // the draft) above — one authority for disclosure, the mirrored estimate,
+    // and the self-booking handoff's billing stamp. A waived (amount 0)
+    // quote discloses nothing — and neither does a quote whose draft mirror
+    // failed to mint (draftEstimateId null): with no persisted freeze there
+    // is no billable handoff, and disclosing a fee the /book path could
+    // never stamp would break disclosure↔billing agreement.
+    const hasSetupFee = Number(setupFeeQuote?.amount) > 0 && !!draftEstimateId;
 
     // Confidence flag: when satellite enrichment came back empty (new construction,
     // missing imagery, AI couldn't classify), widen the customer-facing range from
@@ -1921,6 +2098,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       has_setup_fee: hasSetupFee,
       service_interest: serviceInterest,
     };
+    // Additive: the fee amount behind has_setup_fee, so the quote widget can
+    // disclose the first-visit charge instead of hardcoding $99 client-side.
+    // Same frozen value the draft persisted — disclosure and billing agree.
+    if (hasSetupFee) {
+      response.setup_fee_amount = setupFeeQuote.amount;
+    }
     if (oneTimeTotal > 0) {
       response.one_time_total = Math.round(oneTimeTotal);
     }

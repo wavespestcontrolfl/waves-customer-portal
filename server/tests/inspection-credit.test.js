@@ -125,6 +125,26 @@ beforeEach(() => {
   mockChainCalls.length = 0;
 });
 
+// A live offer's expiry must be in the FUTURE relative to the test clock —
+// a hardcoded timestamp is a time bomb that starts failing (offer reads as
+// lapsed) the moment the real date passes it (broke main CI on 2026-08-26).
+const LIVE_OFFER_EXPIRES_AT = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+const LIVE_OFFER_DEADLINE_TEXT = new Date(new Date(LIVE_OFFER_EXPIRES_AT).getTime() - 1000)
+  .toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+
+
+// Offer-creation and sweep paths spawn a fire-and-forget receipt-resend
+// chain (queueCreditReceiptResend's async IIFE). With the live-offer
+// fixtures above (expiry now genuinely in the future) that chain can still
+// be mid-flight when the last test ends — drain pending turns so it never
+// imports after the Jest environment is torn down.
+afterAll(async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+
 describe('recordInspectionCreditOffer — the promise, not the money', () => {
   it('is inert while the gate is dark', async () => {
     mockGateOn = false;
@@ -1321,10 +1341,10 @@ describe('window + receipt copy', () => {
 
 describe('inspectionCreditMemoForVisit — the report-email channel (owner ruling 2026-08-12)', () => {
   it('announces an open unexpired offer with the frozen terms', async () => {
-    mockOffers = [{ amount: '125.00', expires_at: '2099-08-26T04:00:00Z' }];
+    mockOffers = [{ amount: '125.00', expires_at: LIVE_OFFER_EXPIRES_AT }];
     const memo = await inspectionCreditMemoForVisit('svc-1');
     expect(memo).toContain('$125.00 service credit');
-    expect(memo).toContain('August 25, 2099');
+    expect(memo).toContain(LIVE_OFFER_DEADLINE_TEXT);
     // Scoped to THIS visit's offer, never "the customer's earliest".
     expect(mockChainCalls.some(({ m, args }) => m === 'where'
       && args[0] && typeof args[0] === 'object'
@@ -1341,7 +1361,7 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
 
   it('works while the gate is dark — the persisted offer row is the authority', async () => {
     mockGateOn = false;
-    mockOffers = [{ amount: '75.00', expires_at: '2099-08-26T04:00:00Z' }];
+    mockOffers = [{ amount: '75.00', expires_at: LIVE_OFFER_EXPIRES_AT }];
     expect(await inspectionCreditMemoForVisit('svc-1')).toContain('service credit');
   });
 
@@ -1373,14 +1393,14 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
   });
 
   it('report verdict: a marked visit with an open offer sends the frozen terms', async () => {
-    mockOffers = [{ amount: '125.00', expires_at: '2099-08-26T04:00:00Z', status: 'offered' }];
+    mockOffers = [{ amount: '125.00', expires_at: LIVE_OFFER_EXPIRES_AT, status: 'offered' }];
     const verdict = await inspectionCreditReportNote({
       scheduled_service_id: 'svc-1',
       service_data: JSON.stringify({ inspectionCreditOptIn: true }),
     });
     expect(verdict.retryable).toBeUndefined();
     expect(verdict.note).toContain('$125.00 service credit');
-    expect(verdict.note).toContain('August 25, 2099');
+    expect(verdict.note).toContain(LIVE_OFFER_DEADLINE_TEXT);
   });
 
   it('report verdict: marked but offer missing or unreadable DEFERS — the send is once-ever (pre-push P1)', async () => {
@@ -1399,7 +1419,7 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
 
   it('report verdict: a settled or lapsed offer sends clean — announcing it would be false', async () => {
     const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
-    mockOffers = [{ amount: '125.00', expires_at: '2099-08-26T04:00:00Z', status: 'redeemed' }];
+    mockOffers = [{ amount: '125.00', expires_at: LIVE_OFFER_EXPIRES_AT, status: 'redeemed' }];
     expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
     mockOffers = [{ amount: '125.00', expires_at: '2020-01-01T05:00:00Z', status: 'offered' }];
     expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });

@@ -386,3 +386,24 @@ describe('county-permits merge', () => {
     jest.dontMock('../services/property-lookup/manatee-permit-sync');
   });
 });
+
+describe('column-width clamping (22001 regression, 2026-08-24 permit-sync failure)', () => {
+  const { _private } = require('../services/property-lookup/manatee-permit-sync');
+  const normalize = _private?.normalizeConstructionRow;
+  (normalize ? test : test.skip)('oversized county values clamp to column width; oversized permit_no drops the row', () => {
+    const long = 'X'.repeat(300);
+    const row = normalize({
+      Permit: 'BLD2026-001', CurrentStatus: long, Type: long, TypeofWork: long,
+      JobAddress: `${long} PARRISH 34219`, Parcel: '123456789', BusName: long,
+      'Lic Number': long, Owner: long, IssuedDate: '08/01/2026', JobValue: '100000',
+    }, 'under_construction');
+    expect(row.status.length).toBeLessThanOrEqual(60);
+    expect(row.permit_type.length).toBeLessThanOrEqual(40);
+    expect(row.type_of_work.length).toBeLessThanOrEqual(80);
+    expect(row.address_raw.length).toBeLessThanOrEqual(200);
+    expect(row.contractor_name.length).toBeLessThanOrEqual(160);
+    expect(row.contractor_license.length).toBeLessThanOrEqual(40);
+    expect(row.owner_name.length).toBeLessThanOrEqual(160);
+    expect(normalize({ Permit: 'P'.repeat(41) }, 'under_construction')).toBeNull();
+  });
+});

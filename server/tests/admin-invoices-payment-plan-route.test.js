@@ -360,6 +360,27 @@ describe('POST /:id/payment-plan/cancel', () => {
     });
   });
 
+  test("a retained system void stop ('untouched' re-arm) is handed to scheduleForInvoice — its re-arm branch lifts it now the plan is gone (Codex #3493 r7)", async () => {
+    db.followupsQB.first.mockResolvedValue({
+      id: 'seq-1',
+      status: 'stopped',
+      stopped_reason: 'invoice_voided',
+      paused_reason: null,
+      is_autopay_held: false,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentPlanId: 'plan-1' }),
+      });
+      expect(res.status).toBe(200);
+      const FollowUps = require('../services/invoice-followups');
+      expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+      expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
   test('a scheduling failure after cancel is NOT acknowledged as success (codex r11 P1)', async () => {
     db.followupsQB.first.mockResolvedValue(null); // no sequence → schedule path
     const FollowUps = require('../services/invoice-followups');

@@ -1424,6 +1424,27 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /:id/unvoid — restore an accidentally-voided invoice to an editable,
+// collectible draft. InvoiceService.unvoidInvoice fails closed on any void
+// that returned money state (deposit credit, prepay term, finalized
+// statement, live/unverifiable payment session) — those refusals are
+// operator-actionable conflicts, surfaced as 409 so the UI toasts the
+// reason (mirrors the /void mapper).
+router.post('/:id/unvoid', requireAdmin, async (req, res, next) => {
+  try {
+    const invoice = await InvoiceService.unvoidInvoice(req.params.id);
+    res.json(invoice);
+  } catch (err) {
+    if (/Invoice not found/i.test(err.message)) {
+      return res.status(404).json({ error: err.message });
+    }
+    if (/^Cannot unvoid|^Only a voided invoice|finalized payer statement|resolve it before unvoiding|live payment session|re-check and retry|could not verify the|saved-card charge|unresolved charge attempt|unresolved Stripe charge/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
 // POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.
 // Creates (or re-activates) the linked annual_prepay_terms row and stamps
 // invoices.annual_prepay_term_id — that link is what surfaces the coverage
@@ -2801,7 +2822,14 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     // scheduleForInvoice takes its own invoice lock and re-verifies
     // schedulability, and a concurrent plan creation serializes on that same
     // lock (its in-trx stop runs before or after this whole arm).
-    if (rearm === 'schedule') {
+    // 'untouched' runs it too (Codex #3493 r7): a plan created on an
+    // UNVOIDED invoice can't take ownership of its retained system void
+    // stop (the plan restamp skips non-plan stop reasons), so the cancel's
+    // own re-arm helper leaves that row stranded 'invoice_voided'.
+    // scheduleForInvoice's re-arm branch lifts exactly that stop — plan now
+    // gone — and is a no-op for every other untouched stop/pause (admin
+    // controls, drafts, other reasons stay put).
+    if (rearm === 'schedule' || rearm === 'untouched') {
       try {
         const FollowUpsSvc = require('../services/invoice-followups');
         await FollowUpsSvc.scheduleForInvoice(id);
@@ -2884,8 +2912,13 @@ router.get('/:id/followup', async (req, res, next) => {
 router.post('/:id/followup/pause', requireAdmin, async (req, res, next) => {
   try {
     const { reason, until } = req.body || {};
+    // adminAuthenticate populates req.technicianId (never req.user) — the
+    // old req.user?.id recorded every pause with a NULL admin id, leaving a
+    // blank-reason pause with no durable admin fingerprint for the
+    // void-stop re-arm to preserve (Codex #3493 r7; same bug the stop
+    // route had).
     await FollowUps.pauseSequence(req.params.id, {
-      reason, until, adminId: req.user?.id || null,
+      reason, until, adminId: req.technicianId || null,
     });
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -2903,8 +2936,12 @@ router.post('/:id/followup/resume', requireAdmin, async (req, res, next) => {
 router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
+    // adminAuthenticate populates req.technicianId (never req.user) — the
+    // old req.user?.id recorded every admin stop with a NULL admin id,
+    // erasing the attribution the void-stop preservation keys on
+    // (Codex #3493 r5).
     await FollowUps.stopSequence(req.params.id, {
-      reason, adminId: req.user?.id || null,
+      reason, adminId: req.technicianId || null,
     });
     res.json({ ok: true });
   } catch (err) { next(err); }
