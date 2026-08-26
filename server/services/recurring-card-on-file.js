@@ -320,6 +320,12 @@ async function completeRecurringCardEnrollment({
   // the prepay authorization (immediate 12-month charge), so the recorded
   // snapshot must be that same variant.
   consentVariant = null,
+  // When the customer actually authorized (recovery paths pass the job's
+  // acceptance timestamp — Codex r16): enrollConsentedMethod refuses with
+  // opted_out_after_authorization when the customer disabled Auto Pay
+  // AFTER this moment, so a delayed recovery never silently re-enables a
+  // revoked authorization.
+  authorizedAt = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -376,6 +382,7 @@ async function completeRecurringCardEnrollment({
       source: 'estimate_accept',
       details: { via: 'recurring_card_on_file', estimate_id: estimateId, setup_intent_id: setupIntentId },
       scheduledServiceId,
+      ...(authorizedAt ? { authorizedAt } : {}),
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[recurring-cof] enrollment refused (${enrollment.reason}) for customer ${customerId} pm ${saved?.id}`);
@@ -764,6 +771,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // resolve the account-default payer, refuse, and retire the job
           // to a pay link instead of the authorized charge.
           scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          // The customer's authorization moment (Codex r16): an Auto Pay
+          // opt-out AFTER acceptance must WIN — the enrollment refuses
+          // opted_out_after_authorization and the sweep falls to the
+          // pay-link path instead of re-enabling a revoked authorization.
+          authorizedAt: job.created_at ? new Date(job.created_at) : null,
         });
         if (enrollment?.paymentMethodRowId) {
           pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type');
@@ -817,13 +829,26 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // like a fresh-capture enrollment failure.
       if (pmRow) {
         const { enrollConsentedMethod } = require('./autopay-enrollment');
-        await enrollConsentedMethod({
+        const recoveryEnrollment = await enrollConsentedMethod({
           customerId: invoice.customer_id,
           paymentMethodId: pmRow.id,
           source: 'estimate_accept',
           details: { via: 'prepay_recovery_sweep', estimate_id: row.id, invoice_id: invoice.id },
           scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          // Post-accept Auto Pay revocations WIN (Codex r16): with the
+          // job's authorization timestamp, a later autopay_disabled event
+          // refuses opted_out_after_authorization instead of this sweep
+          // silently re-enabling Auto Pay and charging.
+          authorizedAt: job.created_at ? new Date(job.created_at) : null,
         });
+        if (!recoveryEnrollment?.enrolled && recoveryEnrollment?.reason !== 'already_enrolled') {
+          // A refused enrollment (opt-out, payer flip, method removed)
+          // means the charge's Auto Pay guard would refuse anyway — throw
+          // the accurate reason so the deterministic pay-link fallback +
+          // office alert carry it, never a silent re-enable or a
+          // misleading guard error.
+          throw new Error(`enrollment refused during recovery: ${recoveryEnrollment?.reason || 'unknown'}`);
+        }
       }
       // ZERO acknowledged cents is a legitimate authorization (Codex r9
       // P0): projected credit fully covered the quote — the charge call

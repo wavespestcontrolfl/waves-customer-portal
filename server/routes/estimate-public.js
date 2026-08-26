@@ -10728,6 +10728,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
+        // FENCE the projected account balance by APPLYING it to the
+        // just-minted prepay invoice INSIDE this transaction (Codex r16):
+        // the revalidation above only READ the balance — a competing
+        // invoice waiting on the customer lock could consume it between
+        // this commit and the post-commit charge, making expectedTotal
+        // refuse a plan that is already booked. Applying here consumes the
+        // balance atomically with the acceptance, so nothing can
+        // double-spend it; the in-lock charge-time apply then covers only
+        // the post-commit inspection-offer redemption. Fail CLOSED: an
+        // apply error aborts the accept retryably (unknown credit state =
+        // unknown total). The deposit credit was already netted at mint.
+        if (prepayChargePlan && invoiceIdResult
+          && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          try {
+            const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+            await applyAccountCreditToInvoice({ invoiceId: invoiceIdResult }, trx);
+          } catch (applyErr) {
+            throw estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+          }
+        }
       }
 
       // Standard recurring conversion (Feature #5) — INSIDE the transaction
@@ -11078,6 +11098,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // This flag re-opens the standard delivery path so the invoice routes to
     // the payer AP inbox like any payer-billed accept (Codex #2680 r3).
     let recurringCardPayerFallback = false;
+    // POST-COMMIT payer scope (Codex r14/r16): the visit the policy admitted
+    // the lane with, or — for slot accepts where that is null by
+    // construction — the FIRST visit this accept just created (prepay or
+    // standard conversion). Enrollment, the payer re-check, and the charge
+    // guard must all judge with THIS visit: a visit-specific payer assigned
+    // after commit is otherwise invisible to a customer-default-only check,
+    // enabling Auto Pay on the homeowner for a payer-routed job.
+    const postCommitPayerScopeSsId = recurringCardScopeSsId
+      || txResult.annualPrepayConversion?.firstScheduledServiceId
+      || txResult.standardConversion?.firstScheduledServiceId
+      || null;
     // Enrollment outcome for the prepay auto-charge below — carries the
     // payment_methods row id the charge runs against. Null when enrollment
     // was skipped, refused, or errored (the charge then falls back to the
@@ -11108,7 +11139,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // throwOnError: the default fail-soft contract returns self-pay on a
           // lookup outage, which would silently defeat this fail-closed catch
           // (Codex #2668 round-4 P1).
-          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: recurringCardScopeSsId, throwOnError: true });
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: postCommitPayerScopeSsId, throwOnError: true });
           payerBilled = !!resolvedPayer?.payerId;
         } catch (err) {
           payerBilled = true;
@@ -11130,7 +11161,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // P1): a self_pay_override visit on a payer-billed account is
           // customer-paid — the enrollment's in-lock payer check must not
           // fall back to the account payer and refuse.
-          scheduledServiceId: recurringCardScopeSsId || null,
+          scheduledServiceId: postCommitPayerScopeSsId,
           // In-lane prepay renders + records the prepay authorization
           // (immediate 12-month charge) instead of the base card text. Keyed
           // off what the capture UI RENDERED (in-lane prepay accept), not
@@ -11172,7 +11203,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           source: 'estimate_accept',
           details: { via: 'saved_method_auto_enroll', estimate_id: estimate.id },
           // Same visit scope the policy resolver judged with (#3395 r13 P1).
-          scheduledServiceId: recurringCardScopeSsId || null,
+          scheduledServiceId: postCommitPayerScopeSsId,
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted
@@ -11680,8 +11711,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // visit-specific payer assigned to the NEW visit after
             // acceptance must be seen. The visit-keyed check folds the
             // default payer in and honors the override.
-            ...((recurringCardScopeSsId || txResult.annualPrepayConversion?.firstScheduledServiceId)
-              ? { requireSelfPayScheduledServiceId: recurringCardScopeSsId || txResult.annualPrepayConversion.firstScheduledServiceId }
+            ...(postCommitPayerScopeSsId
+              ? { requireSelfPayScheduledServiceId: postCommitPayerScopeSsId }
               : { requireSelfPayCustomerId: customerId }),
           });
           const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
@@ -11782,9 +11813,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   customerId,
                   // Same scope basis as the charge guard (Codex r13/r14) —
                   // the invoice's own linkage as last fallback.
-                  scheduledServiceId: recurringCardScopeSsId
-                    || txResult.annualPrepayConversion?.firstScheduledServiceId
-                    || invoiceRow?.scheduled_service_id || null,
+                  scheduledServiceId: postCommitPayerScopeSsId || invoiceRow?.scheduled_service_id || null,
                   throwOnError: true,
                 });
                 if (resolved?.payerId) {
