@@ -222,7 +222,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     it('resolves the live-verified SetupIntent capture with Stripe funding (no row yet)', async () => {
       mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit', last4: '4242' } });
       const m = await resolvePrepayChargeMethod({ verification: { ok: true, paymentMethodId: 'pm_1' }, customerId: 'cust-1' });
-      expect(m).toEqual({ stripePaymentMethodId: 'pm_1', paymentMethodRowId: null, methodType: 'card', funding: 'credit', last4: '4242' });
+      expect(m).toEqual({ stripePaymentMethodId: 'pm_1', paymentMethodRowId: null, methodType: 'card', funding: 'credit', last4: '4242', source: 'fresh_capture' });
     });
 
     it('resolves the auto-satisfy saved method row', async () => {

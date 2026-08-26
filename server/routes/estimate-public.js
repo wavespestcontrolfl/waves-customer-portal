@@ -9504,6 +9504,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // surface satisfies it (quote-step checkbox for auto-satisfy,
               // the live capture checkbox for fresh captures).
               consentRequired: true,
+              // TRUE only when the quoted method is the one THIS accept
+              // captured (Codex r30 P1): the capture checkbox authorizes
+              // "this card" — a quote bound to a different saved method
+              // (e.g. Auto Pay enabled in another tab between capture and
+              // requote) must render its own quote-step authorization.
+              capturedMethod: prepayChargeMethod.source === 'fresh_capture',
             },
           });
         }
@@ -12026,9 +12032,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               ? { requireSelfPayScheduledServiceId: postCommitPayerScopeSsId }
               : { requireSelfPayCustomerId: customerId }),
           }));
-          const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
+          // The charge COMMITTED once the fenced call returned — a failed
+          // status re-read must NOT fall into the decline catch (Codex r30
+          // P1: the response + acceptance SMS would promise an invoice
+          // beside collected/collecting money). Classify ambiguous: no pay
+          // link, job unresolved, the sweep re-reads.
+          let freshInvoice = null;
+          let freshReadFailed = false;
+          try {
+            freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
+          } catch (readErr) {
+            freshReadFailed = true;
+            logger.error(`[estimate-accept] post-charge invoice read failed for ${invoiceId} (estimate ${estimate.id}) — classifying ambiguous: ${readErr.message}`);
+          }
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
-          if (['paid', 'prepaid'].includes(freshStatus)) {
+          if (freshReadFailed) {
+            prepayAutoCharge = { status: 'ambiguous', reason: 'post_charge_status_unverified' };
+            invoicePayUrl = null;
+          } else if (['paid', 'prepaid'].includes(freshStatus)) {
             // covered_by_credit / 'prepaid' = account credit covered the
             // whole quoted amount and NO card charge ran (Codex r9): the
             // charge service enqueues no receipt on that early return, so

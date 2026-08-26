@@ -4197,6 +4197,11 @@ function EstimateViewPageInner() {
     // preference re-captures under ITS consent text.
     recurringCardSetupIntentIdRef.current = null;
     setInlineCardIntent(null);
+    // Un-latch the pre-mint guard with the intent it guarded (Codex r30
+    // P2): leaving it true would skip the replacement inline mint after a
+    // preference switch, silently demoting the single-screen flow to the
+    // fallback modal on the next confirm.
+    inlineIntentMintRef.current = false;
   }, [paymentPreference]);
   // Seamless single-screen booking (owner 2026-07-12): when the review card
   // owes an Auto Pay card, the Payment Element renders INLINE in the review
@@ -6268,9 +6273,18 @@ function EstimateViewPageInner() {
             //     card and the modal is gone — the attestation stands.
             //   • auto-satisfy (no capture): render the tender-correct v11
             //     authorization checkbox right here.
-            const captureConsentLive = (inlineAutoPayActive && inlineCardIntent)
-              ? inlineCardState.agreed === true
-              : (recurringCardSetupIntentIdRef.current ? true : null);
+            // Capture consent only stands for the method it captured
+            // (Codex r30 P1): the server marks the quote capturedMethod
+            // when the quoted method IS this accept's fresh capture. A
+            // quote bound to a DIFFERENT saved method (e.g. Auto Pay
+            // enabled in another tab between capture and requote) must
+            // render its own quote-step authorization — the capture
+            // checkbox authorized "this card", not that one.
+            const captureConsentLive = (prepayChargeQuote.capturedMethod === true)
+              ? ((inlineAutoPayActive && inlineCardIntent)
+                ? inlineCardState.agreed === true
+                : (recurringCardSetupIntentIdRef.current ? true : null))
+              : null;
             const quoteCheckboxNeeded = captureConsentLive === null;
             const consentSatisfied = quoteCheckboxNeeded ? prepayConsentChecked === true : captureConsentLive === true;
             return (

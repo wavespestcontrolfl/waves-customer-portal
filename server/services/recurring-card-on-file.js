@@ -485,6 +485,11 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
           methodType: pm.type || 'card',
           funding: pm.card?.funding || null,
           last4: pm.card?.last4 || null,
+          // The quoted method IS the one this accept just captured (Codex
+          // r30 P1): only then may the client reuse the capture checkbox
+          // as the prepay authorization — a saved-method quote must render
+          // its own quote-step consent.
+          source: 'fresh_capture',
         };
       }
       return null;
@@ -522,6 +527,7 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
       methodType: row.method_type || 'card',
       funding,
       last4: row.last_four || null,
+      source: 'saved',
     };
   } catch (err) {
     logger.warn(`[recurring-cof] prepay charge-method resolution failed: ${err.message}`);
@@ -1048,7 +1054,18 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before charge`);
           continue;
         }
-        const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status', 'payment_method');
+        // The charge COMMITTED once the fenced call returned — a failed
+        // status re-read must NOT fall into the deterministic-failure
+        // catch (Codex r30 P1: the fallback would deliver a pay link
+        // beside collected/collecting money). Leave the job claimed; the
+        // next pass re-reads.
+        let freshInvoice = null;
+        try {
+          freshInvoice = await db('invoices').where({ id: invoice.id }).first('status', 'payment_method');
+        } catch (readErr) {
+          logger.error(`[recurring-cof] prepay sweep post-charge invoice read failed for ${invoice.id} (estimate ${row.id}) — leaving claimed for re-read: ${readErr.message}`);
+          continue;
+        }
         const freshStatus = String(freshInvoice?.status || '').toLowerCase();
         if (['paid', 'prepaid'].includes(freshStatus)) { resumed += 1; await resolve('paid'); continue; }
         // Same bank-tender guard as the pre-charge classification (Codex
