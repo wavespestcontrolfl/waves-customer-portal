@@ -181,16 +181,16 @@ async function recordSuppression({ phone, reason, source, capturedBody, dbh = db
  *
  * Returns { ok, recorded } — recorded=true only when a brand-new row was written.
  */
-async function recordNonMobileSuppression({ phone, source, supersedeClearedBefore = null }) {
+async function recordNonMobileSuppression({ phone, source, supersedeClearedBefore = null, dbh = db }) {
   if (!phone) throw new Error('recordNonMobileSuppression: phone is required');
   try {
-    const q = db('messaging_suppression')
+    const q = dbh('messaging_suppression')
       .insert({
         phone,
         reason: 'non_mobile',
         source: source || 'twilio_status_callback',
         active: true,
-        created_at: db.fn.now(),
+        created_at: dbh.fn.now(),
       })
       .onConflict('phone')
       // insert-if-absent, with ONE carve-out: a pure clearance TOMBSTONE

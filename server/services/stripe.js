@@ -2262,12 +2262,13 @@ const StripeService = {
         // 'processing' (not 'succeeded'); the status mapping below + the
         // webhook's processing→paid settlement already handle that lifecycle,
         // and computeChargeAmount already priced ACH surcharge-free.
-        // Both bank aliases: payment_methods rows store 'ach'
-        // (savePaymentMethod) but other surfaces persist Stripe's
-        // 'us_bank_account' — classifying either as card would mint a
-        // card-only PI that Stripe refuses to confirm against a bank
-        // method (Codex round-10).
-        const savedMethodIsBank = card.method_type === 'ach' || card.method_type === 'us_bank_account';
+        // Shared bank classifier (codex #3495 r16): payment_methods rows
+        // carry FOUR aliases ('ach'/'us_bank_account' live, 'bank'/
+        // 'bank_account' legacy) — a narrower inline check here would mint
+        // a card-only PI for an alias row eligibility just declared
+        // chargeable, and Stripe refuses to confirm it against the bank
+        // method (Codex round-10 shape).
+        const savedMethodIsBank = require('./autopay-eligibility').isBankMethodType(card.method_type);
         const invPiParams = {
           amount: invTotalCents,
           currency: 'usd',

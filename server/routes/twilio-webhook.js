@@ -1325,7 +1325,16 @@ router.post('/status', async (req, res) => {
           try {
             await db.transaction(async (trx) => {
               await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
-              const logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
+              let logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
+              // Retry the SID association briefly (codex #3495 r16): a fast
+              // callback can race a LEGACY writer's post-handoff log insert
+              // (the primary path logs pre-handoff, so its row is always
+              // visible). A few short waits usually see the racing insert
+              // commit and give this callback its real send time.
+              for (let attempt = 0; !logRow && attempt < 3; attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
+              }
               const sentAt = logRow?.created_at || null;
               // The primary send path stamps created_at PRE-handoff and
               // marks the row (metadata.pre_handoff_stamp) — those rows
@@ -1346,14 +1355,21 @@ router.post('/status', async (req, res) => {
               const supRow = await trx('messaging_suppression')
                 .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
               // A clearance newer than this send wins (late/redelivered
-              // callback after a START). An UNDATED callback (no sms_log
-              // row for the SID) cannot order itself against a STANDING
-              // clearance — the clearance is explicit recent intent, the
-              // callback's age is unknown: defer to it (codex #3495).
-              // With no clearance at all, an undated callback still applies
-              // the opt-out (fail toward not texting).
+              // callback after a START). A callback STILL undated after the
+              // retries (racing writer never committed) defers only to a
+              // RECENT clearance — one inside the same 10-minute window the
+              // recheck below assumes for a raced send, which could
+              // genuinely postdate it. An OLDER tombstone provably predates
+              // this near-real-time callback's send: deferring to it would
+              // discard the carrier's CURRENT opt-out and leave the phone
+              // textable on every lane (codex #3495 r16). A late-redelivered
+              // callback for a genuinely old send has a long-committed log
+              // row and never reaches this fallback. With no clearance at
+              // all, an undated callback still applies the opt-out (fail
+              // toward not texting).
+              const undatedSendFloor = new Date(Date.now() - 10 * 60 * 1000);
               if (supRow && supRow.active === false && supRow.cleared_at
-                  && (!sentAtFloor || new Date(supRow.cleared_at) > sentAtFloor)) {
+                  && new Date(supRow.cleared_at) > (sentAtFloor || undatedSendFloor)) {
                 outcome.deferred = 'cleared-after-send'; return;
               }
               // A standing row authored by a NEWER attempt owns the verdict

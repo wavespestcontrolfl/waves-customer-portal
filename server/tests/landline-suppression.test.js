@@ -58,6 +58,10 @@ function wireDb() {
     if (table === 'customers') return makeCustomersChain();
     throw new Error(`Unexpected db table ${table}`);
   });
+  // Suppression + cache write run in a transaction under the shared
+  // per-phone advisory lock (codex #3495 r16); the mock trx is db itself.
+  db.raw = jest.fn(async () => ({}));
+  db.transaction = jest.fn(async (fn) => fn(db));
 }
 
 describe('landline suppression on delivery bounce', () => {
