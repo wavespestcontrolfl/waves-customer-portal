@@ -1887,6 +1887,26 @@ describe('handleCardHoldCancellation — park-on-cancel (GATE_CARD_HOLD_PARK_ON_
     );
   });
 
+  it('the in-window bell NEVER fires when the park did not land (lost CAS → released concurrently)', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    mockApptTime.mockResolvedValueOnce(new Date('2026-06-25T20:00:00Z')); // inside the window
+    stubDb([HOLD], { updateReturns: [0] }); // park CAS misses
+    const base = mockDbHandler;
+    let firstDone = false;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      const origFirst = chain.first;
+      chain.first = jest.fn((...a) => {
+        if (!firstDone) { firstDone = true; return Promise.resolve(HOLD); }
+        return Promise.resolve({ status: 'released', parked_at: null }); // post-CAS re-read
+      });
+      return chain;
+    };
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', intent: 'reschedule_request', now });
+    expect(r).toEqual({ handled: false, reason: 'hold_released' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
   it("reschedule_request intent: gate ON parks; gate OFF is a no-op (the legacy flip's status quo)", async () => {
     process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
     stubDb([HOLD]);

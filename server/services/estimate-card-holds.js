@@ -1481,11 +1481,11 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     // Sticky-window evidence (pre-push r6 P1): the legacy request flip
     // writes no reschedule_log row, so a request made INSIDE the disclosed
     // fee window would leave no trace for the sticky-cancel rule once the
-    // hold is repointed. The window verdict is judged NOW and made durable
-    // two ways: a distinct park_reason on the hold row, and a deduped
-    // office bell so the late move is a human-visible fact regardless of
-    // what happens to the stamp. Unresolvable timing parks plainly (the
-    // rail's fail-toward-free posture).
+    // hold is repointed. The window verdict is judged now; the PARK LANDS
+    // FIRST and the bell fires only on a STAMPED park (PR #3506 review
+    // P2: announcing a park that then lost its CAS — or fell back to a
+    // release — would tell staff to expect saved-card collection that can
+    // never happen). Unresolvable timing parks plainly (fail-toward-free).
     let inWindow = false;
     try {
       const { scheduledServiceApptTime } = require('./appointment-reminders');
@@ -1494,7 +1494,8 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     } catch (err) {
       logger.warn('[estimate-card-holds] reschedule-request window check failed — parking without sticky evidence', { scheduledServiceId, error: err.message });
     }
-    if (inWindow) {
+    const parkResult = await parkCardHold({ hold, scheduledServiceId, reason: inWindow ? 'reschedule_request_in_window_park' : 'reschedule_request_park' });
+    if (inWindow && parkResult?.parked) {
       try {
         await require('./notification-service').notifyAdmin(
           'billing',
@@ -1508,7 +1509,7 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
         );
       } catch (e) { logger.warn('[estimate-card-holds] in-window reschedule bell failed', { error: e.message }); }
     }
-    return parkCardHold({ hold, scheduledServiceId, reason: inWindow ? 'reschedule_request_in_window_park' : 'reschedule_request_park' });
+    return parkResult;
   }
   if (waiveFee) {
     if (isParkOnCancelEnabled()) {
