@@ -390,17 +390,44 @@ function pathnameFor(path) {
   return String(path || "").split("?")[0];
 }
 
-// Deep-link guard: nav filtering alone is not a boundary — a non-admin can
-// still type /admin/banking. The shell redirects any pathname that belongs
-// to an adminOnly destination (exact or nested). Unknown paths return false
-// (the API's role middleware is the real enforcement).
+// Deep-link guard, DEFAULT-DENY: nav filtering alone is not a boundary — a
+// non-admin can still type /admin/banking, and routes that never appear in
+// the nav taxonomy (/admin/estimates/:id/proposal, /admin/_design-system,
+// /admin/leads, …) would slip an adminOnly-flag check entirely (codex P1).
+// So the guard allowlists the technician day-to-day prefixes and treats
+// EVERY other /admin path — current or future — as owner-only. The API's
+// role middleware stays the real enforcement.
+const TECH_ALLOWED_PATH_PREFIXES = [
+  "/admin/dashboard",
+  "/admin/schedule",
+  "/admin/dispatch",
+  "/admin/timetracking",
+  "/admin/projects", // Reports
+  "/admin/customers",
+  "/admin/communications",
+  "/admin/lawn-assessments",
+  "/admin/lawn-assessment",
+  "/admin/lawn-protocol",
+  "/admin/lawn-diagnostic",
+  "/admin/turf-height",
+  "/admin/protocols",
+  "/admin/equipment",
+  "/admin/equipment-calibration",
+  "/admin/fleet",
+  "/admin/inventory",
+  "/admin/knowledge",
+  "/admin/kb",
+  "/admin/settings",
+  "/admin/more",
+];
+
 export function isPathAdminOnly(pathname) {
   const p = String(pathname || "");
-  return Object.values(ADMIN_NAV_ITEMS).some((item) => {
-    if (!item.adminOnly) return false;
-    const itemPathname = pathnameFor(item.path);
-    return p === itemPathname || p.startsWith(`${itemPathname}/`);
-  });
+  if (p === "/admin" || p === "/admin/") return false; // index redirects to dashboard
+  const allowed = TECH_ALLOWED_PATH_PREFIXES.some(
+    (prefix) => p === prefix || p.startsWith(`${prefix}/`),
+  );
+  return !allowed;
 }
 
 export function isAdminNavItemActive(item, pathname, search = "") {

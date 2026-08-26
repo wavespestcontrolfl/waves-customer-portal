@@ -248,16 +248,37 @@ describe("role scoping (adminOnly)", () => {
     expect(new Set(techVisible)).toEqual(new Set(TECH_VISIBLE_IDS));
   });
 
-  it("flags owner-only deep links, including nested paths", () => {
+  it("flags owner-only deep links, including nested and non-nav paths", () => {
     expect(isPathAdminOnly("/admin/banking")).toBe(true);
     expect(isPathAdminOnly("/admin/invoices/123")).toBe(true);
     expect(isPathAdminOnly("/admin/seo")).toBe(true);
     expect(isPathAdminOnly("/admin/pricing-logic")).toBe(true);
+    // Routes absent from the nav taxonomy are still owner-only (codex P1).
+    expect(isPathAdminOnly("/admin/estimates/est-1/proposal")).toBe(true);
+    expect(isPathAdminOnly("/admin/_design-system")).toBe(true);
+    expect(isPathAdminOnly("/admin/leads")).toBe(true);
+    expect(isPathAdminOnly("/admin/credentials")).toBe(true);
+    expect(isPathAdminOnly("/admin/revenue")).toBe(true);
+    // Default-deny: unknown/future routes are owner-only until allowlisted.
+    expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
+
+    expect(isPathAdminOnly("/admin")).toBe(false);
     expect(isPathAdminOnly("/admin/dashboard")).toBe(false);
     expect(isPathAdminOnly("/admin/schedule")).toBe(false);
+    expect(isPathAdminOnly("/admin/dispatch")).toBe(false);
     expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);
     expect(isPathAdminOnly("/admin/knowledge")).toBe(false);
-    // Unknown paths fall through to the API's role middleware.
-    expect(isPathAdminOnly("/admin/not-a-page")).toBe(false);
+    expect(isPathAdminOnly("/admin/settings")).toBe(false);
+  });
+
+  it("keeps every technician-visible nav destination reachable past the guard", () => {
+    for (const item of Object.values(ADMIN_NAV_ITEMS)) {
+      if (item.adminOnly || item.id === "more") continue;
+      const pathname = item.path.split("?")[0];
+      expect({ id: item.id, blocked: isPathAdminOnly(pathname) }).toEqual({
+        id: item.id,
+        blocked: false,
+      });
+    }
   });
 });
