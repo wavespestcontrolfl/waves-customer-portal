@@ -208,18 +208,18 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('pending-bank', true, NULL::date, NULL::text, NULL::uuid),
           ('pending-bank-card-exp', true, NULL::date, NULL::text, NULL::uuid)
       ), payment_methods(
-        customer_id, processor, is_default, autopay_enabled,
+        id, customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
       ) AS (
         VALUES
-          ('blank-month', 'stripe', true, true, 'pm_blank_month', 'card', '  ', '2099', NULL::text),
-          ('blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    ', NULL::text),
-          ('invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099', NULL::text),
-          ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope', NULL::text),
-          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099', NULL::text),
-          ('legacy-two-digit', 'stripe', true, true, 'pm_legacy', 'card', '12', '32', NULL::text),
-          ('pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification'),
-          ('pending-bank-card-exp', 'stripe', true, true, 'pm_pending_exp', 'ach', '12', '2099', 'pending_verification')
+          ('00000000-0000-0000-0000-000000000001'::uuid, 'blank-month', 'stripe', true, true, 'pm_blank_month', 'card', '  ', '2099', NULL::text),
+          ('00000000-0000-0000-0000-000000000002'::uuid, 'blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    ', NULL::text),
+          ('00000000-0000-0000-0000-000000000003'::uuid, 'invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099', NULL::text),
+          ('00000000-0000-0000-0000-000000000004'::uuid, 'invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope', NULL::text),
+          ('00000000-0000-0000-0000-000000000005'::uuid, 'valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099', NULL::text),
+          ('00000000-0000-0000-0000-000000000006'::uuid, 'legacy-two-digit', 'stripe', true, true, 'pm_legacy', 'card', '12', '32', NULL::text),
+          ('00000000-0000-0000-0000-000000000007'::uuid, 'pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification'),
+          ('00000000-0000-0000-0000-000000000008'::uuid, 'pending-bank-card-exp', 'stripe', true, true, 'pm_pending_exp', 'ach', '12', '2099', 'pending_verification')
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -251,12 +251,12 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('february-card', true, NULL::date, NULL::text, NULL::uuid),
           ('january-card', true, NULL::date, NULL::text, NULL::uuid)
       ), payment_methods(
-        customer_id, processor, is_default, autopay_enabled,
+        id, customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
       ) AS (
         VALUES
-          ('february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026', NULL::text),
-          ('january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026', NULL::text)
+          ('00000000-0000-0000-0000-000000000009'::uuid, 'february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026', NULL::text),
+          ('00000000-0000-0000-0000-000000000010'::uuid, 'january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026', NULL::text)
       )
       SELECT c.id, ${sql} AS active
       FROM c
