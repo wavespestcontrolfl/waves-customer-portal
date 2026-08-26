@@ -33,40 +33,40 @@ describe('revised rodent pricing rules', () => {
     ).price).toBe(350);
   });
 
-  test('legacy unlimited/upgrade inputs coerce to Standard with a warning', () => {
+  test('legacy plan/upgrade/callback-count inputs still price the flat Standard plan', () => {
     const fromUnlimited = priceRodentTrapping(baseInput(), { plan: 'unlimited' });
     expect(fromUnlimited.price).toBe(350);
     expect(fromUnlimited.name).toBe('Rodent Trapping - Standard');
     expect(fromUnlimited.rodentTrappingPlan).toBe('standard');
-    expect(fromUnlimited.unlimitedCallbacks).toBe(false);
-    expect(fromUnlimited.warnings.join(' ')).toMatch(/retired/i);
+    expect(fromUnlimited.unlimitedCallbacks).toBe(true);
 
-    const fromUpgrade = priceRodentTrapping(baseInput(), { upgradeToUnlimited: true });
-    expect(fromUpgrade.price).toBe(350);
-    expect(fromUpgrade.warnings.join(' ')).toMatch(/retired/i);
+    expect(priceRodentTrapping(baseInput(), { upgradeToUnlimited: true }).price).toBe(350);
   });
 
-  test('standard trapping extra callbacks bill only after two included callbacks are used', () => {
-    expect(priceRodentTrapping(baseInput(), { plan: 'standard', extraCallbackCount: 0 }).price).toBe(350);
-    expect(priceRodentTrapping(baseInput(), { plan: 'standard', callbacksUsed: 1, extraCallbackCount: 1 })).toMatchObject({
+  test('callbacks are unlimited — callback counts never bill', () => {
+    expect(priceRodentTrapping(baseInput(), { extraCallbackCount: 0 }).price).toBe(350);
+    expect(priceRodentTrapping(baseInput(), { callbacksUsed: 2, extraCallbackCount: 2 })).toMatchObject({
       price: 350,
       extraCallbackAllowed: false,
       extraCallbackPrice: 0,
+      unlimitedCallbacks: true,
+      includedCallbacks: 'unlimited',
     });
-    expect(priceRodentTrapping(baseInput(), { plan: 'standard', callbacksUsed: 2, extraCallbackCount: 1 })).toMatchObject({
-      price: 475,
-      extraCallbackAllowed: true,
-      extraCallbackPrice: 125,
+    const withRequestedExtras = priceRodentTrapping(baseInput(), { callbacksUsed: 2, extraCallbackCount: 1 });
+    expect(withRequestedExtras.warnings.join(' ')).toMatch(/no longer apply/i);
+    expect(priceRodentTrappingFollowups(1, { callbacksUsed: 2 })).toMatchObject({
+      price: 0,
+      included: true,
+      unlimitedCallbacks: true,
     });
-    expect(priceRodentTrapping(baseInput(), { plan: 'standard', callbacksUsed: 2, extraCallbackCount: 2 }).price).toBe(600);
-    expect(priceRodentTrappingFollowups(1, { callbacksUsed: 2 }).price).toBe(125);
   });
 
   test('invoice descriptions use revised trapping copy', () => {
     const standard = priceRodentTrapping(baseInput(), { plan: 'standard' });
 
-    expect(standard.invoiceDescription).toContain('initial setup plus 2 callbacks/checks');
-    expect(standard.invoiceDescription).toContain('$125 each');
+    expect(standard.invoiceDescription).toContain('unlimited callbacks/checks');
+    expect(standard.invoiceDescription).toContain('same active trapping job');
+    expect(standard.invoiceDescription).not.toContain('$125');
   });
 
   test('trap-only retainer plans, setup waiver, warranty, and callbacks', () => {

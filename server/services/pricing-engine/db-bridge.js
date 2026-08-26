@@ -1261,7 +1261,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
             : Number(t.included_followups);
       }
       if (t.active_window_days != null) constants.RODENT.trapping.activeWindowDays = Number(t.active_window_days);
-      if (t.additional_followup_rate != null) constants.RODENT.trapping.additionalFollowUpRate = r(t.additional_followup_rate);
+      // additional_followup_rate is retired (callbacks are unlimited on the
+      // Standard plan, owner 2026-08-26) — deliberately not mapped.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
       if (Array.isArray(t.home_size_adjustments)) {

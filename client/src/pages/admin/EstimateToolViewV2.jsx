@@ -2267,8 +2267,6 @@ export default function EstimateToolViewV2({
     exclMeshConcreteLF: "0",
     exclWaive: "NO",
     rodentTrappingEmergency: false,
-    callbacksUsed: "0",
-    extraCallbackCount: "0",
     sanitationTier: "standard",
     sanitationArea: "",
     sanitationDebris: "0",
@@ -4227,8 +4225,6 @@ export default function EstimateToolViewV2({
         rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
         rodentTrappingPlan: "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
-        callbacksUsed: parseInt(form.callbacksUsed, 10) || 0,
-        extraCallbackCount: parseInt(form.extraCallbackCount, 10) || 0,
         trapOnlyRetainerPlan: form.trapOnlyRetainerPlan || "standard",
         trapOnlyRetainerBilling: form.trapOnlyRetainerBilling || "annual",
         trapOnlyResponseCallbacksUsed: parseInt(form.trapOnlyResponseCallbacksUsed, 10) || 0,
@@ -7673,19 +7669,9 @@ export default function EstimateToolViewV2({
               {form.svcRodentTrap && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="text-12 text-zinc-600 mb-3">
-                    Standard plan — $350 flat, includes 2 callbacks/checks. Extra callbacks $125 each after the included ones are used.
+                    Standard plan — $350 flat, unlimited callbacks/checks for the active trapping job.
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Callbacks Used">
-                      <InputV2 k="callbacksUsed" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Extra Callbacks">
-                      <InputV2 k="extraCallbackCount" type="number" min="0" />
-                    </FieldV2>
-                    <div className="col-span-2">
-                      <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
-                    </div>
-                  </div>
+                  <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
                 </div>
               )}
               <CheckboxV2 k="svcTrapOnlyRetainer" label="Customer declined exclusion / trap-only monitoring" />

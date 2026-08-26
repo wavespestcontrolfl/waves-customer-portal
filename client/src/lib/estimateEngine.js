@@ -3081,9 +3081,9 @@ export function calculateEstimate(inputs) {
   if (svcRodentTrap && !isCommercial) {
     hasOT = true;
     // Static mirror of the server's standard-only trapping plan (owner
-    // 2026-08-26): flat $350, no footprint/lot adjustments.
+    // 2026-08-26): flat $350, unlimited callbacks, no footprint/lot adjustments.
     const fp = otP(350);
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + 2 included callbacks' });
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + unlimited trap checks' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */

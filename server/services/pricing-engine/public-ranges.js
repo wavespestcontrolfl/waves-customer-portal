@@ -449,20 +449,12 @@ function buildRows() {
     name: 'Rodent Trapping',
     unit: 'per program',
     // Standard is the only plan (owner 2026-08-26): flat program fee with
-    // included callbacks, then billable extras.
+    // unlimited callbacks/checks for the same active trapping job.
     values: sweepValues(
-      [
-        { plan: 'standard' },
-        // Standard plan with the configured callback allowance exhausted
-        // plus billable extras (allowance read from live config). Extra
-        // callbacks are additive per-unit with no cap — the note discloses
-        // the live per-callback rate so any count is quotable.
-        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 2 },
-        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 6 },
-      ],
+      [{ plan: 'standard' }],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: `Standard plan (flat program fee, setup + ${Number(constants.RODENT.trapping.includedFollowUps) || 2} included callbacks); additional callbacks beyond the range $${Math.round(Number(constants.RODENT.trapping.additionalFollowUpRate) || 125)} each. Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
+    notes: `Standard plan (flat program fee — setup plus unlimited callbacks/checks for the same active trapping job). Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
   }));
 
   add('rodent_sanitation', () => rangeRow({
