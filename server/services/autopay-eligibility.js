@@ -230,7 +230,12 @@ function autopayActivePredicate(now = new Date()) {
 // accept both or alias rows slip past it (Codex #2706 r5).
 function isBankMethodType(methodType) {
   const t = String(methodType || '').toLowerCase();
-  return t === 'ach' || t === 'us_bank_account';
+  // FOUR aliases, matching the SQL predicates (codex #3495): 'ach' and
+  // 'us_bank_account' are the live writers; 'bank'/'bank_account' are the
+  // defensive aliases the aggregates already treated as bank — the JS
+  // classifiers must agree or a stray alias row reads as a CARD here
+  // (NULL expiry ⇒ unchargeable) while billing-health calls it active.
+  return t === 'ach' || t === 'us_bank_account' || t === 'bank' || t === 'bank_account';
 }
 
 module.exports = {
