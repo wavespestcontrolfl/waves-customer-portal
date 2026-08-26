@@ -2870,6 +2870,18 @@ const InvoiceService = {
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.
       await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus });
+      // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
+      // the inner sendViaSMS hook only runs on SMS success, so an
+      // email-only delivery finalized here armed nothing — a fresh invoice
+      // got no dunning, and an unvoided one stayed under its
+      // 'invoice_voided' stop forever. Idempotent when the SMS leg already
+      // scheduled (existing rows are returned unchanged; the void-stop
+      // re-arm is conditional).
+      try {
+        await require("./invoice-followups").scheduleForInvoice(invoiceId);
+      } catch (e) {
+        logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+      }
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
       // No channel delivered — reverse the credit this seam auto-applied before

@@ -1429,24 +1429,28 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
         logger.warn(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number}: combined PI ${pi.id} is ${pi.status} — money may be in flight, not touched`);
       }
     }
-    // Preserve a pre-existing ADMIN stop's attribution under a SYSTEM stop
-    // (Codex #3493 r3): the void lifecycle stop used to overwrite
-    // stopped_reason/stopped_by_admin_id, erasing the only evidence that an
-    // admin had already stopped dunning — the unvoid→resend re-arm then
-    // read the row as system-owned and revived reminders the admin had
-    // killed. An explicit admin stop (adminId present) still re-attributes.
+    // Preserve ANY pre-existing stop's fields under a SYSTEM stop
+    // (Codex #3493 r3/r5): the void lifecycle stop used to overwrite
+    // stopped_reason/stopped_by_admin_id, erasing the only evidence that
+    // dunning was already stopped on purpose — the unvoid→resend re-arm
+    // then read the row as system-owned ('invoice_voided') and revived
+    // reminders someone had killed. Not limited to admin-ATTRIBUTED stops:
+    // the admin stop route recorded a NULL admin id for a while (it read
+    // req.user, which auth never populates), so legacy admin stops are
+    // indistinguishable from system ones except by their reason — keeping
+    // the original reason is what keeps the re-arm off them. An explicit
+    // admin stop (adminId present) still re-attributes.
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .first('status', 'stopped_by_admin_id');
-    const preserveAdminStop = !adminId
+    const preservePriorStop = !adminId
       && priorSeq
-      && priorSeq.status === 'stopped'
-      && priorSeq.stopped_by_admin_id;
+      && priorSeq.status === 'stopped';
     await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
       updated_at: trx.fn.now(),
       status: 'stopped',
       next_touch_at: null,
-      ...(preserveAdminStop ? {} : {
+      ...(preservePriorStop ? {} : {
         stopped_reason: reason || null,
         stopped_by_admin_id: adminId || null,
       }),

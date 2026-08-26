@@ -2921,8 +2921,12 @@ router.post('/:id/followup/resume', requireAdmin, async (req, res, next) => {
 router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
+    // adminAuthenticate populates req.technicianId (never req.user) — the
+    // old req.user?.id recorded every admin stop with a NULL admin id,
+    // erasing the attribution the void-stop preservation keys on
+    // (Codex #3493 r5).
     await FollowUps.stopSequence(req.params.id, {
-      reason, adminId: req.user?.id || null,
+      reason, adminId: req.technicianId || null,
     });
     res.json({ ok: true });
   } catch (err) { next(err); }

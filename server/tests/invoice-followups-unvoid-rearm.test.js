@@ -263,6 +263,17 @@ describe('stopSequence — admin-stop attribution preservation', () => {
     expect(payload).not.toHaveProperty('stopped_by_admin_id');
   });
 
+  test('a SYSTEM stop over an UNATTRIBUTED existing stop preserves its reason too — legacy admin stops recorded a null admin id (Codex #3493 r5)', async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_by_admin_id: null } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('stopped');
+    expect(payload).not.toHaveProperty('stopped_reason');
+    expect(payload).not.toHaveProperty('stopped_by_admin_id');
+  });
+
   test('an explicit ADMIN stop still re-attributes', async () => {
     const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_by_admin_id: 'admin-1' } });
 
