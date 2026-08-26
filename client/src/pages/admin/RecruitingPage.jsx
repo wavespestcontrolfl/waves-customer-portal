@@ -46,6 +46,7 @@ export const STATUS_TABS = [
   { key: "offer", label: "Offer" },
   { key: "hired", label: "Hired" },
   { key: "rejected", label: "Rejected" },
+  { key: "withdrawn", label: "Withdrawn" },
 ];
 
 const ROLE_LABELS = { technician: "Technician", sales: "Sales", other: "Other" };
@@ -124,9 +125,11 @@ export default function RecruitingPage() {
     }
   }, []);
 
-  // Bell deep link: consume ?application=<id> once, then clear it.
-  // Mount-only by design (the errors-only lint config has no
-  // exhaustive-deps rule — a disable directive would itself error).
+  // Bell deep link: consume ?application=<id> and clear it. Reacts to the
+  // param (not mount-only): clicking a second notification while already on
+  // this page updates only the query string — the mounted route must still
+  // reopen the dialog (codex round 4). Clearing the param makes the effect's
+  // rerun a no-op.
   useEffect(() => {
     const id = searchParams.get("application");
     if (!id) return;
@@ -134,7 +137,7 @@ export default function RecruitingPage() {
     const next = new URLSearchParams(searchParams);
     next.delete("application");
     setSearchParams(next, { replace: true });
-  }, []);
+  }, [searchParams, setSearchParams, openDetail]);
 
   const setStatus = async (id, status) => {
     setBusy(true);

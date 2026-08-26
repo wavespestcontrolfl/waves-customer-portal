@@ -166,7 +166,7 @@ router.get('/', async (req, res, next) => {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit, offset);
+    const persisted = await NotificationService.getAdminNotifications(limit, offset, { role: req.techRole });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     const liveCtx = page === 1 && !isBellPolicyEnabled()
@@ -222,7 +222,7 @@ router.get('/unread-count', async (req, res, next) => {
     const liveCtx = isBellPolicyEnabled()
       ? { live: [], liveKeys: new Set() }
       : await liveAlertNotifications(req.technicianId);
-    let persistedCount = await NotificationService.getAdminUnreadCount();
+    let persistedCount = await NotificationService.getAdminUnreadCount({ role: req.techRole });
     if (liveCtx.liveKeys.size > 0) {
       try {
         const unreadDashboardAlerts = await db('notifications')
