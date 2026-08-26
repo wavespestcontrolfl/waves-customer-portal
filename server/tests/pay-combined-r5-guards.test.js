@@ -70,6 +70,10 @@ describe('stopSequence combined-PI release (fail closed)', () => {
       if (table === 'invoice_followup_sequences') {
         const q = {};
         q.where = jest.fn(() => q);
+        // stopSequence reads the prior row before the stop (admin-stop
+        // attribution preservation, Codex #3493 r3); no row → the stop
+        // writes its own reason, same payload these tests assert.
+        q.first = jest.fn(async () => undefined);
         q.update = sequenceUpdate;
         return q;
       }
