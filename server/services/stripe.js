@@ -2556,6 +2556,13 @@ const StripeService = {
             declineCode: err.decline_code || err.code || null,
           };
         }
+        // SCA step-up (Codex r28): a declined off-session confirm (e.g.
+        // authentication_required) can leave the PI alive in
+        // requires_action — carry its identity so callers can cancel it
+        // before opening a pay-link rail beside it (the
+        // payment_intent.requires_action webhook rails may still invite
+        // the customer to complete the original intent).
+        chargeFailed.stripePaymentIntentId = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
         throw chargeFailed;
       }
 

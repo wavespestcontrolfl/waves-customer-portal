@@ -12205,6 +12205,56 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               invoicePayUrl = null;
             }
             logger.warn(`[estimate-accept] prepay auto-charge refused by payer guard for invoice ${invoiceId} (estimate ${estimate.id}): ${payerStamped ? 'payer stamped, invoice routes to payer' : 'payer unresolved — deferred to sweep'}`);
+          } else if (chargeErr.wavesCardDecline?.declineCode === 'authentication_required') {
+            // An SCA step-up thrown as a decline leaves the off-session PI
+            // alive in requires_action (Codex r28 P1): webhook rails can
+            // still invite the customer to complete THAT intent, so the
+            // decline fallback's pay link would open a second collection
+            // rail beside it. Mirror the r13 parked-'processing' triage:
+            // verify + cancel the intent and stamp authentication_required
+            // (fenced, token-conditioned) BEFORE allowing the fallback;
+            // anything short of a confirmed-terminal intent stays
+            // unresolved for the sweep — no pay link.
+            let scaSafeForFallback = false;
+            let scaReason = 'authentication_required_unverified';
+            try {
+              await chargeUnderJobFence(async () => {
+                const StripeSvc = require('../services/stripe');
+                const scaPiId = chargeErr.stripePaymentIntentId || null;
+                const scaPi = scaPiId ? await StripeSvc.retrievePaymentIntent(scaPiId) : null;
+                if (!scaPi) return; // no identity to verify — fail closed
+                if (['succeeded', 'processing'].includes(scaPi.status)) {
+                  // The decline replayed after the customer completed the
+                  // intent — money may be moving; reconcile, never a link.
+                  scaReason = 'authentication_required_completed';
+                  return;
+                }
+                if (scaPi.status !== 'canceled') await StripeSvc.cancelPaymentIntent(scaPiId);
+                await db('estimates').where({ id: estimate.id })
+                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
+                  .update({
+                    estimate_data: db.raw(
+                      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                      [JSON.stringify({ authentication_required: true })],
+                    ),
+                  });
+                scaSafeForFallback = true;
+              });
+            } catch (scaErr) {
+              if (scaErr.code === 'PREPAY_JOB_NOT_OWNED') scaReason = 'job_not_owned';
+              logger.warn(`[estimate-accept] SCA-decline intent triage failed for invoice ${invoiceId} (estimate ${estimate.id}): ${scaErr.message}`);
+            }
+            if (scaSafeForFallback) {
+              // Intent confirmed terminal (canceled) — the pay link is the
+              // customer's way to authenticate on-session; the stamp keeps
+              // the sweep off the doomed off-session re-charge.
+              prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
+              logger.warn(`[estimate-accept] prepay auto-charge hit 3DS off-session for invoice ${invoiceId} (estimate ${estimate.id}) — intent canceled, pay-link fallback`);
+            } else {
+              prepayAutoCharge = { status: 'ambiguous', reason: scaReason };
+              invoicePayUrl = null;
+              logger.warn(`[estimate-accept] prepay auto-charge 3DS decline unresolved for invoice ${invoiceId} (estimate ${estimate.id}): ${scaReason}`);
+            }
           } else {
             prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
             logger.warn(`[estimate-accept] prepay auto-charge declined/failed for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);

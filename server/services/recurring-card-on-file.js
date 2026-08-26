@@ -1140,6 +1140,44 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // no funds moved; fall back to the delivered pay link + office alert
       // (never silent, never a different amount/method than quoted).
       logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
+      if (err.wavesCardDecline?.declineCode === 'authentication_required') {
+        // An SCA step-up thrown as a decline leaves the off-session PI
+        // alive in requires_action (Codex r28 P1, mirror of the route
+        // triage): a pay link beside a completable intent is a second
+        // collection rail. Verify + cancel the intent and stamp
+        // authentication_required (fenced) BEFORE delivering; anything
+        // short of a confirmed-terminal intent defers this pass — the job
+        // stays claimed and the lease retries. (A job already stamped
+        // authentication_required never reaches here — the pre-charge
+        // check throws WITHOUT wavesCardDecline, its intent was already
+        // canceled by whoever stamped it.)
+        let scaTerminal = false;
+        try {
+          const fencedSca = await withJobFence(async () => {
+            const scaPiId = err.stripePaymentIntentId || null;
+            const scaPi = scaPiId ? await StripeService.retrievePaymentIntent(scaPiId) : null;
+            if (!scaPi) return false; // no identity to verify — fail closed
+            if (['succeeded', 'processing'].includes(scaPi.status)) return false; // completion raced the decline — reconcile, never a link
+            if (scaPi.status !== 'canceled') await StripeService.cancelPaymentIntent(scaPiId);
+            await db('estimates').where({ id: row.id })
+              .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [job.claim_token || ''])
+              .update({
+                estimate_data: db.raw(
+                  "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                  [JSON.stringify({ authentication_required: true })],
+                ),
+              });
+            return true;
+          });
+          scaTerminal = fencedSca.ceded !== true && fencedSca.result === true;
+        } catch (scaErr) {
+          logger.warn(`[recurring-cof] prepay sweep SCA-decline triage failed for invoice ${job.invoice_id}: ${scaErr.message}`);
+        }
+        if (!scaTerminal) {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: 3DS-declined intent not confirmed terminal — no pay link this pass`);
+          continue;
+        }
+      }
       let fallbackDelivered = false;
       try {
         const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
