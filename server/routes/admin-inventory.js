@@ -3011,6 +3011,25 @@ router.get('/stats', async (req, res, next) => {
       }
     } catch { /* table not created yet */ }
 
+    // Technician projection (codex P2): only what their UI renders —
+    // product totals, low stock, and open restock counts. Pricing averages
+    // and the vendor/approval/scrape aggregates belong to hidden owner-only
+    // workspaces.
+    if (req.techRole !== 'admin') {
+      return res.json({
+        products: {
+          total: parseInt(productStats.total_products),
+          priced: parseInt(productStats.priced),
+          needsPrice: parseInt(productStats.needs_price),
+          lowStock: parseInt(productStats.low_stock || 0),
+          avgPrice: null,
+        },
+        vendors: null,
+        approvals: null,
+        scrapeJobs: null,
+        restockRequests: { open: restockOpen },
+      });
+    }
     res.json({
       products: {
         total: parseInt(productStats.total_products),

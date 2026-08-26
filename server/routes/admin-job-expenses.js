@@ -15,9 +15,12 @@ const config = require('../config');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { taxPeriodFor } = require('../utils/tax-period');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: per-job revenue/cost/profit/margin data and
+// expense records are owner-only (only live consumer is the owner-only
+// Equipment Costs tab; JobCostCard/ExpenseCapture components are unmounted).
+router.use(adminAuthenticate, requireAdmin);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const s3 = new S3Client({

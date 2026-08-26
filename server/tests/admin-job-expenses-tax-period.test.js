@@ -25,6 +25,7 @@ jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(() => Pr
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 const express = require('express');

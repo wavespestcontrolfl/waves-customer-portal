@@ -665,6 +665,12 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
 }
 
 function SmsTab() {
+  // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
+  // /revise 403 for technicians). A tech following a draftId deep link
+  // still gets the prefilled text/recipient, but sends as a plain manual
+  // SMS — the AI draft stays pending for the owner (codex P2).
+  const smsOutletContext = useOutletContext();
+  const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -926,7 +932,7 @@ function SmsTab() {
             setToNumber(draftPhone);
             finalPhone = draftPhone;
           }
-          setLoadedMessageDraft(draft?.id ? {
+          setLoadedMessageDraft(smsIsAdminRole && draft?.id ? {
             id: draft.id,
             draftResponse: draft.draftResponse || "",
             recipientPhone: finalPhone,

@@ -280,7 +280,8 @@ export default function InventoryPage() {
         ariaLabel="Inventory section"
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
         action={
-          tab === "products"
+          // Product authoring is owner-only (POST/PUT/DELETE 403 for techs).
+          tab === "products" && isAdminRole
             ? {
                 label: "Add Product",
                 icon: Plus,
@@ -445,6 +446,7 @@ export default function InventoryPage() {
           onFilterChange={setProductFilter}
           showAddForm={showAddForm}
           setShowAddForm={setShowAddForm}
+          canAuthor={isAdminRole}
         />
       )}
       {tab === "lawnFacts" && <LawnFactsTab showToast={showToast} />}
@@ -1942,6 +1944,9 @@ function ProductsTab({
   onFilterChange,
   showAddForm,
   setShowAddForm,
+  // Product create/edit/delete is owner-only (server 403s techs) — hide
+  // the authoring affordances rather than rendering doomed forms.
+  canAuthor = false,
 }) {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -2121,7 +2126,7 @@ function ProductsTab({
           ))}
         </select>{" "}
       </div>
-      {showAddForm && (
+      {canAuthor && showAddForm && (
         <div
           style={{
             background: D.card,
@@ -2547,7 +2552,7 @@ function ProductsTab({
                       style={{ display: "flex", gap: 4 }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      {isEditing ? (
+                      {canAuthor && (isEditing ? (
                         <>
                           {" "}
                           <button
@@ -2658,7 +2663,7 @@ function ProductsTab({
                             </button>
                           )}
                         </>
-                      )}
+                      ))}
                     </div>{" "}
                   </td>
                 </tr>,
