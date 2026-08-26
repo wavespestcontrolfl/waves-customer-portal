@@ -47,26 +47,30 @@ const VALID_BODY = {
 };
 
 describe('normalizeAnswers', () => {
-  test('keeps only known keys and caps length', () => {
-    const long = 'x'.repeat(5000);
+  test('keeps allowlisted string answers, trims, drops unknown keys and empties', () => {
     const out = normalizeAnswers({
       experience: ' kept ',
-      evil_key: 'dropped',
-      availability: long,
-      pay_expectation: 42,
+      evil_key: 'dropped by allowlist contract',
       why_waves: '',
     });
-    expect(out).toEqual({
-      experience: 'kept',
-      availability: 'x'.repeat(2000),
-    });
+    expect(out).toEqual({ experience: 'kept' });
     expect(Object.keys(out).every((k) => ANSWER_KEYS.includes(k))).toBe(true);
   });
 
-  test('non-object input yields empty answers', () => {
+  test('fails closed (400) on malformed shapes instead of silently normalizing', () => {
+    // Non-object answers payloads.
+    expect(() => normalizeAnswers(['a'])).toThrow(expect.objectContaining({ status: 400 }));
+    expect(() => normalizeAnswers('str')).toThrow(expect.objectContaining({ status: 400 }));
+    // Non-string values on known keys.
+    expect(() => normalizeAnswers({ pay_expectation: 42 })).toThrow(expect.objectContaining({ status: 400 }));
+    expect(() => normalizeAnswers({ experience: { nested: true } })).toThrow(expect.objectContaining({ status: 400 }));
+    // Oversized answers are rejected, never truncated (content loss).
+    expect(() => normalizeAnswers({ availability: 'x'.repeat(5000) })).toThrow(expect.objectContaining({ status: 400 }));
+  });
+
+  test('absent answers are fine (empty object)', () => {
+    expect(normalizeAnswers(undefined)).toEqual({});
     expect(normalizeAnswers(null)).toEqual({});
-    expect(normalizeAnswers(['a'])).toEqual({});
-    expect(normalizeAnswers('str')).toEqual({});
   });
 });
 

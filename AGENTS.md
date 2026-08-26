@@ -1493,7 +1493,10 @@ violations at the severity noted.
   (404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
   + per-phone limiter (3/hr), honeypot silent-200, Turnstile shadow-verify
   with enforcement under the shared leadTurnstile gate, strict validation
-  (allowlisted answer keys, length caps) with 400 fail-closed. Applicants
+  with 400 fail-closed (malformed shapes, non-string or over-length
+  answers, over-length city, unknown role all reject; answer keys are an
+  ALLOWLIST — unknown keys are dropped by contract, and `source` is
+  server-sanitized attribution, not applicant content). Applicants
   are NEVER customers or leads — the route never touches either table —
   and nothing sends applicant-facing comms (owner contacts every applicant
   himself). Post-insert side effects are fire-and-forget: an AI ranking

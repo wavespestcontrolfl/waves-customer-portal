@@ -43,15 +43,29 @@ function badRequest(message) {
   return err;
 }
 
+// Fail-closed answer validation (codex P1): a malformed submission is a 400,
+// never a silent normalization that loses applicant content. Unknown keys are
+// dropped BY CONTRACT (the allowlist is the schema — arbitrary keys are a
+// storage vector, not content); everything else about a present answer must
+// be well-formed: string-typed and within the length cap.
 function normalizeAnswers(raw) {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw badRequest('Answers must be an object.');
+  }
   const out = {};
   for (const key of ANSWER_KEYS) {
+    if (!(key in raw)) continue;
     const value = raw[key];
-    if (typeof value !== 'string') continue;
+    if (typeof value !== 'string') {
+      throw badRequest(`Answer "${key}" must be text.`);
+    }
+    if (value.length > MAX_ANSWER_CHARS) {
+      throw badRequest(`Answer "${key}" is too long (max ${MAX_ANSWER_CHARS} characters).`);
+    }
     const trimmed = value.trim();
     if (!trimmed) continue;
-    out[key] = trimmed.slice(0, MAX_ANSWER_CHARS);
+    out[key] = trimmed;
   }
   return out;
 }
@@ -88,7 +102,12 @@ async function createJobApplication({ body = {}, database }) {
   // address, only a storage-bloat vector (codex P1) — treat as absent.
   const emailRaw = cleanValidEmailOrNull(body.email);
   const email = emailRaw && emailRaw.length <= 254 ? emailRaw : null;
-  const city = cleanText(body.city || '').slice(0, 80) || null;
+
+  const cityRaw = cleanText(body.city || '');
+  if (cityRaw.length > 80) {
+    throw badRequest('City is too long (max 80 characters).');
+  }
+  const city = cityRaw || null;
 
   const role = ROLES.includes(body.role) ? body.role : null;
   if (!role) {
