@@ -4618,6 +4618,14 @@ const InvoiceService = {
           `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
         );
       }
+      // Saved-card reconciliation fence (Codex #3493 r12): a timed-out or
+      // rolled-back saved-card charge leaves durable
+      // stripe_invoice_charge_attempts / stripe_orphan_charges records with
+      // NO payment row and NO PaymentIntent stamp on the invoice — Stripe
+      // may already have collected the card. Restoring a collectible draft
+      // beside that would enable a second collection; the shared fence
+      // fails closed until reconciliation resolves it.
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       // Linked-visit TOCTOU re-check on the locked row (Codex #3493 r3): a
       // cancellation / re-service conversion / prepay stamping that
       // committed after the fast-fail pass rolls the restore back — its own

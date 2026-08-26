@@ -13,8 +13,10 @@ jest.mock('../services/setup-fee-alert-reconcile', () => ({
   reconcileSetupFeeAlertForInvoice: (...args) => mockReconcile(...args),
 }));
 const mockRetrievePI = jest.fn();
+const mockChargeReconFence = jest.fn(async () => undefined);
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePI(...args),
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockChargeReconFence(...args),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay',
@@ -148,6 +150,21 @@ describe('InvoiceService.unvoidInvoice', () => {
       /this is an annual prepay charge/,
     );
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses while a saved-card charge awaits reconciliation — Stripe may already have collected (Codex #3493 r12)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice() }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(noRow());
+    mockChargeReconFence.mockRejectedValueOnce(
+      new Error('Invoice already has a saved-card charge in progress or awaiting reconciliation'),
+    );
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/saved-card charge/);
+    expect(mockChargeReconFence).toHaveBeenCalledWith('inv-1', db);
+    expect(mockReconcile).not.toHaveBeenCalled();
   });
 
   test('refuses while a dunning touch is mid-send — fireStep writes the sequence back unconditionally after it (Codex #3493 r9)', async () => {

@@ -134,6 +134,31 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.next_touch_at).toBeTruthy();
   });
 
+  test("lifts the LEGACY migration stamp 'invoice_terminal_status:void' too (Codex #3493 r12 P0)", async () => {
+    const seq = voidStoppedSeq({ stopped_reason: 'invoice_terminal_status:void' });
+    const rearmed = { ...seq, status: 'active', stopped_reason: null };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed });
+    customerOnAutopay.mockResolvedValue(false);
+
+    const row = await scheduleForInvoice('inv-1');
+
+    expect(row).toBe(rearmed);
+    expect(seqUpdate.mock.calls[0][0].status).toBe('active');
+  });
+
+  test('a sequence releaseFromAutopayHold already escalated (held marker cleared) resumes its cadence even for an enrolled customer (Codex #3493 r12)', async () => {
+    const seq = voidStoppedSeq({ is_autopay_held: false });
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: seq });
+    customerOnAutopay.mockResolvedValue(true);
+
+    await scheduleForInvoice('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('active');
+    expect(payload.is_autopay_held).toBe(false);
+    expect(payload.next_touch_at).toBeTruthy();
+  });
+
   test('an autopay-held row re-holds only on LIVE enrollment — a stale stored flag is dropped (Codex #3493 r7)', async () => {
     // Customer disabled autopay while the invoice was void: stored flag true,
     // live check false → active cadence, not a hold nothing can ever release.

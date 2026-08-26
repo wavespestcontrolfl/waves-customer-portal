@@ -353,9 +353,14 @@ async function scheduleForInvoice(invoiceId) {
       // The void stop over a PAUSED row carries the ':prev=paused' suffix
       // (same convention as the payment-plan stop) so a metadata-less
       // legacy pause survives the void round-trip.
+      // 'invoice_terminal_status:void' is the SAME system stop stamped by
+      // the 20260601000012 backfill migration on sequences voided before
+      // the runtime hook existed — without lifting it, a legacy voided
+      // invoice restored and resent would never be reminded again
+      // (Codex #3493 r12 P0).
       const voidStopStamp = String(existing.stopped_reason || '');
       const isSystemVoidStop = existing.status === 'stopped'
-        && (voidStopStamp === 'invoice_voided' || voidStopStamp === 'invoice_voided:prev=paused')
+        && ['invoice_voided', 'invoice_voided:prev=paused', 'invoice_terminal_status:void'].includes(voidStopStamp)
         && !existing.stopped_by_admin_id;
       if (isSystemVoidStop) {
         // Never re-arm under an ACTIVE payment plan (Codex #3493 r6): plan
@@ -391,14 +396,15 @@ async function scheduleForInvoice(invoiceId) {
           return repaused || existing;
         }
         const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
-        // LIVE autopay standing only (Codex #3493 r7): the stored
-        // is_autopay_held flag goes stale when the customer disables
-        // autopay while the invoice sits void — restoring the hold from it
-        // would suppress reminders forever (no future autopay attempt can
-        // fail and release it). A still-enrolled customer re-enters the
-        // hold via the live check; a disenrolled one re-enters the active
-        // cadence.
-        const holdForAutopay = await customerOnAutopay(customerNow, { db: trx });
+        // Hold only when BOTH the retained held marker and live enrollment
+        // agree (Codex #3493 r7 + r12): the stored flag alone goes stale
+        // when the customer disables autopay while the invoice sits void
+        // (a hold nothing can release), and live enrollment alone would
+        // re-hold a sequence releaseFromAutopayHold already escalated to
+        // active after the failure threshold (undoing the escalation on an
+        // invoice that may see no further autopay attempt).
+        const holdForAutopay = !!existing.is_autopay_held
+          && await customerOnAutopay(customerNow, { db: trx });
         // Anchor like the ordinary scheduling path: the cadence is measured
         // from when the invoice went out (sent_at → sms_sent_at →
         // created_at), NOT the due date — a due date weeks past delivery
