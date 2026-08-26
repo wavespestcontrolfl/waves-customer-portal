@@ -17,6 +17,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { recordSuppression, clearSuppression } = require('./validators/suppression');
 const { detectSmsOptCommand } = require('./opt-out-detector');
+const { standingVerdictTime } = require('./suppression-ownership');
 const { toE164 } = require('../../utils/phone');
 
 // Last-two-digits-only mask (codex #3495): the earlier middle-four mask
@@ -37,12 +38,27 @@ async function recordSyncProviderOptOut({ phone, attemptAt, source = 'twilio_sen
     await db.transaction(async (trx) => {
       await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
       const supRow = await trx('messaging_suppression')
-        .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at');
+        .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
       if (supRow && supRow.active === false && supRow.cleared_at
           && new Date(supRow.cleared_at) > anchoredAt) {
         outcome.deferred = 'cleared-after-attempt'; return;
       }
-      const res = await recordSuppression({ phone: optOutPhone, reason: 'opt_out', source, dbh: trx });
+      // A standing ACTIVE row authored by a NEWER attempt owns the verdict
+      // (codex #3495 r14): send A → START → send B's 21610 records, then
+      // A's slower 21610 arrives last. A's recheck window starts at its
+      // OLDER anchoredAt, sees the intervening START, and would clear B's
+      // newer carrier verdict — leaving an opted-out phone textable. Same
+      // guard as the callback path, via the shared ownership reader.
+      const ownerAt = await standingVerdictTime(supRow, { dbh: trx });
+      if (ownerAt && ownerAt > anchoredAt) {
+        outcome.deferred = 'newer-attempt-owns-row'; return;
+      }
+      // The attempt's own timestamp rides in the source so LATER slower
+      // recorders (sync or callback) can order themselves against this row.
+      const res = await recordSuppression({
+        phone: optOutPhone, reason: 'opt_out',
+        source: `${source}:${anchoredAt.toISOString()}`, dbh: trx,
+      });
       if (res?.ok === false) {
         throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
       }

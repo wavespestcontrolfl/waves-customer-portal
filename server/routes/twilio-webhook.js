@@ -1346,14 +1346,14 @@ router.post('/status', async (req, res) => {
                   && (!sentAtFloor || new Date(supRow.cleared_at) > sentAtFloor)) {
                 outcome.deferred = 'cleared-after-send'; return;
               }
-              // A standing row authored by a callback for a NEWER send owns
-              // the verdict — an older callback must not overwrite it.
-              const ownerSid = /^twilio_status_21610:(.+)$/.exec(supRow?.source || '')?.[1];
-              if (supRow?.active === true && ownerSid && ownerSid !== MessageSid && sentAt) {
-                const ownerLog = await trx('sms_log').where({ twilio_sid: ownerSid }).first('created_at');
-                if (ownerLog?.created_at && new Date(ownerLog.created_at) > new Date(sentAt)) {
-                  outcome.deferred = 'newer-callback-owns-row'; return;
-                }
+              // A standing row authored by a NEWER attempt owns the verdict
+              // — an older callback must not overwrite it. The shared
+              // reader also orders against SYNC-authored rows (codex #3495
+              // r14: 'twilio_send_21610:<iso>' embeds the attempt time).
+              const ownerAt = await require('../services/messaging/suppression-ownership')
+                .standingVerdictTime(supRow, { dbh: trx, excludeSid: MessageSid });
+              if (ownerAt && sentAt && ownerAt > new Date(sentAt)) {
+                outcome.deferred = 'newer-callback-owns-row'; return;
               }
               // recordSuppression resolves { ok: false } on a swallowed DB
               // error — check the result; a throw here rolls everything back.
