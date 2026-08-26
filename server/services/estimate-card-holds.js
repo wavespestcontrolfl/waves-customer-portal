@@ -342,7 +342,13 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
 // hold card is only ever charged explicitly by id. The hold row already carries
 // the pm id, so a transient failure here is recoverable (re-attach later)
 // without losing the booking.
-async function attachCardHoldPaymentMethod({ customerId, paymentMethodId }) {
+// mode: 'initial' (post-accept first attachment — the hold flow's
+// SetupIntent is deliberately CUSTOMERLESS, so a fresh pm has
+// customer=null at Stripe until this very call attaches it; the
+// revocation guard must not fire there) | 'self_heal' (pre-charge repair
+// of a missing local row — here customer=null means the pm was DETACHED
+// after having been attached, i.e. revoked, and must never re-attach).
+async function attachCardHoldPaymentMethod({ customerId, paymentMethodId, mode = 'initial' }) {
   if (!customerId || !paymentMethodId) return { attached: false };
   // Idempotent: this runs post-accept AND again as a self-heal before the
   // no-show / completion charge. savePaymentMethod inserts unconditionally, so
@@ -353,6 +359,40 @@ async function attachCardHoldPaymentMethod({ customerId, paymentMethodId }) {
     .first('id');
   if (existing) return { attached: true, paymentMethodRowId: existing.id, alreadySaved: true };
   try {
+    // SELF-HEAL ONLY — detached-at-Stripe = REVOKED (pre-push r13/r14
+    // P0): on the pre-charge repair path a missing local row with a
+    // customerless Stripe pm means the card was attached once and then
+    // DETACHED (removal is revocation); re-attaching would collect on
+    // withdrawn consent. The INITIAL post-accept attach must skip this —
+    // the hold flow's SetupIntent is deliberately customerless, so every
+    // fresh capture has customer=null until this very call attaches it.
+    if (mode === 'self_heal') {
+      // A customerless pm at SELF-HEAL time NEVER re-attaches (pre-push
+      // r16 P0): no ledger we write is reliable enough to distinguish "the
+      // best-effort initial attach failed" from "the customer removed the
+      // card" (the consent row is itself best-effort), and re-attaching a
+      // removed card collects on revoked consent. Fail closed with a
+      // deduped office bell — the operator, who can see both stories,
+      // re-attaches or releases. Money stays untouched either way (the
+      // charge paths fail toward pay-link/review on an unresolved card).
+      const stripePm = await StripeService.retrievePaymentMethod(paymentMethodId);
+      if (!stripePm?.customer) {
+        logger.warn('[estimate-card-holds] hold card is customerless at Stripe — never re-attached by self-heal; parked for review', { customerId });
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Card-hold payment method needs review — not on file at Stripe',
+            'A saved-card hold could not be charged: its payment method is not attached to the customer at Stripe (either the original save never completed, or the customer removed the card). Nothing was charged and nothing was re-attached — review the hold and re-collect or release it.',
+            {
+              link: `/admin/customers/${customerId}`,
+              metadata: { customerId, source: 'card_hold_customerless_pm' },
+              dedupeKey: `hold_pm_review:${customerId}:${paymentMethodId}`,
+            },
+          );
+        } catch (e) { logger.warn('[estimate-card-holds] customerless-pm review bell failed', { error: e.message }); }
+        return { attached: false, reason: 'payment_method_unattached_review' };
+      }
+    }
     const saved = await StripeService.savePaymentMethod(customerId, paymentMethodId, { enableAutopay: false, makeDefault: false });
     // Record the immutable save-card consent (admin consent history reads this
     // ledger). Non-fatal: a consent-write hiccup must not drop the held card.
@@ -555,7 +595,7 @@ async function resolveHoldPaymentMethodRowId(hold) {
     .first('id');
   let pm = await lookup();
   if (!pm) {
-    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id, mode: 'self_heal' });
     pm = await lookup();
   }
   return pm?.id || null;
@@ -566,6 +606,11 @@ async function resolveHoldPaymentMethodRowId(hold) {
 async function claimHoldForCharge(holdId) {
   const claimed = await db('estimate_card_holds')
     .where({ id: holdId, status: 'held' })
+    // A PARKED hold is un-chargeable until an operator repoints it (the
+    // repoint clears the stamp) — without this predicate a stale/concurrent
+    // no-show or completion worker could claim and charge a hold the
+    // cancellation had already decided to park (pre-push r3 P0).
+    .whereNull('parked_at')
     .update({ status: 'charging', updated_at: db.fn.now() });
   return claimed > 0;
 }
@@ -614,6 +659,15 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
     logger.warn('[estimate-card-holds] completion charge refused — resolved hold is not the expected row', { scheduledServiceId, expectedHoldId, resolvedHoldId: hold.id });
     return { charged: false, reason: 'hold_mismatch' };
   }
+  // A PARKED hold is untouchable by the charge paths (pre-push r5 P0):
+  // returning before ANY mutation means the non-collectible-invoice
+  // release below can never destroy a consent the cancellation parked for
+  // the successor visit. Only the ops repoint (which clears the stamp) or
+  // an offboarding release may resolve it.
+  if (hold && hold.parked_at) {
+    logger.info('[estimate-card-holds] completion charge skipped — hold is parked for a successor visit', { scheduledServiceId, holdId: hold.id });
+    return { charged: false, reason: 'parked' };
+  }
   if (!hold) {
     // Primary miss → reschedule-orphan detection (gated, read-only): a
     // stranded same-estimate hold is BELLED to the office with the ops
@@ -634,7 +688,11 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
   // helper, not a hand-rolled allow-list that would wrongly release a fresh
   // draft uncharged and silently fall back to an unpaid invoice.
   if (invoice.payer_id || !isInvoiceCollectibleStatus(invoice.status) || Number(invoice.total || 0) <= 0) {
+    // parked_at IS NULL rides the write (pre-push r10 P1): the early
+    // parked check above is a read — a park stamped between it and this
+    // release must win, not be destroyed.
     await db('estimate_card_holds').where({ id: hold.id, status: 'held' })
+      .whereNull('parked_at')
       .update({ status: 'released', updated_at: db.fn.now() });
     return { charged: false, reason: 'invoice_not_collectible' };
   }
@@ -878,6 +936,13 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
+  if (hold && hold.parked_at) {
+    // Parked = untouchable (pre-push r5 P0) — same posture as the
+    // dispatch completion leg; the recap must not charge or release a
+    // consent parked for a successor visit.
+    logger.info('[estimate-card-holds] recap charge skipped — hold is parked for a successor visit', { scheduledServiceId, holdId: hold.id });
+    return { charged: false, reason: 'parked' };
+  }
   if (!hold) {
     // Same reschedule-orphan detection as the dispatch completion path
     // (gated, read-only) — a rescheduled visit completed through
@@ -973,6 +1038,13 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
+  // Parked = untouchable (pre-push r5 P0): the staleness branch below
+  // RELEASES free, and a stale no-show worker racing a fresh park would
+  // otherwise destroy the consent the cancellation just preserved.
+  if (hold.parked_at) {
+    logger.info('[estimate-card-holds] no-show fee skipped — hold is parked for a successor visit', { scheduledServiceId, holdId: hold.id });
+    return { charged: false, reason: 'parked' };
+  }
   // Cross-lane refusal, mirroring the completion leg (pre-push r19 P0): a
   // /secure appointment-card row on the visit — recordCardHoldHeld's
   // logged conflict case, or a raced insert — is a competing, possibly
@@ -1061,7 +1133,7 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
     // removed in the check-to-charge gap then simply fails the off-session
     // charge below — never resurrected.
     if (attachSelfHeal) {
-      await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+      await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id, mode: 'self_heal' });
     }
     paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
@@ -1127,10 +1199,16 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
 
 // Release a hold with NO charge (cancel outside the window, reschedule, admin
 // waive). Idempotent; only a 'held' row releases.
-async function releaseCardHold({ scheduledServiceId, reason = 'released' }) {
+async function releaseCardHold({ scheduledServiceId, reason = 'released', overrideParked = false }) {
   if (!scheduledServiceId) return { released: false };
+  // A parked hold is protected from ordinary releases AT THE WRITE (pre-
+  // push r10 P1 — the read-then-release paths are TOCTOU against a
+  // concurrent park stamp). overrideParked is the deliberate escape hatch
+  // for offboarding and card-removal revocation, where releasing a parked
+  // hold is the point.
   const updated = await db('estimate_card_holds')
     .where({ scheduled_service_id: scheduledServiceId, status: 'held' })
+    .modify((q) => { if (!overrideParked) q.whereNull('parked_at'); })
     .update({ status: 'released', updated_at: db.fn.now() });
   if (updated) logger.info('[estimate-card-holds] card hold released', { scheduledServiceId, reason });
   return { released: updated > 0 };
@@ -1324,10 +1402,118 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
 // business-initiated escape hatch (WE cancelled — sick day, rain-out — not the
 // customer): the module policy charges the fee ONLY for customer-initiated
 // late cancels, so a waived cancel releases the hold unconditionally.
-async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false }) {
+// Park-on-cancel (owner ruling 2026-08-26): with GATE_CARD_HOLD_PARK_ON_
+// CANCEL on, a cancel that would have released the hold FREE leaves it
+// 'held' on the cancelled visit instead — the customer's consent survives
+// the operator two-step reschedule, the stranded-hold detection lane bells
+// when the successor completes, and the ops repair script is the mover.
+// Parking writes NOTHING (leaving the row 'held' IS the park); the fee
+// window, sticky evidence, and consent-revocation releases are untouched.
+function isParkOnCancelEnabled() {
+  try {
+    const gates = require('../config/feature-gates');
+    // HARD dependency (pre-push r6 P1): parking strands the hold on a dead
+    // visit BY DESIGN, and the orphan-detection lane is what surfaces it
+    // when the successor completes. Park without detection = consents that
+    // silently vanish. Both gates or neither.
+    return gates.isEnabled('cardHoldParkOnCancel') && gates.isEnabled('cardHoldRescheduleAdopt');
+  } catch (err) {
+    logger.warn('[estimate-card-holds] park-on-cancel gate read failed — treating as off', { error: err.message });
+    return false;
+  }
+}
+
+// Durable park (pre-push r2 P0): the decision is STAMPED (parked_at +
+// park_reason) so a replayed cancellation returns the park verbatim
+// instead of re-evaluating the fee window against a later `now` — without
+// the stamp, a cancel parked free outside the window could be charged by
+// a replay that lands inside it. A failed stamp falls back to the plain
+// release (today's behavior): a park we cannot make durable is not taken.
+async function parkCardHold({ hold, scheduledServiceId, reason }) {
+  try {
+    const stamped = await db('estimate_card_holds')
+      // The OBSERVED visit pointer rides the CAS (pre-push r3 P1): an ops
+      // repoint committing between the lookup and this stamp moves the
+      // hold to its successor — a stale cancellation must not park the
+      // repaired hold and block the successor's charge.
+      .where({ id: hold.id, status: 'held', scheduled_service_id: scheduledServiceId })
+      .whereNull('parked_at')
+      .update({ parked_at: db.fn.now(), park_reason: reason, updated_at: db.fn.now() });
+    if (stamped < 1) {
+      // Concurrent transition or already parked — re-read tells which.
+      const fresh = await db('estimate_card_holds').where({ id: hold.id }).first('status', 'parked_at');
+      if (fresh?.parked_at) return { handled: true, parked: true, reason: 'already_parked' };
+      return { handled: false, reason: `hold_${fresh?.status || 'missing'}` };
+    }
+    logger.info('[estimate-card-holds] card hold PARKED — consent kept for the rebooked visit', { scheduledServiceId, holdId: hold.id, reason });
+    return { handled: true, parked: true, reason };
+  } catch (err) {
+    logger.warn('[estimate-card-holds] park stamp failed — releasing instead (fail toward today)', { scheduledServiceId, error: err.message });
+    return releaseCardHold({ scheduledServiceId, reason: 'park_stamp_failed' });
+  }
+}
+
+// intent:
+//  - 'cancel' (default): the classic cancel flow — in-window charges the
+//    fee, otherwise release (gate off) or park (gate on).
+//  - 'offboard': the customer is leaving — ALWAYS the waived release,
+//    never a park (a parked hold on an offboarded account is a consent
+//    with no future visit to follow).
+//  - 'reschedule_request': the portal's legacy request flip — the visit is
+//    expected to be rebooked, so the hold parks (gate on) with no fee
+//    evaluation (rescheduling itself is free; the sticky-window rule
+//    already governs cancel-after-late-reschedule dodges). Gate off:
+//    untouched (the legacy flip never resolved holds — status quo).
+async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false, intent = 'cancel' }) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { handled: false, reason: 'no_hold' };
+  // Offboarding outranks a park: a leaving customer's hold always releases,
+  // parked or not — checked BEFORE the durable-park early return.
+  if (intent === 'offboard') {
+    return releaseCardHold({ scheduledServiceId, reason: 'admin_waive', overrideParked: true });
+  }
+  // Durable-park idempotency (pre-push r2 P0): a stamped park is the
+  // decision of record — replays return it verbatim, never a fresh fee
+  // evaluation against a later clock.
+  if (hold.parked_at) return { handled: true, parked: true, reason: 'already_parked' };
+  if (intent === 'reschedule_request') {
+    if (!isParkOnCancelEnabled()) return { handled: false, reason: 'park_gate_off' };
+    // Sticky-window evidence (pre-push r6 P1): the legacy request flip
+    // writes no reschedule_log row, so a request made INSIDE the disclosed
+    // fee window would leave no trace for the sticky-cancel rule once the
+    // hold is repointed. The window verdict is judged NOW and made durable
+    // two ways: a distinct park_reason on the hold row, and a deduped
+    // office bell so the late move is a human-visible fact regardless of
+    // what happens to the stamp. Unresolvable timing parks plainly (the
+    // rail's fail-toward-free posture).
+    let inWindow = false;
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      const start = await scheduledServiceApptTime(scheduledServiceId);
+      inWindow = !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+    } catch (err) {
+      logger.warn('[estimate-card-holds] reschedule-request window check failed — parking without sticky evidence', { scheduledServiceId, error: err.message });
+    }
+    if (inWindow) {
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Late reschedule request on a card-hold visit — fee judgment kept for review',
+          'A customer requested a reschedule INSIDE the disclosed late-cancel fee window on a visit with a saved-card hold. The hold was parked for the rebooked visit and no fee was charged; if the customer later cancels instead of rebooking, judge the late-cancel fee manually — the legacy request flow records no reschedule log for the sticky rule to read.',
+          {
+            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, holdId: hold.id, source: 'reschedule_request_in_window' },
+            dedupeKey: `resched_in_window:${hold.id}:${scheduledServiceId}`,
+          },
+        );
+      } catch (e) { logger.warn('[estimate-card-holds] in-window reschedule bell failed', { error: e.message }); }
+    }
+    return parkCardHold({ hold, scheduledServiceId, reason: inWindow ? 'reschedule_request_in_window_park' : 'reschedule_request_park' });
+  }
   if (waiveFee) {
+    if (isParkOnCancelEnabled()) {
+      return parkCardHold({ hold, scheduledServiceId, reason: 'waived_cancel_park' });
+    }
     return releaseCardHold({ scheduledServiceId, reason: 'admin_waive' });
   }
   let start = serviceStart;
@@ -1367,6 +1553,7 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   // chargeNoShowFee would refuse (feature_disabled) WITHOUT releasing,
   // stranding the hold on a cancelled visit that a later rail re-enable
   // could then charge; falling through releases free instead.
+  let stickyLookupFailed = false;
   if (isCardHoldEnabled() && startLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     try {
       sticky = await findStickyLateReschedule({
@@ -1376,6 +1563,7 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
         currentStart: startDate,
       });
     } catch (err) {
+      stickyLookupFailed = true;
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel failed — releasing free', { scheduledServiceId, error: err.message });
     }
   }
@@ -1402,11 +1590,11 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
             },
           );
         } catch (e) { logger.warn('[estimate-card-holds] sticky revocation alert failed', { error: e.message }); }
-        return releaseCardHold({ scheduledServiceId, reason: 'sticky_payment_method_revoked' });
+        return releaseCardHold({ scheduledServiceId, reason: 'sticky_payment_method_revoked', overrideParked: true });
       }
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky pm-revocation check failed — releasing free', { scheduledServiceId, error: err.message });
-      return releaseCardHold({ scheduledServiceId, reason: 'sticky_pm_check_failed' });
+      return releaseCardHold({ scheduledServiceId, reason: 'sticky_pm_check_failed', overrideParked: true });
     }
     // Charge against the CURRENT start — the visit being cancelled is the
     // live row (verified live just above), so the fee path's staleness
@@ -1416,6 +1604,15 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now, attachSelfHeal: false });
   }
   const startPassed = startMs != null && startMs <= now.getTime();
+  // Free-release legs park instead (ruling 2026-08-26) — but ONLY on a
+  // VERIFIED free-cancel timeline (pre-push r2 P1): an unresolved start or
+  // a failed sticky lookup means the fee window could not be judged, and
+  // those paths promise fail-toward-release; parking there would keep a
+  // hold chargeable on evidence we never verified. The sticky/revocation
+  // releases above stay releases — a removed card is revocation.
+  if (isParkOnCancelEnabled() && startMs != null && !stickyLookupFailed) {
+    return parkCardHold({ hold, scheduledServiceId, reason: startPassed ? 'cancel_past_start_park' : 'cancel_outside_window_park' });
+  }
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
 }
 

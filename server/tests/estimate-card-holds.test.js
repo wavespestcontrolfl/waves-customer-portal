@@ -17,7 +17,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // the sticky tests can flip GATE_STICKY_CANCEL_WINDOW in beforeEach.
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => (name === 'stickyCancelWindow' && process.env.GATE_STICKY_CANCEL_WINDOW === 'true')
-    || (name === 'cardHoldRescheduleAdopt' && process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT === 'true')),
+    || (name === 'cardHoldRescheduleAdopt' && process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT === 'true')
+    || (name === 'cardHoldParkOnCancel' && process.env.GATE_CARD_HOLD_PARK_ON_CANCEL === 'true')),
   gates: {},
 }));
 
@@ -73,8 +74,10 @@ const mockCreateSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn();
 const mockChargeInvoiceWithSavedCard = jest.fn();
 const mockChargeOffSession = jest.fn();
+const mockRetrievePaymentMethod = jest.fn(async () => ({ id: 'pm_s', customer: 'cus_1' }));
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
+  retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
   retrievePaymentIntent: (...a) => mockRetrievePaymentIntent(...a),
   createEstimateCardHoldSetupIntent: (...a) => mockCreateSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
@@ -1752,5 +1755,251 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_hold' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleCardHoldCancellation — park-on-cancel (GATE_CARD_HOLD_PARK_ON_CANCEL, owner ruling 2026-08-26)', () => {
+  const HOLD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date('2026-06-01T12:00:00Z') };
+  const now = new Date('2026-06-25T12:00:00Z');
+  const farStart = new Date('2026-06-28T14:00:00Z'); // outside the 24h window
+
+  // Parking hard-depends on the detection lane (r6 P1): both gates on.
+  beforeEach(() => { process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true'; });
+  afterEach(() => {
+    delete process.env.GATE_CARD_HOLD_PARK_ON_CANCEL;
+    delete process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT;
+  });
+
+  it('park gate WITHOUT the detection gate is OFF — parked consents must never be un-surfaceable', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    delete process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT;
+    stubDb([HOLD]);
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+  });
+
+  it('gate OFF (default): an outside-window cancel releases exactly as before', async () => {
+    stubDb([HOLD]);
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('gate ON: an outside-window cancel PARKS with a durable stamp — status stays held, decision recorded', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual({ handled: true, parked: true, reason: 'cancel_outside_window_park' });
+    expect(mockDbUpdates).toEqual([expect.objectContaining({ park_reason: 'cancel_outside_window_park' })]);
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('gate ON: a past-start cleanup cancel PARKS with its own reason', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    const pastStart = new Date('2026-06-20T10:00:00Z');
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: pastStart, now });
+    expect(r).toEqual({ handled: true, parked: true, reason: 'cancel_past_start_park' });
+    expect(mockDbUpdates).toEqual([expect.objectContaining({ park_reason: 'cancel_past_start_park' })]);
+  });
+
+  it('gate ON: a waived (business-initiated) cancel PARKS — the consent survives the sick-day/rain-out', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', waiveFee: true, now });
+    expect(r).toEqual({ handled: true, parked: true, reason: 'waived_cancel_park' });
+    expect(mockDbUpdates).toEqual([expect.objectContaining({ park_reason: 'waived_cancel_park' })]);
+  });
+
+  it('a STAMPED park is the decision of record — an in-window REPLAY returns it verbatim, never a fee (pre-push r2 P0)', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([{ ...HOLD, parked_at: new Date('2026-06-22T10:00:00Z') }]);
+    const inWindowStart = new Date('2026-06-25T20:00:00Z'); // replay lands inside the window
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: inWindowStart, now });
+    expect(r).toEqual({ handled: true, parked: true, reason: 'already_parked' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  it('gate ON: an UNRESOLVED appointment time still fails toward RELEASE, never a park (pre-push r2 P1)', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    mockApptTime.mockRejectedValueOnce(new Error('appt time gone'));
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('gate ON: a park stamp that cannot land falls back to RELEASE — a park we cannot make durable is not taken', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD], { updateReturns: [0], });
+    // stamp CAS misses → re-read shows the hold moved on concurrently
+    const base = mockDbHandler;
+    let firstDone = false;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      const origFirst = chain.first;
+      chain.first = jest.fn((...a) => {
+        if (!firstDone) { firstDone = true; return Promise.resolve(HOLD); } // cancel's hold lookup
+        return Promise.resolve({ status: 'released', parked_at: null });     // post-CAS re-read
+      });
+      return chain;
+    };
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual({ handled: false, reason: 'hold_released' });
+  });
+
+  it('gate ON: OFFBOARDING always releases — a parked hold has no future visit to follow', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', waiveFee: true, intent: 'offboard', now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('gate ON: an IN-WINDOW customer cancel still charges the disclosed fee — parking never blocks the fee', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    // heldCard(cancel) → fee path: heldCard(chargeNoShowFee) → pm row; lane
+    // check is table-scoped (no /secure row).
+    stubDb([
+      HOLD,
+      { ...HOLD, estimate_id: 'e1' }, // chargeNoShowFee's own lookup
+      { id: 'pmrow1' },
+    ]);
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const inWindowStart = new Date('2026-06-25T20:00:00Z'); // 8h out, inside 24h window
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: inWindowStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true }));
+    expect(mockChargeOffSession).toHaveBeenCalled();
+  });
+
+  it('an IN-WINDOW reschedule request parks with sticky evidence — distinct reason + deduped office bell', async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    mockApptTime.mockResolvedValueOnce(new Date('2026-06-25T20:00:00Z')); // 8h out — inside the 24h window
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', intent: 'reschedule_request', now });
+    expect(r).toEqual({ handled: true, parked: true, reason: 'reschedule_request_in_window_park' });
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('Late reschedule request'),
+      expect.stringContaining('no fee was charged'),
+      expect.objectContaining({ dedupeKey: 'resched_in_window:h1:svc1' }),
+    );
+  });
+
+  it("reschedule_request intent: gate ON parks; gate OFF is a no-op (the legacy flip's status quo)", async () => {
+    process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+    stubDb([HOLD]);
+    mockApptTime.mockResolvedValueOnce(new Date('2026-06-28T14:00:00Z')); // outside the window
+    const parked = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', intent: 'reschedule_request', now });
+    expect(parked).toEqual({ handled: true, parked: true, reason: 'reschedule_request_park' });
+    expect(mockDbUpdates).toEqual([expect.objectContaining({ park_reason: 'reschedule_request_park' })]);
+
+    delete process.env.GATE_CARD_HOLD_PARK_ON_CANCEL;
+    mockDbUpdates.length = 0;
+    stubDb([HOLD]);
+    const untouched = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', intent: 'reschedule_request', now });
+    expect(untouched).toEqual({ handled: false, reason: 'park_gate_off' });
+    expect(mockDbUpdates).toEqual([]);
+  });
+});
+
+describe('attach revocation guard is SELF-HEAL scoped (pre-push r13/r14 P0)', () => {
+  it('self_heal: a customerless pm NEVER re-attaches — fail closed with a deduped review bell', async () => {
+    stubDb([null]); // no local pm row
+    mockRetrievePaymentMethod.mockResolvedValueOnce({ id: 'pm_gone', customer: null });
+    const { attachCardHoldPaymentMethod } = require('../services/estimate-card-holds');
+    const r = await attachCardHoldPaymentMethod({ customerId: 'cust1', paymentMethodId: 'pm_gone', mode: 'self_heal' });
+    expect(r).toEqual({ attached: false, reason: 'payment_method_unattached_review' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('needs review'),
+      expect.stringContaining('Nothing was charged and nothing was re-attached'),
+      expect.objectContaining({ dedupeKey: 'hold_pm_review:cust1:pm_gone' }),
+    );
+  });
+  it('self_heal: a pm still attached at Stripe heals as before', async () => {
+    stubDb([null]);
+    mockRetrievePaymentMethod.mockResolvedValueOnce({ id: 'pm_live', customer: 'cus_9' });
+    mockSavePaymentMethod.mockResolvedValueOnce({ id: 'pmrow_new' });
+    const { attachCardHoldPaymentMethod } = require('../services/estimate-card-holds');
+    const r = await attachCardHoldPaymentMethod({ customerId: 'cust1', paymentMethodId: 'pm_live', mode: 'self_heal' });
+    expect(r).toEqual(expect.objectContaining({ attached: true, paymentMethodRowId: 'pmrow_new' }));
+  });
+  it("INITIAL post-accept attach of a fresh customerless capture (SetupIntent has no Stripe customer) attaches — the guard must not fire", async () => {
+    stubDb([null]);
+    mockSavePaymentMethod.mockResolvedValueOnce({ id: 'pmrow_fresh' });
+    const { attachCardHoldPaymentMethod } = require('../services/estimate-card-holds');
+    const r = await attachCardHoldPaymentMethod({ customerId: 'cust1', paymentMethodId: 'pm_fresh' });
+    expect(r).toEqual(expect.objectContaining({ attached: true, paymentMethodRowId: 'pmrow_fresh' }));
+    expect(mockRetrievePaymentMethod).not.toHaveBeenCalled();
+  });
+  it('the charge-path self-heals pass the self_heal mode (source pattern)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-card-holds.js'), 'utf8');
+    expect(src.split("mode: 'self_heal'").length - 1).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('parked holds are un-chargeable until repointed (pre-push r3/r5 P0)', () => {
+  const parkedHold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1', accepted_amount: 100, parked_at: new Date('2026-06-22T10:00:00Z') };
+
+  test('completion charge on a PARKED hold returns before ANY mutation — even a non-collectible invoice cannot release it', async () => {
+    const paidInvoice = { id: 'inv-1', customer_id: 'cust-1', status: 'paid', total: 75 };
+    stubDb([parkedHold, paidInvoice]);
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'parked' });
+    expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('no-show fee on a PARKED hold returns before the staleness release can touch it', async () => {
+    stubDb([parkedHold]);
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc-1', serviceStart: new Date('2020-01-01'), now: new Date() });
+    expect(r).toEqual({ charged: false, reason: 'parked' });
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('recap charge on a PARKED hold returns untouched', async () => {
+    stubDb([parkedHold]);
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(r).toEqual({ charged: false, reason: 'parked' });
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('the claim CAS itself pins parked_at IS NULL (source pattern)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-card-holds.js'), 'utf8');
+    const claim = src.slice(src.indexOf('async function claimHoldForCharge'), src.indexOf('async function claimHoldForCharge') + 700);
+    expect(claim).toContain("whereNull('parked_at')");
+  });
+});
+
+describe('cancel surfaces wire the shared follow-through (source pattern)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  it('the Intelligence Bar cancel tool runs runVisitCancellationFollowThrough on BOTH the main and replay paths', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    const hits = src.split('runVisitCancellationFollowThrough').length - 1;
+    expect(hits).toBeGreaterThanOrEqual(3); // require ×2 + call ×2 across the two paths, at minimum
+  });
+  it("the portal reschedule-request legacy flip parks the hold via intent 'reschedule_request'", () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/schedule.js'), 'utf8');
+    expect(src).toContain("intent: 'reschedule_request'");
+  });
+  it('the payment_method.detached webhook releases still-held holds atomically — card removal is revocation', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    const handler = src.slice(src.indexOf('async function handlePaymentMethodDetached'));
+    const block = handler.slice(0, handler.indexOf('async function', 10));
+    expect(block).toContain("trx('estimate_card_holds')");
+    expect(block).toContain("status: 'released'");
+  });
+
+  it("offboarding pins intent 'offboard' so parking can never keep a leaving customer's hold", () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/customer-offboarding.js'), 'utf8');
+    expect(src).toContain("intent: 'offboard'");
   });
 });

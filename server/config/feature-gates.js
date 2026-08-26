@@ -38,6 +38,7 @@
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
+ *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
@@ -132,6 +133,21 @@ const gates = {
   // in EVERY environment. Gate off: completions are byte-identical to
   // today. Kill switch: unset or any non-'true' value.
   cardHoldRescheduleAdopt: process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT === 'true',
+
+  // Park-on-cancel for one-time card holds (owner ruling 2026-08-26:
+  // cancelling a visit with a live hold KEEPS the hold active so it can
+  // follow the rebooked visit, instead of releasing it). With this gate
+  // on, a cancel that would have released free (outside the fee window,
+  // past-start cleanup, or an admin waive that is NOT an offboarding)
+  // leaves the hold 'held' on the cancelled visit — the stranded-hold
+  // detection lane (cardHoldRescheduleAdopt) bells when the successor
+  // completes, and ops/agents/repoint-orphaned-card-hold.js is the mover.
+  // In-window late-cancel FEES are unchanged (disclosed policy), consent
+  // revocation still releases, and offboarding always releases. Money-
+  // adjacent surface — fail-closed ==='true' in EVERY environment. Gate
+  // off: cancels release exactly as today. Kill switch: unset or any
+  // non-'true' value.
+  cardHoldParkOnCancel: process.env.GATE_CARD_HOLD_PARK_ON_CANCEL === 'true',
 
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
   // invoice EMAIL carries a "previous balance" note when the customer has

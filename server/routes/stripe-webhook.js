@@ -4353,6 +4353,19 @@ async function handlePaymentMethodDetached(paymentMethod) {
       logger.info(`[stripe-webhook] Removed ${deleted} payment method(s) from DB: ${pmId}`);
     }
 
+    // Card removal is REVOCATION for one-time card holds too (PR
+    // card-hold-park pre-push r11 P0): a still-'held' hold on the detached
+    // method — parked for a rebooked visit or awaiting completion — must
+    // die WITH the card, atomically, or a later charge could self-heal the
+    // detached method back on and collect after revocation. parked_at is
+    // cleared so the released row reads as fully resolved.
+    const revokedHolds = await trx('estimate_card_holds')
+      .where({ stripe_payment_method_id: pmId, status: 'held' })
+      .update({ status: 'released', parked_at: null, park_reason: null, updated_at: trx.fn.now() });
+    if (revokedHolds > 0) {
+      logger.info(`[stripe-webhook] Released ${revokedHolds} card hold(s) on detached method ${pmId} — card removal is revocation`);
+    }
+
     for (const row of rows) {
       const cust = await trx('customers')
         .where({ id: row.customer_id })
