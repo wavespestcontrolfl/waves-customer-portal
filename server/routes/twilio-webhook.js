@@ -449,6 +449,26 @@ router.post('/sms', async (req, res) => {
 
     if (optCommand.action === 'opt_in') {
       const normalizedFrom = normalizeE164(From);
+      // The inbound log lands BEFORE the clear (codex #3495 P1): a late
+      // 21610 callback's post-write recheck discovers a concurrent START by
+      // this row. With clear-first, a START against a not-yet-existing
+      // suppression row no-opped AND left no marker, so a redelivered 21610
+      // interleaving there could re-suppress an opted-in recipient with
+      // nothing to find. Log-then-clear closes the ordering: either the
+      // 21610 wrote first (this clear removes it) or the 21610 runs later
+      // (its recheck sees this logged START and undoes itself).
+      await db('sms_log').insert({
+        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
+        metadata: JSON.stringify({
+          detection_method: optCommand.detectionMethod,
+          source_keyword: optCommand.sourceKeyword,
+        }),
+      }).catch((logErr) => {
+        // Never block the opt-in on a log failure — but say so, since the
+        // ordering guarantee above depends on this row existing.
+        logger.warn(`[sms-optin] inbound opt-in log insert failed for ${maskPhone(From)}: ${logErr.message}`);
+      });
       await clearSuppression({
         phone: normalizedFrom || From,
         source: `twilio_webhook_${optCommand.detectionMethod}`,
@@ -468,15 +488,8 @@ router.post('/sms', async (req, res) => {
         logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
       } catch (e) { logger.error(`[sms-optin] Failed to update prefs: ${e.message}`); }
 
-      await db('sms_log').insert({
-        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
-        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
-        metadata: JSON.stringify({
-          detection_method: optCommand.detectionMethod,
-          source_keyword: optCommand.sourceKeyword,
-        }),
-      }).catch(() => {});
-
+      // (inbound sms_log row inserted above, BEFORE the clear — see the
+      // ordering comment at the top of this branch.)
       if (customer) {
         await db('activity_log').insert({
           customer_id: customer.id, action: 'sms_opt_in',

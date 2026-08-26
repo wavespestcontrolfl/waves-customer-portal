@@ -71,8 +71,19 @@ async function getChargeableAutopayMethod(customer, knex, now = new Date()) {
     // The customer-level ACH rule participates in the walk (hook r2 P1):
     // with ACH suspended, a verified bank row must not shadow a chargeable
     // card — stripe.js and the SQL predicate both skip bank rows in that
-    // state and accept the card.
-    const achBlockedForCustomer = !!(customer.ach_status && customer.ach_status !== 'active');
+    // state and accept the card. Callers commonly pass a bare { id }
+    // (completion/quote paths), so an absent ach_status is LOOKED UP, never
+    // assumed healthy (codex #3495 P1); a failed lookup treats ACH as
+    // blocked (fail toward the card, matching the charge path's caution).
+    let achStatus = customer.ach_status;
+    if (achStatus === undefined) {
+      try {
+        achStatus = (await knex('customers').where({ id: customer.id }).first('ach_status'))?.ach_status ?? null;
+      } catch {
+        achStatus = 'suspended';
+      }
+    }
+    const achBlockedForCustomer = !!(achStatus && achStatus !== 'active');
     return (candidates || []).find((m) => isChargeableAutopayMethod(m, now)
       && !(achBlockedForCustomer && isBankMethodType(m.method_type))) || null;
   } catch {
