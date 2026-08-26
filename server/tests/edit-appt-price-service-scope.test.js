@@ -581,4 +581,16 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   it('the list payload carries recurring_parent_id so a list-opened modal can tell a child from the template (r8)', () => {
     expect(src).toMatch(/recurringParentId: s\.recurring_parent_id \|\| null,/);
   });
+
+  it('only a genuine TRANSITION into re-service stands the scope block down — an echoed existing re-service repricing propagates (r9)', () => {
+    // The transition flag compares the incoming re-service against the row's
+    // stored is_callback (unknown column ⇒ conservative transition=true).
+    expect(src).toMatch(/reServiceTransition = !cols\.is_callback \|\| !existingRow\?\.is_callback;/);
+    // The generic scope block excludes TRANSITIONS only, and the conversion
+    // block's mid-series 'following' refusal fires on transitions only —
+    // a price-only reprice of a re-service series child reaches the generic
+    // propagation instead of a conversion refusal.
+    expect(src).toMatch(/wantsPriceServiceScope && !reServiceTransition && priceServiceBeforeRow/);
+    expect(src).toMatch(/wantsPriceServiceScope && reServiceTransition && self\?\.recurring_parent_id/);
+  });
 });

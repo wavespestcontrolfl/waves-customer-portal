@@ -6154,7 +6154,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // non-re-service label without serviceId can't tell "changed to regular"
     // from "no-op save of a normalized re-service", so we leave it alone).
     let reServiceConversionZeroPrice = false;
-    let reServiceConversion = false; // a switch INTO a re-service this edit
+    let reServiceConversion = false; // the posted service IS a re-service (echoes included)
+    // TRUE only when the row wasn't already a re-service — an actual switch.
+    // A price-only save of an EXISTING re-service echoes its serviceId, which
+    // sets reServiceConversion above; the series-scope block must not stand
+    // down for that echo or a 'following' reprice of a re-service series
+    // silently skips its siblings (Codex #3505 r9 P1).
+    let reServiceTransition = false;
     if (serviceId !== undefined || serviceType !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -6193,7 +6199,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (incomingIsReService === true) {
           reServiceConversion = true;
           const existingRow = await db('scheduled_services').where({ id: req.params.id })
-            .first('estimated_price', 'customer_id');
+            .first('estimated_price', 'customer_id', ...(cols.is_callback ? ['is_callback'] : []));
+          // No is_callback column (pre-migration env) → prior state unknowable;
+          // treat as a transition, which preserves today's behavior.
+          reServiceTransition = !cols.is_callback || !existingRow?.is_callback;
           const customerRow = await db('customers').where({ id: existingRow?.customer_id })
             .first('waveguard_tier', 'monthly_rate').catch(() => null);
           // The payload carries over the PRIOR service's pre-filled price AND its
@@ -7408,7 +7417,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         //   • template + explicit 'this_only' — skip the series-wide
         //     propagation entirely: only the edited template visit converts.
         // No posted scope keeps today's behavior byte-for-byte.
-        if (wantsPriceServiceScope && self?.recurring_parent_id
+        // TRANSITIONS only (Codex #3505 r9 P1): a price-only save of an
+        // already-re-service child echoes its serviceId into this block, and
+        // that reprice belongs to the generic 'following' propagation below —
+        // refusing it here would block repricing a re-service series from any
+        // mid-series visit.
+        if (wantsPriceServiceScope && reServiceTransition && self?.recurring_parent_id
           && normalizePriceServiceScope(priceServiceScope) === 'following') {
           throw httpError(409, "Converting to a re-service can't be applied to following visits from a mid-series appointment — open the series' first appointment to convert the whole plan, or set the change to this appointment only.");
         }
@@ -7561,9 +7575,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       //     template at the parent's PRE-edit values, so a deliberate
       //     one-off edit of the template visit stops leaking into future
       //     extension rows (which copy the parent).
-      // Re-service conversions keep their own bespoke series propagation
-      // above — this block stands down rather than double-writing. Add-on
-      // lines and visit durations stay per-visit by design.
+      // Re-service TRANSITIONS keep their own bespoke series propagation
+      // above — this block stands down rather than double-writing. A save
+      // whose row is ALREADY a re-service (the modal echoes its serviceId on
+      // every save) is not a transition: its price changes propagate here
+      // like any other series row's (Codex #3505 r9 P1). Add-on lines and
+      // visit durations stay per-visit by design.
       // Boosters share recurring_parent_id but deliberately carry
       // is_recurring=false and their OWN pricing — a booster edit must never
       // rewrite the base series or stamp booster values into the template
@@ -7575,7 +7592,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         && normalizePriceServiceScope(priceServiceScope) === 'following') {
         throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
       }
-      if (wantsPriceServiceScope && !reServiceConversion && priceServiceBeforeRow
+      if (wantsPriceServiceScope && !reServiceTransition && priceServiceBeforeRow
         && priceServiceBeforeRow.is_recurring) {
         const scopeCols = await trx('scheduled_services').columnInfo();
         const groups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
