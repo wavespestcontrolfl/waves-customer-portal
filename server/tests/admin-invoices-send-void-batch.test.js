@@ -205,6 +205,7 @@ describe('POST /:id/unvoid refusal mapping', () => {
     ['orphaned annual prepay charge', 'Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment'],
     ['unverifiable linked service', 'Could not verify the linked service visit — refusing to unvoid (boom)'],
     ['deferred send mid-dispatch', 'Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute'],
+    ['delivered send still finalizing', 'Cannot unvoid — a delivered message for this invoice is still finalizing; retry in a few minutes'],
     ['saved-card charge pending', 'Invoice already has a saved-card charge in progress or awaiting reconciliation'],
     ['ambiguous charge attempt', 'Invoice has an unresolved charge attempt with an ambiguous Stripe outcome'],
     ['orphan Stripe charge', 'Invoice has an unresolved Stripe charge pi_abc'],

@@ -4713,6 +4713,13 @@ const InvoiceService = {
         .where({ status: "scheduled" })
         .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
         .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
+        // A finalize_only row is NOT an unsent message: its SMS already
+        // DELIVERED and the scheduled replay re-runs only the post-delivery
+        // finalization. Cancelling it would drop that obligation (and run
+        // onTerminal — marking a delivered completion failed and arming a
+        // duplicate review). The finalization fence below refuses the whole
+        // restore instead (Codex #3493 r16).
+        .whereRaw("COALESCE(metadata->>'finalize_only', 'false') <> 'true'")
         .select("id", "metadata");
       const hookRows = [];
       const plainIds = [];
@@ -4768,6 +4775,26 @@ const InvoiceService = {
       if (dispatchingNow) {
         throw new Error(
           "Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute",
+        );
+      }
+      // Post-delivery finalization fence (Codex #3493 r16): a deferred SMS
+      // that already reached the provider leaves either status='sent' with
+      // finalize_pending (settlement stamped, finalization hook not yet
+      // run) or status='scheduled' with finalize_only (the recovery
+      // sweep's bounded finalization replay). Both represent a DELIVERED
+      // send whose state writes (invoice sent flip, follow-up arming,
+      // receipt claims) have not landed — committing the restore under
+      // them would let that finalizer mark the restored draft sent and arm
+      // follow-ups without a resend. Runs LAST, after the 'sending' fence,
+      // so a dispatch that settled mid-transaction is still caught here.
+      const finalizingNow = await trx("sms_log")
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+        .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
+        .whereRaw("((status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'finalize_only' = 'true'))")
+        .first("id");
+      if (finalizingNow) {
+        throw new Error(
+          "Cannot unvoid — a delivered message for this invoice is still finalizing; retry in a few minutes",
         );
       }
       // Phase 2: an accrued draft re-enters its still-open statement total in

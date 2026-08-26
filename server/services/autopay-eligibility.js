@@ -31,7 +31,7 @@ function isChargeableAutopayMethod(method, now = new Date()) {
     && !isExpiredCardMethod(method, now);
 }
 
-async function getChargeableAutopayMethod(customer, knex) {
+async function getChargeableAutopayMethod(customer, knex, { rethrow = false } = {}) {
   if (!customer?.id) return false;
 
   try {
@@ -46,7 +46,14 @@ async function getChargeableAutopayMethod(customer, knex) {
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
         'is_default', 'autopay_enabled', 'exp_month', 'exp_year'
       );
-  } catch {
+  } catch (err) {
+    // Swallowed by default (a broken read means "no chargeable method" for
+    // display/scheduling call sites). Callers whose SAFE direction is
+    // "still enrolled" — e.g. deciding whether to lift an autopay hold —
+    // pass failClosed and handle the throw themselves: a swallowed read
+    // error here reads as confirmed unenrollment and activates reminders
+    // for an enrolled customer (Codex #3493 r16).
+    if (rethrow) throw err;
     return null;
   }
 }
@@ -57,7 +64,9 @@ async function customerOnAutopay(customer, options = {}) {
   if (customer.autopay_enabled === false) return false;
   if (isPaused(customer, options.now)) return false;
 
-  const paymentMethod = await getChargeableAutopayMethod(customer, knex);
+  const paymentMethod = await getChargeableAutopayMethod(customer, knex, {
+    rethrow: options.failClosed === true,
+  });
   if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {

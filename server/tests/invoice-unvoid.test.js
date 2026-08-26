@@ -66,7 +66,8 @@ function voidInvoice(overrides = {}) {
 //   restore → annual_prepay_terms TOCTOU re-check → payments money guard →
 //   in-flight touch fence → active-sequence stop repair → sms_log
 //   deferred-row SELECT → [plain-row cancel UPDATE, if any] → [one stamped
-//   cancel UPDATE per terminal-hook row] → sms_log in-flight 'sending' fence.
+//   cancel UPDATE per terminal-hook row] → sms_log in-flight 'sending'
+//   fence → sms_log post-delivery finalization fence.
 // (No sequence re-arm here: that lives in scheduleForInvoice at resend.)
 const HOOK_ENTRY_POINTS = ['dispatch_completion_deferred', 'autopay_completion_decline_deferred'];
 
@@ -99,8 +100,10 @@ function mockHappyPath({ restored, deferredRows = [] } = {}) {
     hookCancelChains.push(c);
     db.mockReturnValueOnce(c);
   }
+  const finalizeFenceChain = noRow();
   db.mockReturnValueOnce(sendingChain);
-  return { updateChain, seqStopChain, smsSelectChain, smsCancelChain, hookCancelChains, sendingChain };
+  db.mockReturnValueOnce(finalizeFenceChain);
+  return { updateChain, seqStopChain, smsSelectChain, smsCancelChain, hookCancelChains, sendingChain, finalizeFenceChain };
 }
 
 describe('InvoiceService.unvoidInvoice', () => {
@@ -151,7 +154,29 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(smsCancelChain.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'cancelled' }),
     );
+    // A delivered finalize_only row is NOT an unsent message — the cancel
+    // must never reach it (the finalization fence refuses instead).
+    expect(smsSelectChain.whereRaw).toHaveBeenCalledWith(
+      "COALESCE(metadata->>'finalize_only', 'false') <> 'true'",
+    );
     // A pay-link/dunning rail has no terminal hook — nothing to run.
+    expect(mockRunTerminalHook).not.toHaveBeenCalled();
+  });
+
+  test('refuses while a delivered send is still finalizing — a committed restore would let that finalizer mark the draft sent (Codex #3493 r16)', async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    const { finalizeFenceChain } = mockHappyPath({ restored });
+    finalizeFenceChain.first = jest.fn(async () => ({ id: 'sms-7' }));
+
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — a delivered message for this invoice is still finalizing; retry in a few minutes',
+    );
+    // Both post-delivery shapes are fenced: settled-but-unfinalized and
+    // the recovery sweep's finalize_only replay.
+    expect(finalizeFenceChain.whereRaw).toHaveBeenCalledWith(
+      "((status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'finalize_only' = 'true'))",
+    );
+    expect(mockReconcile).not.toHaveBeenCalled();
     expect(mockRunTerminalHook).not.toHaveBeenCalled();
   });
 
@@ -515,8 +540,9 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow()) // in-flight touch fence
       .mockReturnValueOnce(chain()) // active-sequence stop repair
-      .mockReturnValueOnce(chain())
-      .mockReturnValueOnce(noRow());
+      .mockReturnValueOnce(chain()) // deferred-row select (empty)
+      .mockReturnValueOnce(noRow()) // 'sending' fence
+      .mockReturnValueOnce(noRow()); // post-delivery finalization fence
     mockRetrievePI.mockResolvedValueOnce({ status: 'canceled' });
     await expect(InvoiceService.unvoidInvoice('inv-1')).resolves.toBe(restored);
   });

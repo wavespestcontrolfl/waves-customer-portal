@@ -410,8 +410,19 @@ async function scheduleForInvoice(invoiceId) {
         // re-hold a sequence releaseFromAutopayHold already escalated to
         // active after the failure threshold (undoing the escalation on an
         // invoice that may see no further autopay attempt).
-        const holdForAutopay = !!existing.is_autopay_held
-          && await customerOnAutopay(customerNow, { db: trx });
+        let holdForAutopay = false;
+        if (existing.is_autopay_held) {
+          try {
+            // failClosed: a swallowed payment_methods read error would
+            // read as unenrolled and activate dunning for an enrolled
+            // customer — on a read error keep the hold, the quiet
+            // direction (Codex #3493 r16, same rule as resumeSequence).
+            holdForAutopay = await customerOnAutopay(customerNow, { db: trx, failClosed: true });
+          } catch (err) {
+            logger.warn(`[invoice-followups] re-arm autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
+            holdForAutopay = true;
+          }
+        }
         // Anchor like the ordinary scheduling path: the cadence is measured
         // from when the invoice went out (sent_at → sms_sent_at →
         // created_at), NOT the due date — a due date weeks past delivery
@@ -1312,7 +1323,11 @@ async function resumeSequence(invoiceId, dbc = db) {
     let stillEnrolled = true;
     try {
       const customer = await dbc('customers').where({ id: seq.customer_id }).first();
-      stillEnrolled = customer ? await customerOnAutopay(customer, { db: dbc }) : false;
+      // failClosed: without it a payment_methods read error is swallowed
+      // inside the eligibility helper and reads as confirmed unenrollment
+      // — this catch would never fire and an enrolled customer's hold
+      // would activate into reminders (Codex #3493 r16).
+      stillEnrolled = customer ? await customerOnAutopay(customer, { db: dbc, failClosed: true }) : false;
     } catch (err) {
       logger.warn(`[invoice-followups] resume autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
       stillEnrolled = true;

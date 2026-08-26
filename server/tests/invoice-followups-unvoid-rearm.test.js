@@ -199,6 +199,25 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.status).toBe('autopay_hold');
     expect(payload.is_autopay_held).toBe(true);
     expect(payload.next_touch_at).toBeNull();
+    // failClosed makes a broken payment_methods read THROW instead of
+    // reading as unenrollment (Codex #3493 r16).
+    expect(customerOnAutopay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ failClosed: true }),
+    );
+  });
+
+  test('a held row whose eligibility re-check ERRORS re-holds — the quiet direction, never active dunning (Codex #3493 r16)', async () => {
+    const seq = voidStoppedSeq({ is_autopay_held: true });
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: seq });
+    customerOnAutopay.mockRejectedValue(new Error('payment_methods read failed'));
+
+    await scheduleForInvoice('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('autopay_hold');
+    expect(payload.is_autopay_held).toBe(true);
+    expect(payload.next_touch_at).toBeNull();
   });
 
   test('an exhausted cadence restores terminal completed so the legacy checker owns the invoice', async () => {
@@ -544,6 +563,21 @@ describe('resumeSequence — retained autopay hold marker', () => {
 
     await resumeSequence('inv-1');
 
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('autopay_hold');
+    expect(payload.next_touch_at).toBeNull();
+  });
+
+  test('a payment-method lookup failure inside the eligibility helper ALSO keeps the hold — failClosed makes it throw instead of reading as unenrolled (Codex #3493 r16)', async () => {
+    const { seqUpdate } = setupResumeDb({ seq: pausedHeldSeq, invoice: resumableInvoice });
+    customerOnAutopay.mockRejectedValue(new Error('payment_methods read failed'));
+
+    await resumeSequence('inv-1');
+
+    expect(customerOnAutopay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ failClosed: true }),
+    );
     const payload = seqUpdate.mock.calls[0][0];
     expect(payload.status).toBe('autopay_hold');
     expect(payload.next_touch_at).toBeNull();
