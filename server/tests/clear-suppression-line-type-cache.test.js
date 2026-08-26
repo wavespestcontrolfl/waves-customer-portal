@@ -17,17 +17,31 @@ function wire({ delThrows = null } = {}) {
     insert: jest.fn(() => sup),
     onConflict: jest.fn(() => sup),
     merge: jest.fn(async () => 1),
+    // cleanup ownership re-check: inactive tombstone = the clearance still
+    // owns the row, so the cache deletes proceed.
+    first: jest.fn(async () => ({ active: false })),
   };
   const cache = {
     where: jest.fn(() => cache),
     del: jest.fn(async () => { if (delThrows) throw delThrows; return 1; }),
   };
+  const customers = {
+    whereRaw: jest.fn(() => customers),
+    whereNull: jest.fn(() => customers),
+    whereNotNull: jest.fn(() => customers),
+    select: jest.fn(async () => []), // no cached holders → no legacy update
+  };
   db.mockImplementation((table) => {
     if (table === 'messaging_suppression') return sup;
     if (table === 'phone_line_types') return cache;
+    if (table === 'customers') return customers;
     throw new Error(`unexpected table ${table}`);
   });
-  return { sup, cache };
+  // Cleanup runs in its own advisory-locked transaction (nested savepoint
+  // for the optional table); the mock trx is db itself.
+  db.raw = jest.fn(async () => ({}));
+  db.transaction = jest.fn(async (fn) => fn(db));
+  return { sup, cache, customers };
 }
 
 beforeEach(() => jest.clearAllMocks());
