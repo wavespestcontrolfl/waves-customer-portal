@@ -141,18 +141,22 @@ function detectContext(pathname, search = "") {
   const routes = Object.entries(ROUTE_CONTEXT_MAP).sort(
     (a, b) => b[0].length - a[0].length,
   );
+  // The exact "/admin" catch-all must not shadow the role-aware fallback
+  // below — for a technician it would map every unmapped page (Settings,
+  // Reports, Equipment, Knowledge, Staff) to `dashboard`, which the IB
+  // rejects for that role (codex P2).
+  let catchAll = null;
   for (const [route, ctx] of routes) {
+    if (route === "/admin") { catchAll = ctx; continue; }
     if (pathname.startsWith(route)) return ctx;
   }
   // Fallback context: the IB rejects `dashboard` for non-admin roles
-  // (server pins them to the tech toolset anyway), so unmapped pages —
-  // Settings, Reports, Equipment, Knowledge, Staff — must not send it for
-  // a technician or the palette 403s on every one of those pages.
+  // (server pins them to the tech toolset anyway).
   try {
     const role = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role;
     if (role && role !== "admin") return "customers";
-  } catch { /* fall through to dashboard */ }
-  return "dashboard";
+  } catch { /* fall through */ }
+  return catchAll || "dashboard";
 }
 
 function loadRecents() {

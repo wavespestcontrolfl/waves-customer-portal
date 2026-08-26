@@ -41,9 +41,10 @@ const STAFF_INVENTORY_REQUEST = (req) => {
       || p === '/unit-review' || p === '/restock-requests'
       || /^\/[^/]+\/movements$/.test(p);
   }
+  // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
+  // application rates that drive COGS/pricing) — owner-only. Per-job usage
+  // is logged by the dispatch completion flow, not these endpoints.
   return /^\/[^/]+\/adjust$/.test(p)
-    || (req.method === 'POST' && p === '/service-usage')
-    || /^\/service-usage\/[^/]+$/.test(p)
     || /^\/waveguard-forecast\/[^/]+\/restock-request$/.test(p)
     || /^\/restock-requests\/[^/]+\/action$/.test(p)
     || /^\/unit-review\/[^/]+\/fix$/.test(p);
