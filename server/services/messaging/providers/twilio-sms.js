@@ -214,16 +214,44 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     // every other lane keeps texting an opted-out number.
     if (failure.twilioCode === '21610') {
       const optOutPhone = String(input.to || '').replace(/[^\d+]/g, '');
+      // Same serialization as the delivery-callback path: per-phone
+      // advisory lock + write-then-recheck, with sentAt = this attempt's
+      // own start, so a concurrent inbound START (which logs BEFORE it
+      // clears) either precedes us (we defer to its clearance) or lands in
+      // the post-write recheck and undoes us inside the same transaction.
+      const attemptAt = new Date();
       try {
-        const { recordSuppression } = require('../validators/suppression');
-        const res = await recordSuppression({
-          phone: optOutPhone,
-          reason: 'opt_out',
-          source: 'twilio_send_21610',
+        const db = require('../../../models/db');
+        const { recordSuppression, clearSuppression } = require('../validators/suppression');
+        const { detectSmsOptCommand } = require('../opt-out-detector');
+        await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
+          const supRow = await trx('messaging_suppression')
+            .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at');
+          if (supRow && supRow.active === false && supRow.cleared_at
+              && new Date(supRow.cleared_at) > attemptAt) return; // newer opt-in wins
+          const res = await recordSuppression({
+            phone: optOutPhone, reason: 'opt_out', source: 'twilio_send_21610', dbh: trx,
+          });
+          if (res?.ok === false) {
+            throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
+          }
+          const inbound = await trx('sms_log')
+            .where({ from_phone: optOutPhone })
+            .where('created_at', '>', attemptAt)
+            .orderBy('created_at', 'desc')
+            .limit(50)
+            .select('message_body');
+          const newest = inbound
+            .map((r) => detectSmsOptCommand(r.message_body || '').action)
+            .find((a) => a === 'opt_in' || a === 'opt_out');
+          if (newest === 'opt_in') {
+            const cleared = await clearSuppression({ phone: optOutPhone, source: 'twilio_send_21610_undo', dbh: trx });
+            if (cleared?.ok === false) {
+              throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+            }
+          }
         });
-        if (res?.ok === false) {
-          throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
-        }
       } catch (suppressErr) {
         try {
           await require('../../notification-service').notifyAdmin(
