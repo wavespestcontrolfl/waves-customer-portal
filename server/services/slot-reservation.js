@@ -1444,12 +1444,59 @@ async function releaseExpiredReservations() {
   // other writer — or a partial legacy row — can leave it behind): deleting
   // it here would silently destroy a real visit. Rescue it instead by
   // clearing the stray timestamp, and say so loudly.
-  const rescued = await db('scheduled_services')
+  const rescuedRows = await db('scheduled_services')
     .where('reservation_expires_at', '<', now)
     .whereNotNull('customer_id')
-    .update({ reservation_expires_at: null, updated_at: now });
+    .update({ reservation_expires_at: null, updated_at: now })
+    .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
+  const rescued = rescuedRows.length;
   if (rescued > 0) {
     logger.warn(`[slot-reservation] cleared stale reservation_expires_at on ${rescued} COMMITTED visit(s) — a committed row is never deleted by this sweep`);
+    // While the timestamp was expired, every occupancy predicate treated the
+    // row as dead — another booking may have legitimately taken the window
+    // (codex #3494 r1 P1). Re-occupying silently would commit an overlap:
+    // probe each rescued slot and ring the bell on any collision so a human
+    // re-slots one of the two. Best-effort — a probe failure never blocks
+    // the sweep (the rescue itself is already the safe outcome vs deletion).
+    for (const row of rescuedRows) {
+      try {
+        if (!row.scheduled_date || !row.window_start) continue;
+        // findConflictingVisits requires windowEnd — derive it from the
+        // duration when the row has none (legacy admin edits).
+        const ws = String(row.window_start).slice(0, 8);
+        let we = row.window_end ? String(row.window_end).slice(0, 8) : null;
+        if (!we) {
+          const [h, m] = ws.split(':').map(Number);
+          const end = h * 60 + (m || 0) + (Number(row.estimated_duration_minutes) || 60);
+          we = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00`;
+        }
+        const clash = await findConflictingVisits({
+          db,
+          date: typeof row.scheduled_date === 'string'
+            ? row.scheduled_date.slice(0, 10)
+            : new Date(row.scheduled_date).toISOString().slice(0, 10),
+          windowStart: ws,
+          windowEnd: we,
+          excludeServiceIds: [row.id],
+          includeHolds: false,
+        });
+        if (Array.isArray(clash) && clash.length) {
+          logger.warn(`[slot-reservation] rescued visit ${row.id} now COLLIDES with ${clash.length} other visit(s) booked while it was expired`);
+          try {
+            await require('./notification-service').notifyAdmin(
+              'schedule',
+              'Rescued reservation collides with a newer booking',
+              `Visit ${row.id} was rescued from the expired-reservation sweep, but another booking took its window while it looked dead. One of the two needs a new slot.`,
+              { bell: true, metadata: { scheduledServiceId: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) } },
+            );
+          } catch (notifyErr) {
+            logger.error(`[slot-reservation] rescue-collision notify failed: ${notifyErr.message}`);
+          }
+        }
+      } catch (probeErr) {
+        logger.error(`[slot-reservation] rescue-collision probe failed for ${row.id}: ${probeErr.message}`);
+      }
+    }
   }
   const released = await db('scheduled_services')
     .where('reservation_expires_at', '<', now)

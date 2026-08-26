@@ -1334,12 +1334,16 @@ describe('scheduled service reservation hold migration', () => {
 describe('releaseExpiredReservations', () => {
   test('never deletes a committed row — stale expiry on a customer visit is cleared, not swept', async () => {
     const chains = [];
+    // Rescued rows carry no scheduled_date, so the collision probe skips
+    // them (probe behavior is occupancy.js's contract, not this sweep's).
+    const rescuedRows = [{ id: 'visit-a' }, { id: 'visit-b' }];
     const mkChain = (result) => {
       const chain = {};
       chain.where = jest.fn(() => chain);
       chain.whereNull = jest.fn(() => chain);
       chain.whereNotNull = jest.fn(() => chain);
-      chain.update = jest.fn(async () => result);
+      chain.update = jest.fn(() => chain);
+      chain.returning = jest.fn(async () => rescuedRows);
       chain.del = jest.fn(async () => result);
       chains.push(chain);
       return chain;
@@ -1356,6 +1360,7 @@ describe('releaseExpiredReservations', () => {
     expect(chains[0].update).toHaveBeenCalledWith(
       expect.objectContaining({ reservation_expires_at: null }),
     );
+    expect(chains[0].returning).toHaveBeenCalled();
     expect(chains[0].del).not.toHaveBeenCalled();
 
     // Pass 2: the DELETE is scoped to uncommitted holds only.
