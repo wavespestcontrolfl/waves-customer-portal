@@ -272,7 +272,8 @@ export default function SettingsPage() {
   // hooks must run on every render path or React throws "Rendered more
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
-    if (user && user.role !== "admin" && ["service-reports", "blackout-days", "kpi-targets"].includes(tab)) {
+    if (user && user.role !== "admin"
+      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system"].includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.
@@ -296,15 +297,18 @@ export default function SettingsPage() {
   // non-admin roles instead of rendering panels that can only 403
   // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
   const isAdminRole = user?.role === "admin";
+  // Non-admin Settings: General (account/team view) + Operating Costs +
+  // Portal Usage. Integrations (its tab renders "Admin access required"),
+  // Service Reports, Scheduling, KPI targets, feature gates, and System
+  // are owner-only.
+  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "gates", "system", "service-reports", "blackout-days"];
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
-    (g) => isAdminRole || !["service-reports", "scheduling"].includes(g.key),
+    (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
   ).map((g) => (
-    // Financials keeps only the read-only Operating Costs leaf for techs —
-    // KPI targets (revenue/margin/MRR matrix) is owner-only.
-    isAdminRole || g.key !== "financials"
+    isAdminRole
       ? g
-      : { ...g, tabs: g.tabs.filter((t) => t !== "kpi-targets") }
-  ));
+      : { ...g, tabs: g.tabs.filter((t) => !OWNER_ONLY_SETTINGS_LEAVES.includes(t)) }
+  )).filter((g) => g.tabs.length > 0);
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 

@@ -24,6 +24,8 @@ const SECTIONS = [
     key: "tap-to-pay",
     label: "Tap to Pay",
     to: "/admin/settings?tab=integrations",
+    // IntegrationsTab renders "Admin access required" for other roles.
+    adminOnly: true,
   },
   {
     key: "communications",
@@ -53,6 +55,7 @@ const SECTIONS = [
     key: "integrations",
     label: "Integrations",
     to: "/admin/settings?tab=integrations",
+    adminOnly: true,
   },
   { key: "account", label: "Account", to: "/admin/settings?tab=general" },
   { key: "system", label: "System", to: "/admin/settings?tab=system", adminOnly: true },
