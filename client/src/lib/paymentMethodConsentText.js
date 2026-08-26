@@ -43,12 +43,30 @@ export const PREPAY_CARD_CONSENT_TEXT = [
   'cards, and bank transfers have no added card surcharge.',
 ].join(' ');
 
+// Annual-prepay immediate debit on an already-saved BANK method (Codex
+// #3492 r11) — mirror of the server's PREPAY_ACH_CONSENT_TEXT.
+export const PREPAY_ACH_CONSENT_TEXT = [
+  'By checking this box, I authorize Waves Pest Control, LLC to',
+  'initiate an electronic ACH debit from my saved bank account now for',
+  'my 12-month annual prepay invoice at the exact total shown before I',
+  'confirm, and to initiate electronic ACH debits from that account for',
+  'future invoices as agreed (including plan renewals), each in the',
+  'amount of that invoice, until I revoke this authorization. I may',
+  `revoke by writing to billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY}`,
+  'at least 3 business days before the next scheduled debit. I may',
+  'request a copy of this authorization at any time by contacting Waves',
+  'at the email or phone above. I can manage or remove saved payment',
+  'methods anytime in my customer portal. Bank transfers have no added',
+  'card surcharge.',
+].join(' ');
+
 // Back-compat alias. Anything that imports CONSENT_TEXT without a method
 // type falls back to the card variant.
 export const CONSENT_TEXT = CARD_CONSENT_TEXT;
 
 export function getConsentText(methodType, { variant = null } = {}) {
   if (methodType === 'us_bank_account' || methodType === 'ach') {
+    if (variant === 'prepay_card') return PREPAY_ACH_CONSENT_TEXT;
     return ACH_CONSENT_TEXT;
   }
   if (variant === 'prepay_card') return PREPAY_CARD_CONSENT_TEXT;

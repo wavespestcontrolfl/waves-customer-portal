@@ -53,9 +53,20 @@ function isRecurringCardOnFileEnabled() {
 // card — /data must not advertise prepayInLane and the accept must not run
 // a charge the UI never disclosed. The prepay lane exists only inside the
 // recurring card lane.
+// CONJUNCTION with GATE_AUTO_APPLY_ACCOUNT_CREDIT too (Codex #3492 r11
+// P0): the quote projects balance + promised inspection credit and the
+// post-commit charge relies on chargeInvoiceWithSavedCard's in-lock
+// auto-apply to consume them — both are dark when the credit gate is off,
+// so an in-lane accept would quote and charge the GROSS annual amount
+// while the customer's promised credit sat unused. The prepay lane
+// therefore requires the credit gate; with it off, prepay accepts keep
+// the legacy carve-out (invoice + pay link) and committed jobs drain via
+// the sweep's pay-link fallback exactly like the kill switch.
 function isPrepayCardAndChargeEnabled() {
   const flag = process.env.GATE_PREPAY_CARD_AND_CHARGE;
-  return isRecurringCardOnFileEnabled() && (flag === '1' || flag === 'true' || flag === 'on');
+  return isRecurringCardOnFileEnabled()
+    && (flag === '1' || flag === 'true' || flag === 'on')
+    && require('../config/feature-gates').gates.autoApplyAccountCredit === true;
 }
 
 // What a recurring accept requires. Exempt lanes:
@@ -685,8 +696,8 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       }
       if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
-        ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id')
-        : await db('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id }).first('id', 'customer_id', 'stripe_payment_method_id');
+        ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type')
+        : await db('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type');
       // Fresh capture that crashed BEFORE enrollment (pre-push Codex P1
       // r6): no payment_methods row exists yet, and the setup_intent
       // webhook backstop skips accepted prepay terms — idempotently
@@ -701,7 +712,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           consentVariant: 'prepay_card',
         });
         if (enrollment?.paymentMethodRowId) {
-          pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id');
+          pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type');
         }
       }
       // The BOUND method only — a different row (method swapped/removed)
@@ -709,6 +720,36 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       if (pmRow && (String(pmRow.customer_id) !== String(invoice.customer_id)
         || (job.stripe_payment_method_id && pmRow.stripe_payment_method_id !== job.stripe_payment_method_id))) {
         pmRow = null;
+      }
+      // v11 prepay authorization snapshot BEFORE any recovery collection
+      // (Codex r11): the accept normally recorded it (this is the
+      // idempotent no-op path); a crash in the gap re-records here with
+      // the tender-correct prepay variant. FAIL CLOSED like the accept —
+      // no immutable authorization row, no charge; defer and the
+      // stale-claim lease retries.
+      if (pmRow) {
+        try {
+          const ConsentService = require('./payment-method-consents');
+          const consentMethodType = pmRow.method_type || 'card';
+          const already = await ConsentService.hasConsentSnapshotForVariant(
+            invoice.customer_id,
+            pmRow.stripe_payment_method_id,
+            { methodType: consentMethodType, variant: 'prepay_card' },
+          );
+          if (!already) {
+            await ConsentService.recordConsent({
+              customerId: invoice.customer_id,
+              paymentMethodId: pmRow.id,
+              stripePaymentMethodId: pmRow.stripe_payment_method_id,
+              source: 'estimate_accept',
+              methodType: consentMethodType,
+              consentVariant: 'prepay_card',
+            });
+          }
+        } catch (consentErr) {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: consent snapshot failed (${consentErr.message})`);
+          continue;
+        }
       }
       // ZERO acknowledged cents is a legitimate authorization (Codex r9
       // P0): projected credit fully covered the quote — the charge call

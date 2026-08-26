@@ -35,7 +35,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -4169,6 +4169,11 @@ function EstimateViewPageInner() {
   // the acknowledged cents into the re-submitted accept. Server-authoritative:
   // a stale ack simply earns a fresh quote.
   const [prepayChargeQuote, setPrepayChargeQuote] = useState(null);
+  // Auto-satisfy quote step's authorization checkbox (Codex #3492 r11):
+  // those accepts have no capture UI, so the v11 immediate-charge
+  // authorization renders HERE with a required checkbox; the ack carries
+  // the attestation and the server 402s without it.
+  const [prepayConsentChecked, setPrepayConsentChecked] = useState(false);
   const prepayChargeAckRef = useRef(null);
   // A quote is scoped to the preference it was minted for (pre-push Codex
   // P0 r2): switching prepay ↔ pay-per-application (prefSwitch, bond reset,
@@ -4178,6 +4183,7 @@ function EstimateViewPageInner() {
   useEffect(() => {
     prepayChargeAckRef.current = null;
     setPrepayChargeQuote(null);
+    setPrepayConsentChecked(false);
     // Consent-variant boundary (Codex r5 P1): a card captured or a checkbox
     // agreed under one authorization (per-application Auto Pay vs immediate
     // annual charge) must not silently ride into the other — drop the
@@ -4879,6 +4885,9 @@ function EstimateViewPageInner() {
           // switch server-side re-quotes instead of charging a card the
           // customer never saw.
           prepayChargeAcknowledgedMethodKey: prepayChargeAckRef.current?.methodKey ?? undefined,
+          // Attests the quote step's authorization checkbox was checked
+          // (auto-satisfy accepts — Codex #3492 r11); server-enforced.
+          prepayChargeConsentAccepted: prepayChargeAckRef.current?.consentAccepted === true ? true : undefined,
         }),
       });
       if (!r.ok) {
@@ -4907,6 +4916,7 @@ function EstimateViewPageInner() {
           // pay" tap before re-submitting with the acknowledged cents.
           prepayChargeAckRef.current = null;
           setPrepayChargeQuote(body.quote);
+          setPrepayConsentChecked(false);
           setCtaPhase('review');
           return;
         }
@@ -4923,6 +4933,7 @@ function EstimateViewPageInner() {
           // Any prepay quote/ack belonged to the dropped card.
           prepayChargeAckRef.current = null;
           setPrepayChargeQuote(null);
+          setPrepayConsentChecked(false);
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
@@ -5247,6 +5258,7 @@ function EstimateViewPageInner() {
     // server re-quotes authoritatively on the next confirm regardless).
     prepayChargeAckRef.current = null;
     setPrepayChargeQuote(null);
+    setPrepayConsentChecked(false);
     // Don't clear selectedSlotId — the customer usually goes back to tweak
     // something and continues with the same slot. The hold stays live
     // server-side (up to 15 min) and is intentionally NOT released here:
@@ -6242,11 +6254,34 @@ function EstimateViewPageInner() {
                   ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
                   : `Charged to your saved payment method${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
               </div>
+              {prepayChargeQuote.consentRequired ? (
+                // Auto-satisfy accepts never saw the capture checkbox, so
+                // the v11 immediate-charge authorization renders here —
+                // tender-correct (saved bank methods get the ACH variant) —
+                // and gates the confirm button (Codex #3492 r11). The
+                // server records this exact variant as the snapshot of
+                // record and refuses the accept without the attestation.
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 12, textAlign: 'left', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={prepayConsentChecked}
+                    onChange={(e) => setPrepayConsentChecked(e.target.checked)}
+                    style={{ marginTop: 3, flexShrink: 0 }}
+                  />
+                  <span style={{ fontSize: 12, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+                    {['us_bank_account', 'ach'].includes(prepayChargeQuote.methodType) ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT}
+                  </span>
+                </label>
+              ) : null}
               <button
                 type="button"
-                disabled={ctaPhase === 'submitting'}
+                disabled={ctaPhase === 'submitting' || (prepayChargeQuote.consentRequired && !prepayConsentChecked)}
                 onClick={() => {
-                  prepayChargeAckRef.current = { totalCents: prepayChargeQuote.totalCents, methodKey: prepayChargeQuote.methodKey || null };
+                  prepayChargeAckRef.current = {
+                    totalCents: prepayChargeQuote.totalCents,
+                    methodKey: prepayChargeQuote.methodKey || null,
+                    consentAccepted: prepayChargeQuote.consentRequired ? prepayConsentChecked === true : undefined,
+                  };
                   setPrepayChargeQuote(null);
                   handleConfirm();
                 }}

@@ -9441,8 +9441,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const acknowledged = Number(req.body?.prepayChargeAcknowledgedTotalCents);
         const acknowledgedMethodKey = typeof req.body?.prepayChargeAcknowledgedMethodKey === 'string'
           ? req.body.prepayChargeAcknowledgedMethodKey : '';
+        // Auto-satisfy accepts (saved method / Auto Pay already active)
+        // have NO capture checkbox, so the v11 immediate-charge
+        // authorization is presented AT the quote step instead — the
+        // resubmit must attest the customer checked it (Codex #3492 r11);
+        // the recorded snapshot below then matches copy the customer
+        // actually saw. Fresh-capture accepts rendered it at the capture
+        // checkbox already.
+        const prepayConsentRequiredAtQuote = recurringCardPolicy.required !== true;
+        const prepayConsentAccepted = req.body?.prepayChargeConsentAccepted === true;
         if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
-          || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey) {
+          || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey
+          || (prepayConsentRequiredAtQuote && !prepayConsentAccepted)) {
           return res.status(402).json({
             code: 'PREPAY_CHARGE_QUOTE',
             error: 'Confirm your exact annual prepay total to finish booking',
@@ -9455,6 +9465,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               funding: prepayChargeMethod.funding || null,
               methodType: prepayChargeMethod.methodType || 'card',
               last4: prepayChargeMethod.last4 || null,
+              consentRequired: prepayConsentRequiredAtQuote,
             },
           });
         }
@@ -11541,6 +11552,43 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } else if (!(prepayCeilingCents > 0)) {
         // No verifiable accepted amount — never charge without a ceiling.
         prepayAutoCharge = { status: 'skipped', reason: 'no_accepted_amount' };
+      } else if (!(await (async () => {
+        // The v11 prepay authorization must exist as an immutable
+        // payment_method_consents row BEFORE any collection (Codex r11):
+        // fresh captures recorded it at enrollment (the variant check makes
+        // this a no-op there); auto-satisfy methods — including saved BANK
+        // accounts — record here with the tender-correct prepay variant,
+        // matching the copy the quote step's checkbox rendered. FAIL
+        // CLOSED: no authorization row, no charge — defer to the sweep,
+        // which re-attempts the same idempotent record.
+        try {
+          const ConsentService = require('../services/payment-method-consents');
+          const consentMethodType = prepayChargePlan.method.methodType || 'card';
+          const already = await ConsentService.hasConsentSnapshotForVariant(
+            customerId,
+            prepayChargePlan.method.stripePaymentMethodId,
+            { methodType: consentMethodType, variant: 'prepay_card' },
+          );
+          if (!already) {
+            await ConsentService.recordConsent({
+              customerId,
+              paymentMethodId: prepayChargePmRowId,
+              stripePaymentMethodId: prepayChargePlan.method.stripePaymentMethodId,
+              source: 'estimate_accept',
+              methodType: consentMethodType,
+              ip: req.ip,
+              userAgent: req.get('user-agent') || null,
+              consentVariant: 'prepay_card',
+            });
+          }
+          return true;
+        } catch (consentErr) {
+          logger.warn(`[estimate-accept] prepay consent snapshot failed for invoice ${invoiceId} (estimate ${estimate.id}) — deferring charge: ${consentErr.message}`);
+          return false;
+        }
+      })())) {
+        prepayAutoCharge = { status: 'ambiguous', reason: 'consent_snapshot_failed' };
+        invoicePayUrl = null;
       } else {
         try {
           const StripeService = require('../services/stripe');
@@ -11672,7 +11720,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? 'The promised inspection credit could not be confirmed as redeemed, so the auto-charge was deferred to the recovery sweep. No charge was attempted and no pay link was sent.'
             : prepayAutoCharge.reason === 'payer_unresolved'
               ? 'The charge was refused because this bill appears to route to a third-party payer that could not be confirmed. No charge ran and no pay link was sent — the recovery sweep will retry once the payer state resolves.'
-              : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
+              : prepayAutoCharge.reason === 'consent_snapshot_failed'
+                ? 'The prepay authorization snapshot could not be recorded, so no charge ran and no pay link was sent — the recovery sweep will retry the record and the charge.'
+                : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
