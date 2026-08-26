@@ -11655,7 +11655,40 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // surcharge/credit/ledger/receipt semantics (single surcharge
     // authority) and refuses payer-billed invoices internally.
     let prepayAutoCharge = null; // { status: 'paid'|'declined'|'skipped', reason? }
-    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId) {
+    // CAS ownership of the durable job (hook P0 r19): a request stalled
+    // >15 min could otherwise resume AFTER the sweep claimed the job,
+    // delivered a pay link, and released the Stripe attempt fence — then
+    // charge on top of a payable link (sequential double collection). The
+    // in-flow executor claims 'pending' → 'claimed' with its own token;
+    // losing the CAS cedes the job (no charge, no pay link — the owner
+    // resolves), and every resolution below writes only while the token
+    // still matches.
+    let prepayJobClaimToken = null;
+    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId && !txResult.prepayCoveredInTrx) {
+      const candidateToken = require('crypto').randomUUID();
+      try {
+        const claimedRows = await db('estimates')
+          .where({ id: estimate.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'")
+          .update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({ status: 'claimed', claimed_at: new Date().toISOString(), claim_token: candidateToken })],
+            ),
+          });
+        if (claimedRows === 1) prepayJobClaimToken = candidateToken;
+      } catch (claimErr) {
+        logger.warn(`[estimate-accept] prepay job claim failed for estimate ${estimate.id} — ceding to the sweep: ${claimErr.message}`);
+      }
+    }
+    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
+      && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
+      // Another executor owns the job (or the claim write failed) — never
+      // run a second collection beside it.
+      prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+      invoicePayUrl = null;
+      logger.warn(`[estimate-accept] prepay job for estimate ${estimate.id} is owned elsewhere — no in-flow charge`);
+    } else if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId) {
       // Fresh capture resolves its payment_methods row at enrollment
       // (post-commit); saved/autopay sources carried their row on the plan.
       const prepayChargePmRowId = prepayChargePlan.method.paymentMethodRowId
@@ -11990,22 +12023,52 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // Atomic JSON-path merge, never a full estimate_data rewrite
       // (pre-push Codex P0 r5). Best-effort: a failed update degrades to
       // the sweep re-verifying against the live invoice.
-      if (['paid', 'processing'].includes(prepayAutoCharge.status) && prepayAutoCharge.termSyncPending !== true) {
+      // Release the claim back to 'pending' for defers with NOTHING in
+      // flight (hook P0 r19): the sweep then retries at its 15-min cadence
+      // instead of waiting out the 60-min stale-claim lease. Charge-
+      // initiated ambiguity (Stripe fence/webhook) keeps the claim —
+      // reconciliation owns that pacing.
+      if (prepayJobClaimToken
+        && ['inspection_credit_unresolved', 'payer_unresolved', 'consent_snapshot_failed'].includes(prepayAutoCharge?.reason)) {
         try {
           await db('estimates')
             .where({ id: estimate.id })
-            .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+            .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken])
             .update({
               estimate_data: db.raw(
                 "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-                [JSON.stringify({
-                  status: prepayAutoCharge.status,
-                  reason: prepayAutoCharge.reason || null,
-                  resolved_at: new Date().toISOString(),
-                  resolved_by: 'accept',
-                })],
+                [JSON.stringify({ status: 'pending', claim_token: null, claimed_at: null })],
               ),
             });
+        } catch (releaseErr) {
+          logger.warn(`[estimate-accept] prepay job claim release failed for estimate ${estimate.id} (stale lease recovers it): ${releaseErr.message}`);
+        }
+      }
+      if (['paid', 'processing'].includes(prepayAutoCharge.status) && prepayAutoCharge.termSyncPending !== true) {
+        try {
+          const resolveQ = db('estimates')
+            .where({ id: estimate.id })
+            .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL");
+          // Ownership-conditioned (hook P0 r19): only the executor holding
+          // the claim token may retire the job. The in-trx coverage path
+          // never claimed (it settled before any executor raced) — it
+          // resolves only a still-pending stamp.
+          if (prepayJobClaimToken) {
+            resolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken]);
+          } else {
+            resolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'");
+          }
+          await resolveQ.update({
+            estimate_data: db.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify({
+                status: prepayAutoCharge.status,
+                reason: prepayAutoCharge.reason || null,
+                resolved_at: new Date().toISOString(),
+                resolved_by: 'accept',
+              })],
+            ),
+          });
         } catch (stampErr) {
           logger.warn(`[estimate-accept] prepay job stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
         }
@@ -12403,21 +12466,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // fallbackDelivered guard.
     if (['declined', 'skipped'].includes(prepayAutoCharge?.status) && invoiceLinkDelivered) {
       try {
-        await db('estimates')
+        const lateResolveQ = db('estimates')
           .where({ id: estimate.id })
-          .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
-          .update({
-            estimate_data: db.raw(
-              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-              [JSON.stringify({
-                status: prepayAutoCharge.status,
-                reason: prepayAutoCharge.reason || null,
-                fallback_delivered: true,
-                resolved_at: new Date().toISOString(),
-                resolved_by: 'accept',
-              })],
-            ),
-          });
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL");
+        if (prepayJobClaimToken) {
+          lateResolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken]);
+        } else {
+          lateResolveQ.whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = 'pending'");
+        }
+        await lateResolveQ.update({
+          estimate_data: db.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify({
+              status: prepayAutoCharge.status,
+              reason: prepayAutoCharge.reason || null,
+              fallback_delivered: true,
+              resolved_at: new Date().toISOString(),
+              resolved_by: 'accept',
+            })],
+          ),
+        });
       } catch (stampErr) {
         logger.warn(`[estimate-accept] prepay job late stamp resolution failed for estimate ${estimate.id}: ${stampErr.message}`);
       }

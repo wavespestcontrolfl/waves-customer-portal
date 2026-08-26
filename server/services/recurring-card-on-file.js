@@ -572,7 +572,10 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           && (!current.claimed_at || new Date(current.claimed_at) < new Date(Date.now() - claimStaleMinutes * 60 * 1000));
         if (current.status !== 'pending' && !claimStale) return; // another worker owns it / already resolved
         if (current.status === 'pending' && current.created_at && new Date(current.created_at) > cutoff) return; // in-flow executor may still be running
-        const claim = { status: 'claimed', claimed_at: new Date().toISOString() };
+        // Ownership token (hook P0 r19): resolutions are conditioned on it
+        // so a stalled accept executor resuming later can never retire or
+        // double-collect a job this sweep pass owns (and vice versa).
+        const claim = { status: 'claimed', claimed_at: new Date().toISOString(), claim_token: require('crypto').randomUUID() };
         // Atomic JSON-path merge (pre-push Codex P0 r5): the advisory lock
         // serializes SWEEP workers only — other estimate writers (linkage
         // invalidation etc.) are not under it, so the update must touch
@@ -596,6 +599,8 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         await db('estimates')
           .where({ id: row.id })
           .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+          // Only while this pass still owns the claim (hook P0 r19).
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [job.claim_token])
           .update({
             estimate_data: db.raw(
               "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
