@@ -4624,6 +4624,31 @@ const InvoiceService = {
       // invoice sweep skips 'void' rows, so it cannot repair a restore that
       // commits on the stale verdict.
       await assertUnvoidableLinkedVisit(trx, updated, { lock: true });
+      // In-flight dunning touch fence (Codex #3493 r9, same fence as the
+      // edit path): fireStep stamps touch_claimed_at for the duration of a
+      // touch and writes the sequence back UNCONDITIONALLY afterward — a
+      // void+unvoid landing inside that window would let the in-flight
+      // touch send its stale reminder and then re-arm the sequence on the
+      // restored draft. Refuse (rolling back) while a fresh claim exists;
+      // crashed senders self-heal past the 10-minute freshness window.
+      // Fail CLOSED on read errors, matching the edit fence.
+      const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
+      let inFlightTouch = null;
+      try {
+        inFlightTouch = await trx("invoice_followup_sequences")
+          .where({ invoice_id: id })
+          .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+          .first("id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the follow-up send state — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (inFlightTouch) {
+        throw new Error(
+          "Cannot unvoid — a payment reminder for this invoice is sending right now; retry in a few minutes",
+        );
+      }
       // The void-time lifecycle stop is BEST-EFFORT (stopInvoiceFollowupSequence
       // swallows failures, so voidInvoice can succeed with the sequence still
       // ACTIVE), and runPending excludes only terminal invoice statuses — an

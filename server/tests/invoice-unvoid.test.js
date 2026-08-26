@@ -56,8 +56,8 @@ function voidInvoice(overrides = {}) {
 // Happy-path db() slot order inside unvoidInvoice:
 //   load → annual_prepay_terms canonical-link pre-guard → (trx) conditional
 //   restore → annual_prepay_terms TOCTOU re-check → payments money guard →
-//   active-sequence stop repair → sms_log deferred-send cancel → sms_log
-//   in-flight 'sending' fence.
+//   in-flight touch fence → active-sequence stop repair → sms_log
+//   deferred-send cancel → sms_log in-flight 'sending' fence.
 // (No sequence re-arm here: that lives in scheduleForInvoice at resend.)
 function mockHappyPath({ restored } = {}) {
   const updateChain = chain({ returning: [restored] });
@@ -70,6 +70,7 @@ function mockHappyPath({ restored } = {}) {
     .mockReturnValueOnce(updateChain)
     .mockReturnValueOnce(noRow()) // TOCTOU: still no owning term
     .mockReturnValueOnce(noRow()) // fresh-row money guard
+    .mockReturnValueOnce(noRow()) // in-flight touch fence
     .mockReturnValueOnce(seqStopChain)
     .mockReturnValueOnce(smsChain)
     .mockReturnValueOnce(sendingChain);
@@ -148,6 +149,20 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('refuses while a dunning touch is mid-send — fireStep writes the sequence back unconditionally after it (Codex #3493 r9)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice() }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: { id: 'seq-1' } })); // fresh touch claim -> rollback
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — a payment reminder for this invoice is sending right now; retry in a few minutes',
+    );
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+
   test('refuses while a claimed deferred send is mid-dispatch — the cancel cannot reach a claimed row (Codex #3493 r2)', async () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
@@ -155,6 +170,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(noRow()) // in-flight touch fence
       .mockReturnValueOnce(chain()) // active-sequence stop repair
       .mockReturnValueOnce(chain())
       .mockReturnValueOnce(chain({ first: { id: 'sms-9' } })); // 'sending' claim present → rollback
@@ -381,6 +397,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ returning: [restored] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(noRow()) // in-flight touch fence
       .mockReturnValueOnce(chain()) // active-sequence stop repair
       .mockReturnValueOnce(chain())
       .mockReturnValueOnce(noRow());
