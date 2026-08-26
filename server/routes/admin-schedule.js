@@ -2222,11 +2222,18 @@ function moneyValuesDiffer(a, b) {
 // value-by-value against the locked before-image. Presence is not change:
 // the modal echoes the price fields on every save once an appointment has
 // add-ons, so an untouched save must never restamp a series.
+//
+// A service change additionally requires an explicit catalog pick
+// (serviceId posted) — the same trust-serviceId-when-present doctrine as
+// the re-service reclassification above. The modal echoes a NORMALIZED
+// service_type label ("Lawn Care") on every save while rows store the
+// booked label ("Lawn Care Visit"), so a label-only delta is
+// indistinguishable from that no-op echo and must never rewrite siblings.
 function computePriceServiceGroupChanges(before, updates) {
-  const serviceChanged = (updates.service_type !== undefined
-    && String(updates.service_type) !== String(before?.service_type || ''))
-    || (updates.service_id !== undefined
-      && String(updates.service_id ?? '') !== String(before?.service_id ?? ''));
+  const serviceChanged = updates.service_id !== undefined
+    && (String(updates.service_id ?? '') !== String(before?.service_id ?? '')
+      || (updates.service_type !== undefined
+        && String(updates.service_type) !== String(before?.service_type || '')));
   const priceChanged = (updates.primary_line_price !== undefined
     && moneyValuesDiffer(updates.primary_line_price, before?.primary_line_price))
     || (updates.discount_type !== undefined

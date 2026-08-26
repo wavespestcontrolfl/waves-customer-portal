@@ -113,10 +113,12 @@ describe('computePriceServiceGroupChanges — presence is not change', () => {
     expect(Object.keys(groups.fields).every((k) => PRICE_SERVICE_OVERRIDE_KEYS.has(k))).toBe(true);
   });
 
-  it('a service change (label or catalog id) collects the service-group keys', () => {
-    const byLabel = computePriceServiceGroupChanges(before, { service_type: 'Pest Control Service' });
-    expect(byLabel.serviceChanged).toBe(true);
-    expect(byLabel.fields).toEqual({ service_type: 'Pest Control Service' });
+  it('a service change requires an explicit catalog pick — a label-only delta is the modal normalization echo', () => {
+    // The modal posts "Lawn Care" for a row stored as "Lawn Care Visit" on
+    // EVERY save; without serviceId that must never read as a switch.
+    const labelEcho = computePriceServiceGroupChanges(before, { service_type: 'Pest Control Service' });
+    expect(labelEcho.serviceChanged).toBe(false);
+    expect(labelEcho.fields).toEqual({});
 
     const byId = computePriceServiceGroupChanges(before, {
       service_type: 'Lawn Care Visit', service_id: 9, service_key_snapshot: 'pest_control', is_callback: false,
@@ -125,6 +127,14 @@ describe('computePriceServiceGroupChanges — presence is not change', () => {
     expect(byId.fields).toEqual({
       service_type: 'Lawn Care Visit', service_id: 9, service_key_snapshot: 'pest_control', is_callback: false,
     });
+
+    // Same catalog id posted with a new label (a picked library item that
+    // resolves to the same service row) still counts — the id is present,
+    // so this is a deliberate pick, not an echo.
+    const relabelWithId = computePriceServiceGroupChanges(before, {
+      service_type: 'Pest Control Service', service_id: 7,
+    });
+    expect(relabelWithId.serviceChanged).toBe(true);
   });
 
   it('an appointment-discount change counts as a price change', () => {
