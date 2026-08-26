@@ -1093,10 +1093,15 @@ async function publishAstro(postId) {
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
     // Owner directive 2026-08-26: with namedCompetitorAutopublish on, a CLEAN
     // named-competitor post needs no human merge — the stamp below stays
-    // false and pages-poll auto-merges it like any other post. Fails CLOSED
-    // (unreadable gate → stamp still set → human merge required).
+    // false and pages-poll auto-merges it like any other post. Requires BOTH
+    // flags (namedCompetitorComparison off keeps the human merge). Fails
+    // CLOSED (unreadable gate → stamp still set → human merge required).
     let namedCompetitorAutopublish = false;
-    try { namedCompetitorAutopublish = require('../../config/feature-gates').isEnabled('namedCompetitorAutopublish') === true; } catch (_) { namedCompetitorAutopublish = false; }
+    try {
+      const fg = require('../../config/feature-gates');
+      namedCompetitorAutopublish = fg.isEnabled('namedCompetitorAutopublish') === true
+        && fg.isEnabled('namedCompetitorComparison') === true;
+    } catch (_) { namedCompetitorAutopublish = false; }
     const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
     if (!comparison.pass) {
       // UNCLASSIFIED_OPTION is fail-closed classification AMBIGUITY (a

@@ -3085,6 +3085,26 @@ describe('named-competitor autopublish gate', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
+  test('autopublish requires namedCompetitorComparison too — comparison flag OFF keeps the review park (hook P1)', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher });
+    // Non-prod feature-gates pins namedCompetitorComparison true, so flip it
+    // at the isEnabled seam (same fresh module instance the runner reads).
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      g === 'namedCompetitorComparison' ? false : realIsEnabled(g)));
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
+    fg.isEnabled.mockRestore();
+  });
+
   test('gate ON never rescues a comparison-gate FAILURE', async () => {
     process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
     const publisher = { publishOrUpdatePage: jest.fn() };

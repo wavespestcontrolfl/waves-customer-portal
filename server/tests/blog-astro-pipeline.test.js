@@ -1908,6 +1908,29 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       astro_requires_human_merge: false,
     }));
   });
+
+  test('autopublish alone is not enough — namedCompetitorComparison OFF keeps the human-merge stamp (hook P1)', async () => {
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    const featureGates = require('../config/feature-gates');
+    const realIsEnabled = featureGates.isEnabled;
+    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => {
+      if (g === 'namedCompetitorAutopublish') return true;
+      if (g === 'namedCompetitorComparison') return false;
+      return realIsEnabled(g);
+    });
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: true,
+    }));
+  });
 });
 
 describe('Astro publisher idempotency guard', () => {

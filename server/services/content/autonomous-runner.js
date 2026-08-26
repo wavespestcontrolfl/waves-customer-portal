@@ -962,12 +962,22 @@ class AutonomousRunner {
     // A named-competitor comparison routes to human review (legal/brand
     // surface) UNLESS namedCompetitorAutopublish is on (owner directive
     // 2026-08-26: intercept lane is fully autonomous — a CLEAN draft
-    // publishes; gate failures still block/park exactly as before). With the
-    // gate off it still uses the approvable trust-build review path. Gate
-    // read fails CLOSED: an unreadable flag keeps the review park.
+    // publishes; gate failures still block/park exactly as before). This
+    // deliberately includes operator-AUTHORIZED competitors named in an
+    // intercept brief (hook P1 considered): the owner's per-competitor
+    // authorization recorded in the brief IS the human sign-off the review
+    // park would collect, given in advance — and the sourcing rules the
+    // brief mandates are still enforced by the comparison table's per-cell
+    // checks, the fact-check gate, and Codex on the PR. Autopublish
+    // requires BOTH flags — namedCompetitorComparison off keeps every
+    // named-competitor draft on the review path. With autopublish off it
+    // still uses the approvable trust-build review path. Gate reads fail
+    // CLOSED: an unreadable flag keeps the review park.
     let namedCompetitorAutopublish = false;
     try {
-      namedCompetitorAutopublish = require('../../config/feature-gates').isEnabled('namedCompetitorAutopublish') === true;
+      const fg = require('../../config/feature-gates');
+      namedCompetitorAutopublish = fg.isEnabled('namedCompetitorAutopublish') === true
+        && fg.isEnabled('namedCompetitorComparison') === true;
     } catch (_) { namedCompetitorAutopublish = false; }
     const forceNamedCompetitorReview = run.comparison_requires_review === true
       && !namedCompetitorAutopublish;

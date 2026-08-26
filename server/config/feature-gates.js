@@ -1096,8 +1096,9 @@ const gates = {
   // matching the brief set's standing "fully autonomous — no UAT hold"
   // override of 2026-06-11). Gate failures (disparagement, unsourced facts,
   // unknown competitor, …) still block exactly as before — this flag only
-  // removes the review park on CLEAN drafts. Requires
-  // namedCompetitorComparison to be on to matter. OFF in EVERY environment
+  // removes the review park on CLEAN drafts. Consumers require
+  // namedCompetitorComparison to ALSO be on (enforced at both read sites —
+  // this flag alone never lifts a park). OFF in EVERY environment
   // unless set to exactly 'true' (same posture as GATE_COMPLIANCE — a
   // policy flag, not a dev feature, so dev/test keep the review-park
   // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
