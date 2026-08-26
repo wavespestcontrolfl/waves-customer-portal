@@ -319,9 +319,10 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
-    // Captured BEFORE the provider call: the sync-21610 recorder orders a
+    // Re-anchored immediately before messages.create below; the entry-time
+    // value only covers early-exit throws. The sync-21610 recorder orders a
     // concurrent START against this instant (messaging/sync-optout.js).
-    const smsAttemptAt = new Date();
+    let smsAttemptAt = new Date();
     let attemptedFrom = options.fromNumber || null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
@@ -595,6 +596,11 @@ const TwilioService = {
       // post-handoff and can postdate a START that raced the log write,
       // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
       const handoffAt = new Date();
+      // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
+      // handoff (codex #3495): entry-time capture predates template/
+      // customer lookups and the push-first attempt, so a START received
+      // during that preparation wrongly outranked the rejection.
+      smsAttemptAt = new Date();
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,

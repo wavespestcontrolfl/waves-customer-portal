@@ -62,6 +62,26 @@ async function recordSyncProviderOptOut({ phone, attemptAt, source = 'twilio_sen
       if (declined === false) {
         throw Object.assign(new Error('recipient decline write reported failure'), { code: 'recipient_decline_failed' });
       }
+      // Prefs honesty, mirroring the callback path (codex #3495): flip
+      // sms_enabled only under UNIQUE primary-phone ownership — a later
+      // START's restore goes through findSingleCustomerByPhone, which
+      // refuses ambiguous numbers, so flipping every sharer here would be
+      // irreversible for all of them. Ambiguous ⇒ skip; the phone-keyed
+      // suppression row still blocks sends and the daily reconciler
+      // surfaces prefs-vs-suppression drift.
+      const ownDigits = String(optOutPhone).replace(/\D/g, '').slice(-10);
+      if (ownDigits.length === 10) {
+        const holders = await trx('customers')
+          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${ownDigits}`])
+          .whereNull('deleted_at')
+          .select('id');
+        if (holders.length === 1) {
+          await trx('notification_prefs')
+            .insert({ customer_id: holders[0].id, sms_enabled: false })
+            .onConflict('customer_id')
+            .merge({ sms_enabled: false });
+        }
+      }
       outcome.recorded = true;
     });
   } catch (err) {
