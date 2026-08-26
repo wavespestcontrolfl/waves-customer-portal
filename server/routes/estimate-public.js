@@ -10939,11 +10939,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // a crash in the gap would otherwise recover at the gross
               // amount the customer never acknowledged).
               scheduled_service_id: annualPrepayConversionResult?.firstScheduledServiceId || null,
-              // Payer scope the policy admitted the lane with (Codex r13):
-              // recovery's in-lock self-pay guard must judge with the SAME
-              // visit so a self_pay_override on a payer-billed account
-              // stays customer-paid.
-              payer_scope_scheduled_service_id: recurringCardScopeSsId || null,
+              // Payer scope for the in-lock self-pay guard (Codex r13/r14):
+              // the visit the policy admitted the lane with, or — for a
+              // new-slot accept where that scope is deliberately null — the
+              // FIRST prepay visit this very transaction just created, so a
+              // visit-specific payer assigned after acceptance is seen by
+              // recovery's visit-keyed recheck instead of degrading to the
+              // customer-default check.
+              payer_scope_scheduled_service_id: recurringCardScopeSsId
+                || annualPrepayConversionResult?.firstScheduledServiceId || null,
               status: 'pending',
               created_at: new Date().toISOString(),
             })],
@@ -11629,15 +11633,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // the invoice's payer_id stays null. This re-resolves the
             // default payer under the lock and refuses rather than charging
             // the homeowner's card for a bill that now routes to a payer.
-            // VISIT-SCOPED when the accept had a scope (Codex r13): the
-            // policy admitted this lane with recurringCardScopeSsId — a
+            // VISIT-SCOPED when a scope exists (Codex r13/r14): the visit
+            // the policy admitted the lane with, or the first prepay visit
+            // this accept just created (new-slot accepts) — a
             // self_pay_override visit on a payer-billed account is
             // customer-paid, and a customer-only recheck would inherit the
             // account default payer and wrongly refuse + re-route the
-            // acknowledged homeowner charge to AP. The visit-keyed check
-            // folds the default payer in and honors the override.
-            ...(recurringCardScopeSsId
-              ? { requireSelfPayScheduledServiceId: recurringCardScopeSsId }
+            // acknowledged homeowner charge to AP; conversely a
+            // visit-specific payer assigned to the NEW visit after
+            // acceptance must be seen. The visit-keyed check folds the
+            // default payer in and honors the override.
+            ...((recurringCardScopeSsId || txResult.annualPrepayConversion?.firstScheduledServiceId)
+              ? { requireSelfPayScheduledServiceId: recurringCardScopeSsId || txResult.annualPrepayConversion.firstScheduledServiceId }
               : { requireSelfPayCustomerId: customerId }),
           });
           const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
@@ -11736,9 +11743,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               } else {
                 const resolved = await PayerService.resolveForInvoice({
                   customerId,
-                  // Same scope basis the lane was admitted with (Codex r13)
-                  // — the invoice's own linkage as fallback.
-                  scheduledServiceId: recurringCardScopeSsId || invoiceRow?.scheduled_service_id || null,
+                  // Same scope basis as the charge guard (Codex r13/r14) —
+                  // the invoice's own linkage as last fallback.
+                  scheduledServiceId: recurringCardScopeSsId
+                    || txResult.annualPrepayConversion?.firstScheduledServiceId
+                    || invoiceRow?.scheduled_service_id || null,
                   throwOnError: true,
                 });
                 if (resolved?.payerId) {
