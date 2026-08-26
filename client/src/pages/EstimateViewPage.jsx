@@ -6275,12 +6275,23 @@ function EstimateViewPageInner() {
               ) : null}
               <button
                 type="button"
-                disabled={ctaPhase === 'submitting' || (prepayChargeQuote.consentRequired && !prepayConsentChecked)}
+                disabled={ctaPhase === 'submitting'
+                  || (prepayChargeQuote.consentRequired && !prepayConsentChecked)
+                  // Fresh inline capture (Codex #3492 r12): the capture UI
+                  // stays mounted through the quote round-trip and its
+                  // authorization checkbox is still editable — a customer
+                  // who UNCHECKS the visible authorization must not be
+                  // charged by this button. The quote confirm tracks the
+                  // live checkbox state exactly like the underlying review
+                  // CTA does.
+                  || (inlineAutoPayActive && inlineCardIntent && !inlineCardState.agreed)}
                 onClick={() => {
                   prepayChargeAckRef.current = {
                     totalCents: prepayChargeQuote.totalCents,
                     methodKey: prepayChargeQuote.methodKey || null,
-                    consentAccepted: prepayChargeQuote.consentRequired ? prepayConsentChecked === true : undefined,
+                    consentAccepted: prepayChargeQuote.consentRequired
+                      ? prepayConsentChecked === true
+                      : ((inlineAutoPayActive && inlineCardIntent) ? inlineCardState.agreed === true : undefined),
                   };
                   setPrepayChargeQuote(null);
                   handleConfirm();

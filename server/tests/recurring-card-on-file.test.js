@@ -47,8 +47,10 @@ jest.mock('../services/payer', () => ({
   resolveForInvoice: (...a) => mockResolveForInvoice(...a),
 }));
 const mockCustomerOnAutopay = jest.fn(async () => false);
+const mockIsPaused = jest.fn(() => false);
 jest.mock('../services/autopay-eligibility', () => ({
   customerOnAutopay: (...a) => mockCustomerOnAutopay(...a),
+  isPaused: (...a) => mockIsPaused(...a),
 }));
 const mockHasConsentFor = jest.fn(async () => false);
 // Enrollment-scoped twin (r6 P1): the enrollment path now consults THIS —
@@ -320,6 +322,24 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     mockCustomerOnAutopay.mockResolvedValue(true);
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
     expect(p.exemptReason).toBe('autopay_already_active');
+  });
+
+  // Codex #3492 r12: an ACTIVE pause is the customer's explicit "don't
+  // auto-charge" — the paused cohort must classify OUT of the auto-satisfy
+  // lane (no charge-at-confirm promise, no capture demand), even when a
+  // consented saved card exists that would otherwise auto-satisfy.
+  it('classifies an autopay-PAUSED customer outside the charge lane (no auto-satisfy, no capture)', async () => {
+    mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true, autopay_paused_until: '2099-01-01' };
+    mockIsPaused.mockReturnValue(true);
+    mockCustomerOnAutopay.mockResolvedValue(false);
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-1' });
+    try {
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+      expect(p.exemptReason).toBe('autopay_paused');
+      expect(p.required).toBe(false);
+    } finally {
+      mockIsPaused.mockReturnValue(false);
+    }
   });
 
   it('auto-satisfies with a saved consented card (spec §3.2 — never re-ask) and surfaces its row id', async () => {

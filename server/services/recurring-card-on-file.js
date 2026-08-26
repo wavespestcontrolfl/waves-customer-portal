@@ -193,8 +193,21 @@ async function resolveRecurringCardPolicyForEstimate({
 
     // Already protected: enrolled AND a chargeable method in charge.
     try {
-      const { customerOnAutopay } = require('./autopay-eligibility');
+      const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
       const customer = await db('customers').where({ id: resolvedCustomerId }).first();
+      // An ACTIVE autopay pause is the customer's explicit "don't
+      // auto-charge" (Codex #3492 r12): without this check the paused
+      // cohort fell through to saved_method_consented, the UI promised a
+      // charge-at-confirm, and the in-lock Auto Pay guard then
+      // deterministically refused AFTER the acceptance committed —
+      // reverting every such accept to the pay-link fallback it was never
+      // told about. Classify them OUT of the auto-satisfy lane entirely:
+      // no capture demanded (asking a paused customer to save a card for
+      // auto-charging contradicts the pause), invoices stay on the normal
+      // payable path.
+      if (customer && isPaused(customer)) {
+        return { enforced: true, required: false, exemptReason: 'autopay_paused' };
+      }
       if (customer && await customerOnAutopay(customer)) {
         return { enforced: true, required: false, exemptReason: 'autopay_already_active' };
       }

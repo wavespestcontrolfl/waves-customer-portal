@@ -5583,6 +5583,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Stranded prepay auto-charge recovery every 15 min (Codex #3492 r12):
+  // an accept can crash between commit and its in-flow charge, and
+  // same-day slots book with a two-hour lead — a job stranded just after
+  // the daily 10:07 retry cron must not wait a full day for its charge or
+  // pay link (a serviced-unpaid visit is the exact incident this lane
+  // exists to prevent). Idempotent + advisory-locked inside the service;
+  // no-op while the gate is off beyond draining committed jobs.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await runExclusive('prepay-charge-recovery', async () => {
+        await require('./recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+      });
+    } catch (err) {
+      logger.error(`Stranded prepay auto-charge sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Autopay pre-charge reminders — daily 9 AM, 3 days before scheduled charge
   cron.schedule('0 9 * * *', async () => {
     try {
