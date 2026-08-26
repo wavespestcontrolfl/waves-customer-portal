@@ -2,18 +2,15 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const gbpService = require('../services/google-business');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
-// 2026-08-25 role lockdown: the GBP workspace is owner-only. The ONLY
-// technician exemption is GET /locations — the tech-visible Settings page
-// reads it for OAuth status display. Every other read (per-location detail,
-// updates, notifications) and every mutation requires the admin role.
-router.use((req, res, next) => (
-  req.method === 'GET' && req.path === '/locations' ? next() : requireAdmin(req, res, next)
-));
+// 2026-08-25 role lockdown: the GBP workspace is owner-only end to end.
+// (The Settings GbpConnectSection consumer only mounts behind the
+// IntegrationsTab admin gate, so no technician workflow reads this API —
+// no exemption needed.)
+router.use(adminAuthenticate, requireAdmin);
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 

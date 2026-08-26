@@ -512,6 +512,21 @@ function normalizeAvailabilityStatus(value) {
   return value ? 'unknown' : null;
 }
 
+// Technician projection for the product list: stock/agronomic/registry
+// fields only. Vendor pricing rows, catalog costs, and cached best-price
+// data are owner-only (2026-08-25 role lockdown) — hiding the Vendors &
+// Pricing tabs means nothing here may leak the same data (codex P1).
+const OWNER_ONLY_PRODUCT_FIELDS = [
+  'bestPrice', 'bestVendor', 'bestVendorPricingId', 'bestPriceAmountCached',
+  'bestPriceVendorIdCached', 'bestPriceUpdatedAt', 'bestPriceStatus',
+  'costPerUnit', 'costUnit', 'monthlyCost',
+];
+function stripOwnerPricing(mapped) {
+  const safe = { ...mapped, vendorPricing: [], unitPrices: null };
+  for (const field of OWNER_ONLY_PRODUCT_FIELDS) delete safe[field];
+  return safe;
+}
+
 function mapProduct(product, vendorPricing = []) {
   const inventoryOnHand = numberOrNull(product.inventory_on_hand);
   const lowStockThreshold = numberOrNull(product.low_stock_threshold);
@@ -1068,13 +1083,17 @@ router.get('/', async (req, res, next) => {
       pendingApprovals = parseInt(r.count);
     } catch { /* table not created yet */ }
 
+    const isAdminRequest = req.techRole === 'admin';
     res.json({
-      products: products.map(p => mapProduct(p, pricingMap[p.id] || [])),
+      products: products.map(p => {
+        const mapped = mapProduct(p, pricingMap[p.id] || []);
+        return isAdminRequest ? mapped : stripOwnerPricing(mapped);
+      }),
       stats: {
         total: parseInt(stats?.total || 0),
         priced: parseInt(stats?.priced || 0),
         needsPrice: parseInt(stats?.needs_price || 0),
-        avgPrice: stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
+        avgPrice: isAdminRequest && stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
         pendingApprovals,
       },
       categories: categories.map(c => ({ name: c.category, count: parseInt(c.count) })),

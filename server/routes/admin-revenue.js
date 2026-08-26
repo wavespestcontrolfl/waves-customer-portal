@@ -169,9 +169,28 @@ router.get('/overview', async (req, res, next) => {
 });
 
 // GET /api/admin/revenue/settings
+// The one technician-readable revenue endpoint (Settings → Operating Costs
+// renders these read-only). Non-admin callers get ONLY the overhead fields
+// that panel displays — the full company_financials row carries owner-only
+// pricing assumptions, loaded labor/vehicle costs, target margins, and the
+// vehicle tax election (codex P1).
+const TECH_VISIBLE_FINANCIAL_FIELDS = [
+  'ovh_insurance', 'ovh_software', 'ovh_office_payroll', 'ovh_rent',
+  'ovh_vehicle_fixed', 'ovh_other_ga', 'overhead_entered_at',
+];
 router.get('/settings', async (req, res, next) => {
   try {
     const settings = await db('company_financials').orderBy('effective_date', 'desc').first();
+    if (req.techRole !== 'admin') {
+      const projected = settings
+        ? Object.fromEntries(
+            TECH_VISIBLE_FINANCIAL_FIELDS
+              .filter((f) => f in settings)
+              .map((f) => [f, settings[f]])
+          )
+        : null;
+      return res.json({ settings: projected });
+    }
     res.json({ settings });
   } catch (err) { next(err); }
 });
