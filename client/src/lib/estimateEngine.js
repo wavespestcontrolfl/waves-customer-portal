@@ -3286,12 +3286,13 @@ export function calculateEstimate(inputs) {
   if (svcExclusion && !isCommercial && (exS + exM + exA) > 0) {
     const sc = exS * 37.50 + exM * 75 + exA * 150;
     let ep = Math.max(150, Math.round(sc));
-    let insp = exW ? 0 : 85;
+    // Static mirror of RODENT.inspection.fee ($75, owner 2026-08-26).
+    let insp = exW ? 0 : 75;
     const tp = otP(ep) + insp;
     let tl = 'Basic';
     if (exA > 0) tl = 'Advanced (Roof)';
     else if (exM > 0) tl = 'Moderate';
-    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $85 inspect' : '') + (exW ? ' (waived)' : '') });
+    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $75 inspect' : '') + (exW ? ' (waived)' : '') });
   }
 
   /* ═══════════ WAVEGUARD TOTALS ═══════════ */

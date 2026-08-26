@@ -4141,11 +4141,11 @@ function EstimateToolView() {
                       <Input k="exclAdvanced" type="number" min="0" />
                     </Field>{" "}
                   </div>{" "}
-                  <Field label="Waive Inspection ($85)?">
+                  <Field label="Waive Inspection ($75)?">
                     <Select
                       k="exclWaive"
                       options={[
-                        { value: "NO", label: "No — charge $85" },
+                        { value: "NO", label: "No — charge $75 (credits toward treatment)" },
                         { value: "YES", label: "Yes — booking work" },
                       ]}
                     />

@@ -166,10 +166,10 @@ describe('revised rodent pricing rules', () => {
       meshSoftLF: 20,
     });
 
-    expect(result.price).toBe(705); // 150 wire + 150 boxes + 280 mesh + 125 inspect
+    expect(result.price).toBe(655); // 150 wire + 150 boxes + 280 mesh + 75 inspect
     const components = result.lineItems.map(li => li.component);
     expect(components).toEqual(['wire_mesh_points', 'bird_boxes', 'linear_mesh', 'inspect_fee']);
-    expect(result.lineItems.map(li => li.price)).toEqual([150, 150, 280, 125]);
+    expect(result.lineItems.map(li => li.price)).toEqual([150, 150, 280, 75]);
     expect(result.lineItems.reduce((s, li) => s + li.price, 0)).toBe(result.price);
     // Every row keeps the exclusion identity for catalog/adoption/completion.
     expect(result.lineItems.every(li => li.service === 'rodent_exclusion')).toBe(true);

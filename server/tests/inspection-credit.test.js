@@ -167,19 +167,21 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
   });
 
   it('a rodent inspection credits its QUOTED fee, never the flat default (r23 P0, owner ruling 2026-08-04)', async () => {
-    // The public estimator has promised "$125 inspection (creditable for
-    // 14 days toward remediation work)" on tokenized estimates since before
-    // this feature — an in-flight estimate is a keep-working surface, so
-    // freezing the flat $75 onto a rodent offer would short a promise
-    // already sent.
+    // The public estimator prints the live inspection fee as "creditable
+    // for 14 days toward remediation work" on tokenized estimates — an
+    // in-flight estimate is a keep-working surface, so a rodent offer must
+    // freeze the fee the estimator quoted, not a divergent flat default.
+    // The quoted fee is $75 since the 2026-08-26 owner directive (down
+    // from $125) — the full fee still goes toward treatment on booking.
     const res = await recordInspectionCreditOffer({
       customerId: 'cust-1', scheduledServiceId: 'svc-1', serviceKey: 'rodent_inspection',
     });
     expect(res.recorded).toBe(true);
-    expect(res.amount).toBe(125); // RODENT.inspection.fee — the estimator's number
+    expect(res.amount).toBe(75); // RODENT.inspection.fee — the estimator's number
     expect(res.windowDays).toBe(14); // and rodent's own window
-    // The override is rodent-specific: everything else keeps the flat default.
-    expect(configuredCreditAmountForServiceKey('rodent_inspection')).toBe(125);
+    // The override path is rodent-specific: everything else uses the flat
+    // default (coincidentally also $75 today — the sourcing differs).
+    expect(configuredCreditAmountForServiceKey('rodent_inspection')).toBe(75);
     expect(configuredCreditAmountForServiceKey('wdo_inspection')).toBe(75);
     expect(configuredCreditAmountForServiceKey(null)).toBe(75);
   });

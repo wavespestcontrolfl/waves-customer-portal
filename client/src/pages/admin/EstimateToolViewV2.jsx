@@ -7786,11 +7786,11 @@ export default function EstimateToolViewV2({
                       <InputV2 k="exclMeshConcreteLF" type="number" min="0" />
                     </FieldV2>
                   </div>
-                  <FieldV2 label="Waive Inspection ($125)?">
+                  <FieldV2 label="Waive Inspection ($75)?">
                     <SelectV2
                       k="exclWaive"
                       options={[
-                        { value: "NO", label: "No — charge $125" },
+                        { value: "NO", label: "No — charge $75 (credits toward treatment)" },
                         { value: "YES", label: "Yes — booking work" },
                       ]}
                     />

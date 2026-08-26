@@ -1095,8 +1095,11 @@ const RODENT = {
   baitPerStationOverage: r(8),
 
   // ── Inspection / diagnosis ────────────────────────────────
+  // $75 (owner directive 2026-08-26, down from $125) — fully creditable
+  // toward approved treatment within the window, so a converting customer
+  // nets $0 for the inspection. inspection-credit.js reads this fee live.
   inspection: {
-    fee: r(125),
+    fee: r(75),
     creditableWithinDays: 14,
     waiveIfApprovedTotalOver: r(995),
   },
@@ -1247,7 +1250,8 @@ const RODENT = {
 
   // ── Exclusion V2 (unified mesh-point + bird-box + linear-mesh) ─
   exclusionV2: {
-    inspectionFee: r(125),
+    // Fallback only — live callers read RODENT.inspection.fee ($75).
+    inspectionFee: r(75),
 
     floors: {
       pointOnly: r(195),
@@ -1918,7 +1922,7 @@ const SPECIALTY = {
     constructionMultipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 },
     // Inspection fee — sourced from RODENT.inspection.fee in V2 callers.
     // Kept here for V1 backward compat; new callers should read RODENT.inspection.
-    inspectionFee: r(125),
+    inspectionFee: r(75),
     rodentGuarantee: r(199), // legacy reference; new gating in RODENT.guarantee
   },
   wdo: {
@@ -2211,9 +2215,9 @@ const CARD_HOLD = {
 // moves a promise already made. DB-authoritative via pricing_config key
 // `inspection_credit`. Per-service overrides still win where they exist:
 // rodent's creditableWithinDays (14) AND its amount — a rodent inspection
-// credits its quoted RODENT.inspection.fee ($125), because the public
-// estimator promises that fee as creditable on tokenized estimates
-// (owner ruling 2026-08-04).
+// credits its quoted RODENT.inspection.fee ($75 since 2026-08-26; was
+// $125), because the public estimator promises that fee as creditable on
+// tokenized estimates (owner ruling 2026-08-04).
 const INSPECTION_CREDIT = {
   amount: 75,
   creditableWithinDays: 30,

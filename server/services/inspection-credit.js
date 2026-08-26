@@ -64,12 +64,13 @@ function configuredCreditAmount() {
 /**
  * The credit amount for a specific service. Rodent inspections credit their
  * QUOTED fee, not the flat default (owner ruling 2026-08-04): the public
- * estimator has been promising "$125 inspection (creditable for 14 days
- * toward remediation work)" on tokenized estimates since before this
- * feature existed, and an in-flight estimate is a keep-working surface —
- * freezing the flat $75 onto a rodent offer would short a promise already
- * sent. pricing_config stays authoritative for both values via the
- * db-bridge overlay.
+ * estimator prints the live fee as "creditable for 14 days toward
+ * remediation work" on tokenized estimates, and an in-flight estimate is a
+ * keep-working surface — freezing a different amount onto a rodent offer
+ * would short a promise already sent. (The quoted fee is $75 since
+ * 2026-08-26; offers frozen at the earlier $125 keep what they promised.)
+ * pricing_config stays authoritative for both values via the db-bridge
+ * overlay.
  */
 function configuredCreditAmountForServiceKey(serviceKey) {
   try {
@@ -105,8 +106,8 @@ function isCreditableInspectionProfile(profile) {
 
 /**
  * Services whose credit promise exists INDEPENDENT of GATE_INSPECTION_CREDIT
- * (Codex #3178 r31 P0): the public estimator prints "$125 inspection
- * (creditable for 14 days toward remediation work)" on every rodent
+ * (Codex #3178 r31 P0): the public estimator prints the live inspection fee
+ * as "creditable for 14 days toward remediation work" on every rodent
  * tokenized estimate — a keep-working surface that predates this lane.
  * While the gate is dark these closeouts still write the durable marker
  * and freeze the offer, or a customer completing an in-flight estimate
