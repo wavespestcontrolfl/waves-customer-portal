@@ -117,7 +117,17 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
           })
           .orderBy('created_at', 'desc')
           .first('id', 'twilio_sid', 'status')
-          .catch(() => null);
+          .catch((err) => {
+            // On a transactional dbh Postgres has already ABORTED on this
+            // error; swallowing it here can let COMMIT silently resolve as a
+            // rollback when no later query trips 25P02 (hook #3495) — the
+            // caller would report success with nothing persisted. Rethrow so
+            // the outer catch returns FALSE and the webhook's fail-loud
+            // guard runs its locked fallback. Fire-and-forget callers keep
+            // the best-effort null.
+            if (dbh && dbh.isTransaction) throw err;
+            return null;
+          });
         const { isFailureStatus } = require('./twilio-failure-alerts');
         if (priorAskRow && !isFailureStatus(priorAskRow.status)) {
           updated += await dbh('recipient_optin')

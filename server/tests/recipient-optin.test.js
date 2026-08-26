@@ -75,4 +75,51 @@ describe('recipient double opt-in', () => {
     expect(applied.whereNotNull).toContain('dispatched_at');
     expect(applied.orWhere).toContainEqual({ status: 'declined' });
   });
+
+  // Marker-recovery sms_log lookup failure (hook #3495): on a TRANSACTIONAL
+  // dbh Postgres has already aborted the trx — swallowing the error and
+  // returning the count would let the webhook's fail-loud guard pass while
+  // COMMIT resolves as a rollback. Must return FALSE so the caller retries
+  // under its locked fallback. A fire-and-forget dbh keeps best-effort null.
+  function markerRecoveryQueues({ smsLogFails }) {
+    function chain({ rows = [], firstRejects = false } = {}) {
+      const q = {};
+      ['where', 'whereNot', 'whereRaw', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy'].forEach((m) => {
+        q[m] = jest.fn((arg) => {
+          if (typeof arg === 'function') arg.call(q);
+          return q;
+        });
+      });
+      q.update = jest.fn(async () => 1);
+      q.first = jest.fn(() => (firstRejects
+        ? Promise.reject(new Error('db down'))
+        : Promise.resolve(null)));
+      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return q;
+    }
+    return {
+      recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] })],
+      sms_log: [chain({ firstRejects: smsLogFails })],
+    };
+  }
+  function queuedDbh(queues) {
+    return jest.fn((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected table ${table}`);
+      return queue.shift();
+    });
+  }
+
+  test('marker-recovery sms_log error on a transactional dbh returns FALSE', async () => {
+    const dbh = queuedDbh(markerRecoveryQueues({ smsLogFails: true }));
+    dbh.isTransaction = true;
+    const updated = await markRecipientOptin('+19415550123', 'confirmed', { dbh });
+    expect(updated).toBe(false);
+  });
+
+  test('marker-recovery sms_log error on a fire-and-forget dbh stays best-effort (returns the count)', async () => {
+    const dbh = queuedDbh(markerRecoveryQueues({ smsLogFails: true }));
+    const updated = await markRecipientOptin('+19415550123', 'confirmed', { dbh });
+    expect(updated).toBe(1);
+  });
 });
