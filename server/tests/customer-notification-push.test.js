@@ -168,3 +168,84 @@ describe('customer notification native push dispatch', () => {
     expect(PushService.sendToCustomer).not.toHaveBeenCalled();
   });
 });
+
+// Admin bell role scoping (2026-08-25 recruiting lane): adminRoleOnly
+// trigger rows are hidden from non-admin readers on list, badge, AND the
+// read-marking mutations — a technician must not see, count, or mark read
+// a bell whose linked surface is requireAdmin.
+describe('admin feed role scoping (adminRoleOnly triggers)', () => {
+  function adminFeedQuery({ rows = [], count = '2', updated = 1 } = {}) {
+    const q = {};
+    for (const m of ['whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'limit']) {
+      q[m] = jest.fn(() => q);
+    }
+    q.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(q);
+      return q;
+    });
+    q.offset = jest.fn(async () => rows);
+    q.count = jest.fn(async () => [{ count }]);
+    q.update = jest.fn(async () => updated);
+    return q;
+  }
+
+  function setupAdminDb(opts) {
+    const q = adminFeedQuery(opts);
+    db.mockImplementation((table) => {
+      if (table === 'notifications') return q;
+      throw new Error(`Unexpected table ${table}`);
+    });
+    return q;
+  }
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('admin role reads the full feed — no metadata predicate applied', async () => {
+    const q = setupAdminDb({ rows: [{ id: 'n1' }] });
+    const rows = await NotificationService.getAdminNotifications(50, 0, { role: 'admin' });
+    expect(rows).toEqual([{ id: 'n1' }]);
+    expect(q.orWhereRaw).not.toHaveBeenCalled();
+  });
+
+  test('callers passing no role (internal jobs) also see the full feed', async () => {
+    const q = setupAdminDb({});
+    await NotificationService.getAdminNotifications(50, 0);
+    expect(q.orWhereRaw).not.toHaveBeenCalled();
+  });
+
+  test('technician list excludes adminRoleOnly trigger rows', async () => {
+    const q = setupAdminDb({ rows: [] });
+    await NotificationService.getAdminNotifications(50, 0, { role: 'technician' });
+    expect(q.whereNull).toHaveBeenCalledWith('metadata');
+    expect(q.orWhereRaw).toHaveBeenCalled();
+    const [sql, bindings] = q.orWhereRaw.mock.calls[0];
+    expect(sql).toContain("metadata->>'triggerKey'");
+    expect(bindings).toContain('new_job_application');
+  });
+
+  test('technician unread count applies the same predicate and parses the count', async () => {
+    const q = setupAdminDb({ count: '4' });
+    const count = await NotificationService.getAdminUnreadCount({ role: 'technician' });
+    expect(count).toBe(4);
+    expect(q.orWhereRaw).toHaveBeenCalled();
+    expect(q.whereNull).toHaveBeenCalledWith('read_at');
+  });
+
+  test('markReadAdmin as technician cannot touch a hidden row', async () => {
+    const q = setupAdminDb({ updated: 0 });
+    const ok = await NotificationService.markReadAdmin('n-hidden', { role: 'technician' });
+    expect(ok).toBe(false);
+    expect(q.orWhereRaw).toHaveBeenCalled();
+  });
+
+  test('markAllReadAdmin scopes by role; admin stays global', async () => {
+    const techQ = setupAdminDb({});
+    await NotificationService.markAllReadAdmin({ role: 'technician' });
+    expect(techQ.orWhereRaw).toHaveBeenCalled();
+
+    const adminQ = setupAdminDb({});
+    await NotificationService.markAllReadAdmin({ role: 'admin' });
+    expect(adminQ.orWhereRaw).not.toHaveBeenCalled();
+    expect(adminQ.update).toHaveBeenCalled();
+  });
+});
