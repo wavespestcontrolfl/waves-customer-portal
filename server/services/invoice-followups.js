@@ -354,6 +354,17 @@ async function scheduleForInvoice(invoiceId) {
         && existing.stopped_reason === 'invoice_voided'
         && !existing.stopped_by_admin_id;
       if (isSystemVoidStop) {
+        // Never re-arm under an ACTIVE payment plan (Codex #3493 r6): plan
+        // creation can't take ownership of a void-stopped row (its restamp
+        // deliberately skips stops with non-plan reasons), so a plan created
+        // between unvoid and resend leaves 'invoice_voided' in place — the
+        // plan owns collection, and reviving ordinary dunning here would dun
+        // a customer who is already paying. Same check as the INSERT path
+        // below, under the same invoice lock.
+        const planActive = await trx('payment_plans')
+          .where({ invoice_id: invoiceId, status: 'active' })
+          .first('id');
+        if (planActive) return existing;
         // A pre-void ADMIN PAUSE survives the void stop as the retained
         // paused_* fields (stopSequence never clears them) — restore the
         // PAUSE, not active dunning (Codex #3493 r3). Same conditional

@@ -58,7 +58,7 @@ function voidStoppedSeq(overrides = {}) {
   };
 }
 
-function setupDb({ seq, invoice, rearmed }) {
+function setupDb({ seq, invoice, rearmed, activePlan = null }) {
   const seqUpdate = jest.fn(() => ({ returning: jest.fn(async () => (rearmed ? [rearmed] : [])) }));
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.transaction = jest.fn(async (fn) => fn(db));
@@ -85,7 +85,7 @@ function setupDb({ seq, invoice, rearmed }) {
       return q;
     }
     if (table === 'payment_plans') {
-      const q = { where: jest.fn(() => q), first: jest.fn(async () => undefined) };
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => activePlan) };
       return q;
     }
     throw new Error(`unexpected table ${table}`);
@@ -169,6 +169,16 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     const payload = seqUpdate.mock.calls[0][0];
     expect(payload.status).toBe('completed');
     expect(payload.next_touch_at).toBeNull();
+  });
+
+  test('never re-arms under an ACTIVE payment plan — the plan owns collection (Codex #3493 r6)', async () => {
+    const seq = voidStoppedSeq();
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, activePlan: { id: 'plan-1' } });
+
+    const row = await scheduleForInvoice('inv-1');
+
+    expect(row).toBe(seq);
+    expect(seqUpdate).not.toHaveBeenCalled();
   });
 
   test('restores a retained pre-void ADMIN PAUSE instead of activating dunning (Codex #3493 r3)', async () => {
