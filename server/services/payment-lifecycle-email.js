@@ -332,9 +332,12 @@ function expiryStageFor(method, now = new Date()) {
   const rawYear = Number(method?.exp_year);
   const year = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
   if (!month || !year) return null;
-  const expirationEnd = new Date(year, month, 0, 23, 59, 59);
-  const daysUntil = Math.ceil((expirationEnd.getTime() - now.getTime()) / 86400000);
-  if (daysUntil < 0) return 'expired';
+  // Shared ET outlook (hook #3495 P1): local Date construction here was
+  // UTC on Railway, so stage boundaries missed the Eastern month end.
+  // Lazy require — autopay-notifications requires this module at load.
+  const { cardExpiryOutlook } = require('./autopay-notifications');
+  const { daysUntil, expired } = cardExpiryOutlook(year, month, now);
+  if (expired) return 'expired';
   if (daysUntil <= 7) return '7_day';
   if (daysUntil <= 30) return '30_day';
   return null;

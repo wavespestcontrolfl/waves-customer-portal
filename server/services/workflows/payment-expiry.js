@@ -12,8 +12,10 @@ class PaymentExpiry {
    */
   async checkExpiringCards() {
     const now = new Date();
-    const thisMonth = now.getMonth() + 1; // 1-based
-    const thisYear = now.getFullYear();
+    // ET calendar month, not the server's UTC (hook P1): getMonth() on
+    // Railway rolls at 8/7pm ET, so a final-evening run would scan the
+    // NEXT two months and skip the current ET month entirely.
+    const [thisYear, thisMonth] = etDateString(now).split('-').map(Number);
 
     // Next month (handle December → January rollover)
     const nextMonth = thisMonth === 12 ? 1 : thisMonth + 1;

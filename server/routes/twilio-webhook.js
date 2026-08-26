@@ -1352,7 +1352,13 @@ router.post('/status', async (req, res) => {
               // r14: 'twilio_send_21610:<iso>' embeds the attempt time).
               const ownerAt = await require('../services/messaging/suppression-ownership')
                 .standingVerdictTime(supRow, { dbh: trx, excludeSid: MessageSid });
-              if (ownerAt && sentAt && ownerAt > new Date(sentAt)) {
+              // An UNDATED callback (no sms_log row) cannot supersede a
+              // TIMESTAMPED standing owner either (hook P1) — same rule as
+              // the clearance check above: without its own send time this
+              // callback cannot prove it is newer, and proceeding would let
+              // its recheck clear the newer verdict via an intervening
+              // START. Defer keeps the phone suppressed — the safe side.
+              if (ownerAt && (!sentAt || ownerAt > new Date(sentAt))) {
                 outcome.deferred = 'newer-callback-owns-row'; return;
               }
               // recordSuppression resolves { ok: false } on a swallowed DB
