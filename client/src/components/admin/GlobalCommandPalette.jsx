@@ -144,6 +144,14 @@ function detectContext(pathname, search = "") {
   for (const [route, ctx] of routes) {
     if (pathname.startsWith(route)) return ctx;
   }
+  // Fallback context: the IB rejects `dashboard` for non-admin roles
+  // (server pins them to the tech toolset anyway), so unmapped pages —
+  // Settings, Reports, Equipment, Knowledge, Staff — must not send it for
+  // a technician or the palette 403s on every one of those pages.
+  try {
+    const role = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role;
+    if (role && role !== "admin") return "customers";
+  } catch { /* fall through to dashboard */ }
   return "dashboard";
 }
 

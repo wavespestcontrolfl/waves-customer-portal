@@ -1,11 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { VEHICLE_METHODS } = require('../services/pnl-report');
 
-router.use(adminAuthenticate, requireAdmin);
+// 2026-08-25 role lockdown: revenue is owner-only, with ONE technician
+// exemption — GET /settings, which the tech-visible Settings page's
+// Operating Costs tab reads to populate its (already read-only for
+// non-admins) inputs. All other reads and every write require admin.
+router.use(adminAuthenticate, requireTechOrAdmin);
+router.use((req, res, next) => (
+  req.method === 'GET' && req.path === '/settings' ? next() : requireAdmin(req, res, next)
+));
 
 function getPeriodDates(period, dateStr) {
   const d = dateStr ? parseETDateTime(dateStr + 'T12:00') : new Date();

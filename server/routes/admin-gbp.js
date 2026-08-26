@@ -7,10 +7,13 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-// 2026-08-25 role lockdown: GBP mutations (profile edits, Google pushes)
-// are owner-only. Reads stay staff-wide — the tech-visible Settings page
-// fetches /admin/gbp/locations for OAuth status display.
-router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
+// 2026-08-25 role lockdown: the GBP workspace is owner-only. The ONLY
+// technician exemption is GET /locations — the tech-visible Settings page
+// reads it for OAuth status display. Every other read (per-location detail,
+// updates, notifications) and every mutation requires the admin role.
+router.use((req, res, next) => (
+  req.method === 'GET' && req.path === '/locations' ? next() : requireAdmin(req, res, next)
+));
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 

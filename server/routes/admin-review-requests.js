@@ -1,10 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: the review-request queue (reads return customer
+// name/phone) is owner-only. The ONLY technician exemption is POST /trigger
+// — the field completion flow on the tech-visible Dispatch surface fires it.
+router.use((req, res, next) => (
+  req.method === 'POST' && req.path === '/trigger' ? next() : requireAdmin(req, res, next)
+));
 
 // GET /stats
 router.get('/stats', async (req, res, next) => {
