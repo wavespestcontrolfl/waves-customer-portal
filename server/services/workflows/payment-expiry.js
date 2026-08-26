@@ -97,6 +97,12 @@ class PaymentExpiry {
                      WHEN NULLIF(BTRIM(pp.exp_month), '') ~ '^[0-9]{1,2}$'
                        AND NULLIF(BTRIM(pp.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
                      THEN (
+                       -- month 1-12 guard mirrors autopayActivePredicate /
+                       -- isExpiredCardMethod (codex r5 P1): exp_month='99'
+                       -- passes the regex and the >= comparison, but
+                       -- charge() rejects it and falls back
+                       NULLIF(BTRIM(pp.exp_month), '')::integer BETWEEN 1 AND 12
+                       AND (
                        (CASE WHEN NULLIF(BTRIM(pp.exp_year), '')::integer < 100
                              THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
                              ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) > ?
@@ -104,6 +110,7 @@ class PaymentExpiry {
                                  THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
                                  ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) = ?
                            AND NULLIF(BTRIM(pp.exp_month), '')::integer >= ?)
+                       )
                      )
                      ELSE FALSE
                    END
@@ -116,19 +123,31 @@ class PaymentExpiry {
                AND pm2.processor = 'stripe' AND pm2.is_default = true
                AND pm2.autopay_enabled = true
                AND pm2.stripe_payment_method_id IS NOT NULL
-               -- only another CHARGEABLE CARD default can outrank this one —
-               -- a newer bank/disabled/shell default must not hide the real
-               -- card's warning (hook P1 ×2) — and "chargeable" means the FULL
-               -- charge-time predicate, expiry included: charge() skips an
-               -- expired or malformed-expiry row, so such a newer default
-               -- must not silence the warning for the older valid card that
-               -- will actually be charged (codex r4 P1)
-               AND (pm2.method_type IS NULL
+               -- only another CHARGEABLE default can outrank this one —
+               -- "chargeable" means the FULL charge-time predicate (codex
+               -- r4+r5 P1s), because charge() walks the same defaults in
+               -- this same order and picks the first eligible row: a newer
+               -- HEALTHY BANK default outranks (the customer is charged via
+               -- ACH — the card notice is noise, same rule as the pointer
+               -- branch), while a disabled/shell/blocked-bank/expired/
+               -- malformed-expiry default does NOT (charge() skips it, so
+               -- the older valid card's warning must fire)
+               AND (
+                 (
+                   pm2.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+                   AND (c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active')
+                   AND (pm2.ach_status IS NULL
+                        OR pm2.ach_status NOT IN ('pending_verification', 'verification_failed'))
+                 )
+                 OR (
+                   (pm2.method_type IS NULL
                     OR pm2.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
-               AND CASE
+                   AND CASE
                      WHEN NULLIF(BTRIM(pm2.exp_month), '') ~ '^[0-9]{1,2}$'
                        AND NULLIF(BTRIM(pm2.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
                      THEN (
+                       NULLIF(BTRIM(pm2.exp_month), '')::integer BETWEEN 1 AND 12
+                       AND (
                        (CASE WHEN NULLIF(BTRIM(pm2.exp_year), '')::integer < 100
                              THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
                              ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) > ?
@@ -136,9 +155,12 @@ class PaymentExpiry {
                                  THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
                                  ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) = ?
                            AND NULLIF(BTRIM(pm2.exp_month), '')::integer >= ?)
+                       )
                      )
                      ELSE FALSE
                    END
+                 )
+               )
                AND (pm2.updated_at > pm.updated_at
                     OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
           )

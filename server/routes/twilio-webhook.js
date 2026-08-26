@@ -1362,6 +1362,28 @@ router.post('/status', async (req, res) => {
                     .onConflict('customer_id')
                     .merge({ sms_enabled: false });
                 }
+              } else {
+                // Early callback raced the sms_log insert (Twilio can reject
+                // at send time, before our row commits) — the SID lookup
+                // found nothing, so resolve the holder by primary-phone
+                // OWNERSHIP instead (codex r5 P2). Same guard semantics: a
+                // customer whose OWN phone carrier-opted-out gets an honest
+                // sms_enabled=false; a contact's number that isn't anyone's
+                // primary phone flips nothing (the phone-keyed suppression
+                // row above already blocks it either way).
+                const ownDigits = String(optOutPhone).replace(/\D/g, '').slice(-10);
+                if (ownDigits.length === 10) {
+                  const holders = await trx('customers')
+                    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${ownDigits}`])
+                    .whereNull('deleted_at')
+                    .select('id');
+                  for (const holder of holders) {
+                    await trx('notification_prefs')
+                      .insert({ customer_id: holder.id, sms_enabled: false })
+                      .onConflict('customer_id')
+                      .merge({ sms_enabled: false });
+                  }
+                }
               }
               outcome.applied = true;
             });
