@@ -1437,13 +1437,113 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
  */
 async function releaseExpiredReservations() {
   const now = new Date();
+  // Only uncommitted holds (customer_id NULL — the module's own hold
+  // discriminator) are deletable. A row that carries a customer with a stale
+  // reservation_expires_at is a COMMITTED booking whose commit didn't clear
+  // the timestamp (commitReservation clears it in the same UPDATE, but any
+  // other writer — or a partial legacy row — can leave it behind): deleting
+  // it here would silently destroy a real visit. Rescue it instead by
+  // clearing the stray timestamp, and say so loudly.
+  // Rescue runs per-date under the SAME occupancy advisory lock the booking
+  // paths take (hook r2 P1): clearing the timestamp turns an invisible
+  // expired row back into active occupancy, and doing that outside the lock
+  // races a booking transaction that already passed its conflict check —
+  // the probe below could run before that booking commits and miss the
+  // overlap. Lock → re-verify → clear → probe, all in one transaction per
+  // date, so the rescue and every booking serialize on the date.
+  const { acquireOccupancyLock } = require('./scheduling/occupancy');
+  const expiredCommitted = await db('scheduled_services')
+    .where('reservation_expires_at', '<', now)
+    .whereNotNull('customer_id')
+    .select('id', 'scheduled_date');
+  const byDate = new Map();
+  for (const r of expiredCommitted) {
+    const d = typeof r.scheduled_date === 'string'
+      ? r.scheduled_date.slice(0, 10)
+      : (r.scheduled_date ? new Date(r.scheduled_date).toISOString().slice(0, 10) : null);
+    if (!byDate.has(d)) byDate.set(d, []);
+    byDate.get(d).push(r.id);
+  }
+  let rescued = 0;
+  const collisions = [];
+  for (const dateStr of [...byDate.keys()].sort()) {
+    try {
+      // Results accumulate LOCALLY and merge only after commit (hook r3
+      // P1): a later probe throwing rolls the rescue back, and the outer
+      // state must not report rows Postgres never kept.
+      const { txRescued, txCollisions } = await db.transaction(async (trx) => {
+        if (dateStr) await acquireOccupancyLock(trx, dateStr);
+        const rows = await trx('scheduled_services')
+          .whereIn('id', byDate.get(dateStr))
+          .where('reservation_expires_at', '<', now)
+          .whereNotNull('customer_id')
+          // Re-verify the date UNDER the lock (hook r3 P1): a concurrent
+          // reschedule can move the row after the unlocked snapshot; the
+          // rescue must never reactivate occupancy on a date whose lock it
+          // does not hold — a moved row is left for the next 15-min tick.
+          .modify((qb) => {
+            if (dateStr) qb.whereRaw('scheduled_date::date = ?', [dateStr]);
+            else qb.whereNull('scheduled_date');
+          })
+          .update({ reservation_expires_at: null, updated_at: now })
+          .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
+        const localCollisions = [];
+        for (const row of rows) {
+          if (!row.scheduled_date || !row.window_start) continue;
+          // findConflictingVisits requires windowEnd — derive it from the
+          // duration when the row has none (legacy admin edits).
+          const ws = String(row.window_start).slice(0, 8);
+          let we = row.window_end ? String(row.window_end).slice(0, 8) : null;
+          if (!we) {
+            const [h, m] = ws.split(':').map(Number);
+            const end = h * 60 + (m || 0) + (Number(row.estimated_duration_minutes) || 60);
+            we = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00`;
+          }
+          const clash = await findConflictingVisits({
+            db: trx,
+            date: dateStr,
+            windowStart: ws,
+            windowEnd: we,
+            excludeServiceIds: [row.id],
+            includeHolds: false,
+          });
+          if (Array.isArray(clash) && clash.length) {
+            localCollisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
+          }
+        }
+        return { txRescued: rows.length, txCollisions: localCollisions };
+      });
+      rescued += txRescued;
+      collisions.push(...txCollisions);
+    } catch (rescueErr) {
+      logger.error(`[slot-reservation] rescue transaction failed for ${dateStr}: ${rescueErr.message}`);
+    }
+  }
+  if (rescued > 0) {
+    logger.warn(`[slot-reservation] cleared stale reservation_expires_at on ${rescued} COMMITTED visit(s) — a committed row is never deleted by this sweep`);
+  }
+  // Bells fire post-commit — a notify failure must not roll back a rescue.
+  for (const c of collisions) {
+    logger.warn(`[slot-reservation] rescued visit ${c.id} now COLLIDES with ${c.conflicts.length} other visit(s) booked while it was expired`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'schedule',
+        'Rescued reservation collides with a newer booking',
+        `Visit ${c.id} was rescued from the expired-reservation sweep, but another booking took its window while it looked dead. One of the two needs a new slot.`,
+        { bell: true, metadata: { scheduledServiceId: c.id, conflicts: c.conflicts } },
+      );
+    } catch (notifyErr) {
+      logger.error(`[slot-reservation] rescue-collision notify failed: ${notifyErr.message}`);
+    }
+  }
   const released = await db('scheduled_services')
     .where('reservation_expires_at', '<', now)
+    .whereNull('customer_id')
     .del();
   if (released > 0) {
     logger.info(`[slot-reservation] released ${released} expired reservation(s)`);
   }
-  return { released };
+  return { released, rescued };
 }
 
 module.exports = {
