@@ -14,7 +14,12 @@ function isPaused(customer, now = new Date()) {
 function isExpiredCardMethod(method, now = new Date()) {
   if (!method || isBankMethodType(method.method_type)) return false;
   const expMonth = Number(method.exp_month);
-  const expYear = Number(method.exp_year);
+  // Legacy rows store 2-digit expiry years — normalize exactly like the
+  // charge path does (stripe.js normalizeLegacyExpiry), or a valid '12/32'
+  // card reads as year 32 and eligibility refuses a method collection
+  // would happily charge (dashboard says unchargeable, charge succeeds).
+  const rawYear = Number(method.exp_year);
+  const expYear = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
   if (!Number.isInteger(expMonth) || expMonth < 1 || expMonth > 12 || !Number.isInteger(expYear)) {
     return true;
   }
@@ -22,13 +27,22 @@ function isExpiredCardMethod(method, now = new Date()) {
   return expYear < currentYear || (expYear === currentYear && expMonth < currentMonth);
 }
 
+// Bank rows the charge path refuses regardless of customers.ach_status —
+// the METHOD's own verification state (billing-v2 writes these on the
+// microdeposit flow). Mirrored by methodEligibleForCharge in stripe.js and
+// by the SQL predicate below; the three must agree or billing-health calls
+// a method "chargeable" that collection refuses at charge time.
+const BLOCKED_PM_ACH_STATUSES = ['pending_verification', 'verification_failed'];
+
 function isChargeableAutopayMethod(method, now = new Date()) {
   return !!method
     && method.processor === 'stripe'
     && method.is_default === true
     && method.autopay_enabled === true
     && !!method.stripe_payment_method_id
-    && !isExpiredCardMethod(method, now);
+    && !isExpiredCardMethod(method, now)
+    && !(isBankMethodType(method.method_type)
+      && BLOCKED_PM_ACH_STATUSES.includes(method.ach_status));
 }
 
 async function getChargeableAutopayMethod(customer, knex) {
@@ -44,7 +58,7 @@ async function getChargeableAutopayMethod(customer, knex) {
       })
       .first(
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
-        'is_default', 'autopay_enabled', 'exp_month', 'exp_year'
+        'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
       );
   } catch {
     return null;
@@ -90,16 +104,35 @@ function autopayActivePredicate(now = new Date()) {
         AND pm.autopay_enabled = true
         AND pm.stripe_payment_method_id IS NOT NULL
         AND (
-          pm.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+          (
+            pm.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+            -- The METHOD's own verification state blocks a bank row exactly
+            -- like the charge path (stripe.js methodEligibleForCharge) —
+            -- without this a pending/failed-verification bank row counts as
+            -- "chargeable" on billing-health while collection refuses it.
+            AND (pm.ach_status IS NULL
+              OR pm.ach_status NOT IN ('pending_verification', 'verification_failed'))
+          )
+          -- Card expiry accepts legacy 2-digit years (+2000), mirroring the
+          -- charge path's normalizeLegacyExpiry — a '12/32' card is valid.
+          -- The casts live inside CASE THEN, which Postgres evaluates only
+          -- after the WHEN regexes pass (unlike AND, whose conjuncts may
+          -- reorder), so a non-numeric value can never reach ::integer.
           OR CASE
             WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
-              AND NULLIF(BTRIM(pm.exp_year), '') ~ '^[0-9]{4}$'
+              AND NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
             THEN (
               NULLIF(BTRIM(pm.exp_month), '')::integer BETWEEN 1 AND 12
               AND (
-                NULLIF(BTRIM(pm.exp_year), '')::integer > EXTRACT(YEAR FROM et.today)
+                (CASE WHEN NULLIF(BTRIM(pm.exp_year), '')::integer < 100
+                      THEN NULLIF(BTRIM(pm.exp_year), '')::integer + 2000
+                      ELSE NULLIF(BTRIM(pm.exp_year), '')::integer END)
+                  > EXTRACT(YEAR FROM et.today)
                 OR (
-                  NULLIF(BTRIM(pm.exp_year), '')::integer = EXTRACT(YEAR FROM et.today)
+                  (CASE WHEN NULLIF(BTRIM(pm.exp_year), '')::integer < 100
+                        THEN NULLIF(BTRIM(pm.exp_year), '')::integer + 2000
+                        ELSE NULLIF(BTRIM(pm.exp_year), '')::integer END)
+                    = EXTRACT(YEAR FROM et.today)
                   AND NULLIF(BTRIM(pm.exp_month), '')::integer >= EXTRACT(MONTH FROM et.today)
                 )
               )

@@ -1223,6 +1223,59 @@ router.post('/status', async (req, res) => {
           link: '/admin/communications',
         });
 
+        // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
+        // STOP we never saw inbound (sent to a different number on the
+        // Messaging Service, a pre-portal opt-out, a carrier block). Without
+        // this branch the number stays textable on every surface and every
+        // lane keeps burning sends against it forever. Feed the canonical
+        // suppression store + flip prefs, mirroring the inbound STOP handler
+        // above; fail LOUD like dropped-call-sms's 21610 path — a swallowed
+        // write means other workflows keep texting an opted-out number.
+        if (String(ErrorCode) === '21610') {
+          const optOutPhone = normalizeE164(To) || To;
+          try {
+            // recordSuppression resolves { ok: false } on a swallowed DB
+            // error — it does NOT reject — so check the result, not the catch.
+            const result = await recordSuppression({
+              phone: optOutPhone,
+              reason: 'opt_out',
+              source: 'twilio_status_21610',
+            });
+            if (result?.ok === false) {
+              throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
+            }
+            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
+          } catch (suppressErr) {
+            logger.warn(`[twilio-status] 21610 opt-out suppression write FAILED for ${maskPhone(optOutPhone)}: ${suppressErr.code || suppressErr.name || 'db_error'}`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'Opt-out suppression write failed',
+                `A Twilio 21610 opt-out for ${maskPhone(optOutPhone)} could not be saved to the suppression list (delivery status callback). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
+                // bell: true — compliance backstop must ring even when the
+                // bell policy would suppress the 'system' category.
+                { bell: true, metadata: { source: 'twilio_status_21610', error: suppressErr.code || suppressErr.name || 'db_error' } },
+              );
+            } catch (notifyErr) {
+              logger.error(`[twilio-status] 21610 suppression-failure notify also failed: ${notifyErr.message}`);
+            }
+          }
+          // Prefs flip is best-effort and separate — the suppression row is
+          // the enforcement; sms_enabled keeps the admin UI honest (same
+          // split as the STOP handler).
+          try {
+            const logRow = await db('sms_log').where({ twilio_sid: MessageSid }).first('customer_id');
+            if (logRow?.customer_id) {
+              await db('notification_prefs')
+                .insert({ customer_id: logRow.customer_id, sms_enabled: false })
+                .onConflict('customer_id')
+                .merge({ sms_enabled: false });
+            }
+          } catch (prefsErr) {
+            logger.error(`[twilio-status] 21610 prefs flip failed: ${prefsErr.message}`);
+          }
+        }
+
         // Appointment-text fallback: if this undelivered message was an appointment
         // notification (confirmation / 72h / 24h / en-route), learn the landline on
         // a 30006 bounce and send the email version so the customer still gets it.

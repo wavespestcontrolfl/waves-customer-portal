@@ -83,16 +83,24 @@ describe('autopay eligibility', () => {
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
 
     const monthGuard = "NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'";
-    const yearGuard = "NULLIF(BTRIM(pm.exp_year), '') ~ '^[0-9]{4}$'";
+    const yearGuard = "NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'";
     const monthCast = "NULLIF(BTRIM(pm.exp_month), '')::integer";
     const yearCast = "NULLIF(BTRIM(pm.exp_year), '')::integer";
+    // Legacy 2-digit years normalize (+2000) inside the same guarded CASE,
+    // mirroring the charge path's normalizeLegacyExpiry.
+    const normalizedYear = `(CASE WHEN ${yearCast} < 100 THEN ${yearCast} + 2000 ELSE ${yearCast} END)`;
 
     expect(normalizedSql).toContain(`CASE WHEN ${monthGuard} AND ${yearGuard} THEN (`);
     expect(normalizedSql).toContain(`${monthCast} BETWEEN 1 AND 12`);
     expect(normalizedSql).toContain('FROM (VALUES (?::date)) AS et(today)');
     expect(normalizedSql).toContain('c.autopay_paused_until >= et.today');
-    expect(normalizedSql).toContain(`${yearCast} > EXTRACT(YEAR FROM et.today)`);
+    expect(normalizedSql).toContain(`${normalizedYear} > EXTRACT(YEAR FROM et.today)`);
     expect(normalizedSql).toContain(`${monthCast} >= EXTRACT(MONTH FROM et.today)`);
+    // Bank rows blocked by the METHOD's own verification state, exactly like
+    // the charge path (stripe.js methodEligibleForCharge).
+    expect(normalizedSql).toContain(
+      "pm.ach_status NOT IN ('pending_verification', 'verification_failed')",
+    );
     expect(normalizedSql).toContain('ELSE FALSE END');
     expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
     expect(normalizedSql.indexOf(yearGuard)).toBeLessThan(normalizedSql.indexOf(yearCast));
@@ -172,17 +180,21 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('blank-year', true, NULL::date, NULL::text),
           ('invalid-month', true, NULL::date, NULL::text),
           ('invalid-year', true, NULL::date, NULL::text),
-          ('valid-card', true, NULL::date, NULL::text)
+          ('valid-card', true, NULL::date, NULL::text),
+          ('legacy-two-digit', true, NULL::date, NULL::text),
+          ('pending-bank', true, NULL::date, NULL::text)
       ), payment_methods(
         customer_id, processor, is_default, autopay_enabled,
-        stripe_payment_method_id, method_type, exp_month, exp_year
+        stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
       ) AS (
         VALUES
-          ('blank-month', 'stripe', true, true, 'pm_blank_month', 'card', '  ', '2099'),
-          ('blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    '),
-          ('invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099'),
-          ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope'),
-          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099')
+          ('blank-month', 'stripe', true, true, 'pm_blank_month', 'card', '  ', '2099', NULL::text),
+          ('blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    ', NULL::text),
+          ('invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099', NULL::text),
+          ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope', NULL::text),
+          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099', NULL::text),
+          ('legacy-two-digit', 'stripe', true, true, 'pm_legacy', 'card', '12', '32', NULL::text),
+          ('pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification')
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -195,6 +207,10 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
       'invalid-month': false,
       'invalid-year': false,
       'valid-card': true,
+      // '12'/'32' = Dec 2032 — normalized like the charge path.
+      'legacy-two-digit': true,
+      // The method's own verification state blocks a bank row.
+      'pending-bank': false,
     });
   });
 
@@ -208,11 +224,11 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('january-card', true, NULL::date, NULL::text)
       ), payment_methods(
         customer_id, processor, is_default, autopay_enabled,
-        stripe_payment_method_id, method_type, exp_month, exp_year
+        stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
       ) AS (
         VALUES
-          ('february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026'),
-          ('january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026')
+          ('february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026', NULL::text),
+          ('january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026', NULL::text)
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -224,5 +240,24 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
       'february-card': true,
       'january-card': false,
     });
+  });
+});
+
+describe('charge-path parity (cron-gap audit B4)', () => {
+  test('legacy 2-digit expiry years normalize like the charge path', () => {
+    // A '12/32' card is valid until Dec 2032 — the old predicate read year
+    // 32 and refused a method collection would charge.
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' })).toBe(false);
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '02' })).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' })).toBe(true);
+  });
+
+  test('bank rows in pending/failed verification are not chargeable; verified and NULL are', () => {
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'pending_verification' })).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verification_failed' })).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verified' })).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableAch })).toBe(true);
+    // Cards are untouched by ach_status.
+    expect(isChargeableAutopayMethod({ ...chargeableCard, ach_status: 'pending_verification' })).toBe(true);
   });
 });

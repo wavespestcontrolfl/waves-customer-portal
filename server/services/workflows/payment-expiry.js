@@ -18,14 +18,40 @@ class PaymentExpiry {
     const nextMonth = thisMonth === 12 ? 1 : thisMonth + 1;
     const nextYear = thisMonth === 12 ? thisYear + 1 : thisYear;
 
-    // Query payment methods expiring this month or next
-    const expiringCards = await db('payment_methods')
+    // Query payment methods expiring this month or next.
+    // Scope: live Stripe rows for customers we still serve — the unfiltered
+    // version texted churned/deleted customers about dead cards (and legacy
+    // Square rows). Former stages are excluded even when the active flag is
+    // stale; a NULL pipeline_stage (legacy rows) stays included. exp_* are
+    // varchar and legacy rows hold 2-digit years — compare via guarded
+    // casts (CASE evaluates THEN only after the WHEN regexes pass, so a
+    // non-numeric value never reaches ::integer), normalizing years < 100
+    // by +2000 like the charge path does.
+    const { FORMER_CUSTOMER_STAGES } = require('../customer-stages');
+    const expiringCards = await db('payment_methods as pm')
+      .join('customers as c', 'pm.customer_id', 'c.id')
+      .where('pm.processor', 'stripe')
+      .where('c.active', true)
+      .whereNull('c.deleted_at')
       .where(function () {
-        this.where({ exp_month: thisMonth, exp_year: thisYear })
-          .orWhere({ exp_month: nextMonth, exp_year: nextYear });
+        this.whereNull('c.pipeline_stage')
+          .orWhereNotIn('c.pipeline_stage', [...FORMER_CUSTOMER_STAGES, 'lost']);
       })
-      .whereNotNull('customer_id')
-      .select('id', 'customer_id', 'last_four', 'exp_month', 'exp_year', 'card_brand');
+      .whereRaw(
+        `CASE
+           WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
+             AND NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+           THEN (
+             (CASE WHEN NULLIF(BTRIM(pm.exp_year), '')::integer < 100
+                   THEN NULLIF(BTRIM(pm.exp_year), '')::integer + 2000
+                   ELSE NULLIF(BTRIM(pm.exp_year), '')::integer END,
+              NULLIF(BTRIM(pm.exp_month), '')::integer) IN ((?, ?), (?, ?))
+           )
+           ELSE FALSE
+         END`,
+        [thisYear, thisMonth, nextYear, nextMonth],
+      )
+      .select('pm.id', 'pm.customer_id', 'pm.last_four', 'pm.exp_month', 'pm.exp_year', 'pm.card_brand');
 
     let notified = 0;
 
