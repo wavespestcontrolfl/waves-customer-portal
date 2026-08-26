@@ -10353,6 +10353,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               unit_price: secureSetupFee.amount,
               amount: secureSetupFee.amount,
               category: 'Setup fee',
+              // Durable single-use auto-charge marker (see allowance block).
+              secure_claim: true,
             }]
             : undefined,
           // Backfill: createFromService otherwise rolls an accepted
@@ -10418,6 +10420,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               unit_price: secureSetupFee.amount,
               amount: secureSetupFee.amount,
               category: 'Setup fee',
+              // Durable single-use marker — see the sibling mint above.
+              secure_claim: true,
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
@@ -11070,22 +11074,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         wizardFrozenFeeLinked = true;
       }
       let setupFeeAllowance = 0;
-      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)) {
-        try {
-          const rawLines = invoice.line_items;
-          const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
-          const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
-            /one-time setup fee/i.test(String(li?.description || ''))
-            && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
-          ));
-          if (setupLine) {
-            const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
-            // Cap at the real fee: an office-inflated setup line must not
-            // widen the allowance.
-            setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
-          }
-        } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
-      }
+      try {
+        const rawLines = invoice.line_items;
+        const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+        const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+          /one-time setup fee/i.test(String(li?.description || ''))
+          && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
+        ));
+        // The secure_claim marker on the mint's own line is PROVENANCE
+        // ONLY (forensics + a future immutable-claim fix) and is
+        // deliberately NOT consumed for authorization: invoice line JSON
+        // is editable through the admin update path (unknown fields
+        // survive), so ANY authorization derived from it — predicate or
+        // ceiling — could be widened by an edited line once the frozen
+        // estimate evidence is gone. A crash between the claim retirement
+        // and this rail therefore routes the resumed charge to MANUAL
+        // REVIEW (bounded, money-safe); auto-pay across that window needs
+        // immutable server-side claim storage, a scoped follow-up.
+        if (perApplicationBilling
+          && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)
+          && setupLine) {
+          const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+          // Cap at the real fee: an office-inflated setup line must not
+          // widen the allowance.
+          setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
+        }
+      } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
       const capCeiling = acceptedPerVisit != null
         ? acceptedPerVisit + setupFeeAllowance
         : null;

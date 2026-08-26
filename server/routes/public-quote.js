@@ -1475,11 +1475,47 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // just-booked customer can still read as non-member here. A
           // revived draft must never be able to invoice a SECOND fee while
           // the first is anywhere in flight.
-          const queued = await q('scheduled_services')
-            .where({ customer_id: customerId })
-            .whereNotNull('pending_setup_fee')
-            .whereNot('pending_setup_fee', 0)
-            .first('id');
+          // A claim only counts while it can still be CONSUMED: the claim
+          // row itself is live, or a non-cancelled series child can still
+          // complete and mint it. A fully-cancelled wizard series would
+          // otherwise waive this customer's setup fee on every future plan
+          // forever (Codex #3489 follow-up).
+          const queued = await q('scheduled_services as claim')
+            .where('claim.customer_id', customerId)
+            .whereNotNull('claim.pending_setup_fee')
+            .whereNot('claim.pending_setup_fee', 0)
+            .where(function consumable() {
+              // A NEGATIVE stamp is completion's in-progress/crash-recovery
+                    // marker — resume may still mint or heal it regardless of the
+                    // row's status, so it ALWAYS suppresses a second claim. A
+                    // positive claim consumes only while its row can still
+                    // complete; a completed/skipped/terminal parent's claim is
+                    // recoverable only through a live child (the EXISTS arm).
+                    this.where('claim.pending_setup_fee', '<', 0)
+                      .orWhereIn('claim.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+                // ...or while a PENDING completion attempt can still
+                // resume and mint it: a worker can commit the parent
+                // 'completed' and die before the claim step, leaving a
+                // positive claim that the resume will consume (Codex #3500
+                // r3) — a second quote must keep waiving until that attempt
+                // resolves.
+                .orWhereExists(function pendingCompletion() {
+                  this.select(q.raw('1'))
+                    .from('service_completion_attempts as sca')
+                    .whereIn('sca.status', ['pending', 'side_effects_pending', 'side_effects_running'])
+                    .whereRaw('(sca.service_id = claim.id OR sca.service_id IN (SELECT id FROM scheduled_services WHERE recurring_parent_id = claim.id))');
+                })
+                .orWhereExists(function liveChild() {
+                  this.select(q.raw('1'))
+                    .from('scheduled_services as child')
+                    .whereRaw('child.recurring_parent_id = claim.id')
+                    // Only statuses that can still COMPLETE consume a claim
+                    // — completed/skipped/no_show children are done and
+                    // cannot mint it (Codex #3500).
+                    .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+                });
+            })
+            .first('claim.id');
           feeAlreadyQueued = !!queued;
         }
         // Persist the WAIVER too, not just the fee: a waived draft carries
@@ -1660,16 +1696,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // or a wizard draft already promoted to sent/viewed — keeps the
             // hard block so wizard data never clobbers a working estimate.
             if (shouldRefreshWizardDraft(duplicateBlock)) {
-              await trx('estimates')
+              // Re-validate under the row lock, not the pre-lock snapshot:
+              // staff can promote or archive this draft between the
+              // duplicate read and FOR UPDATE. A promoted/archived row must
+              // not mint a handoff — the guarded update would affect zero
+              // rows (or overwrite an archived row that stays archived)
+              // while draftEstimateId still disclosed a fee and minted a
+              // token whose live shape confirmation then rejects (Codex
+              // #3489 follow-up). draftEstimateId is set ONLY when the
+              // locked row is still the wizard's own live draft and the
+              // update actually landed.
+              const lockedDup = await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId })
                 .forUpdate()
-                .first('id');
-              await applySetupFeeQuote(trx);
-              await trx('estimates')
-                .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
-                .update({ ...estFields, updated_at: new Date() });
-              draftEstimateId = duplicateBlock.existingEstimateId;
-              logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+                .first('id', 'source', 'status', 'archived_at');
+              if (lockedDup && lockedDup.source === 'quote_wizard'
+                && lockedDup.status === 'draft' && !lockedDup.archived_at) {
+                await applySetupFeeQuote(trx);
+                const refreshed = await trx('estimates')
+                  .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
+                  .update({ ...estFields, updated_at: new Date() });
+                if (refreshed === 1) {
+                  draftEstimateId = duplicateBlock.existingEstimateId;
+                  logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+                }
+              } else {
+                logger.info(`[public-quote] Wizard draft ${duplicateBlock.existingEstimateId} changed under lock (promoted/archived) — refresh skipped, no handoff minted for lead ${lead.id}`);
+              }
             } else {
               logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
             }
