@@ -278,7 +278,7 @@ describe('completion charge accepted-amount cap — frozen at booking, never col
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
-    expect(mockChargeInvoiceWithSavedCard).toHaveBeenCalledWith('inv-1', 'pm-row-1', { maxAuthorizedSubtotal: 250, requireSelfPayScheduledServiceId: 'svc-1', requireInvoiceScheduledServiceBinding: true, requireCompletedOneTimeVisit: true });
+    expect(mockChargeInvoiceWithSavedCard).toHaveBeenCalledWith('inv-1', 'pm-row-1', { maxAuthorizedSubtotal: 250, requireSelfPayScheduledServiceId: 'svc-1', requireInvoiceScheduledServiceBinding: true, requireCompletedOneTimeVisit: true, requireNoAppointmentCardLane: true });
     expect(mockDbUpdates).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'charged_completion' }),
     ]));

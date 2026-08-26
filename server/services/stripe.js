@@ -1848,7 +1848,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2042,6 +2042,24 @@ const StripeService = {
             }
             if (lockedSvc.is_recurring === true) {
               throw new Error('The visit is no longer one-time. Review before charging.');
+            }
+          }
+          // Cross-lane exclusion at the money move (hold-rail pre-push r13
+          // P0): a /secure appointment-card row appearing on the visit —
+          // e.g. one whose insert raced an operator's stranded-hold
+          // repoint — is a competing, possibly NEWER card consent, and
+          // charging the estimate hold would suppress it and draw the old
+          // card. Any-status refusal under this transaction's visit lock,
+          // matching the creation-time exclusion in
+          // appointment-card-request.js; a throw rolls back with nothing
+          // consumed and the completion falls to its pay-link path.
+          if (requireNoAppointmentCardLane) {
+            const laneRow = await trx('appointment_card_requests')
+              .where({ scheduled_service_id: requireSelfPayScheduledServiceId })
+              .forUpdate()
+              .first('id');
+            if (laneRow) {
+              throw new Error('The visit carries a /secure appointment-card consent. Review which consent owns it before charging.');
             }
           }
           // Completion-lane revalidation under the locks (Codex #3153 r23

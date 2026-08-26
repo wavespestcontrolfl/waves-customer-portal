@@ -199,6 +199,26 @@ async function repoint(client) {
       throw new Error(`target visit already carries ${otherHolds.length} other active hold(s) — refusing; resolve those first`);
     }
 
+    // No /secure appointment-card lane row on the target AT ALL (PR #3496
+    // review P1 + pre-push r13 P0): a recreated visit later secured
+    // through /secure has its own newer consent + card, and both
+    // completion rails treat ANY estimate-hold row as owning the lane —
+    // repointing would suppress that consent and could draw the OLD card.
+    // Locked and refused REGARDLESS of status: a pending/completing
+    // request can finish right after this transaction and become newer
+    // consent just the same (the table has no dead status to safely
+    // exempt). The FOR UPDATE serializes a mid-flight /secure completion
+    // against this decision; the operator reconciles which consent should
+    // own the visit before any repoint.
+    const { rows: apptRows } = await client.query(
+      `SELECT id, status FROM appointment_card_requests
+       WHERE scheduled_service_id = $1
+       FOR UPDATE`, [TO_VISIT]);
+    if (apptRows.length) {
+      const statuses = apptRows.map((a) => a.status).join(',');
+      throw new Error(`target visit carries ${apptRows.length} /secure appointment-card request row(s) (status: ${statuses}) — refusing; reconcile which consent owns the visit first`);
+    }
+
     // Completion-invoice candidates, for the --charge leg and the plan print.
     const { rows: invoices } = await client.query(
       `SELECT id, status, total FROM invoices
@@ -247,6 +267,24 @@ async function repoint(client) {
         `UPDATE estimate_card_holds SET scheduled_service_id = $1, updated_at = NOW()
          WHERE id = $2 AND status = 'held'`, [TO_VISIT, HOLD_ID]);
       if (rowCount !== 1) throw new Error('CAS repoint did not land — refusing');
+      // Durable record of the operator's decision in the SAME transaction
+      // (PR #3496 review P2, following stamp-billing-mode.js): the update
+      // overwrites the hold's only reference to the original visit, and a
+      // later completion charge of the transferred consent must be
+      // investigable back to this ruling.
+      await client.query(
+        `INSERT INTO audit_log (actor_type, actor_id, action, resource_type, resource_id, metadata)
+         VALUES ('system', NULL, 'billing.card_hold.repoint', 'estimate_card_hold', $1, $2::jsonb)`,
+        [HOLD_ID, JSON.stringify({
+          from_scheduled_service_id: hold.scheduled_service_id,
+          to_scheduled_service_id: TO_VISIT,
+          allow_no_lineage: ALLOW_NO_LINEAGE,
+          charge_requested: CHARGE,
+          accepted_amount_cap: hold.accepted_amount,
+          source: 'ops/agents/repoint-orphaned-card-hold.js',
+          ruling: 'owner-ruled reschedule-successor repoint (stranded-hold lane 2026-08-25)',
+        })],
+      );
       await client.query('COMMIT');
       committed = true;
       console.log('repointed.');

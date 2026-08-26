@@ -469,6 +469,11 @@ async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invo
       {
         link: orphan.customerId ? `/admin/customers/${orphan.customerId}` : '/admin/dispatch',
         metadata: { scheduledServiceId, invoiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, source: 'reschedule_orphan_detection' },
+        // One bell per hold/target pair (PR #3496 review P1): recap edits
+        // and other replays re-run this detection; the admin dedupe (same
+        // mechanism as notifyCustomer) keeps the billing feed to a single
+        // bell until the pair changes.
+        dedupeKey: `orphan_hold_review:${orphan.holdId}:${scheduledServiceId}`,
       },
     );
   } catch (e) { logger.warn('[estimate-card-holds] orphan-hold review alert failed', { error: e.message }); }
@@ -633,6 +638,11 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
       // so the runtime path always satisfies it; only a stale/raced caller
       // is refused.
       requireCompletedOneTimeVisit: true,
+      // A /secure lane row on the visit is a competing (possibly newer)
+      // consent — refuse under the same locks rather than suppress it
+      // (pre-push r13 P0; creation-time counterpart lives in
+      // appointment-card-request.js).
+      requireNoAppointmentCardLane: true,
     });
     // Account credit fully covered the invoice inside the charge call — no card
     // was charged; release the hold cleanly rather than claim a phantom charge.
