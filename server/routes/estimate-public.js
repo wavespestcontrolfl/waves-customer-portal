@@ -12599,12 +12599,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         || recurringCardPayerFallback)))) {
       try {
         const InvoiceService = require('../services/invoice');
-        const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
+        const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,
           }),
         });
+        // Prepay job deliveries run under the ownership fence (hook P0
+        // r23): a request stalled past the lease must not send a pay link
+        // AFTER the sweep took the job and ran the authorized charge — the
+        // external send is the point of no return, so the token check and
+        // the send are one fenced critical section. Non-prepay accepts
+        // (no durable job) deliver as always.
+        let delivery = null;
+        if (annualPrepaySelected && prepayChargePlan && !txResult.prepayCoveredInTrx) {
+          try {
+            delivery = await chargeUnderJobFence(() => runDelivery());
+          } catch (fenceErr) {
+            if (fenceErr.code === 'PREPAY_JOB_NOT_OWNED') {
+              logger.warn(`[estimate-accept] prepay fallback delivery ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
+            } else {
+              throw fenceErr;
+            }
+          }
+        } else {
+          delivery = await runDelivery();
+        }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
