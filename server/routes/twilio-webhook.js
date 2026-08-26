@@ -1292,22 +1292,48 @@ router.post('/status', async (req, res) => {
           // the send wins — undo the suppression and skip the downstream
           // verdicts. Write-then-recheck converges to the recipient's
           // newest verdict regardless of interleaving.
+          // Only the NEWEST post-send opt command is authoritative (hook r3
+          // P1): a START followed by a newer STOP must keep the suppression,
+          // and an unknown send timestamp keeps it too (fail toward not
+          // texting) — never the epoch fallback that would let a pre-send
+          // START override the current 21610.
           let laterOptIn = false;
-          try {
-            const inbound = await db('sms_log')
-              .where({ from_phone: optOutPhone })
-              .where('created_at', '>', sentAt || new Date(0))
-              .orderBy('created_at', 'desc')
-              .limit(10)
-              .select('message_body');
-            laterOptIn = inbound.some((r) => detectSmsOptCommand(r.message_body || '').action === 'opt_in');
-          } catch { /* unreadable log → keep the suppression (fail toward not texting) */ }
+          if (sentAt) {
+            try {
+              const inbound = await db('sms_log')
+                .where({ from_phone: optOutPhone })
+                .where('created_at', '>', sentAt)
+                .orderBy('created_at', 'desc')
+                .limit(10)
+                .select('message_body');
+              const newestCommand = inbound
+                .map((r) => detectSmsOptCommand(r.message_body || '').action)
+                .find((a) => a === 'opt_in' || a === 'opt_out');
+              laterOptIn = newestCommand === 'opt_in';
+            } catch { /* unreadable log → keep the suppression */ }
+          }
           if (laterOptIn) {
             try {
-              await clearSuppression({ phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo' });
+              // clearSuppression resolves { ok: false } on a swallowed DB
+              // error — it does not reject (hook r3 P1): check the result,
+              // or a recipient who opted back in stays blocked silently.
+              const cleared = await clearSuppression({ phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo' });
+              if (cleared?.ok === false) {
+                throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+              }
               logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression cleared`);
             } catch (undoErr) {
-              logger.error(`[twilio-status] 21610 late-callback undo failed: ${undoErr.message}`);
+              logger.error(`[twilio-status] 21610 late-callback undo FAILED for ${maskPhone(optOutPhone)}: ${undoErr.code || undoErr.message} — recipient may be wrongly suppressed`);
+              try {
+                await require('../services/notification-service').notifyAdmin(
+                  'system',
+                  'Opt-out clear failed after late 21610 callback',
+                  `A later inbound opt-in from ${maskPhone(optOutPhone)} should have cleared the suppression written by a late 21610 callback, but the clear failed. Clear this number from the do-not-text list manually.`,
+                  { bell: true, metadata: { source: 'twilio_status_21610_late_callback_undo' } },
+                );
+              } catch (notifyErr) {
+                logger.error(`[twilio-status] 21610 undo-failure notify also failed: ${notifyErr.message}`);
+              }
             }
           } else {
           // Recipient double opt-in (codex #3495 r1 P1): when the failed
