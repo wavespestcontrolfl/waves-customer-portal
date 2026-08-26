@@ -27,6 +27,7 @@ function makeSuppressionChain() {
   c.merge = jest.fn(() => c);
   c.where = jest.fn((...a) => { c._wheres.push(a); return c; });
   c.whereRaw = jest.fn((...a) => { c._wheres.push(['raw', ...a]); return c; });
+  c.returning = jest.fn(() => c);
   c.then = (resolve, reject) => Promise.resolve(insertResult).then(resolve, reject);
   lastSuppressionChain = c;
   return c;
@@ -134,6 +135,10 @@ describe('landline suppression on delivery bounce', () => {
     expect(res.ok).toBe(true);
     expect(res.recorded).toBe(true);
     expect(lastSuppressionChain.merge).toHaveBeenCalled(); // guarded tombstone-only merge
+    // RETURNING is what makes recorded trustworthy on Postgres — without it
+    // an applied write and a guard-rejected conflict are indistinguishable
+    // (codex r6 P2).
+    expect(lastSuppressionChain.returning).toHaveBeenCalledWith('phone');
   });
 });
 

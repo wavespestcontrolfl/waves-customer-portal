@@ -216,9 +216,14 @@ async function recordNonMobileSuppression({ phone, source, supersedeClearedBefor
     // date the send never supersede (whereRaw false ⇒ insert-if-absent).
     if (supersedeClearedBefore) q.where('messaging_suppression.cleared_at', '<', supersedeClearedBefore);
     else q.whereRaw('false');
-    const inserted = await q;
-    // Knex returns the inserted rows ([] when the conflict was ignored). Treat a
-    // non-empty result as "newly recorded"; fall back to length-agnostic ok.
+    // RETURNING makes recorded trustworthy on Postgres (codex r6 P2): without
+    // it the resolved value doesn't reliably distinguish an applied
+    // insert/merge from a conflict the WHERE guards rejected — and callers
+    // now gate the customers.line_type cache write on this flag, so a false
+    // negative would starve the cache while the store suppresses.
+    const inserted = await q.returning('phone');
+    // Non-empty = the insert landed or the guarded merge ran; [] = the
+    // conflict was rejected by the tombstone guards (stale/standing row).
     const recorded = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
     return { ok: true, recorded };
   } catch (err) {
