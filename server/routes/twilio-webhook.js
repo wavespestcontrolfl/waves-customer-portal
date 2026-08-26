@@ -1384,7 +1384,12 @@ router.post('/status', async (req, res) => {
               // callback cannot prove it is newer, and proceeding would let
               // its recheck clear the newer verdict via an intervening
               // START. Defer keeps the phone suppressed — the safe side.
-              if (ownerAt && (!sentAt || ownerAt > new Date(sentAt))) {
+              // Ordered against the ADJUSTED send time (hook #3495 r16):
+              // an unstamped legacy row logged AFTER a newer send's verdict
+              // must not read as newer than that owner — comparing raw
+              // sentAt would let the older attempt overwrite the newest
+              // carrier verdict and its recheck clear it via a raced START.
+              if (ownerAt && (!sentAtFloor || ownerAt > sentAtFloor)) {
                 outcome.deferred = 'newer-callback-owns-row'; return;
               }
               // recordSuppression resolves { ok: false } on a swallowed DB

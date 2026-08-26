@@ -266,48 +266,54 @@ async function clearSuppression({ phone, source, dbh = db }) {
         cleared_at: dbh.fn.now(),
         source: source ? `cleared_by:${source}` : null,
       });
-    // Also drop any cached line-type so a START/admin clear fully un-blocks the
-    // number. The proactive line-type guard (phone_line_types, gated) blocks
-    // cached landlines on its own authority, independent of this suppression row;
-    // without clearing it a false positive or a number ported landline->mobile
-    // would stay blocked forever despite the clear. Next send re-evaluates fresh.
-    // Best-effort: the table may not exist yet, and a cache miss is harmless.
-    try {
-      // Deliberately the GLOBAL connection even when dbh is a transaction:
-      // this delete is best-effort and its error is swallowed — inside a
-      // caller's transaction a swallowed failure would still ABORT the
-      // transaction, silently rolling back the clearance above (codex
-      // #3495). Outside it, a cache-delete failure costs nothing.
-      await db('phone_line_types').where({ phone }).del();
-    } catch (cacheErr) {
-      if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
-        logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
-      }
-    }
-    // The LEGACY primary-phone cache too (hook #3495 P1): the 30006 path
-    // also stores customers.line_type='landline', and the appointment
-    // reader treats it as authoritative after the phone_line_types miss —
-    // without this, an explicit START un-suppresses the number but
-    // appointment SMS stays blocked forever. The inbound text itself
-    // proves the number can SMS; NULLing the cache makes the next send
-    // re-evaluate fresh via Lookup. UNIQUE primary-phone ownership only
-    // (same rule as the prefs flip): a shared number must not clear a
-    // sibling's verdict. Best-effort on the GLOBAL connection for the
-    // same abort-safety reason as the delete above.
-    try {
-      const digits = String(phone).replace(/\D/g, '').slice(-10);
-      if (digits.length === 10) {
-        const holders = await db('customers')
-          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
-          .whereNull('deleted_at')
-          .whereNotNull('line_type')
-          .select('id');
-        if (holders.length === 1) {
-          await db('customers').where({ id: holders[0].id }).update({ line_type: null });
+    // Also drop the cached line-types so a START/admin clear fully
+    // un-blocks the number — phone_line_types (the gated proactive guard)
+    // and the LEGACY customers.line_type primary-phone cache (hook #3495
+    // P1: the appointment reader treats it as authoritative after the
+    // phone_line_types miss, so without this an explicit START
+    // un-suppresses the number but appointment SMS stays blocked forever).
+    // The inbound text itself proves the number can SMS; clearing makes
+    // the next send re-evaluate fresh via Lookup. UNIQUE primary-phone
+    // ownership only for the legacy cache (same rule as the prefs flip):
+    // a shared number must not clear a sibling's verdict. Best-effort on
+    // the GLOBAL connection: errors are swallowed, and inside a caller's
+    // transaction a swallowed failure would still ABORT it, silently
+    // rolling back the clearance above (codex #3495).
+    const runCacheCleanup = async () => {
+      try {
+        await db('phone_line_types').where({ phone }).del();
+      } catch (cacheErr) {
+        if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
+          logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
         }
       }
-    } catch (legacyErr) {
-      logger.warn(`[messaging:suppression] legacy line_type clear failed: ${legacyErr.message}`);
+      try {
+        const digits = String(phone).replace(/\D/g, '').slice(-10);
+        if (digits.length === 10) {
+          const holders = await db('customers')
+            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+            .whereNull('deleted_at')
+            .whereNotNull('line_type')
+            .select('id');
+          if (holders.length === 1) {
+            await db('customers').where({ id: holders[0].id }).update({ line_type: null });
+          }
+        }
+      } catch (legacyErr) {
+        logger.warn(`[messaging:suppression] legacy line_type clear failed: ${legacyErr.message}`);
+      }
+    };
+    if (dbh.isTransaction && dbh.executionPromise) {
+      // POST-COMMIT when called inside a transaction (hook #3495 r16):
+      // awaiting the global connection while the trx holds its own can
+      // deadlock the pool under a START/21610 burst (every trx waits for
+      // one more connection), and the writes would escape rollback — a
+      // rolled-back clear must not have already wiped the caches. Fires
+      // only after the trx commits; a rollback skips it. Same pattern as
+      // the repo's other executionPromise post-commit hooks.
+      dbh.executionPromise.then(runCacheCleanup).catch(() => {});
+    } else {
+      await runCacheCleanup();
     }
     return { ok: true };
   } catch (err) {
