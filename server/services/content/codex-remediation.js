@@ -1468,6 +1468,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
     operatorFaqException = false, guardContext = null,
+    // Owner directive 2026-08-26: TRUE only when the caller verified
+    // operator-intercept provenance AND both named-competitor gates
+    // (namedCompetitorAutopublish + namedCompetitorComparison) — lets a fix
+    // on an opted-in intercept PR continue past the named-competitor park
+    // below. Fail-closed default: no caller opt-in → park as before.
+    namedCompetitorAutopublish = false,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
@@ -1741,10 +1747,16 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   try { originalMetaDescription = ((fm.parse(file.content) || {}).data || {}).meta_description; } catch (_) { originalMetaDescription = undefined; }
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext, originalMetaDescription }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
-  // A passing fix that INTRODUCES a named-competitor comparison still needs a
-  // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
-  // / named_competitor_review) predate the fix and are never restamped here.
-  if (gate.requiresHumanReview === true) {
+  // A passing fix that carries named-competitor content still needs a human:
+  // the merge stamps enforcing that sign-off (astro_requires_human_merge /
+  // named_competitor_review) predate the fix and are never restamped here.
+  // Exception (owner directive 2026-08-26): an operator-intercept run under
+  // GATE_NAMED_COMPETITOR_AUTOPUBLISH continues — the same scoped eligibility
+  // the runner applies at its review-park decision, threaded in by the
+  // autonomous caller (fail-closed: absent flag parks). Without it, every
+  // remediation round on an opted-in intercept PR would re-enter the human
+  // queue the lane no longer has.
+  if (gate.requiresHumanReview === true && namedCompetitorAutopublish !== true) {
     return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha, PARK_PRE_PUSH);
   }
 
@@ -2130,6 +2142,13 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // missing row or lookup failure stays false, which only parks (stricter),
   // never merges.
   let operatorFaqException = false;
+  // Owner directive 2026-08-26: scoped named-competitor autopublish
+  // eligibility for the park in runRemediationForPr — TRUE only for a run
+  // with operator-intercept provenance (the same non-empty
+  // operatorBriefTextForComparisonGate predicate the runner's review-park
+  // decision uses) AND both named-competitor gates on. Fail-closed: any
+  // lookup/derivation failure leaves it false and the park stands.
+  let namedCompetitorAutopublish = false;
   // Full run-context for the preflight gate: the static frontmatter-derived
   // evaluate would P0 brief-mandated links, checked-existing routes, and
   // refresh-grandfathered content the run-context gate allows — the preflight
@@ -2152,6 +2171,15 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
         };
+        try {
+          const interceptProvenance = (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
+            ? runner._internals.operatorBriefTextForComparisonGate(opp, brief) !== ''
+            : false;
+          const fg = require('../../config/feature-gates');
+          namedCompetitorAutopublish = interceptProvenance
+            && fg.isEnabled('namedCompetitorAutopublish') === true
+            && fg.isEnabled('namedCompetitorComparison') === true;
+        } catch (_) { namedCompetitorAutopublish = false; }
       }
     }
   } catch (e) {
@@ -2170,6 +2198,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // this keeps the invariant local instead of relying on that gate.)
     restampPublished: (run && run.action_type) === 'new_supporting_blog',
     operatorFaqException,
+    namedCompetitorAutopublish,
     // Surface the park on the run itself: the run stays parked at
     // completed_pending_review (status='parked' stops re-remediation until a
     // new head re-arms), and without this note the ONLY record of why lived

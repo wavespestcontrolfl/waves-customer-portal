@@ -960,23 +960,29 @@ class AutonomousRunner {
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
     // A named-competitor comparison routes to human review (legal/brand
-    // surface) UNLESS namedCompetitorAutopublish is on (owner directive
-    // 2026-08-26: intercept lane is fully autonomous — a CLEAN draft
-    // publishes; gate failures still block/park exactly as before). This
-    // deliberately includes operator-AUTHORIZED competitors named in an
-    // intercept brief (hook P1 considered): the owner's per-competitor
-    // authorization recorded in the brief IS the human sign-off the review
-    // park would collect, given in advance — and the sourcing rules the
-    // brief mandates are still enforced by the comparison table's per-cell
-    // checks, the fact-check gate, and Codex on the PR. Autopublish
-    // requires BOTH flags — namedCompetitorComparison off keeps every
-    // named-competitor draft on the review path. With autopublish off it
-    // still uses the approvable trust-build review path. Gate reads fail
-    // CLOSED: an unreadable flag keeps the review park.
+    // surface) UNLESS namedCompetitorAutopublish is on AND the run carries
+    // OPERATOR-INTERCEPT provenance (owner directive 2026-08-26: the
+    // intercept lane is fully autonomous — a CLEAN draft publishes; gate
+    // failures still block/park exactly as before). The provenance predicate
+    // is the SAME one that arms operatorBriefTextForComparisonGate: the
+    // operator_intercept bucket plus the operator-authored brief payload —
+    // the owner's per-competitor authorization recorded in that brief IS the
+    // human sign-off the review park would collect, given in advance, and
+    // sourcing is still enforced by the comparison table's per-cell checks,
+    // the fact-check gate, and Codex on the PR. A named-competitor draft
+    // WITHOUT that provenance (any other bucket, manual/calendar lanes)
+    // keeps the review path regardless of the flag. Autopublish also
+    // requires namedCompetitorComparison — the autopublish flag alone never
+    // lifts a park. Gate reads fail CLOSED: an unreadable flag keeps the
+    // review park. With autopublish off (or out of scope) the run still
+    // uses the approvable trust-build review path.
+    const interceptProvenance = opp?.bucket === OPERATOR_INTERCEPT_BUCKET
+      && Boolean(brief?.voice_constraints?.operator_brief);
     let namedCompetitorAutopublish = false;
     try {
       const fg = require('../../config/feature-gates');
-      namedCompetitorAutopublish = fg.isEnabled('namedCompetitorAutopublish') === true
+      namedCompetitorAutopublish = interceptProvenance
+        && fg.isEnabled('namedCompetitorAutopublish') === true
         && fg.isEnabled('namedCompetitorComparison') === true;
     } catch (_) { namedCompetitorAutopublish = false; }
     const forceNamedCompetitorReview = run.comparison_requires_review === true

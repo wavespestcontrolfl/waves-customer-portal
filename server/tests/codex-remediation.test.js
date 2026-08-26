@@ -668,6 +668,20 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  // Owner directive 2026-08-26: the autonomous caller may thread a scoped
+  // namedCompetitorAutopublish eligibility (operator-intercept provenance +
+  // both gates) — the named-competitor park then does not fire and the fix
+  // pushes. Absent/false keeps the park (test above).
+  test('namedCompetitorAutopublish eligibility threaded by the caller lets an intercept fix continue past the named-competitor park', async () => {
+    const gh = makeGh();
+    const r = await runRemediationForPr({ ...CTX, namedCompetitorAutopublish: true }, {
+      db: makeDb(), gh, callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+    });
+    expect(r.parked).toBeUndefined();
+    expect(gh._calls.putFile).toHaveLength(1);
+  });
+
   // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
   test('frontmatterFixViolation flags any non-whitelisted key change (title/hero path/author/date/added key)', () => {
     const orig = '---\ntitle: Roof Rats\nhero_image: /images/blog/x/hero.webp\nauthor: Adam\npublished: "2026-07-01"\n---\nbody text';

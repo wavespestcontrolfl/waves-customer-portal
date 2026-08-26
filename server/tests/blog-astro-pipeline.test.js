@@ -1886,39 +1886,16 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
     }));
   });
 
-  test('namedCompetitorAutopublish ON suppresses the stamp — a clean named-competitor post auto-merges like any other', async () => {
-    // Owner directive 2026-08-26: with GATE_NAMED_COMPETITOR_AUTOPUBLISH the
-    // requiresHumanReview pass no longer requires a human merge; pages-poll
-    // sees FALSE and the post rides the normal Codex-gated auto-merge.
+  test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {
+    // Owner directive 2026-08-26 scopes autopublish to operator-intercept
+    // runs; publishAstro serves manual/calendar posts with no such
+    // provenance, so the human-merge stamp is unconditional here.
     const gate = require('../services/content/comparison-table-gate');
     jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
     const featureGates = require('../config/feature-gates');
     const realIsEnabled = featureGates.isEnabled;
     jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => (
       g === 'namedCompetitorAutopublish' ? true : realIsEnabled(g)));
-    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
-    const update = chain();
-    const queries = [read, update];
-    db.mockImplementation(() => queries.shift() || chain());
-
-    await AstroPublisher.publishAstro('post-1');
-
-    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
-      astro_status: 'pr_open',
-      astro_requires_human_merge: false,
-    }));
-  });
-
-  test('autopublish alone is not enough — namedCompetitorComparison OFF keeps the human-merge stamp (hook P1)', async () => {
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    const featureGates = require('../config/feature-gates');
-    const realIsEnabled = featureGates.isEnabled;
-    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => {
-      if (g === 'namedCompetitorAutopublish') return true;
-      if (g === 'namedCompetitorComparison') return false;
-      return realIsEnabled(g);
-    });
     const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
     const update = chain();
     const queries = [read, update];
