@@ -249,7 +249,7 @@ describe('stampRecurringTemplateOverrides', () => {
 });
 
 describe('propagatePriceServiceToFollowingSiblings', () => {
-  function propagationScenario({ siblings, addonsByVisit = {} }) {
+  function propagationScenario({ siblings, addonsByVisit = {}, invoicesByVisit = {} }) {
     const updates = [];
     const reminderUpdates = [];
     const targetQueries = [];
@@ -257,6 +257,10 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
       if (op === 'await' && table === 'scheduled_services') {
         targetQueries.push(calls);
         return siblings;
+      }
+      if (op === 'first' && table === 'invoices') {
+        const whereCall = calls.find(([name, arg]) => name === 'where' && arg && arg.scheduled_service_id);
+        return invoicesByVisit[whereCall?.[1]?.scheduled_service_id] || null;
       }
       if (op === 'await' && table === 'scheduled_service_addons') {
         const whereCall = calls.find(([name, arg]) => name === 'where' && arg && arg.scheduled_service_id);
@@ -392,6 +396,24 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     })).rejects.toMatchObject({ status: 409 });
     expect(updates).toHaveLength(0);
   });
+
+  it('refuses while a target visit has ANY live invoice — nothing is voided, nothing is written (r7, owner decision)', async () => {
+    const siblings = [
+      { id: 's1', scheduled_date: '2098-02-15', primary_line_price: '25.00', estimated_price: '25.00' },
+    ];
+    const { conn, updates } = propagationScenario({
+      siblings,
+      invoicesByVisit: { s1: { id: 'inv1', status: 'draft', payer_statement_id: null } },
+    });
+    // Opt this scenario into the invoice link column so the live probe runs.
+    conn.schema.hasColumn = async (table, col) => table === 'invoices' && col === 'scheduled_service_id';
+    await expect(propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited', parentId: 'p1', fromDateStr: '2098-01-15',
+      fields: { primary_line_price: 50, estimated_price: 50 },
+      serviceChanged: false, priceChanged: true, cols: COLS,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(updates).toHaveLength(0);
+  });
 });
 
 describe('applyStoredVisitFinancials — scoped explicit-$0 carries to spawned rows', () => {
@@ -516,24 +538,19 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
     expect(src).toMatch(/stampRecurringTemplateOverrides\(trx, req\.params\.id, conversionGroups\.fields, seriesCols\)/);
   });
 
-  it('a reprice fails closed when a selected stale invoice could not actually be voided', () => {
-    expect(src).toMatch(/voidedIds\.length < staleInvoiceIds\.length/);
-  });
-
   it('sibling add-on reads fail closed — only the missing-table compat case proceeds add-on-less', () => {
     expect(src).toMatch(/const addonTableExists = billingRelevant && targets\.length > 0/);
   });
 
-  it('the void set excludes every terminal invoice state and re-checks UNDER row locks before voiding', () => {
-    expect(src).toMatch(/\.whereNotIn\('status', \['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'\]\)\s*\n\s*\.whereNull\('payer_statement_id'\)/);
-    // Locked re-check: a post-probe 'sending' claim (or money appearing)
-    // refuses; rows that turned terminal drop out of the void set.
-    expect(src).toMatch(/const lockedStale = await conn\('invoices'\)\s*\n\s*\.whereIn\('id', staleInvoiceIds\)\s*\n\s*\.forUpdate\(\)/);
-    expect(src).toMatch(/\['sending', 'paid', 'prepaid', 'processing'\]\.includes\(String\(invoice\.status\)\)/);
-  });
-
-  it('voiding a stale invoice cancels its active payment plan, mirroring the canonical void path', () => {
-    expect(src).toMatch(/\.whereIn\('invoice_id', voidedIds\)\s*\n\s*\.where\(\{ status: 'active' \}\)/);
-    expect(src).toMatch(/cancelled_by: 'system:invoice_void'/);
+  it('the propagation lane NEVER voids an invoice — any live invoice on a target visit refuses (r7, owner decision)', () => {
+    // Only NON-terminal statuses count as live; the refusal replaces the
+    // whole void/re-mint machinery (and its race family) in this lane.
+    expect(src).toMatch(/\.whereNotIn\('status', \['void', 'refunded', 'canceled', 'cancelled'\]\)\s*\n\s*\.first\('id', 'status', 'payer_statement_id'\)/);
+    expect(src).toMatch(/already has an invoice\. Settle or void that invoice first/);
+    // Statement-accrued lines still name the payer flow as the remedy.
+    expect(src).toMatch(/already accrued to a payer statement\. Handle that statement first/);
+    // The propagation helper carries no void call at all — the conversion
+    // path's own voiding (pre-existing, `trx`-named) is out of this lane.
+    expect(src).not.toMatch(/voidConversionInvoicesRestoringCredits\(\{ trx: conn/);
   });
 });

@@ -1237,11 +1237,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // "Apply price & service change to" — series rows only, rendered only when
   // the server says the lane is live (seriesSummary.canScopePriceService,
   // dark behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE) AND the primary line's
-  // price or service actually changed. Defaults to the remaining series,
-  // matching the staff selector's default on a series row.
-  const [priceServiceScope, setPriceServiceScope] = useState(() =>
-    serviceHasSeries ? "following" : "this_only",
-  );
+  // price or service actually changed. Defaults to this visit only (Codex
+  // #3505 r7, owner decision): a bulk billing rewrite must be an explicit
+  // pick, never the side effect of an unnoticed default — unlike the staff
+  // selector, whose series default moves no money.
+  const [priceServiceScope, setPriceServiceScope] = useState("this_only");
   // The primary line's price/service as the modal opened — the selector only
   // renders (and the scope only posts) once one of them actually changed, so
   // an untouched save can never restamp the series.
@@ -2651,8 +2651,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </option>
                 </select>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                  Also covers visits the plan adds later. Add-on lines stay
-                  per-appointment.
+                  Also covers visits the plan adds later. Applies to the main
+                  service line only.
+                  {serviceIsRecurringTemplate
+                    ? " Add-on changes saved on this first visit still carry into visits the plan adds later."
+                    : " Add-on lines stay per-appointment."}
                 </div>
               </div>
             )}

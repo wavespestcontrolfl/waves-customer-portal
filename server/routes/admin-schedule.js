@@ -2404,79 +2404,30 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   const updatedIds = [];
   for (const sibling of targets) {
     if (billingRelevant && invoiceLinkColumn) {
-      // Statement-accrued lines belong to a third-party payer's monthly
-      // statement — repricing underneath one needs the payer flow, not a
-      // silent row update. Fail closed like the covered check above.
-      const accrued = await conn('invoices')
+      // NO voiding here, ever (Codex #3505 r7, owner decision): the earlier
+      // rounds voided still-collectable drafts and grew three layers of race
+      // hardening (mint visit-row locks, send-claim re-checks under invoice
+      // row locks, void-completeness) while the dunning touch-claim window
+      // stayed open — a claimed follow-up touch releases its row lock before
+      // sending, so no in-transaction status check can see it. Refusing the
+      // series change while ANY live invoice exists on a target visit removes
+      // the entire race family: the operator settles or voids that invoice
+      // through the normal billing flow first, then re-applies the change.
+      // The visit-row locks taken up front keep this sound — a concurrent
+      // mint serializes on the visit row, so it either mints before this
+      // probe (probe refuses) or after commit (mints at the new price).
+      const live = await conn('invoices')
         .where({ scheduled_service_id: sibling.id })
         .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
-        .whereNotNull('payer_statement_id')
-        .first('id');
-      if (accrued) {
-        throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${dateOnly(sibling.scheduled_date) || 'later'} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
-      }
-      // Every terminal state is excluded, not just paid/prepaid/void
-      // (Codex #3505 r5 P1): re-voiding a refunded/canceled invoice would
-      // erase its refund state and can double-restore deposit credits —
-      // the mint path skips the same set.
-      const staleInvoices = await conn('invoices')
-        .where({ scheduled_service_id: sibling.id })
-        .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .whereNull('payer_statement_id')
-        .select('id', 'status');
-      let staleInvoiceIds = staleInvoices.map((invoice) => invoice.id);
-      if (staleInvoiceIds.length > 0) {
-        // Re-check UNDER invoice row locks (Codex #3505 r5+r6 P1): a sender
-        // can claim a draft invoice between the probe above and the void
-        // helper's own lock, and the helper's skip set doesn't include
-        // 'sending' — the canonical transition guard refuses voids mid-send
-        // because the pre-void message can still reach the customer with
-        // the old amount and a dead pay link. Money appearing under the
-        // lock refuses the same way (retryable 409); rows that turned
-        // terminal drop out of the void set (nothing left to retire).
-        const lockedStale = await conn('invoices')
-          .whereIn('id', staleInvoiceIds)
-          .forUpdate()
-          .select('id', 'status');
-        if (lockedStale.some((invoice) => ['sending', 'paid', 'prepaid', 'processing'].includes(String(invoice.status)))) {
-          throw httpError(409, `Can't apply this price/service change to the rest of the series: an invoice for the ${dateOnly(sibling.scheduled_date) || 'later'} visit is being sent or paid right now. Retry in a moment, or set the change to this appointment only.`);
+        .first('id', 'status', 'payer_statement_id');
+      if (live) {
+        const when = dateOnly(sibling.scheduled_date) || 'later';
+        if (live.payer_statement_id) {
+          // Statement-accrued lines belong to a third-party payer's monthly
+          // statement — the remedy is the payer flow, so name it.
+          throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${when} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
         }
-        staleInvoiceIds = lockedStale
-          .filter((invoice) => !['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status)))
-          .map((invoice) => invoice.id);
-      }
-      if (staleInvoiceIds.length > 0) {
-        const voidUpdate = { status: 'void' };
-        if (await conn.schema.hasColumn('invoices', 'updated_at').catch(() => false)) {
-          voidUpdate.updated_at = conn.fn.now();
-        }
-        // The helper locks each row and SKIPS anything with recorded or
-        // in-flight money, restoring consumed deposit/account credit on
-        // the ones it voids.
-        const voidedIds = await voidConversionInvoicesRestoringCredits({ trx: conn, ids: staleInvoiceIds, voidUpdate });
-        // A customer can confirm /pay setup between the probe above and
-        // the helper's row lock — the helper then skips that now-in-flight
-        // invoice, and repricing the visit while the live old-amount
-        // invoice survives is exactly the stale-collect bug. Fail closed
-        // when anything selected wasn't actually voided (Codex #3505 r4
-        // P1); the 409 is retryable once the payment settles or fails.
-        if (voidedIds.length < staleInvoiceIds.length) {
-          throw httpError(409, `Can't apply this price/service change to the rest of the series: a payment on the ${dateOnly(sibling.scheduled_date) || 'later'} visit's invoice is in flight. Retry after it settles, or set the change to this appointment only.`);
-        }
-        // A void is a terminal exit for the invoice's collection path — an
-        // ACTIVE payment plan must not survive it (it blocks edits/credit
-        // reversal forever on a dead invoice). Mirror the canonical void
-        // path's transactional plan cancellation (Codex #3505 r5 P1; the
-        // covered check above can't see a plan that holds no money yet).
-        await conn('payment_plans')
-          .whereIn('invoice_id', voidedIds)
-          .where({ status: 'active' })
-          .update({
-            status: 'cancelled',
-            cancelled_at: new Date(),
-            cancelled_by: 'system:invoice_void',
-            updated_at: new Date(),
-          });
+        throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${when} visit already has an invoice. Settle or void that invoice first, or set the change to this appointment only.`);
       }
     }
     const siblingUpdates = { updated_at: new Date() };
