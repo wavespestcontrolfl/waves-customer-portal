@@ -123,14 +123,26 @@ export default function RecruitingPage() {
 
   useEffect(() => { load(tab); }, [tab, load]);
 
+  // Same monotonic guard as the list: a slow response for applicant A must
+  // not replace an already-opened applicant B (a status/note could land on
+  // the wrong person), and closing the dialog invalidates pending opens.
+  const detailSeq = useRef(0);
+
   const openDetail = useCallback(async (id) => {
+    const seq = ++detailSeq.current;
     try {
       const data = await adminFetch(`/admin/careers/${id}`);
+      if (seq !== detailSeq.current) return; // superseded or dialog closed
       setDetail(data.application);
       setNote("");
     } catch (err) {
-      setError(err.message);
+      if (seq === detailSeq.current) setError(err.message);
     }
+  }, []);
+
+  const closeDetail = useCallback(() => {
+    detailSeq.current += 1; // invalidate any in-flight open
+    setDetail(null);
   }, []);
 
   // Bell deep link: consume ?application=<id> and clear it. Reacts to the
@@ -251,7 +263,7 @@ export default function RecruitingPage() {
         </div>
       )}
 
-      <Dialog open={Boolean(detail)} onClose={() => setDetail(null)}>
+      <Dialog open={Boolean(detail)} onClose={closeDetail}>
         {detail && (
           <>
             <DialogHeader>
@@ -324,7 +336,7 @@ export default function RecruitingPage() {
                     {label}
                   </Button>
                 ))}
-                <Button size="sm" variant="ghost" onClick={() => setDetail(null)}>Close</Button>
+                <Button size="sm" variant="ghost" onClick={closeDetail}>Close</Button>
               </div>
             </DialogFooter>
           </>
