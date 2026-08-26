@@ -95,15 +95,24 @@ async function scan(client) {
      ORDER BY h.held_at DESC`, [DEAD]);
   console.log(`orphaned 'held' holds: ${rows.length}`);
   for (const r of rows) {
+    // No LIMIT (PR #3496 review P2): the 1:1 verdict below must see EVERY
+    // eligible candidate — a display cap applied before the one-time
+    // filter could hide an older one-time visit and print a false
+    // ready-made command. Candidate sets are naturally small (visits of
+    // one estimate); the print is capped separately.
     const { rows: cands } = await client.query(
       `SELECT id, status, scheduled_date, is_recurring, service_type
        FROM scheduled_services
        WHERE customer_id = $1 AND source_estimate_id = $2
          AND id IS DISTINCT FROM $3
          AND status = ANY($4)
-       ORDER BY scheduled_date DESC LIMIT 5`,
+       ORDER BY scheduled_date DESC`,
       [r.customer_id, r.estimate_id, r.linked_visit_id, LIVE_TARGET]);
-    console.log(JSON.stringify({ ...r, repoint_candidates: cands }, null, 1));
+    console.log(JSON.stringify({
+      ...r,
+      repoint_candidates: cands.slice(0, 10),
+      repoint_candidates_total: cands.length,
+    }, null, 1));
     // Only print a ready-made command for the UNAMBIGUOUS 1:1 shape —
     // exactly one live one-time candidate whose service identity matches
     // the dead visit's (where both are known). Estimate lineage alone does
