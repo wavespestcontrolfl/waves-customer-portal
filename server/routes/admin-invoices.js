@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const db = require('../models/db');
@@ -16,7 +16,23 @@ const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/cu
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 
-router.use(adminAuthenticate, requireAdmin);
+router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
+// staff exemption — the single-invoice GET (/:id exactly). The technician
+// tap-to-pay checkout on the Dispatch surface reads it after tender to
+// confirm settlement (PrepaySwitchSheet/AnnualPrepayLauncher); without it
+// the flow false-fails into recovery. Named GET siblings (/stats, list,
+// search, recipients, attachments, credit-context, followup) and every
+// mutation require the admin role.
+const SINGLE_INVOICE_GET_RE = /^\/[A-Za-z0-9-]+$/;
+const NAMED_INVOICE_GETS = new Set(['/stats', '/customers']);
+router.use((req, res, next) => (
+  req.method === 'GET'
+    && SINGLE_INVOICE_GET_RE.test(req.path)
+    && !NAMED_INVOICE_GETS.has(req.path)
+    ? next()
+    : requireAdmin(req, res, next)
+));
 
 const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 
