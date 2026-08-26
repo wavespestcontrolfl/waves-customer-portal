@@ -50,6 +50,14 @@ class PaymentExpiry {
               .where('p.status', 'paid');
           });
       })
+      // Only the customer's CURRENT method — the enrollment pointer or the
+      // default row. Replaced cards linger in payment_methods with
+      // is_default=false; without this, a customer gets texted about a card
+      // they already replaced, once per stale row (hook merge-round P1).
+      .where(function () {
+        this.where('pm.is_default', true)
+          .orWhereRaw('pm.id = c.autopay_payment_method_id');
+      })
       .whereRaw(
         `CASE
            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
