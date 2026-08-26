@@ -1329,10 +1329,18 @@ router.post('/status', async (req, res) => {
               // suppression. Returns a row count on success (0 = no
               // recipient asks, the common case) and FALSE on a swallowed
               // DB error.
-              try {
-                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined', { dbh: trx });
-                if (declined === false) outcome.declineFailed = true;
-              } catch { /* markRecipientOptin does not reject; belt only */ }
+              // markRecipientOptin swallows SQL errors and returns FALSE —
+              // but a swallowed SQL error has already ABORTED this Postgres
+              // transaction, and Knex can resolve the eventual COMMIT that
+              // Postgres converts to ROLLBACK, reporting success while the
+              // suppression vanished (hook r12 P1). The phone is valid here
+              // (normalized above), so FALSE ≡ SQL error: throw, roll back
+              // cleanly, and let the generic failure bell fire. The normal
+              // no-recipient-rows case returns the number 0 and proceeds.
+              const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined', { dbh: trx });
+              if (declined === false) {
+                throw Object.assign(new Error('recipient decline write reported failure'), { code: 'recipient_decline_failed' });
+              }
               // Prefs flip — the suppression row is the enforcement;
               // sms_enabled keeps the admin UI honest (same split as STOP).
               if (optOutCustomerId) {
@@ -1370,19 +1378,6 @@ router.post('/status', async (req, res) => {
             logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression not kept`);
           } else if (outcome.deferred) {
             logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred (${outcome.deferred})`);
-          }
-          if (outcome.declineFailed && !outcome.failed) {
-            logger.warn(`[twilio-status] 21610 recipient-decline write FAILED for ${maskPhone(optOutPhone)}`);
-            try {
-              await require('../services/notification-service').notifyAdmin(
-                'system',
-                'Recipient decline write failed on 21610',
-                `A Twilio 21610 for ${maskPhone(optOutPhone)} could not record the recipient decline. If this number had a pending opt-in ask, mark it declined manually or the next START cannot unblock their appointment texts.`,
-                { bell: true, metadata: { source: 'twilio_status_21610' } },
-              );
-            } catch (nErr) {
-              logger.error(`[twilio-status] decline-failure notify also failed: ${nErr.message}`);
-            }
           }
         }
 
