@@ -11090,6 +11090,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               method_key: RecurringCards.prepayChargeMethodKey(prepayChargePlan.method.stripePaymentMethodId),
               authorized_total_cents: prepayChargePlan.quote.totalCents,
               authorized_base_cents: prepayChargePlan.quote.baseCents,
+              // The ACTUAL acknowledgement moment (Codex r21): recovery's
+              // opt-out check must use when the customer SUBMITTED the
+              // authorization, not this stamp's later write time — an Auto
+              // Pay disable landing in the gap would otherwise read as
+              // predating authorization and be re-enabled.
+              authorized_at: acceptAuthorizedAt.toISOString(),
               // First prepay visit — the recovery sweep re-runs the
               // promised inspection-credit redemption against THIS booking
               // before charging or delivering a pay link (Codex r9 P0: the

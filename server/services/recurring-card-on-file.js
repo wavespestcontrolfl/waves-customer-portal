@@ -854,7 +854,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // opt-out AFTER acceptance must WIN — the enrollment refuses
           // opted_out_after_authorization and the sweep falls to the
           // pay-link path instead of re-enabling a revoked authorization.
-          authorizedAt: job.created_at ? new Date(job.created_at) : null,
+          authorizedAt: (job.authorized_at || job.created_at) ? new Date(job.authorized_at || job.created_at) : null,
         });
         if (enrollment?.paymentMethodRowId) {
           pmRow = await db('payment_methods').where({ id: enrollment.paymentMethodRowId }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type');
@@ -918,7 +918,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // job's authorization timestamp, a later autopay_disabled event
           // refuses opted_out_after_authorization instead of this sweep
           // silently re-enabling Auto Pay and charging.
-          authorizedAt: job.created_at ? new Date(job.created_at) : null,
+          authorizedAt: (job.authorized_at || job.created_at) ? new Date(job.authorized_at || job.created_at) : null,
         });
         if (!recoveryEnrollment?.enrolled && recoveryEnrollment?.reason !== 'already_enrolled') {
           // A refused enrollment (opt-out, payer flip, method removed)
