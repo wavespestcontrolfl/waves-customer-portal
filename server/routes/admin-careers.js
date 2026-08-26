@@ -30,7 +30,9 @@ router.get('/', async (req, res) => {
         'id', 'role', 'status', 'language', 'contact_snapshot',
         'ai_score', 'ai_recommendation', 'ai_screen', 'created_at', 'updated_at'
       )
-      .orderBy('created_at', 'desc')
+      // Best-first: the AI screen exists so the owner reads the queue in
+      // ranked order; unscored rows sink, recency breaks ties.
+      .orderByRaw('ai_score DESC NULLS LAST, created_at DESC')
       .limit(200);
 
     if (STATUSES.includes(req.query.status)) {
@@ -84,30 +86,37 @@ router.patch('/:id/status', async (req, res) => {
       ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
       : '';
 
-    const row = await db('job_applications').where({ id: req.params.id }).first();
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    if (row.status === status && !note) {
-      return res.json({ application: row });
-    }
+    // Row lock inside one transaction: concurrent transitions must not both
+    // derive from the same snapshot and silently drop a history entry.
+    const updated = await db.transaction(async (trx) => {
+      const row = await trx('job_applications')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!row) return null;
+      if (row.status === status && !note) return row;
 
-    const history = Array.isArray(row.status_history) ? row.status_history : [];
-    history.push({
-      from: row.status,
-      to: status,
-      note: note || null,
-      by: req.technicianId,
-      at: new Date().toISOString(),
+      const history = Array.isArray(row.status_history) ? row.status_history : [];
+      history.push({
+        from: row.status,
+        to: status,
+        note: note || null,
+        by: req.technicianId,
+        at: new Date().toISOString(),
+      });
+
+      const [next] = await trx('job_applications')
+        .where({ id: req.params.id })
+        .update({
+          status,
+          status_history: JSON.stringify(history),
+          updated_at: new Date(),
+        })
+        .returning('*');
+      return next;
     });
 
-    const [updated] = await db('job_applications')
-      .where({ id: req.params.id })
-      .update({
-        status,
-        status_history: JSON.stringify(history),
-        updated_at: new Date(),
-      })
-      .returning('*');
-
+    if (!updated) return res.status(404).json({ error: 'Not found' });
     res.json({ application: updated });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${err.message}`);

@@ -17,7 +17,7 @@ const {
   ANSWER_KEYS,
 } = require('../services/job-applications');
 const { __private: screenPrivate } = require('../services/job-application-screen');
-const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
+const { TRIGGER_REGISTRY, __private: triggerPrivate } = require('../services/notification-triggers');
 
 function mockDb() {
   const inserts = [];
@@ -143,9 +143,10 @@ describe('AI screen mapping', () => {
 });
 
 describe('new_job_application bell', () => {
-  test('is registered and masks the applicant phone', () => {
+  test('carries ZERO applicant PII — staff-wide fan-out vs requireAdmin queue', () => {
     const trigger = TRIGGER_REGISTRY.new_job_application;
     expect(trigger).toBeDefined();
+    // Even a payload that (wrongly) includes PII must not surface it.
     const built = trigger.build({
       applicationId: 'app-1',
       role: 'technician',
@@ -154,8 +155,16 @@ describe('new_job_application bell', () => {
       city: 'Venice',
     });
     expect(built.link).toBe('/admin/recruiting?application=app-1');
-    expect(built.body).toContain('***0142');
-    expect(built.body).not.toContain('941-555');
-    expect(built.body).toContain('Jane Doe');
+    const surface = `${built.title} ${built.body}`;
+    expect(surface).not.toContain('Jane');
+    expect(surface).not.toContain('0142');
+    expect(surface).not.toContain('Venice');
+  });
+
+  test('push tag is per-application so pushes never collapse', () => {
+    const tagA = triggerPrivate.pushTagFor('new_job_application', { applicationId: 'app-1' });
+    const tagB = triggerPrivate.pushTagFor('new_job_application', { applicationId: 'app-2' });
+    expect(tagA).not.toBe(tagB);
+    expect(tagA).toContain('app-1');
   });
 });

@@ -78,12 +78,11 @@ router.post('/apply', applyIpLimiter, applyPhoneLimiter, async (req, res) => {
     // Fire-and-forget: owner bell/push.
     void (async () => {
       const { triggerNotification } = require('../services/notification-triggers');
+      // No applicant PII in the payload: notifications fan out to all staff
+      // but the recruiting queue is requireAdmin (codex P0).
       await triggerNotification('new_job_application', {
         applicationId: row.id,
         role: row.role,
-        name: body.name,
-        phone: body.phone,
-        city: body.city,
       });
     })().catch((err) => {
       logger.error(`[careers] notification failed: ${err.message}`);

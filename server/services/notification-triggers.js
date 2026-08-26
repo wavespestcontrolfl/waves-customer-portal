@@ -149,6 +149,10 @@ const TRIGGER_REGISTRY = {
   // Fired by the public careers funnel (routes/public-careers.js) on a new
   // job application. Applicants are never customers/leads; the owner calls
   // or texts every applicant himself from the recruiting queue.
+  // NO applicant PII in the notification: bell/push fans out to every
+  // active staff user, but the recruiting API is requireAdmin — name/city/
+  // phone must not cross that boundary (codex P0). Details live behind the
+  // link, in the admin-only queue.
   new_job_application: {
     label: 'New job application',
     category: 'new_lead',
@@ -156,11 +160,7 @@ const TRIGGER_REGISTRY = {
     group: 'Leads & Sales',
     build: (p) => ({
       title: `Job application: ${p.role || 'technician'}`,
-      body: [
-        p.name || 'An applicant',
-        p.city ? `(${p.city})` : null,
-        p.phone ? `Phone: ${maskPhone(p.phone)}` : null,
-      ].filter(Boolean).join(' - '),
+      body: 'New applicant — open the recruiting queue to review.',
       link: p.applicationId
         ? `/admin/recruiting?application=${p.applicationId}`
         : '/admin/recruiting',
@@ -638,6 +638,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // Per-request (codex r12): a re-armed second request must not replace
     // the first push silently (renotify:false in the service worker).
     return `waves-appointment_reschedule_intent-${payload.customerId || 'unknown-customer'}-${payload.decisionId || 'x'}`;
+  }
+  if (triggerKey === 'new_job_application') {
+    // Per-application tag: two applications arriving before the owner opens
+    // notifications must not collapse into one push (same-tag replacement).
+    return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
   }
   return `waves-${triggerKey}`;
 }
