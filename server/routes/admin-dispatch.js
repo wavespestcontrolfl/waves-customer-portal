@@ -10215,6 +10215,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
               .first('id');
             if (lineExists) {
+              // Backfill the immutable claim record before healing: a
+              // worker that died between the mint commit and the record
+              // insert left the invoice recordless, and healing without
+              // one would strand the resumed Auto Pay in manual review
+              // (Codex #3503). The clearing claim's own amount is the
+              // server-side truth.
+              try {
+                await db('setup_fee_claims')
+                  .insert({
+                    invoice_id: lineExists.id,
+                    scheduled_service_id: setupParentId,
+                    amount,
+                  })
+                  .onConflict('invoice_id')
+                  .ignore();
+              } catch (recErr) {
+                logger.warn(`[dispatch] setup-fee claim record backfill failed for invoice ${lineExists.id} (resume stays manual-review): ${recErr.message}`);
+              }
               await db('scheduled_services')
                 .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
                 .update({ pending_setup_fee: null, updated_at: new Date() });
@@ -10353,6 +10371,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               unit_price: secureSetupFee.amount,
               amount: secureSetupFee.amount,
               category: 'Setup fee',
+              // Durable single-use auto-charge marker (see allowance block).
+              secure_claim: true,
             }]
             : undefined,
           // Backfill: createFromService otherwise rolls an accepted
@@ -10418,6 +10438,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               unit_price: secureSetupFee.amount,
               amount: secureSetupFee.amount,
               category: 'Setup fee',
+              // Durable single-use marker — see the sibling mint above.
+              secure_claim: true,
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
@@ -10534,6 +10556,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (secureSetupFee) {
           const feeRode = JSON.stringify(invoice?.line_items || '')
             .toLowerCase().includes('one-time setup fee');
+          // Immutable claim record FIRST (before the retire below): if the
+          // process dies after the retire commits but before the saved-card
+          // rail runs, this row is the authorization evidence the resumed
+          // request recovers — server-written only, matched on invoice_id +
+          // exact cents at read time. Insert failure degrades to the old
+          // behavior (resume routes to manual review), never blocks the
+          // mint or the retire.
+          if (feeRode && invoice?.id) {
+            try {
+              await db('setup_fee_claims')
+                .insert({
+                  invoice_id: invoice.id,
+                  scheduled_service_id: secureSetupFee.parentId,
+                  amount: secureSetupFee.amount,
+                })
+                .onConflict('invoice_id')
+                .ignore();
+            } catch (recErr) {
+              logger.warn(`[dispatch] setup-fee claim record insert failed for invoice ${invoice.id} (crash-resume will route to review): ${recErr.message}`);
+            }
+          }
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
@@ -11031,23 +11074,85 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const sharedFee = Number(require('../services/estimate-converter').WAVEGUARD_SETUP_FEE);
         if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
       } catch (e) { /* keep the conservative literal */ }
-      let setupFeeAllowance = 0;
-      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected)) {
-        try {
-          const rawLines = invoice.line_items;
-          const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
-          const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
-            /one-time setup fee/i.test(String(li?.description || ''))
-            && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
-          ));
-          if (setupLine) {
-            const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
-            // Cap at the real fee: an office-inflated setup line must not
-            // widen the allowance.
-            setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
+      // The frozen quote-time fee outranks the live constant: an invoice
+      // minted from a quote that froze a different amount is VALID at that
+      // amount, and capping it at a since-lowered constant would misroute a
+      // correct Auto Pay charge to manual review (Codex #3489). The frozen
+      // resolver validates shape; require a linked source estimate.
+      let wizardFrozenFeeLinked = false;
+      try {
+        if (svc.source_estimate_id) {
+          const srcEst = await db('estimates').where({ id: svc.source_estimate_id }).first('estimate_data');
+          if (srcEst) {
+            const srcData = typeof srcEst.estimate_data === 'string'
+              ? JSON.parse(srcEst.estimate_data)
+              : (srcEst.estimate_data || {});
+            const frozenObligation = Number(srcData?.acceptedSetupFeeAmount ?? srcData?.setupFeeQuote?.amount);
+            if (Number.isFinite(frozenObligation) && frozenObligation > 0) {
+              // Amount CAP only — never the allowance PREDICATE: every
+              // seeded child keeps source_estimate_id, so estimate-derived
+              // authorization would outlive the one-time obligation and let
+              // a later duplicated/office-added setup line auto-charge.
+              // The predicate comes solely from the ACTIVE claim below.
+              WAVEGUARD_SETUP_FEE_ALLOWANCE = frozenObligation;
+            }
           }
-        } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
+        }
+      } catch (e) { /* keep the shared/live cap (fail toward review) */ }
+      // SINGLE-USE wizard allowance: authorized only by the durable claim
+      // THIS completion consumed (secureSetupFee — nulled when the fee did
+      // not ride this invoice), at exactly its amount. The durable stamp
+      // outranks the estimate JSON (a post-booking /calculate re-run
+      // rewrites the draft to a zero-waiver while the visit keeps its
+      // positive pending_setup_fee), and once the obligation is billed the
+      // claim is retired — a later invoice with a duplicated or
+      // office-added setup line earns NO wizard allowance and routes to
+      // manual review (Codex #3489).
+      if (secureSetupFee && Number(secureSetupFee.amount) > 0) {
+        WAVEGUARD_SETUP_FEE_ALLOWANCE = Number(secureSetupFee.amount);
+        wizardFrozenFeeLinked = true;
       }
+      let setupFeeAllowance = 0;
+      try {
+        const rawLines = invoice.line_items;
+        const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+        const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+          /one-time setup fee/i.test(String(li?.description || ''))
+          && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
+        ));
+        // The secure_claim marker on the mint's own line stays PROVENANCE
+        // ONLY — editable line JSON never authorizes (predicate or
+        // ceiling). Crash-resume authorization comes from the IMMUTABLE
+        // setup_fee_claims record the mint wrote (server-only writes),
+        // matched on this invoice's id AND exact cents against the line:
+        // an edited line mismatches and the charge routes to manual
+        // review; a matching record restores both the predicate and the
+        // ceiling at the recorded amount.
+        if (!wizardFrozenFeeLinked && setupLine) {
+          try {
+            const claimRecord = await db('setup_fee_claims')
+              .where({ invoice_id: invoice.id })
+              .first('amount');
+            if (claimRecord) {
+              const lineCents = Math.round((Number(setupLine.amount
+                ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0) * 100);
+              const recordCents = Math.round(Number(claimRecord.amount) * 100);
+              if (recordCents > 0 && recordCents === lineCents) {
+                wizardFrozenFeeLinked = true;
+                WAVEGUARD_SETUP_FEE_ALLOWANCE = recordCents / 100;
+              }
+            }
+          } catch (e) { /* record unreadable -> fail toward review */ }
+        }
+        if (perApplicationBilling
+          && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)
+          && setupLine) {
+          const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+          // Cap at the real fee: an office-inflated setup line must not
+          // widen the allowance.
+          setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
+        }
+      } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
       const capCeiling = acceptedPerVisit != null
         ? acceptedPerVisit + setupFeeAllowance
         : null;

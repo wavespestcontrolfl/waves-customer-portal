@@ -157,7 +157,41 @@ const NotificationService = {
 
   // Create admin notification (no recipient_id needed)
   async notifyAdmin(category, title, body, opts = {}) {
-    return this.create({ recipientType: 'admin', category, title, body, ...opts });
+    // Opt-in dedupe, mirroring notifyCustomer's mechanism (PR #3496 review
+    // P1: replayed emitters — e.g. repeated recap edits re-detecting the
+    // same stranded card hold — must not crowd the billing feed with
+    // identical bells). Same advisory-lock + metadata dedupeKey shape so
+    // both recipient types share one mechanism; no dedupeKey = unchanged
+    // behavior for every existing caller. Fail closed: an unprovably-new
+    // event skips the bell rather than risking a duplicate.
+    const { dedupeKey, ...createOpts } = opts;
+    if (!dedupeKey) {
+      return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
+    }
+    const metadata = { ...(createOpts.metadata || {}), dedupeKey };
+    try {
+      const persisted = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+        const existing = await trx('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first();
+        if (existing) return { notification: existing, deduped: true };
+        const created = await this.create({
+          recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
+        });
+        // create() returns null on an insert failure (PR #3496 review P1):
+        // spreading that null would report {deduped:false} as if a row
+        // landed. Throw inside the transaction so the failure surfaces as
+        // the null return below, never as success.
+        if (!created) throw new Error('admin notification insert failed');
+        return { notification: created, deduped: false };
+      });
+      return { ...persisted.notification, deduped: persisted.deduped };
+    } catch (err) {
+      logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
+      return null;
+    }
   },
 
   // Create customer notification

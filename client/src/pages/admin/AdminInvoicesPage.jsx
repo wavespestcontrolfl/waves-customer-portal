@@ -920,6 +920,26 @@ function InvoiceList({
     }
   };
 
+  const handleUnvoid = async (id) => {
+    if (
+      !confirm(
+        "Restore this voided invoice to a draft? It becomes editable and collectible again.",
+      )
+    )
+      return;
+    setRowActionBusy(id);
+    try {
+      await adminFetch(`/admin/invoices/${id}/unvoid`, { method: "POST" });
+      showToast("Invoice restored to draft");
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Unvoid failed: ${err.message}`);
+    } finally {
+      setRowActionBusy(null);
+    }
+  };
+
   const handleReversePrepaid = async (id) => {
     if (
       !confirm(
@@ -1741,6 +1761,19 @@ function InvoiceList({
                               title="Return the applied account credit to the customer and reopen this invoice"
                             >
                               Reverse prepaid
+                            </button>
+                          )}
+                          {isAdminUser && inv.status === "void" && (
+                            <button
+                              onClick={() => handleUnvoid(inv.id)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn(D.heading, D.white, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
+                              title="Restore this voided invoice to an editable draft"
+                            >
+                              Unvoid
                             </button>
                           )}
                           {inv.status === "void" && !inv.archived_at && (

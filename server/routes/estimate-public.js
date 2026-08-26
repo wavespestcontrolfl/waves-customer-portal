@@ -1605,10 +1605,9 @@ function recurringInvoiceServiceLabel(rows = []) {
   return labels.length ? labels.join(' + ') : 'Pest Control';
 }
 
-// Mirrors estimate-converter's (unexported) WAVEGUARD_SETUP_FEE. The standard
-// accept's setup line — minted inside the accept transaction below — must bill
-// the exact figure the converter bills on every other conversion path.
-const WAVEGUARD_SETUP_FEE = 99;
+// The standard accept's setup line — minted inside the accept transaction
+// below — bills through EstimateConverter.frozenSetupFeeAmount, the same
+// frozen-disclosure resolver every other conversion path prices with.
 
 function buildEstimateInvoiceModeDraft({
   estimate = {},
@@ -4932,8 +4931,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // pay-per-application invoice copy, prepay math) consistent.
   const operatorSetupFeeWaived = require('../services/estimate-converter')
     .estimateOperatorSetupFeeWaived(estData);
-  const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived
-    ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
+  // Frozen wizard disclosure outranks the cached/live figures — the legacy
+  // SSR must show the same amount frozenSetupFeeAmount charges. An explicit
+  // { amount: 0, waived } quote zeroes the fee outright (member waiver from
+  // /calculate), same as the operator waiver.
+  const frozenQuoteFeeRaw = Number(estData?.setupFeeQuote?.amount);
+  const frozenQuoteFeeWaived = !!estData?.setupFeeQuote && !(frozenQuoteFeeRaw > 0);
+  const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived && !frozenQuoteFeeWaived
+    ? (frozenQuoteFeeRaw > 0
+      ? frozenQuoteFeeRaw
+      : (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99)))
     : 0;
   // Existing customers never pay the setup again — the fee is waived outright
   // (shown struck-through), and with no waivable fee the annual-prepay option
@@ -9653,7 +9660,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             && EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
               recurringServices: frozenRecurring, estimateData: nextEstimateData,
             })) {
-            nextEstimateData.acceptedSetupFeeAmount = EstimateConverter.WAVEGUARD_SETUP_FEE;
+            // Frozen-disclosure resolver: the amount the quote showed, with
+            // the constant only as the pre-freeze legacy fallback.
+            nextEstimateData.acceptedSetupFeeAmount = EstimateConverter.frozenSetupFeeAmount(nextEstimateData);
           }
         } catch (feeFreezeErr) {
           logger.warn(`[estimate-public] accept-time setup-fee freeze skipped: ${feeFreezeErr.message}`);
@@ -10590,11 +10599,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
+            // Frozen-disclosure resolver — bill (and narrate) exactly what
+            // the quote disclosed (constant = pre-freeze legacy fallback).
+            const acceptSetupFeeAmount = EstimateConverter.frozenSetupFeeAmount(conversionEstData);
             if (setupFeeApplies) {
               lineItems.push({
                 description: 'WaveGuard Membership — one-time setup fee',
                 quantity: 1,
-                unit_price: WAVEGUARD_SETUP_FEE,
+                unit_price: acceptSetupFeeAmount,
               });
             }
             if (includesFirstApplicationLine) {
@@ -10630,9 +10642,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               ? 'WaveGuard Membership Setup + First Application'
               : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
             const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee plus first application.`
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee plus first application.`
               : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,
@@ -20626,13 +20638,23 @@ async function buildPricingBundleInner(estimate) {
       && !estData?.membershipSnapshot?.isExistingCustomer
       && recurringMixHasSeasonalMosquito(v1.services);
     if ((annualPrepayEligible || seasonalSetupFeeDue) && membershipFeeMixApplies) {
-      firstVisitFees.push({
-        service: 'waveguard_setup',
-        amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
-        label: 'WaveGuard setup',
-        // No waiver note when prepay isn't offered (seasonal mosquito).
-        waivedWithPrepay: annualPrepayEligible,
-      });
+      // Frozen wizard disclosure first (estimate_data.setupFeeQuote): the
+      // rendered fee must match what /calculate disclosed and what the
+      // frozen-resolver charging paths bill — live config is the fallback
+      // ONLY for legacy estimates with no frozen quote at all. An explicit
+      // { amount: 0, waived } quote suppresses the card entirely (member
+      // waiver: no fee was disclosed and none is charged).
+      const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
+      const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
+      if (!frozenQuoteWaived) {
+        firstVisitFees.push({
+          service: 'waveguard_setup',
+          amount: frozenQuoteFee > 0 ? frozenQuoteFee : (Number(v1.membershipFee || PEST.initialFee || 99) || 99),
+          label: 'WaveGuard setup',
+          // No waiver note when prepay isn't offered (seasonal mosquito).
+          waivedWithPrepay: annualPrepayEligible,
+        });
+      }
     }
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
     if (initialRoachItem) {
@@ -20662,7 +20684,12 @@ async function buildPricingBundleInner(estimate) {
         return Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100);
       }
       if (membershipFeeMixApplies && (annualPrepayEligible || seasonalSetupFeeDue) && !(v1.membershipFee > 0)) {
-        const fee = Number(PEST.initialFee || 99) || 99;
+        // Frozen-quote waiver: no fee was disclosed, none may be added to
+        // the anchor; frozen amount outranks live config when it exists
+        // (same rule as the fee card above).
+        const anchorFrozenFee = Number(estData?.setupFeeQuote?.amount);
+        if (estData?.setupFeeQuote && !(anchorFrozenFee > 0)) return rawV1OneTimeTotal;
+        const fee = anchorFrozenFee > 0 ? anchorFrozenFee : (Number(PEST.initialFee || 99) || 99);
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }
       return rawV1OneTimeTotal;
@@ -20739,14 +20766,25 @@ async function buildPricingBundleInner(estimate) {
       const storedSetupRow = (Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [])
         .find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
       const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
-      const feeAmount = storedSetupAmount > 0 ? storedSetupAmount : (Number(PEST.initialFee || 99) || 99);
-      fallbackFirstVisitFees.push({
-        service: 'waveguard_setup',
-        amount: feeAmount,
-        label: 'WaveGuard setup',
-        waivedWithPrepay: fallbackPrepayEligible,
-      });
-      if (!storedSetupRow) fallbackAnchorLift = feeAmount;
+      // Frozen wizard disclosure outranks both the stored snapshot row and
+      // live config — display must match the frozen-resolver charge. An
+      // explicit { amount: 0, waived } quote suppresses the card entirely.
+      const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
+      const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
+      const feeAmount = frozenQuoteFee > 0
+        ? frozenQuoteFee
+        : (storedSetupAmount > 0 ? storedSetupAmount : (Number(PEST.initialFee || 99) || 99));
+      if (!frozenQuoteWaived) {
+        fallbackFirstVisitFees.push({
+          service: 'waveguard_setup',
+          amount: feeAmount,
+          label: 'WaveGuard setup',
+          waivedWithPrepay: fallbackPrepayEligible,
+        });
+      }
+      // A waived quote must not lift the one-time anchor either — the fee is
+      // neither shown nor charged (same guard as the card push above).
+      if (!storedSetupRow && !frozenQuoteWaived) fallbackAnchorLift = feeAmount;
     }
     const payload = finalizePricingBundle(withManualDiscount({
       ...(legacyLawnRequote
@@ -20903,12 +20941,18 @@ async function buildPricingBundleInner(estimate) {
     && !estData?.membershipSnapshot?.isExistingCustomer
     && recurringMixHasSeasonalMosquito(engineRecurringServices);
   if (!oneTimeOnly && engineMembershipFeeMixApplies && (enginePrepayEligible || engineSeasonalFeeDue)) {
-    engineFirstVisitFees.push({
-      service: 'waveguard_setup',
-      amount: Number(PEST.initialFee || 99) || 99,
-      label: 'WaveGuard setup',
-      waivedWithPrepay: enginePrepayEligible,
-    });
+    // Frozen wizard disclosure first — see the v1 branch. An explicit
+    // { amount: 0, waived } quote suppresses the card entirely.
+    const engineFrozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
+    const engineFrozenQuoteWaived = !!estData?.setupFeeQuote && !(engineFrozenQuoteFee > 0);
+    if (!engineFrozenQuoteWaived) {
+      engineFirstVisitFees.push({
+        service: 'waveguard_setup',
+        amount: engineFrozenQuoteFee > 0 ? engineFrozenQuoteFee : (Number(PEST.initialFee || 99) || 99),
+        label: 'WaveGuard setup',
+        waivedWithPrepay: enginePrepayEligible,
+      });
+    }
   }
   // Cockroach Treatment first-visit fee — mirror the v1 branch's fee card.
   // Engine-input estimates (Agent estimates / quote wizard) carry the roach
