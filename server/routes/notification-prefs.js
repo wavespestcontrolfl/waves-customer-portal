@@ -104,23 +104,7 @@ router.put('/', async (req, res, next) => {
 
     const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
 
-    // seasonal_tips / marketing_offers are marketing-CONSENT flags with
-    // tri-state storage: true = captured opt-in, false = explicit opt-out,
-    // NULL = never asked. Persist only real FLIPS relative to the state the
-    // GET rendered — an unchanged value in a full-object save is a
-    // round-trip, and writing it would either fabricate consent
-    // (NULL -> true) or burn the never-asked tri-state (NULL -> false).
-    // seasonal_tips renders opt-out style (ON unless explicitly false);
-    // marketing_offers renders opt-in style (ON only when true).
-    const renderedFlag = (flag, stored) => (flag === 'seasonal_tips'
-      ? stored !== false
-      : stored === true);
-    for (const flag of ['seasonal_tips', 'marketing_offers']) {
-      if (typeof updates[flag] === 'boolean'
-        && updates[flag] === renderedFlag(flag, existing ? existing[flag] : null)) {
-        delete updates[flag];
-      }
-    }
+    dropRoundTrippedMarketingFlags(updates, existing);
 
     if (Object.keys(updates).length === 0) {
       // Nothing left to write (e.g. an untouched round-trip of unconsented
@@ -143,5 +127,44 @@ router.put('/', async (req, res, next) => {
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+// seasonal_tips / marketing_offers are marketing-CONSENT flags with
+// tri-state storage: true = captured opt-in, false = explicit opt-out,
+// NULL = never asked. Persist only real FLIPS relative to the state the
+// GET rendered — an unchanged value in a full-object save is a
+// round-trip, and writing it would either fabricate consent
+// (NULL -> true) or burn the never-asked tri-state (NULL -> false).
+// seasonal_tips renders opt-out style (ON unless explicitly false);
+// marketing_offers renders opt-in style (ON only when true).
+// Exception: flipping the flag's channel to an SMS-capable value in the
+// SAME request IS an explicit consent action — without it a NULL
+// seasonal_tips (rendered ON) round-trips as "unchanged", stays NULL,
+// and the marketing validator then blocks the SMS channel the customer
+// just selected. Only a genuine channel FLIP qualifies; an untouched
+// full-object save still never mints consent from a NULL.
+const CONSENT_CHANNEL = { seasonal_tips: 'seasonal_channel', marketing_offers: 'marketing_channel' };
+function dropRoundTrippedMarketingFlags(updates, existing) {
+  const renderedFlag = (flag, stored) => (flag === 'seasonal_tips'
+    ? stored !== false
+    : stored === true);
+  const smsCapable = (v) => v === 'sms' || v === 'both';
+  for (const flag of ['seasonal_tips', 'marketing_offers']) {
+    if (typeof updates[flag] === 'boolean'
+      && updates[flag] === renderedFlag(flag, existing ? existing[flag] : null)) {
+      const chanCol = CONSENT_CHANNEL[flag];
+      const storedFlag = existing ? existing[flag] : null;
+      const storedChannel = (existing && existing[chanCol]) || 'email';
+      // Only rescue a true that would otherwise be LOST (stored NULL);
+      // already-captured consent (stored true) has nothing to rescue.
+      const channelFlippedToSms = updates[flag] === true
+        && storedFlag == null
+        && smsCapable(updates[chanCol])
+        && updates[chanCol] !== storedChannel;
+      if (!channelFlippedToSms) delete updates[flag];
+    }
+  }
+}
+
+router._private = { dropRoundTrippedMarketingFlags };
 
 module.exports = router;
