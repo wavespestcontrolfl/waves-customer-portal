@@ -11746,7 +11746,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         notOwned.code = 'PREPAY_JOB_NOT_OWNED';
         throw notOwned;
       }
-      return fn();
+      return fn(fenceTrx);
     });
     if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
       && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
@@ -12027,23 +12027,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // in-flight state stays ambiguous for the sweep to re-read.
             let prepayCardIntentReason = 'card_intent_incomplete';
             try {
-              const StripeSvc = require('../services/stripe');
-              const invPiRow = await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id');
-              const stuckPiId = invPiRow?.stripe_payment_intent_id;
-              const stuckPi = stuckPiId ? await StripeSvc.retrievePaymentIntent(stuckPiId) : null;
-              if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
-                await StripeSvc.cancelPaymentIntent(stuckPiId);
-                await db('estimates').where({ id: estimate.id })
-                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
-                  .update({
-                    estimate_data: db.raw(
-                      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-                      [JSON.stringify({ authentication_required: true })],
-                    ),
-                  });
-                prepayCardIntentReason = 'authentication_required';
-              }
+              // Fenced (hook P0 r23): PI revalidation, cancellation, and
+              // the job stamp run under the ownership fence — a superseded
+              // executor must not cancel a successor's PI (stamp via the
+              // fence's trx: it holds the row lock).
+              await chargeUnderJobFence(async (fenceTrx) => {
+                const StripeSvc = require('../services/stripe');
+                const invPiRow = await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id');
+                const stuckPiId = invPiRow?.stripe_payment_intent_id;
+                const stuckPi = stuckPiId ? await StripeSvc.retrievePaymentIntent(stuckPiId) : null;
+                if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
+                  await StripeSvc.cancelPaymentIntent(stuckPiId);
+                  await fenceTrx('estimates').where({ id: estimate.id })
+                    .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                    .update({
+                      estimate_data: fenceTrx.raw(
+                        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                        [JSON.stringify({ authentication_required: true })],
+                      ),
+                    });
+                  prepayCardIntentReason = 'authentication_required';
+                }
+              });
             } catch (stuckErr) {
+              if (stuckErr.code === 'PREPAY_JOB_NOT_OWNED') {
+                prepayCardIntentReason = 'job_not_owned';
+              }
               logger.warn(`[estimate-accept] stuck-card-intent triage failed for invoice ${invoiceId}: ${stuckErr.message}`);
             }
             prepayAutoCharge = { status: 'ambiguous', reason: prepayCardIntentReason };

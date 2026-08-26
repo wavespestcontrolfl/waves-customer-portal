@@ -629,7 +629,32 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // P0) can reach the invoice row and the shared payer-delivery helper.
     let invoice = null;
     let deliverToPayerAndResolve = async () => {};
-    let withJobFence = async () => ({ ceded: true });
+    // ATOMIC ownership fence (Codex r23 + hook P0): a worker paused past
+    // the 60-minute lease can be superseded — the successor may already
+    // have delivered a pay link, and the Stripe attempt fence cannot stop
+    // a SEQUENTIAL charge after a fallback that made no Stripe attempt.
+    // A read-then-act check leaves a gap, so every collection/payer side
+    // effect runs under FOR UPDATE on the estimate row: claim steals and
+    // token rewrites are UPDATEs on that same row and must WAIT until the
+    // fenced side effect finishes — the token check and the action are
+    // one critical section. Returns { ceded: true } without acting when
+    // the token was lost (or the fence itself fails — fail closed).
+    const withJobFence = async (fn) => {
+      try {
+        return await db.transaction(async (fenceTrx) => {
+          await fenceTrx('estimates').where({ id: row.id }).forUpdate().first('id');
+          const freshRow = await fenceTrx('estimates').where({ id: row.id }).first('estimate_data');
+          let base = freshRow?.estimate_data;
+          if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+          if (base?.prepayAutoChargeJob?.claim_token !== job.claim_token) return { ceded: true };
+          const result = await fn(fenceTrx);
+          return { ceded: false, result };
+        });
+      } catch (fenceErr) {
+        if (fenceErr && (fenceErr.code || fenceErr.reconciliationRequired)) throw fenceErr;
+        throw fenceErr;
+      }
+    };
     try {
       invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
@@ -732,20 +757,30 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         // customer's authentication.
         if (String(invoice.payment_method || '') !== 'us_bank_account') {
           try {
-            const invPi = await db('invoices').where({ id: invoice.id }).first('stripe_payment_intent_id');
-            const stuckPiId = invPi?.stripe_payment_intent_id;
-            const stuckPi = stuckPiId ? await StripeService.retrievePaymentIntent(stuckPiId) : null;
-            if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
-              await StripeService.cancelPaymentIntent(stuckPiId);
-              await db('estimates').where({ id: row.id })
-                .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
-                .update({
-                  estimate_data: db.raw(
-                    "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-                    [JSON.stringify({ authentication_required: true })],
-                  ),
-                });
-              logger.info(`[recurring-cof] prepay sweep canceled 3DS-parked intent ${stuckPiId} for invoice ${invoice.id} — pay-link fallback after the webhook reopens it`);
+            // Under the ownership fence (hook P0 r23): a superseded worker
+            // must not cancel a successor's (or a new pay-session's) PI nor
+            // mutate the successor's job — PI revalidation, cancellation,
+            // and the stamp all run inside the fenced critical section
+            // (stamp via fenceTrx: the fence holds the row lock).
+            const fencedTriage = await withJobFence(async (fenceTrx) => {
+              const invPi = await db('invoices').where({ id: invoice.id }).first('stripe_payment_intent_id');
+              const stuckPiId = invPi?.stripe_payment_intent_id;
+              const stuckPi = stuckPiId ? await StripeService.retrievePaymentIntent(stuckPiId) : null;
+              if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
+                await StripeService.cancelPaymentIntent(stuckPiId);
+                await fenceTrx('estimates').where({ id: row.id })
+                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                  .update({
+                    estimate_data: fenceTrx.raw(
+                      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                      [JSON.stringify({ authentication_required: true })],
+                    ),
+                  });
+                logger.info(`[recurring-cof] prepay sweep canceled 3DS-parked intent ${stuckPiId} for invoice ${invoice.id} — pay-link fallback after the webhook reopens it`);
+              }
+            });
+            if (fencedTriage.ceded) {
+              logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before 3DS triage`);
             }
           } catch (stuckErr) {
             logger.warn(`[recurring-cof] prepay sweep stuck-card-intent triage failed for invoice ${invoice.id}: ${stuckErr.message}`);
@@ -773,32 +808,6 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // inbox; resolve only on a confirmed {ok} delivery, else the
       // stale-claim lease retries. Shared with the in-charge payer-guard
       // refusal below (Codex r10 P0).
-      // ATOMIC ownership fence (Codex r23 + hook P0): a worker paused past
-      // the 60-minute lease can be superseded — the successor may already
-      // have delivered a pay link, and the Stripe attempt fence cannot stop
-      // a SEQUENTIAL charge after a fallback that made no Stripe attempt.
-      // A read-then-act check leaves a gap, so every collection/payer side
-      // effect runs under FOR UPDATE on the estimate row: claim steals and
-      // token rewrites are UPDATEs on that same row and must WAIT until the
-      // fenced side effect finishes — the token check and the action are
-      // one critical section. Returns { ceded: true } without acting when
-      // the token was lost (or the fence itself fails — fail closed).
-      withJobFence = async (fn) => {
-        try {
-          return await db.transaction(async (fenceTrx) => {
-            await fenceTrx('estimates').where({ id: row.id }).forUpdate().first('id');
-            const freshRow = await fenceTrx('estimates').where({ id: row.id }).first('estimate_data');
-            let base = freshRow?.estimate_data;
-            if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
-            if (base?.prepayAutoChargeJob?.claim_token !== job.claim_token) return { ceded: true };
-            const result = await fn(fenceTrx);
-            return { ceded: false, result };
-          });
-        } catch (fenceErr) {
-          if (fenceErr && (fenceErr.code || fenceErr.reconciliationRequired)) throw fenceErr;
-          throw fenceErr;
-        }
-      };
       deliverToPayerAndResolve = async () => {
         let payerDelivered = false;
         try {
