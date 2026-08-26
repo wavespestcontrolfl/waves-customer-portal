@@ -61,7 +61,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -85,6 +85,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -130,7 +133,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -154,6 +157,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -196,7 +202,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -220,6 +226,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -257,7 +266,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -281,6 +290,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -322,7 +334,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -347,6 +359,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -385,7 +400,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -409,6 +424,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -452,7 +470,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -481,6 +499,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
