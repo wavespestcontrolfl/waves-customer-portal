@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   CheckCircle2,
@@ -192,10 +192,32 @@ const LEAF_META = {
 
 const ALL_LEAF_TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 
+// Vendor credentials, pricing sync/approvals, scrape health, and service
+// margins are owner-only (2026-08-25 role lockdown) — techs keep products,
+// planning, content, and protocols. Server-gated in admin-inventory.js.
+const OWNER_ONLY_INVENTORY_TABS = new Set([
+  "price-sync",
+  "approvals",
+  "vendors",
+  "scrape",
+  "margins",
+]);
+
 export default function InventoryPage() {
   const [searchParams] = useSearchParams();
-  const initialTab = ALL_LEAF_TABS.includes(searchParams.get("tab"))
-    ? searchParams.get("tab")
+  // Server-verified role from the shell's Outlet context (never localStorage).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
+  const visibleGroups = TAB_GROUPS
+    .map((g) => ({
+      ...g,
+      tabs: g.tabs.filter((t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t)),
+    }))
+    .filter((g) => g.tabs.length > 0);
+  const requestedTab = searchParams.get("tab");
+  const initialTab = ALL_LEAF_TABS.includes(requestedTab)
+    && (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
+    ? requestedTab
     : "products";
   const [tab, setTab] = useState(initialTab);
 
@@ -224,8 +246,8 @@ export default function InventoryPage() {
   };
 
   const activeGroup =
-    TAB_GROUPS.find((g) => g.tabs.includes(tab)) || TAB_GROUPS[0];
-  const groupSections = TAB_GROUPS.map((g) => {
+    visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
+  const groupSections = visibleGroups.map((g) => {
     let pending = 0;
     if (g.tabs.includes("approvals")) pending += stats?.approvals?.pending || 0;
     if (g.tabs.includes("restock")) pending += stats?.restockRequests?.open || 0;
@@ -252,7 +274,7 @@ export default function InventoryPage() {
         sections={groupSections}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = TAB_GROUPS.find((x) => x.key === key);
+          const g = visibleGroups.find((x) => x.key === key);
           if (g) setTab(g.tabs[0]);
         }}
         ariaLabel="Inventory section"

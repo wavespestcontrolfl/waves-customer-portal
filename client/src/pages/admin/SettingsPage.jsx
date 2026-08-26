@@ -280,8 +280,24 @@ export default function SettingsPage() {
 
   const gates = health?.gates || {};
 
+  // Service Reports (coverage config) and Scheduling (blackout days) are
+  // requireAdmin end to end server-side — hide the whole groups from
+  // non-admin roles instead of rendering panels that can only 403
+  // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
+  const isAdminRole = user?.role === "admin";
+  const visibleGroups = SETTINGS_TAB_GROUPS.filter(
+    (g) => isAdminRole || !["service-reports", "scheduling"].includes(g.key),
+  );
+  // A ?tab= deep link into a hidden group resolves to General once the
+  // server-verified profile arrives.
+  useEffect(() => {
+    if (user && !isAdminRole && ["service-reports", "blackout-days"].includes(tab)) {
+      selectTab("general");
+    }
+    // selectTab is stable per render contract above; errors-only lint config.
+  }, [user, isAdminRole, tab]);
   const activeGroup =
-    SETTINGS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) || SETTINGS_TAB_GROUPS[0];
+    visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 
   return (
     <div>
@@ -289,10 +305,10 @@ export default function SettingsPage() {
       <AdminCommandHeader
         title="Settings"
         icon={SettingsIcon}
-        sections={SETTINGS_TAB_GROUPS}
+        sections={visibleGroups}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = SETTINGS_TAB_GROUPS.find((x) => x.key === key);
+          const g = visibleGroups.find((x) => x.key === key);
           if (g) selectTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"

@@ -2,7 +2,7 @@ const express = require('express');
 const { parse: parseCsvSync } = require('csv-parse/sync');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -26,6 +26,32 @@ const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: technicians keep DAY-TO-DAY stock operations —
+// product list, movements, stock adjustments, service-usage logging, and
+// the planning reads (forecast / unit review / restock). Everything touching
+// vendors (encrypted credentials), pricing, approvals, price history,
+// scrape/system sync, aliases, AI price lookups, and product create/edit/
+// delete is owner-only. Fail closed: any path not explicitly staff-allowed
+// requires the admin role.
+const STAFF_INVENTORY_REQUEST = (req) => {
+  const p = req.path;
+  if (req.method === 'GET') {
+    return p === '/' || p === '/stats' || p === '/protocol-health'
+      || p === '/service-usage' || p === '/waveguard-forecast'
+      || p === '/unit-review' || p === '/restock-requests'
+      || p === '/lawn-outline-facts'
+      || /^\/[^/]+\/movements$/.test(p);
+  }
+  return /^\/[^/]+\/adjust$/.test(p)
+    || (req.method === 'POST' && p === '/service-usage')
+    || /^\/service-usage\/[^/]+$/.test(p)
+    || /^\/waveguard-forecast\/[^/]+\/restock-request$/.test(p)
+    || /^\/restock-requests\/[^/]+\/action$/.test(p)
+    || /^\/unit-review\/[^/]+\/fix$/.test(p);
+};
+router.use((req, res, next) => (
+  STAFF_INVENTORY_REQUEST(req) ? next() : requireAdmin(req, res, next)
+));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

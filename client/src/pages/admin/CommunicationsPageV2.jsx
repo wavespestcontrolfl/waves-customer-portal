@@ -2897,7 +2897,13 @@ export default function CommunicationsPageV2() {
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
   const isAdminRole = outletContext?.user?.role === "admin";
-  const tabs = TABS.filter((t) => !t.adminOnly || isAdminRole);
+  // Memoized by role: the hash-sync effect below depends on `tabs`, and a
+  // fresh array every render would re-run applyHashTab() after each tab
+  // click, snapping the user back to the deep-linked tab (codex P2).
+  const tabs = useMemo(
+    () => TABS.filter((t) => !t.adminOnly || isAdminRole),
+    [isAdminRole],
+  );
 
   // A hash deep link (or stale state) to a hidden management tab must not
   // strand a non-admin on a blank/unauthorized view.
