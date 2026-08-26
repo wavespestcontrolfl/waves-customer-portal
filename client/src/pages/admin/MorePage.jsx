@@ -1,4 +1,4 @@
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
   ExternalLink,
@@ -15,12 +15,11 @@ export default function MorePage() {
   // on desktop it rendered a blank page). Desktop uses the full sidebar — send
   // it to the dashboard instead. Reactive: resizing to desktop redirects too.
   const isMobile = useIsMobile();
-  let currentRole = null;
-  try {
-    currentRole = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
-  } catch {
-    currentRole = null;
-  }
+  // Role comes from the shell's Outlet context — the SERVER-verified
+  // /admin/auth/me profile — never the spoofable localStorage copy (codex
+  // P1). Missing context fails closed: owner-only items stay hidden.
+  const outletContext = useOutletContext();
+  const currentRole = outletContext?.user?.role || null;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   if (!isMobile) return <Navigate to="/admin" replace />;

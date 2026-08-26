@@ -261,6 +261,9 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/revenue")).toBe(true);
     // Default-deny: unknown/future routes are owner-only until allowlisted.
     expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
+    // Owner-only pages nested under technician-allowed prefixes (codex P1).
+    expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
+    expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);
     expect(isPathAdminOnly("/admin/dashboard")).toBe(false);

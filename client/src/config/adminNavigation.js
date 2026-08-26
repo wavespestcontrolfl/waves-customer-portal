@@ -421,9 +421,23 @@ const TECH_ALLOWED_PATH_PREFIXES = [
   "/admin/more",
 ];
 
+// Owner-only pages that live UNDER a technician-allowed prefix — the prefix
+// match alone would admit them (codex P1). Both backend routers requireAdmin.
+const OWNER_ONLY_NESTED_PATHS = [
+  "/admin/customers/duplicates",
+  "/admin/settings/pest-pressure",
+];
+
 export function isPathAdminOnly(pathname) {
   const p = String(pathname || "");
   if (p === "/admin" || p === "/admin/") return false; // index redirects to dashboard
+  if (
+    OWNER_ONLY_NESTED_PATHS.some(
+      (nested) => p === nested || p.startsWith(`${nested}/`),
+    )
+  ) {
+    return true;
+  }
   const allowed = TECH_ALLOWED_PATH_PREFIXES.some(
     (prefix) => p === prefix || p.startsWith(`${prefix}/`),
   );
