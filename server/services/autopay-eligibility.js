@@ -45,21 +45,30 @@ function isChargeableAutopayMethod(method, now = new Date()) {
       && BLOCKED_PM_ACH_STATUSES.includes(method.ach_status));
 }
 
-async function getChargeableAutopayMethod(customer, knex) {
+async function getChargeableAutopayMethod(customer, knex, now = new Date()) {
   if (!customer?.id) return false;
 
   try {
-    return await knex('payment_methods')
+    // Legacy data (or a pre-fix race) can hold SEVERAL default+enabled rows,
+    // and the charge path (stripe.js) walks candidates in a deterministic
+    // order until an eligible one is found. Mirror that walk: an unordered
+    // .first() could surface a pending-verification bank row and declare the
+    // customer unchargeable while a chargeable card sits beside it — making
+    // this predicate disagree with the SQL aggregate and the charge path
+    // (codex #3495 r1 P1).
+    const candidates = await knex('payment_methods')
       .where({
         customer_id: customer.id,
         processor: 'stripe',
         is_default: true,
         autopay_enabled: true,
       })
-      .first(
+      .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'id', order: 'asc' }])
+      .select(
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
         'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
       );
+    return (candidates || []).find((m) => isChargeableAutopayMethod(m, now)) || null;
   } catch {
     return null;
   }
@@ -71,7 +80,7 @@ async function customerOnAutopay(customer, options = {}) {
   if (customer.autopay_enabled === false) return false;
   if (isPaused(customer, options.now)) return false;
 
-  const paymentMethod = await getChargeableAutopayMethod(customer, knex);
+  const paymentMethod = await getChargeableAutopayMethod(customer, knex, options.now);
   if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {

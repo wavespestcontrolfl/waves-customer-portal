@@ -1233,6 +1233,30 @@ router.post('/status', async (req, res) => {
         // write means other workflows keep texting an opted-out number.
         if (String(ErrorCode) === '21610') {
           const optOutPhone = normalizeE164(To) || To;
+          // Late/redelivered-callback guard (codex #3495 r1 P1): Twilio can
+          // retry a 21610 callback until AFTER the recipient has since sent
+          // START and had the suppression cleared. Apply the opt-out only
+          // when no clearance postdates the SEND this callback describes —
+          // otherwise the retry would reverse the newer explicit opt-in and
+          // block every SMS indefinitely.
+          let sentAt = null;
+          let optOutCustomerId = null;
+          try {
+            const logRow = await db('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at');
+            sentAt = logRow?.created_at || null;
+            optOutCustomerId = logRow?.customer_id || null;
+          } catch (lookupErr) {
+            logger.warn(`[twilio-status] 21610 sms_log lookup failed: ${lookupErr.message}`);
+          }
+          let clearedAfterSend = false;
+          try {
+            const supRow = await db('messaging_suppression').where({ phone: optOutPhone }).first('active', 'cleared_at');
+            clearedAfterSend = !!(supRow && supRow.active === false && supRow.cleared_at
+              && sentAt && new Date(supRow.cleared_at) > new Date(sentAt));
+          } catch { /* no row / no read → apply the opt-out normally */ }
+          if (clearedAfterSend) {
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} predates a later opt-in clearance — not re-suppressing`);
+          } else {
           try {
             // recordSuppression resolves { ok: false } on a swallowed DB
             // error — it does NOT reject — so check the result, not the catch.
@@ -1260,20 +1284,30 @@ router.post('/status', async (req, res) => {
               logger.error(`[twilio-status] 21610 suppression-failure notify also failed: ${notifyErr.message}`);
             }
           }
+          // Recipient double opt-in (codex #3495 r1 P1): when the failed
+          // message was the opt-in ask itself, the generic ask_failed
+          // handler below leaves the recipient row in a state
+          // markRecipientOptin('confirmed') deliberately ignores — so a
+          // later START would clear the global suppression while
+          // appointment fanout stayed blocked forever. A 21610 is the
+          // recipient's VERDICT: record declined, same as inbound STOP.
+          try {
+            await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
+          } catch { /* no recipient row is the common case — never block */ }
           // Prefs flip is best-effort and separate — the suppression row is
           // the enforcement; sms_enabled keeps the admin UI honest (same
           // split as the STOP handler).
           try {
-            const logRow = await db('sms_log').where({ twilio_sid: MessageSid }).first('customer_id');
-            if (logRow?.customer_id) {
+            if (optOutCustomerId) {
               await db('notification_prefs')
-                .insert({ customer_id: logRow.customer_id, sms_enabled: false })
+                .insert({ customer_id: optOutCustomerId, sms_enabled: false })
                 .onConflict('customer_id')
                 .merge({ sms_enabled: false });
             }
           } catch (prefsErr) {
             logger.error(`[twilio-status] 21610 prefs flip failed: ${prefsErr.message}`);
           }
+          } // end !clearedAfterSend
         }
 
         // Appointment-text fallback: if this undelivered message was an appointment

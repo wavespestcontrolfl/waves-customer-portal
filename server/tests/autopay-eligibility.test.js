@@ -27,6 +27,8 @@ function knexReturning(row) {
     where() { return query; },
     andWhere(fn) { if (typeof fn === 'function') fn.call(query); return query; },
     orWhere() { return query; },
+    orderBy() { return query; },
+    select() { return Promise.resolve(row ? [row] : []); },
     first() { return Promise.resolve(row); },
   };
   return () => query;
@@ -172,7 +174,9 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
   });
 
   test('treats blank and malformed varchar expiry values as inactive without raising', async () => {
-    const { sql, binding } = autopayActivePredicate();
+    // Frozen clock — the legacy-two-digit '32' row must stay future-dated
+    // deterministically (codex #3495 r1 P1).
+    const { sql, binding } = autopayActivePredicate(new Date('2026-07-16T16:00:00Z'));
     const result = await database.raw(`
       WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
         VALUES
@@ -244,20 +248,43 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
 });
 
 describe('charge-path parity (cron-gap audit B4)', () => {
+  // Frozen clock (codex #3495 r1 P1): with a live clock these assertions
+  // would start failing without a code change in January 2033.
+  const frozenNow = new Date('2026-07-16T16:00:00Z');
   test('legacy 2-digit expiry years normalize like the charge path', () => {
     // A '12/32' card is valid until Dec 2032 — the old predicate read year
     // 32 and refused a method collection would charge.
-    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' })).toBe(false);
-    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '02' })).toBe(true);
-    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' })).toBe(true);
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' }, frozenNow)).toBe(false);
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: '12', exp_year: '02' }, frozenNow)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: '12', exp_year: '32' }, frozenNow)).toBe(true);
   });
 
   test('bank rows in pending/failed verification are not chargeable; verified and NULL are', () => {
-    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'pending_verification' })).toBe(false);
-    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verification_failed' })).toBe(false);
-    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verified' })).toBe(true);
-    expect(isChargeableAutopayMethod({ ...chargeableAch })).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'pending_verification' }, frozenNow)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verification_failed' }, frozenNow)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, ach_status: 'verified' }, frozenNow)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableAch }, frozenNow)).toBe(true);
     // Cards are untouched by ach_status.
-    expect(isChargeableAutopayMethod({ ...chargeableCard, ach_status: 'pending_verification' })).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, ach_status: 'pending_verification' }, frozenNow)).toBe(true);
+  });
+
+  test('walks all default methods before declaring autopay inactive (multi-default legacy data)', async () => {
+    // A pending-verification bank row beside a chargeable card must not
+    // make customerOnAutopay() false — mirror the charge path's candidate
+    // walk (codex #3495 r1 P1).
+    const rows = [
+      { ...chargeableAch, id: 'pm-bank', ach_status: 'pending_verification' },
+      { ...chargeableCard, id: 'pm-card' },
+    ];
+    const query = {
+      where() { return query; },
+      orderBy() { return query; },
+      select() { return Promise.resolve(rows); },
+      first() { return Promise.resolve(rows[0]); },
+    };
+    await expect(customerOnAutopay({
+      id: 'customer-1',
+      autopay_enabled: true,
+    }, { db: () => query, now: frozenNow })).resolves.toBe(true);
   });
 });
