@@ -478,14 +478,22 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // safe to re-attempt because the charge service's durable attempt
     // claim (stripe_invoice_charge_attempts) fences any still-active or
     // ambiguous charge underneath it.
+    // Age predicates live IN the query and selection is oldest-first
+    // (Codex r9 P1): filtering fresh pending jobs only after the LIMIT let
+    // a burst of new accepts fill every batch while older stranded jobs
+    // were never selected. The in-lock re-checks below stay as the atomic
+    // guard; missing timestamps coalesce to epoch (= old) exactly like the
+    // in-lock logic treats them.
     rows = await db('estimates')
       .where({ status: 'accepted' })
       .whereRaw(
-        "((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'pending'"
+        "(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'pending'"
+        + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'created_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute'))"
         + " OR ((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'claimed'"
         + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'claimed_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute')))",
-        [claimStaleMinutes],
+        [olderThanMinutes, claimStaleMinutes],
       )
+      .orderByRaw("COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'created_at')::timestamptz, 'epoch'::timestamptz) asc")
       .limit(limit)
       .select('id', 'estimate_data');
   } catch (err) {
@@ -552,7 +560,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
     ).catch(() => {});
     try {
-      const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
+      const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
       const invStatus = String(invoice.status || '').toLowerCase();
       // Terminal classification (pre-push Codex P1 r4): only paid/prepaid
@@ -586,6 +594,15 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         }
         if (reconciliationPending) {
           logger.info(`[recurring-cof] prepay sweep deferring estimate ${row.id}: invoice ${invoice.id} processing with reconciliation pending`);
+          continue;
+        }
+        // Bank tender only (Codex r9 P0): the charge service stamps every
+        // non-succeeded PaymentIntent as 'processing' — a CARD intent
+        // parked mid-flight is NOT an initiated collection and must stay
+        // unresolved (the lease retries after the intent settles or dies),
+        // never retired as if the money were moving.
+        if (String(invoice.payment_method || '') !== 'us_bank_account') {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: invoice ${invoice.id} processing on a non-bank tender (incomplete card intent)`);
           continue;
         }
         await resolve('processing', { reason: 'already_initiated' });
@@ -703,10 +720,17 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // card for a bill that now routes to a third-party payer.
           requireSelfPayCustomerId: invoice.customer_id,
         });
-        const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status');
+        const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status', 'payment_method');
         const freshStatus = String(freshInvoice?.status || '').toLowerCase();
         if (['paid', 'prepaid'].includes(freshStatus)) { resumed += 1; await resolve('paid'); continue; }
-        if (freshStatus === 'processing') { resumed += 1; await resolve('processing'); continue; }
+        // Same bank-tender guard as the pre-charge classification (Codex
+        // r9 P0): only a confirmed bank debit resolves as 'processing'; a
+        // card intent stamped 'processing' stays unresolved for the lease.
+        if (freshStatus === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') { resumed += 1; await resolve('processing'); continue; }
+        if (freshStatus === 'processing') {
+          logger.warn(`[recurring-cof] prepay sweep leaving estimate ${row.id} claimed: post-charge invoice ${invoice.id} processing on a non-bank tender`);
+          continue;
+        }
         throw new Error(`post-charge status ${freshStatus || 'unknown'}`);
       }
       throw new Error(pmRow ? 'no authorized total on job' : 'bound method not found');

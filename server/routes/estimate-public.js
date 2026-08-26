@@ -11556,7 +11556,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // the homeowner's card for a bill that now routes to a payer.
             requireSelfPayCustomerId: customerId,
           });
-          const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token');
+          const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
           if (['paid', 'prepaid'].includes(freshStatus)) {
             // covered_by_credit / 'prepaid' = account credit covered the
@@ -11569,17 +11569,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'paid', ...(coveredByCredit ? { coveredByCredit: true } : {}) };
             invoicePayUrl = null; // nothing left to pay — never advertise a pay link
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
-          } else if (freshStatus === 'processing') {
+          } else if (freshStatus === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') {
             // A saved BANK method (autopay-active customers can be
             // ACH-enrolled) debits asynchronously — 'processing' is a
             // successfully INITIATED collection, not a decline (pre-push
             // Codex P1 r2): no failure alert, no pay link, no invoice
             // delivery (sendViaSMSAndEmail would refuse a non-collectible
             // invoice anyway); the existing ACH webhook rails own the
-            // settle/fail outcome from here.
+            // settle/fail outcome from here. The bank-tender check is
+            // load-bearing (Codex r9 P0): the charge service maps EVERY
+            // non-succeeded PaymentIntent to invoice 'processing' — a CARD
+            // intent parked in requires_action etc. is NOT collected money
+            // and must not resolve the job as an initiated debit.
             prepayAutoCharge = { status: 'processing' };
             invoicePayUrl = null;
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
+          } else if (freshStatus === 'processing') {
+            // A non-bank 'processing' is an incomplete CARD intent — the
+            // intent may yet succeed via webhook, so never a pay link
+            // beside it and never a resolved job: ambiguous, the sweep
+            // re-reads the invoice after the intent settles or dies.
+            prepayAutoCharge = { status: 'ambiguous', reason: 'card_intent_incomplete' };
+            invoicePayUrl = null;
+            logger.warn(`[estimate-accept] prepay invoice ${invoiceId} card intent incomplete (status processing, non-bank tender) — deferring to sweep (estimate ${estimate.id})`);
           } else {
             // Charge call returned without throwing but the invoice is in
             // an unexpected state (e.g. parked for reconciliation) — treat
