@@ -262,6 +262,22 @@ const gates = {
   // or cancelled are not reversed when it flips.
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
+  // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
+  // and following" visits of a recurring series (per-visit stays the default).
+  // "Following" rewrites the stored price/service on real future visits AND
+  // stamps the change into the series template's recurring_template_overrides
+  // so auto-extend / top-up / alert-extend rows inherit it (the series parent
+  // row is usually already completed, so its own columns can't be rewritten
+  // without falsifying the first visit's record) — which is why it ships dark.
+  // Gate off: /series-summary answers canScopePriceService:false so the modal
+  // never renders the selector, update-details refuses a posted
+  // priceServiceScope outright rather than silently applying it per-visit,
+  // and the extension writers ignore any stored overrides — extensions copy
+  // the parent row exactly as before this lane existed. Kill switch: unset or
+  // any non-'true' value; sibling rows already rewritten are not reversed
+  // when it flips.
+  editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY

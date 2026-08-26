@@ -1234,6 +1234,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  // "Apply price & service change to" — series rows only, rendered only when
+  // the server says the lane is live (seriesSummary.canScopePriceService,
+  // dark behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE) AND the primary line's
+  // price or service actually changed. Defaults to the remaining series,
+  // matching the staff selector's default on a series row.
+  const [priceServiceScope, setPriceServiceScope] = useState(() =>
+    serviceHasSeries ? "following" : "this_only",
+  );
+  // The primary line's price/service as the modal opened — the selector only
+  // renders (and the scope only posts) once one of them actually changed, so
+  // an untouched save can never restamp the series.
+  const initialPrimaryRef = useRef({
+    price: form.price,
+    serviceType: form.serviceType,
+  });
   // Recorded time on-site for a COMPLETED visit (forgotten-closeout fix,
   // after-the-fact leg): admin-only correction of an inflated recorded
   // duration. Deliberately OUTSIDE `form` — it saves through the dedicated
@@ -1399,14 +1414,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // instruction, unlike a stale default).
   const [seriesSummary, setSeriesSummary] = useState(null);
   const [seriesSummaryState, setSeriesSummaryState] = useState(
-    serviceIsRecurringTemplate ? "loading" : "idle",
+    serviceHasSeries ? "loading" : "idle",
   );
   const recurringCountTouched = useRef(false);
   const recurringOngoingTouched = useRef(false);
   useEffect(() => {
-    // Template only: the panel is hidden on a child visit, so there is no
-    // length to seed and no reason to spend the request.
-    if (!service?.id || !serviceIsRecurringTemplate) return undefined;
+    // Any series row: the template needs the plan length to seed the Count
+    // field; a child visit still needs the capability flags
+    // (canScopePriceService) that decide whether the price/service "Apply
+    // to" selector renders. One-offs skip the request entirely.
+    if (!service?.id || !serviceHasSeries) return undefined;
     let cancelled = false;
     adminFetch(`/admin/schedule/${service.id}/series-summary`)
       .then((data) => {
@@ -1417,6 +1434,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
         setSeriesSummary(data);
         setSeriesSummaryState("loaded");
+        // Length/ongoing seeding is template-only — those controls are
+        // hidden on a child visit.
+        if (!serviceIsRecurringTemplate) return;
         // Never clobber a number the operator already typed while this was
         // in flight.
         if (!recurringCountTouched.current && data.upcomingCount > 0) {
@@ -1435,7 +1455,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       })
       .catch(() => { if (!cancelled) setSeriesSummaryState("error"); });
     return () => { cancelled = true; };
-  }, [service?.id, serviceIsRecurringTemplate]);
+  }, [service?.id, serviceHasSeries, serviceIsRecurringTemplate]);
   const [recurringNth, setRecurringNth] = useState(
     service.recurringNth ?? service.recurring_nth ?? 3,
   );
@@ -1717,6 +1737,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const removeServiceLine = (key) =>
     setServiceLines((lines) => lines.filter((l) => l._key !== key));
   const recurringControlsActive = isRecurring || serviceIsRecurringTemplate;
+
+  // "Apply price & service change to" — offered only when this row belongs
+  // to a series, the server says the lane is live (canScopePriceService,
+  // dark behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — fail closed on an
+  // unreadable summary, same posture as the plan-length controls), and the
+  // primary line's price or service actually changed since the modal opened.
+  // The scope posts only under the same condition, so an untouched save can
+  // never restamp the series.
+  const primaryPriceDirty =
+    String(form.price ?? "") !== String(initialPrimaryRef.current.price ?? "");
+  const primaryServiceDirty =
+    (form.serviceType || "") !== (initialPrimaryRef.current.serviceType || "");
+  const priceServiceScopeActive =
+    serviceHasSeries &&
+    seriesSummary?.canScopePriceService === true &&
+    (primaryPriceDirty || primaryServiceDirty);
 
   // Plan length on a series that already exists. The save sends a length only
   // when the number is trustworthy — either the live plan came back from the
@@ -2021,6 +2057,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             form.technicianId !== (service.technicianId || "")
               ? assignmentScope
               : undefined,
+          priceServiceScope: priceServiceScopeActive
+            ? priceServiceScope
+            : undefined,
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
@@ -2033,6 +2072,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // the double-booking is a choice, not a surprise.
       if (Array.isArray(result?.warnings) && result.warnings.length) {
         alert(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      }
+      // A 'following' scope rewrites visits the operator can't see from this
+      // modal — report what actually moved rather than closing silently.
+      if (result?.priceServiceScope?.scope === "following") {
+        const n = Number(result.priceServiceScope.updatedVisits) || 0;
+        alert(
+          `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? "" : "s"} in the series. Visits the plan schedules later will use the new values too.`,
+        );
       }
       // Resizing a plan moves visits the operator can't see from this modal —
       // say what happened rather than closing on a silent change. The count
@@ -2330,6 +2377,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     onRemove,
     label,
     showStaff = false,
+    showSeriesScope = false,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -2569,6 +2617,28 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               className="font-medium"
               style={inputStyle}
             />
+            {showSeriesScope && (
+              <div style={{ marginTop: 10 }}>
+                <label style={labelStyle}>
+                  Apply price &amp; service change to
+                </label>
+                <select
+                  value={priceServiceScope}
+                  onChange={(e) => setPriceServiceScope(e.target.value)}
+                  className="font-medium"
+                  style={inputStyle}
+                >
+                  <option value="this_only">This appointment only</option>
+                  <option value="following">
+                    This and following appointments
+                  </option>
+                </select>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                  Also covers visits the plan adds later. Add-on lines stay
+                  per-appointment.
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -3102,6 +3172,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 onField: update,
                 onRemove: null,
                 showStaff: true,
+                showSeriesScope: priceServiceScopeActive,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
               {serviceLines.map((line) =>
