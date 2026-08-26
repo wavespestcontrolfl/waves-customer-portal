@@ -11729,6 +11729,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] prepay job claim failed for estimate ${estimate.id} — ceding to the sweep: ${claimErr.message}`);
       }
     }
+    // ATOMIC ownership fence for the accept executor (hook P0 r23): the
+    // token check and the money side effect run under FOR UPDATE on the
+    // estimate row, so a sweep's stale-lease takeover (an UPDATE on that
+    // row) must WAIT until the fenced action completes — a stale accept
+    // can never charge after a successor delivered a pay link. Throws
+    // PREPAY_JOB_NOT_OWNED (handled as an ambiguous defer) when the token
+    // was superseded.
+    const chargeUnderJobFence = async (fn) => db.transaction(async (fenceTrx) => {
+      await fenceTrx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      const freshRow = await fenceTrx('estimates').where({ id: estimate.id }).first('estimate_data');
+      let base = freshRow?.estimate_data;
+      if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+      if (base?.prepayAutoChargeJob?.claim_token !== prepayJobClaimToken) {
+        const notOwned = new Error('prepay job claim superseded');
+        notOwned.code = 'PREPAY_JOB_NOT_OWNED';
+        throw notOwned;
+      }
+      return fn();
+    });
     if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
       && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
       // Another executor owns the job (or the claim write failed) — never
@@ -11934,7 +11953,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } else {
         try {
           const StripeService = require('../services/stripe');
-          const prepayChargeResult = await StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+          const prepayChargeResult = await chargeUnderJobFence(() => StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
             // EXACT-equality freeze to the acknowledged quote (pre-push
             // Codex P0 r2): the in-lock computeChargeAmount result must be
             // the same cents the customer confirmed — any drift (a credit
@@ -11967,7 +11986,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ...(postCommitPayerScopeSsId
               ? { requireSelfPayScheduledServiceId: postCommitPayerScopeSsId }
               : { requireSelfPayCustomerId: customerId }),
-          });
+          }));
           const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
           if (['paid', 'prepaid'].includes(freshStatus)) {
@@ -12042,7 +12061,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // (pre-push Codex P0 r5): never open the pay-link rail beside
           // them, never resolve the durable stamp — the recovery sweep
           // re-reads the invoice after the attempt/reconciliation resolves.
-          if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(chargeErr.code) || chargeErr.reconciliationRequired) {
+          if (chargeErr.code === 'PREPAY_JOB_NOT_OWNED') {
+            // The sweep's stale-lease takeover superseded this executor
+            // before the charge — cede entirely: no charge ran, no pay
+            // link, the owner resolves (hook P0 r23).
+            prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+            invoicePayUrl = null;
+            logger.warn(`[estimate-accept] prepay charge ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
+          } else if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(chargeErr.code) || chargeErr.reconciliationRequired) {
             prepayAutoCharge = { status: 'ambiguous', reason: chargeErr.code || chargeErr.message };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay auto-charge outcome ambiguous for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
@@ -12077,20 +12103,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   // netted would fund the payer's bill from the
                   // homeowner's ledger. A failed reversal keeps the
                   // invoice self-pay and defers (no stamp, no delivery).
-                  const creditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
-                  const appliedCredit = Number(creditRow?.credit_applied) || 0;
-                  if (appliedCredit > 0) {
-                    await require('../services/customer-credit').reverseAppliedCredit({
-                      invoiceId,
-                      amount: appliedCredit,
-                      createdBy: 'system:prepay_payer_reroute',
-                      note: 'Account credit returned — invoice re-routed to third-party payer',
+                  // Under the ownership fence (hook P0 r23): payer/credit
+                  // mutations only while this executor still owns the job.
+                  await chargeUnderJobFence(async () => {
+                    const creditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
+                    const appliedCredit = Number(creditRow?.credit_applied) || 0;
+                    if (appliedCredit > 0) {
+                      await require('../services/customer-credit').reverseAppliedCredit({
+                        invoiceId,
+                        amount: appliedCredit,
+                        createdBy: 'system:prepay_payer_reroute',
+                        note: 'Account credit returned — invoice re-routed to third-party payer',
+                      });
+                    }
+                    await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
+                      payer_id: resolved.payerId,
+                      ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
+                      ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
                     });
-                  }
-                  await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
-                    payer_id: resolved.payerId,
-                    ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
-                    ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
                   });
                   payerStamped = true;
                 }

@@ -629,7 +629,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // P0) can reach the invoice row and the shared payer-delivery helper.
     let invoice = null;
     let deliverToPayerAndResolve = async () => {};
-    let stillOwnsJob = async () => false;
+    let withJobFence = async () => ({ ceded: true });
     try {
       invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
@@ -773,29 +773,41 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // inbox; resolve only on a confirmed {ok} delivery, else the
       // stale-claim lease retries. Shared with the in-charge payer-guard
       // refusal below (Codex r10 P0).
-      // Live ownership recheck (Codex r23): a worker paused past the
-      // 60-minute lease can be superseded — the successor may already have
-      // delivered a pay link and resolved the job, and the Stripe attempt
-      // fence cannot stop a SEQUENTIAL charge after a fallback that made no
-      // Stripe attempt. Every collection side effect re-verifies the claim
-      // token immediately before acting.
-      stillOwnsJob = async () => {
+      // ATOMIC ownership fence (Codex r23 + hook P0): a worker paused past
+      // the 60-minute lease can be superseded — the successor may already
+      // have delivered a pay link, and the Stripe attempt fence cannot stop
+      // a SEQUENTIAL charge after a fallback that made no Stripe attempt.
+      // A read-then-act check leaves a gap, so every collection/payer side
+      // effect runs under FOR UPDATE on the estimate row: claim steals and
+      // token rewrites are UPDATEs on that same row and must WAIT until the
+      // fenced side effect finishes — the token check and the action are
+      // one critical section. Returns { ceded: true } without acting when
+      // the token was lost (or the fence itself fails — fail closed).
+      withJobFence = async (fn) => {
         try {
-          const freshRow = await db('estimates').where({ id: row.id }).first('estimate_data');
-          let base = freshRow?.estimate_data;
-          if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
-          return base?.prepayAutoChargeJob?.claim_token === job.claim_token;
-        } catch { return false; }
+          return await db.transaction(async (fenceTrx) => {
+            await fenceTrx('estimates').where({ id: row.id }).forUpdate().first('id');
+            const freshRow = await fenceTrx('estimates').where({ id: row.id }).first('estimate_data');
+            let base = freshRow?.estimate_data;
+            if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+            if (base?.prepayAutoChargeJob?.claim_token !== job.claim_token) return { ceded: true };
+            const result = await fn(fenceTrx);
+            return { ceded: false, result };
+          });
+        } catch (fenceErr) {
+          if (fenceErr && (fenceErr.code || fenceErr.reconciliationRequired)) throw fenceErr;
+          throw fenceErr;
+        }
       };
       deliverToPayerAndResolve = async () => {
-        if (!(await stillOwnsJob())) {
-          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before payer delivery`);
-          return;
-        }
         let payerDelivered = false;
         try {
-          const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
-          payerDelivered = !!delivery?.ok;
+          const fenced = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
+          if (fenced.ceded) {
+            logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before payer delivery`);
+            return;
+          }
+          payerDelivered = !!fenced.result?.ok;
         } catch (sendErr) {
           logger.error(`[recurring-cof] prepay sweep payer delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
         }
@@ -966,11 +978,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }
       if (pmRow && Number.isInteger(job.authorized_total_cents) && job.authorized_total_cents >= 0) {
-        if (!(await stillOwnsJob())) {
-          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before charge`);
-          continue;
-        }
-        await StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
+        const fencedCharge = await withJobFence(async () => StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
           expectedTotal: Number(job.authorized_total_cents) / 100,
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
           requireAutopayForCustomerId: invoice.customer_id,
@@ -986,7 +994,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           ...(job.payer_scope_scheduled_service_id
             ? { requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id }
             : { requireSelfPayCustomerId: invoice.customer_id }),
-        });
+        }));
+        if (fencedCharge.ceded) {
+          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before charge`);
+          continue;
+        }
         const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status', 'payment_method');
         const freshStatus = String(freshInvoice?.status || '').toLowerCase();
         if (['paid', 'prepaid'].includes(freshStatus)) { resumed += 1; await resolve('paid'); continue; }
@@ -1034,23 +1046,27 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
               // Return the homeowner's applied account credit BEFORE the
               // bill becomes the payer's (Codex r17) — mirror of the
               // in-flow re-route; a failed reversal throws and the job
-              // stays claimed for the lease.
-              const creditRow = await db('invoices').where({ id: job.invoice_id }).first('credit_applied');
-              const appliedCredit = Number(creditRow?.credit_applied) || 0;
-              if (appliedCredit > 0) {
-                await require('./customer-credit').reverseAppliedCredit({
-                  invoiceId: job.invoice_id,
-                  amount: appliedCredit,
-                  createdBy: 'system:prepay_payer_reroute',
-                  note: 'Account credit returned — invoice re-routed to third-party payer',
+              // stays claimed for the lease. Under the ownership fence
+              // (hook P0 r23): payer/credit mutations only while this pass
+              // still owns the job.
+              const fencedStamp = await withJobFence(async () => {
+                const creditRow = await db('invoices').where({ id: job.invoice_id }).first('credit_applied');
+                const appliedCredit = Number(creditRow?.credit_applied) || 0;
+                if (appliedCredit > 0) {
+                  await require('./customer-credit').reverseAppliedCredit({
+                    invoiceId: job.invoice_id,
+                    amount: appliedCredit,
+                    createdBy: 'system:prepay_payer_reroute',
+                    note: 'Account credit returned — invoice re-routed to third-party payer',
+                  });
+                }
+                await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
+                  payer_id: resolved.payerId,
+                  ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
+                  ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
                 });
-              }
-              await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
-                payer_id: resolved.payerId,
-                ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
-                ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
               });
-              payerStamped = true;
+              payerStamped = fencedStamp.ceded !== true;
             }
           }
         } catch (payerErr) {
@@ -1067,14 +1083,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // no funds moved; fall back to the delivered pay link + office alert
       // (never silent, never a different amount/method than quoted).
       logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
-      if (!(await stillOwnsJob())) {
-        logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
-        continue;
-      }
       let fallbackDelivered = false;
       try {
-        const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
-        fallbackDelivered = !!delivery?.ok;
+        const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
+        if (fencedDelivery.ceded) {
+          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
+          continue;
+        }
+        fallbackDelivered = !!fencedDelivery.result?.ok;
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
