@@ -1293,17 +1293,22 @@ router.post('/status', async (req, res) => {
                 throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
               }
               // Post-write recheck: the NEWEST post-send opt command wins.
-              // SQL prefilter to opt-command-shaped rows (coarse superset of
-              // the detector vocabulary; detectSmsOptCommand stays the
-              // authority; \y is PostgreSQL's word boundary).
+              // No SQL vocabulary mirror (codex #3495: a hand-built regex
+              // superset drifts from detectSmsOptCommand's patterns — it
+              // already missed phrase forms like "please take me off").
+              // The detector is the SOLE authority: scan the newest 200
+              // post-send inbound rows and classify in JS. If no command
+              // appears among them, the suppression STANDS — an opt-in
+              // older than 200 newer messages cannot be trusted to be the
+              // newest verdict, and failing toward not texting is the safe
+              // side of that uncertainty.
               let laterOptIn = false;
               if (sentAt) {
                 const inbound = await trx('sms_log')
                   .where({ from_phone: optOutPhone })
                   .where('created_at', '>', sentAt)
-                  .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'\u2019]?t text)\\y'")
                   .orderBy('created_at', 'desc')
-                  .limit(50)
+                  .limit(200)
                   .select('message_body');
                 const newestCommand = inbound
                   .map((r) => detectSmsOptCommand(r.message_body || '').action)
