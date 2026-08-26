@@ -278,16 +278,22 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId) {
-    const updated = await db('notifications')
-      .where({ id: notificationId, recipient_type: 'admin' })
-      .update({ read_at: new Date() });
+  async markReadAdmin(notificationId, { role } = {}) {
+    // Same role predicate as the reads: a technician must not be able to
+    // mark a hidden adminRoleOnly row read before the owner sees it.
+    const updated = await scopeAdminFeedToRole(
+      db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
+      role,
+    ).update({ read_at: new Date() });
     return updated > 0;
   },
 
   // Mark all read for admin
-  async markAllReadAdmin() {
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at').update({ read_at: new Date() });
+  async markAllReadAdmin({ role } = {}) {
+    await scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    ).whereNull('read_at').update({ read_at: new Date() });
   },
 
   // Mark all read for customer

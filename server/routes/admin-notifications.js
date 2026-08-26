@@ -321,7 +321,7 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin();
+    await NotificationService.markAllReadAdmin({ role: req.techRole });
     await dismissLiveAlerts(req.technicianId);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -443,7 +443,7 @@ router.put('/:id/read', async (req, res, next) => {
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id);
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
     res.json({ success: true, updated });
   } catch (err) { next(err); }
 });
