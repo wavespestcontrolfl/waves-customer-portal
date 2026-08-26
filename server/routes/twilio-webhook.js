@@ -1300,11 +1300,17 @@ router.post('/status', async (req, res) => {
           let laterOptIn = false;
           if (sentAt) {
             try {
+              // SQL prefilter to opt-command-SHAPED rows only (hook r5 P1):
+              // a bare LIMIT over all traffic could bury the decisive START
+              // under ordinary replies. The regex mirrors the detector's
+              // EXACT_OPT_IN/EXACT_OPT_OUT vocabulary as a coarse superset;
+              // detectSmsOptCommand stays the authority on each match.
               const inbound = await db('sms_log')
                 .where({ from_phone: optOutPhone })
                 .where('created_at', '>', sentAt)
+                .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'’]?t text)\\b'")
                 .orderBy('created_at', 'desc')
-                .limit(10)
+                .limit(50)
                 .select('message_body');
               const newestCommand = inbound
                 .map((r) => detectSmsOptCommand(r.message_body || '').action)

@@ -37,6 +37,19 @@ class PaymentExpiry {
         this.whereNull('c.pipeline_stage')
           .orWhereNotIn('c.pipeline_stage', [...FORMER_CUSTOMER_STAGES, 'lost']);
       })
+      // Lead-stage rows (customers.active defaults TRUE for CRM leads) only
+      // get expiry notices when a real payment relationship exists — the
+      // stuck-at-new_lead PAYER gap is documented in customer-stages.js,
+      // but a pure lead with a saved card must not be texted about billing
+      // (hook r5 P1).
+      .where(function () {
+        this.whereIn('c.pipeline_stage', ['active_customer', 'won', 'at_risk'])
+          .orWhereExists(function () {
+            this.select(db.raw('1')).from('payments as p')
+              .whereRaw('p.customer_id = c.id')
+              .where('p.status', 'paid');
+          });
+      })
       .whereRaw(
         `CASE
            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
