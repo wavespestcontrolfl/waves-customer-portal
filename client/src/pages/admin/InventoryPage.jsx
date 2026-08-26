@@ -206,6 +206,9 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   "registry",
   "lawnFacts",
   "lawnContent",
+  // Protocol config reads carry per-product cost/COGS data (owner-only);
+  // techs get protocol reference in the tech portal instead.
+  "protocols",
 ]);
 
 export default function InventoryPage() {
@@ -2979,7 +2982,10 @@ function ExpandedProduct({
   const loadMovements = useCallback(async () => {
     setMovementLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
+      // Movements are owner-only (rows carry costUsed) — a technician's
+      // expanded product just shows no history instead of erroring.
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
+        .catch(() => ({ movements: [] }));
       setMovements(data.movements || []);
     } catch {
       setMovements([]);

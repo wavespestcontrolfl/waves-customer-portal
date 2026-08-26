@@ -36,10 +36,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 const STAFF_INVENTORY_REQUEST = (req) => {
   const p = req.path;
   if (req.method === 'GET') {
-    return p === '/' || p === '/stats' || p === '/protocol-health'
-      || p === '/service-usage' || p === '/waveguard-forecast'
-      || p === '/unit-review' || p === '/restock-requests'
-      || /^\/[^/]+\/movements$/.test(p);
+    // NOTE: /protocol-health, /service-usage, and /:id/movements carry
+    // per-product cost/COGS fields — owner-only, like the pricing
+    // projection on GET / (codex P0). Techs use /tech/protocols for
+    // protocol reference.
+    return p === '/' || p === '/stats' || p === '/waveguard-forecast'
+      || p === '/unit-review' || p === '/restock-requests';
   }
   // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
   // application rates that drive COGS/pricing) — owner-only. Per-job usage
