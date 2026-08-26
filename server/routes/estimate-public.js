@@ -11694,14 +11694,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           await require('../services/payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
         } catch (e) { logger.warn(`[estimate-accept] plan completion after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        let coverageTermSynced = false;
         try {
           const coveredInvoiceRow = await db('invoices').where({ id: invoiceId }).first();
           if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
+          coverageTermSynced = true;
         } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
         require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
-        prepayAutoCharge = { status: 'paid', coveredByCredit: true };
+        // termSyncPending keeps the durable job UNRESOLVED on a sync
+        // failure (Codex r18): credit coverage has no Stripe webhook, so
+        // without the sweep retry only the daily reconciliation would
+        // activate the term — a same-day visit could complete and bill
+        // per-application over an already-spent year. Customer-facing
+        // outcome stays 'paid' (the money side IS settled).
+        prepayAutoCharge = {
+          status: 'paid',
+          coveredByCredit: true,
+          ...(coverageTermSynced ? {} : { termSyncPending: true }),
+        };
         invoicePayUrl = null;
-        logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})`);
+        logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})${coverageTermSynced ? '' : ' — term sync pending, sweep will retry'}`);
       } else if (prepayCreditUnresolved) {
         prepayAutoCharge = { status: 'ambiguous', reason: 'inspection_credit_unresolved' };
         invoicePayUrl = null;
@@ -11966,7 +11978,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // Atomic JSON-path merge, never a full estimate_data rewrite
       // (pre-push Codex P0 r5). Best-effort: a failed update degrades to
       // the sweep re-verifying against the live invoice.
-      if (['paid', 'processing'].includes(prepayAutoCharge.status)) {
+      if (['paid', 'processing'].includes(prepayAutoCharge.status) && prepayAutoCharge.termSyncPending !== true) {
         try {
           await db('estimates')
             .where({ id: estimate.id })
