@@ -39,7 +39,8 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   if (type.includes('review')) return 'review_request';
   if (type.includes('referral')) return 'referral';
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
-  if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
+  if (type.includes('seasonal')) return 'marketing_seasonal';
+  if (type.includes('marketing') || type.includes('promo')) return 'marketing';
   // 'prep' covers prep_info — the deferred booking-time prep text requeued
   // from a quiet-hours hold replays under the same appointment policy the
   // immediate send enforced.
@@ -3068,10 +3069,35 @@ function initScheduledJobs() {
           // instead of falling through to 'conversational'. Bounded to the
           // known purpose enum; every validator still re-runs at dispatch.
           const { MESSAGE_PURPOSES } = require('./messaging/policy');
-          const purpose = (typeof claimMeta.replay_purpose === 'string'
+          let purpose = (typeof claimMeta.replay_purpose === 'string'
             && MESSAGE_PURPOSES.includes(claimMeta.replay_purpose))
             ? claimMeta.replay_purpose
             : purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
+          // Legacy-row normalization (consent split, owner ruling 08-25):
+          // rows enqueued before the marketing/marketing_seasonal split
+          // stored replay_purpose 'marketing' for SEASONAL-lane content.
+          // Left as-is they would validate against marketing_offers —
+          // sending seasonal content on a promotions-only opt-in and
+          // blocking seasonal-only recipients. The content's truth is the
+          // message type (seasonal_* / reactivation) or, for deferred
+          // customer-guide document sends (message_type document_request*),
+          // the guide entry point. Promotions rows ('upsell') match none of
+          // these and stay on marketing_offers.
+          if (purpose === 'marketing') {
+            const legacyType = String(msg.message_type || '');
+            const legacyEntry = String(claimMeta.entry_point || '');
+            // document_request* rows only ever stored replay_purpose
+            // 'marketing' when the content was a marketing customer guide
+            // (plain document requests store 'document_request'), and the
+            // deferred reminder lane discards the guide entry point — the
+            // stored marketing purpose is itself the guide marker.
+            if (legacyType.includes('seasonal')
+              || legacyType.includes('reactivation')
+              || legacyType.startsWith('document_request')
+              || legacyEntry.includes('guide')) {
+              purpose = 'marketing_seasonal';
+            }
+          }
           // Marketing-grade replays (retention/marketing) lose their
           // enqueue-time consentBasis — reconstruct it from the STORED
           // opt-in only, at fire time: the policy's prefsColumn must be

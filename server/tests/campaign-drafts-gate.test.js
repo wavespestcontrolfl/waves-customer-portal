@@ -82,14 +82,14 @@ beforeEach(() => {
   jest.clearAllMocks();
   builders.length = 0;
   queues = {};
-  // Default prefs row = explicit marketing opt-in: the gate now requires
-  // seasonal_tips === true (a NULL/absent row is "never asked", not consent),
-  // so tests exercising OTHER predicates get an opted-in row unless they
-  // enqueue their own.
+  // Default prefs row = explicit opt-in on BOTH toggles: the gate requires
+  // the campaign's OWN consent column === true (toggles are independent —
+  // owner ruling 08-25), so tests exercising OTHER predicates get a
+  // fully-opted-in row unless they enqueue their own.
   db.mockImplementation((table) => makeBuilder(
     table,
     (queues[table] || []).shift()
-      || (table === 'notification_prefs' ? { first: { sms_enabled: true, seasonal_tips: true } } : {}),
+      || (table === 'notification_prefs' ? { first: { sms_enabled: true, seasonal_tips: true, marketing_offers: true } } : {}),
   ));
   db.raw.mockImplementation((expr) => expr);
 });
@@ -224,17 +224,32 @@ describe('prefs', () => {
     expect(verdict.code).toBe('prefs_opted_out');
   });
 
-  test('promotions-only opt-in (marketing_offers=true, seasonal_tips NULL) passes the prefs gate', async () => {
+  test('promotions-only opt-in does NOT authorize a reactivation (seasonal) campaign — toggles are independent', async () => {
     enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
     enqueue('notification_prefs', { first: { sms_enabled: true, seasonal_tips: null, marketing_offers: true } });
     const verdict = await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('prefs_opted_out');
+  });
+
+  test('promotions-only opt-in DOES authorize an upsell campaign', async () => {
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'active_customer', active: true }) });
+    enqueue('notification_prefs', { first: { sms_enabled: true, seasonal_tips: null, marketing_offers: true } });
+    const verdict = await evaluateCampaignSendGate({ campaignType: 'upsell', customerId: 'cust-1' });
     expect(verdict.ok).toBe(true);
   });
 
-  test('seasonal_tips=false is the master kill even with marketing_offers=true → prefs_opted_out', async () => {
+  test('seasonal_tips=false blocks reactivation even with marketing_offers=true (own toggle governs)', async () => {
     enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
     enqueue('notification_prefs', { first: { sms_enabled: true, seasonal_tips: false, marketing_offers: true } });
     const verdict = await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('prefs_opted_out');
+  });
+
+  test('unmapped campaign type fails closed at the prefs gate', async () => {
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    const verdict = await evaluateCampaignSendGate({ campaignType: 'mystery_lane', customerId: 'cust-1' });
     expect(verdict.ok).toBe(false);
     expect(verdict.code).toBe('prefs_opted_out');
   });
