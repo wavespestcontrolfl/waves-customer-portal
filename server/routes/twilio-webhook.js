@@ -457,22 +457,47 @@ router.post('/sms', async (req, res) => {
       // nothing to find. Log-then-clear closes the ordering: either the
       // 21610 wrote first (this clear removes it) or the 21610 runs later
       // (its recheck sees this logged START and undoes itself).
-      await db('sms_log').insert({
-        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
-        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
-        metadata: JSON.stringify({
-          detection_method: optCommand.detectionMethod,
-          source_keyword: optCommand.sourceKeyword,
-        }),
-      }).catch((logErr) => {
-        // Never block the opt-in on a log failure — but say so, since the
-        // ordering guarantee above depends on this row existing.
-        logger.warn(`[sms-optin] inbound opt-in log insert failed for ${maskPhone(From)}: ${logErr.message}`);
-      });
-      await clearSuppression({
-        phone: normalizedFrom || From,
-        source: `twilio_webhook_${optCommand.detectionMethod}`,
-      });
+      // Marker + clear are ATOMIC under the same per-phone advisory lock
+      // the 21610 recorders take (hook P1): with the lock, a concurrent
+      // callback either commits first (this clear removes its row and the
+      // tombstone timestamps the opt-in) or blocks until this commits and
+      // then finds the START row/tombstone in its recheck. A failed log
+      // insert no longer strands the ordering — the clearance TOMBSTONE
+      // clearSuppression upserts is itself the durable marker, written in
+      // the same transaction. The opt-in itself must never fail: any
+      // transaction error falls back to the plain (unlocked) clear.
+      const optInPhone = normalizedFrom || From;
+      try {
+        await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
+          await trx('sms_log').insert({
+            customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+            message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
+            metadata: JSON.stringify({
+              detection_method: optCommand.detectionMethod,
+              source_keyword: optCommand.sourceKeyword,
+            }),
+          });
+          // NO swallowed catch inside the transaction — a failed insert has
+          // already ABORTED it (the trap this PR hit twice); let it throw
+          // into the fallback below, where the plain clear still lands the
+          // opt-in and the tombstone still timestamps it.
+          const cleared = await clearSuppression({
+            phone: optInPhone,
+            source: `twilio_webhook_${optCommand.detectionMethod}`,
+            dbh: trx,
+          });
+          if (cleared?.ok === false) {
+            throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+          }
+        });
+      } catch (optInErr) {
+        logger.error(`[sms-optin] locked clear failed (${optInErr.code || optInErr.message}) — falling back to plain clear`);
+        await clearSuppression({
+          phone: optInPhone,
+          source: `twilio_webhook_${optCommand.detectionMethod}`,
+        });
+      }
       // Recipient double opt-in: YES from a pending third-party recipient
       // confirms them (no-op when no recipient row exists).
       try {
