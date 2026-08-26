@@ -461,7 +461,7 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
       // guard then refuses post-commit.
       const customer = await db('customers').where({ id: customerId }).first();
       const canonicalPm = customer
-        ? await require('./autopay-eligibility').getChargeableAutopayMethod(customer)
+        ? await require('./autopay-eligibility').getChargeableAutopayMethod(customer, db)
         : null;
       rowId = canonicalPm?.id || null;
     }
@@ -629,6 +629,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // P0) can reach the invoice row and the shared payer-delivery helper.
     let invoice = null;
     let deliverToPayerAndResolve = async () => {};
+    let stillOwnsJob = async () => false;
     try {
       invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
@@ -772,7 +773,25 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // inbox; resolve only on a confirmed {ok} delivery, else the
       // stale-claim lease retries. Shared with the in-charge payer-guard
       // refusal below (Codex r10 P0).
+      // Live ownership recheck (Codex r23): a worker paused past the
+      // 60-minute lease can be superseded — the successor may already have
+      // delivered a pay link and resolved the job, and the Stripe attempt
+      // fence cannot stop a SEQUENTIAL charge after a fallback that made no
+      // Stripe attempt. Every collection side effect re-verifies the claim
+      // token immediately before acting.
+      stillOwnsJob = async () => {
+        try {
+          const freshRow = await db('estimates').where({ id: row.id }).first('estimate_data');
+          let base = freshRow?.estimate_data;
+          if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
+          return base?.prepayAutoChargeJob?.claim_token === job.claim_token;
+        } catch { return false; }
+      };
       deliverToPayerAndResolve = async () => {
+        if (!(await stillOwnsJob())) {
+          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before payer delivery`);
+          return;
+        }
         let payerDelivered = false;
         try {
           const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
@@ -947,6 +966,10 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }
       if (pmRow && Number.isInteger(job.authorized_total_cents) && job.authorized_total_cents >= 0) {
+        if (!(await stillOwnsJob())) {
+          logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before charge`);
+          continue;
+        }
         await StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
           expectedTotal: Number(job.authorized_total_cents) / 100,
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
@@ -1044,6 +1067,10 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // no funds moved; fall back to the delivered pay link + office alert
       // (never silent, never a different amount/method than quoted).
       logger.warn(`[recurring-cof] prepay sweep charge failed for estimate ${row.id} invoice ${job.invoice_id}: ${err.message}`);
+      if (!(await stillOwnsJob())) {
+        logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
+        continue;
+      }
       let fallbackDelivered = false;
       try {
         const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);

@@ -235,6 +235,9 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       // customers.autopay_payment_method_id pointer must not matter.
       mockGetChargeableAutopayMethod.mockResolvedValue({ id: 'pmrow-7' });
       const m = await resolvePrepayChargeMethod({ policy: { exemptReason: 'autopay_already_active' }, customerId: 'cust-1' });
+      // The resolver REQUIRES its knex handle (Codex r23: omitting it threw
+      // inside the helper, was caught, and 503'd every autopay quote).
+      expect(mockGetChargeableAutopayMethod).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), expect.anything());
       expect(m.paymentMethodRowId).toBe('pmrow-7');
       expect(m.stripePaymentMethodId).toBe('pm_7');
     });
