@@ -528,6 +528,10 @@ export default function SettingsPage() {
               ))}
             </div>{" "}
           </Card>{" "}
+          {/* Pest Pressure config is owner-only (/admin/settings/pest-pressure
+              is an OWNER_ONLY_NESTED_PATH — the deep-link guard bounces
+              non-admins), so don't render a dead card for them. */}
+          {user?.role === "admin" && (
           <Card>
             <Link
               to="/admin/settings/pest-pressure"
@@ -560,6 +564,7 @@ export default function SettingsPage() {
               <ChevronRight size={18} color={D.muted} />
             </Link>
           </Card>
+          )}
         </div>
       )}
       {/* ── INTEGRATIONS ── */}
