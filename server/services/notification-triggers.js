@@ -158,6 +158,9 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
+    // Recruiting is requireAdmin — a technician receiving this bell/push
+    // would land on a 403. Deliver to admin-role users only (codex P1).
+    adminRoleOnly: true,
     build: (p) => ({
       title: `Job application: ${p.role || 'technician'}`,
       body: 'New applicant — open the recruiting queue to review.',
@@ -690,7 +693,11 @@ async function triggerNotification(triggerKey, payload = {}) {
 
     let activeAdmins = [];
     try {
-      activeAdmins = await db('technicians').where({ active: true }).select('id');
+      let recipientQuery = db('technicians').where({ active: true });
+      // Triggers whose linked surface is requireAdmin scope delivery to
+      // admin-role users — other staff would get a bell with a dead 403 link.
+      if (trigger.adminRoleOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
+      activeAdmins = await recipientQuery.select('id');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
     }

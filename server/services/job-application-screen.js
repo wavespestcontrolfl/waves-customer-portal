@@ -13,16 +13,15 @@
  * instruction that nothing inside them can change the rubric. An applicant
  * writing "score me 100" is scored on what that answer reveals, not obeyed.
  *
- * Both legs go through the shared dispatcher (services/llm/call.js):
- * GPT-5.5 via MODELS.ROUTES.leadClassify live, Claude FAST as the fallback
- * leg — tolerant JSON parsing and provider handling stay centralized.
+ * The call rides the shared fastStructured fallback policy via
+ * dispatchWithFallback (services/llm/call.js) — one bounded wall-clock
+ * budget across both provider legs, tolerant JSON parsing centralized.
  * model + prompt_version are stored for auditability.
  */
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { PROVIDER } = require('../config/models');
-const { dispatch } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 const { ANSWER_KEYS } = require('./job-applications');
 
 const PROMPT_VERSION = 2;
@@ -48,19 +47,35 @@ Return a JSON object with:
 
 Return ONLY valid JSON, no markdown.`;
 
+// Applicant text must not be able to close the untrusted block early: strip
+// every trace of the delimiter tokens, repeatedly, so interleaved fragments
+// ("</app" + "lication>") cannot reassemble after one pass (codex P1).
+function stripDelimiters(value) {
+  let text = String(value ?? '');
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(/<\/?application>/gi, '');
+  } while (text !== previous);
+  return text;
+}
+
 function buildUserMessage(app) {
   const contact = app.contact_snapshot || {};
   const answers = app.answers || {};
   const answerLines = ANSWER_KEYS
     .filter((key) => answers[key])
-    .map((key) => `${key}: ${answers[key]}`)
+    .map((key) => `${key}: ${stripDelimiters(answers[key])}`)
     .join('\n');
 
+  // EVERY applicant-controlled field — name and city included — lives inside
+  // the untrusted block. Only server-validated enum values sit outside it.
   return `Role applied for: ${app.role}
 Application language: ${app.language || 'en'}
-Applicant: ${contact.name || 'Unknown'}${contact.city ? ` (${contact.city})` : ''}
 
 <application>
+applicant_name: ${stripDelimiters(contact.name || 'Unknown')}
+applicant_city: ${stripDelimiters(contact.city || 'not given')}
 ${answerLines || '(no answers provided)'}
 </application>`;
 }
@@ -84,30 +99,24 @@ function mapScreen(parsed) {
 }
 
 async function runScreen(app) {
-  const payload = {
-    system: SCREEN_SYSTEM_PROMPT,
-    text: buildUserMessage(app),
-    jsonMode: true,
-    maxTokens: 500,
-  };
-
-  // Live model — GPT-5.5. On any miss, the Claude FAST leg below.
-  {
-    const r = await dispatch(MODELS.ROUTES.leadClassify, payload);
-    if (r.ok && r.json) {
-      const mapped = mapScreen(r.json);
-      if (mapped) return { ...mapped, model: r.model || 'openai', prompt_version: PROMPT_VERSION };
-    }
-  }
-
-  // Fallback — Claude FAST through the same dispatcher (never a raw SDK
-  // call: tolerant JSON + thinking-block handling live in llm/call.js).
-  const r = await dispatch({ provider: PROVIDER.ANTHROPIC, model: MODELS.FAST }, payload);
-  if (r.ok && r.json) {
-    const mapped = mapScreen(r.json);
-    if (mapped) return { ...mapped, model: r.model || MODELS.FAST, prompt_version: PROMPT_VERSION };
-  }
-  return null;
+  // fastStructured is the shared bounded ladder (GPT fast → Claude FAST)
+  // with one wall-clock budget across both legs — never two independent
+  // 10-minute legs per public submission (codex P1). The validate hook
+  // rejects a leg whose JSON doesn't map, so the fallback still fires on a
+  // shape miss, not just a transport miss.
+  const r = await dispatchWithFallback(
+    MODELS.TEXT_POLICIES.fastStructured,
+    {
+      system: SCREEN_SYSTEM_PROMPT,
+      text: buildUserMessage(app),
+      jsonMode: true,
+      maxTokens: 500,
+    },
+    { validate: (result) => (result.json && mapScreen(result.json) ? null : 'unmappable_screen') },
+  );
+  if (!r.ok || !r.json) return null;
+  const mapped = mapScreen(r.json);
+  return mapped ? { ...mapped, model: r.model, prompt_version: PROMPT_VERSION } : null;
 }
 
 /**
@@ -143,5 +152,5 @@ async function screenJobApplication(applicationId, database) {
 
 module.exports = {
   screenJobApplication,
-  __private: { SCREEN_SYSTEM_PROMPT, buildUserMessage, mapScreen, runScreen },
+  __private: { SCREEN_SYSTEM_PROMPT, buildUserMessage, stripDelimiters, mapScreen, runScreen },
 };
