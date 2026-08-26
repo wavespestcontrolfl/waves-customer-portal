@@ -350,8 +350,12 @@ async function scheduleForInvoice(invoiceId) {
       // stopped. An exhausted cadence restores terminal 'completed' so
       // the legacy late-payment checker owns the invoice again (mirrors
       // resumeSequence's exhausted branch).
+      // The void stop over a PAUSED row carries the ':prev=paused' suffix
+      // (same convention as the payment-plan stop) so a metadata-less
+      // legacy pause survives the void round-trip.
+      const voidStopStamp = String(existing.stopped_reason || '');
       const isSystemVoidStop = existing.status === 'stopped'
-        && existing.stopped_reason === 'invoice_voided'
+        && (voidStopStamp === 'invoice_voided' || voidStopStamp === 'invoice_voided:prev=paused')
         && !existing.stopped_by_admin_id;
       if (isSystemVoidStop) {
         // Never re-arm under an ACTIVE payment plan (Codex #3493 r6): plan
@@ -366,12 +370,15 @@ async function scheduleForInvoice(invoiceId) {
           .first('id');
         if (planActive) return existing;
         // A pre-void ADMIN PAUSE survives the void stop as the retained
-        // paused_* fields (stopSequence never clears them) — restore the
-        // PAUSE, not active dunning (Codex #3493 r3). Same conditional
-        // shape as the re-arm below so a racing admin write still wins.
-        if (existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) {
+        // paused_* fields (stopSequence never clears them) or, for
+        // metadata-less legacy pauses, as the ':prev=paused' stamp —
+        // restore the PAUSE, not active dunning (Codex #3493 r3/r8). Same
+        // conditional shape as the re-arm below so a racing admin write
+        // still wins.
+        if (voidStopStamp === 'invoice_voided:prev=paused'
+          || existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) {
           const [repaused] = await trx('invoice_followup_sequences')
-            .where({ id: existing.id, status: 'stopped', stopped_reason: 'invoice_voided' })
+            .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
             .whereNull('stopped_by_admin_id')
             .update({
               updated_at: trx.fn.now(),
@@ -1457,18 +1464,33 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
     // indistinguishable from system ones except by their reason — keeping
     // the original reason is what keeps the re-arm off them. An explicit
     // admin stop (adminId present) still re-attributes.
+    // FOR UPDATE (Codex #3493 r8): without the lock, an admin stop that
+    // commits between this read and the unconditional write below gets its
+    // fresh attribution clobbered by the system stop. Locking serializes:
+    // the admin's committed stop is seen (and preserved), or their write
+    // waits for this one and re-attributes on top (adminId present wins).
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
+      .forUpdate()
       .first('status', 'stopped_by_admin_id');
     const preservePriorStop = !adminId
       && priorSeq
       && priorSeq.status === 'stopped';
+    // A PAUSED row's meaning must survive a SYSTEM stop even when the pause
+    // carries NO metadata (Codex #3493 r8 P0: the old pause route recorded a
+    // null admin id and the UI permits a blank reason, so legacy pauses can
+    // have every paused_* field null). Encode the prior status into the
+    // stop stamp with the same `:prev=<status>` convention the payment-plan
+    // stop uses; the resend re-arm restores 'paused' from it.
+    const encodePausedPrev = !adminId && priorSeq && priorSeq.status === 'paused';
     await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
       updated_at: trx.fn.now(),
       status: 'stopped',
       next_touch_at: null,
       ...(preservePriorStop ? {} : {
-        stopped_reason: reason || null,
+        stopped_reason: encodePausedPrev
+          ? `${reason || 'stopped'}:prev=paused`
+          : (reason || null),
         stopped_by_admin_id: adminId || null,
       }),
     });

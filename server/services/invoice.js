@@ -217,25 +217,30 @@ function invoiceHasDepositCreditLine(invoice) {
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
-async function assertUnvoidableLinkedVisit(conn, invoiceRow) {
+async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
   if (!invoiceRow.scheduled_service_id) return;
   let svc = null;
   try {
-    svc = await conn("scheduled_services")
-      .where({ id: invoiceRow.scheduled_service_id })
-      .first();
+    // The in-transaction pass takes the visit row lock (Codex #3493 r8): a
+    // concurrent writer holding the row (coverage stamping, cancellation)
+    // is uncommitted-invisible to a plain MVCC read, so a lockless second
+    // read could pass on the stale version while both commit. FOR UPDATE
+    // waits for the in-flight writer and reads the committed result.
+    let q = conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id });
+    if (lock) q = q.forUpdate();
+    svc = await q.first();
   } catch (err) {
     throw new Error(
       `Could not verify the linked service visit — refusing to unvoid (${err.message})`,
     );
   }
   if (!svc) return;
-  // Cancellation deliberately voids the visit's open invoices
-  // (voidOpenInvoicesForCancelledService) — restoring one while the visit
-  // stays cancelled/rescheduled would bill work that is no longer
-  // scheduled.
+  // Cancellation and no-show deliberately void the visit's open invoices
+  // (voidOpenInvoicesForCancelledService; the no-show flow may also charge
+  // the no-show fee) — restoring one while the visit stays terminal would
+  // bill work that was not performed.
   const svcStatus = String(svc.status || "").toLowerCase();
-  if (["cancelled", "canceled", "rescheduled"].includes(svcStatus)) {
+  if (["cancelled", "canceled", "rescheduled", "no_show"].includes(svcStatus)) {
     throw new Error(
       `Cannot unvoid — the linked service visit is ${svcStatus}; restore or re-book the visit before restoring its invoice`,
     );
@@ -4618,7 +4623,7 @@ const InvoiceService = {
       // committed after the fast-fail pass rolls the restore back — its own
       // invoice sweep skips 'void' rows, so it cannot repair a restore that
       // commits on the stale verdict.
-      await assertUnvoidableLinkedVisit(trx, updated);
+      await assertUnvoidableLinkedVisit(trx, updated, { lock: true });
       // The void-time lifecycle stop is BEST-EFFORT (stopInvoiceFollowupSequence
       // swallows failures, so voidInvoice can succeed with the sequence still
       // ACTIVE), and runPending excludes only terminal invoice statuses — an

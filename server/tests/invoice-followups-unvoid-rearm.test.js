@@ -203,6 +203,25 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(customerOnAutopay).not.toHaveBeenCalled();
   });
 
+  test("a metadata-less legacy pause restores via the ':prev=paused' stamp (Codex #3493 r8 P0)", async () => {
+    const seq = voidStoppedSeq({
+      stopped_reason: 'invoice_voided:prev=paused',
+      paused_reason: null,
+      paused_by_admin_id: null,
+      paused_until: null,
+    });
+    const repaused = { ...seq, status: 'paused', stopped_reason: null };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: repaused });
+
+    const row = await scheduleForInvoice('inv-1');
+
+    expect(row).toBe(repaused);
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('paused');
+    expect(payload.next_touch_at).toBeNull();
+    expect(customerOnAutopay).not.toHaveBeenCalled();
+  });
+
   test("an admin's own stop is returned untouched — no update runs", async () => {
     const adminStop = voidStoppedSeq({ stopped_by_admin_id: 'admin-1' });
     const { seqUpdate } = setupDb({ seq: adminStop, invoice: sentInvoice });
@@ -255,6 +274,7 @@ describe('stopSequence — admin-stop attribution preservation', () => {
       if (table === 'invoice_followup_sequences') {
         const q = {
           where: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => seq),
           update: seqUpdate,
         };
@@ -264,6 +284,17 @@ describe('stopSequence — admin-stop attribution preservation', () => {
     });
     return { seqUpdate };
   }
+
+  test("a SYSTEM stop over a PAUSED row encodes ':prev=paused' so metadata-less pauses survive (Codex #3493 r8 P0)", async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'paused', stopped_by_admin_id: null } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('stopped');
+    expect(payload.stopped_reason).toBe('invoice_voided:prev=paused');
+    expect(payload.stopped_by_admin_id).toBeNull();
+  });
 
   test('a SYSTEM stop over an existing admin stop keeps the admin attribution', async () => {
     const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_by_admin_id: 'admin-1' } });

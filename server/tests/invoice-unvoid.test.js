@@ -242,6 +242,17 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('refuses a no_show visit — its void sweep (and possible no-show fee) must stand (Codex #3493 r8)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'no_show' } }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — the linked service visit is no_show; restore or re-book the visit before restoring its invoice',
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('refuses a visit stamped prepaid by an annual term — deterministic stamp check, never the fail-open coverage helper (Codex #3493 r3)', async () => {
     const svc = {
       id: 'svc-1',
@@ -272,7 +283,8 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('re-checks the linked visit on the locked row — a cancellation landing mid-restore rolls it back (Codex #3493 r3)', async () => {
+  test('re-checks the linked visit on the LOCKED row — a cancellation landing mid-restore rolls it back (Codex #3493 r3/r8)', async () => {
+    const inTrxVisitChain = chain({ first: { id: 'svc-1', status: 'cancelled' } });
     db
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
       .mockReturnValueOnce(noRow()) // term pre-guard
@@ -280,10 +292,13 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
       .mockReturnValueOnce(noRow()) // TOCTOU term re-check
       .mockReturnValueOnce(noRow()) // money guard
-      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'cancelled' } })); // in-trx visit re-check
+      .mockReturnValueOnce(inTrxVisitChain); // in-trx visit re-check
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
       'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice',
     );
+    // FOR UPDATE on the in-trx pass: a plain MVCC read could miss an
+    // in-flight coverage stamp / cancellation on the same row.
+    expect(inTrxVisitChain.forUpdate).toHaveBeenCalled();
     expect(mockReconcile).not.toHaveBeenCalled();
   });
 
