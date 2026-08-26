@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 const PaymentLifecycleEmail = require('../payment-lifecycle-email');
@@ -61,7 +62,10 @@ class PaymentExpiry {
             this.select(db.raw('1')).from('scheduled_services as ss')
               .whereRaw('ss.customer_id = c.id')
               .whereIn('ss.status', ['pending', 'confirmed'])
-              .whereRaw('ss.scheduled_date >= CURRENT_DATE');
+              // ET date, not the session's UTC CURRENT_DATE (hook P1):
+              // Railway runs UTC, so CURRENT_DATE rolls at 8/7pm ET and
+              // would drop an ET-today visit from the relationship guard.
+              .whereRaw('ss.scheduled_date >= ?', [etDateString(now)]);
           });
       })
       // Only the customer's ONE current method, charge-path semantics: the

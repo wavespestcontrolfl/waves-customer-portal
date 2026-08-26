@@ -492,11 +492,35 @@ router.post('/sms', async (req, res) => {
           }
         });
       } catch (optInErr) {
-        logger.error(`[sms-optin] locked clear failed (${optInErr.code || optInErr.message}) — falling back to plain clear`);
-        await clearSuppression({
-          phone: optInPhone,
-          source: `twilio_webhook_${optCommand.detectionMethod}`,
-        });
+        // Retry UNDER THE SAME LOCK without the marker insert (hook P1: an
+        // unlocked fallback clear can interleave with a 21610 transaction
+        // that read before this tombstone lands, re-suppressing an
+        // explicitly opted-in recipient). The common abort cause is the
+        // sms_log insert; the clearance tombstone alone is the durable
+        // marker, so the retry drops the insert but keeps the serialization.
+        logger.error(`[sms-optin] locked clear failed (${optInErr.code || optInErr.message}) — retrying under the lock without the marker insert`);
+        try {
+          await db.transaction(async (trx) => {
+            await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
+            const cleared = await clearSuppression({
+              phone: optInPhone,
+              source: `twilio_webhook_${optCommand.detectionMethod}`,
+              dbh: trx,
+            });
+            if (cleared?.ok === false) {
+              throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+            }
+          });
+        } catch (retryErr) {
+          // Both locked attempts failed — the DB itself is misbehaving (a
+          // concurrent 21610 writer is in the same storm). The opt-in must
+          // never be dropped: land the plain clear as the last resort.
+          logger.error(`[sms-optin] locked retry also failed (${retryErr.code || retryErr.message}) — last-resort plain clear`);
+          await clearSuppression({
+            phone: optInPhone,
+            source: `twilio_webhook_${optCommand.detectionMethod}`,
+          });
+        }
       }
       // Recipient double opt-in: YES from a pending third-party recipient
       // confirms them (no-op when no recipient row exists).
