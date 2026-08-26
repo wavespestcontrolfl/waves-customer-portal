@@ -369,12 +369,14 @@ export default function InventoryPage() {
               value: stats.vendors?.total,
               color: D.teal,
               action: () => setTab("vendors"),
+              adminOnly: true,
             },
             {
               label: "Pending Approvals",
               value: stats.approvals?.pending,
               color: stats.approvals?.pending > 0 ? D.amber : D.green,
               action: () => setTab("approvals"),
+              adminOnly: true,
             },
             {
               label: "Restock",
@@ -387,8 +389,11 @@ export default function InventoryPage() {
               value: stats.scrapeJobs?.completed,
               color: D.purple,
               action: () => setTab("scrape"),
+              adminOnly: true,
             },
-          ].map((s) => (
+            // Shortcut cards into owner-only tabs are hidden for techs —
+            // clicking them would land on a tab the role can't open.
+          ].filter((s) => isAdminRole || !s.adminOnly).map((s) => (
             <div
               key={s.label}
               onClick={() => {
