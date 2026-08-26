@@ -118,14 +118,32 @@ class PaymentExpiry {
                AND pm2.stripe_payment_method_id IS NOT NULL
                -- only another CHARGEABLE CARD default can outrank this one —
                -- a newer bank/disabled/shell default must not hide the real
-               -- card's warning (hook P1 ×2)
+               -- card's warning (hook P1 ×2) — and "chargeable" means the FULL
+               -- charge-time predicate, expiry included: charge() skips an
+               -- expired or malformed-expiry row, so such a newer default
+               -- must not silence the warning for the older valid card that
+               -- will actually be charged (codex r4 P1)
                AND (pm2.method_type IS NULL
                     OR pm2.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
+               AND CASE
+                     WHEN NULLIF(BTRIM(pm2.exp_month), '') ~ '^[0-9]{1,2}$'
+                       AND NULLIF(BTRIM(pm2.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+                     THEN (
+                       (CASE WHEN NULLIF(BTRIM(pm2.exp_year), '')::integer < 100
+                             THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
+                             ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) > ?
+                       OR ((CASE WHEN NULLIF(BTRIM(pm2.exp_year), '')::integer < 100
+                                 THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
+                                 ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) = ?
+                           AND NULLIF(BTRIM(pm2.exp_month), '')::integer >= ?)
+                     )
+                     ELSE FALSE
+                   END
                AND (pm2.updated_at > pm.updated_at
                     OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
           )
         )
-      )`, [thisYear, thisYear, thisMonth])
+      )`, [thisYear, thisYear, thisMonth, thisYear, thisYear, thisMonth])
       .whereRaw(
         `CASE
            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'

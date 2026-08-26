@@ -91,9 +91,15 @@ async function suppressNonMobileOnBounce({ errorCode, to, sid = null } = {}) {
     // path's send-time landline guard) consistent. Match on the normalized phone;
     // a miss here is harmless because the suppression row above is what actually
     // blocks future sends. Only touch live rows not already cached as landline.
+    // Gated on recorded: when the verdict was stale evidence (a delayed 30006
+    // that lost to a newer START's clearance tombstone, or any standing row it
+    // must not clobber), the cache must stay silent too — isLandline() treats
+    // customers.line_type as authoritative after START deletes the phone-keyed
+    // cache, so an ungated write here would re-block the opted-in recipient
+    // through the side door the suppression row just refused to open.
     try {
       const digits = lastTen(phone);
-      if (digits) {
+      if (recorded && digits) {
         await db('customers')
           .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
           .whereNull('deleted_at')

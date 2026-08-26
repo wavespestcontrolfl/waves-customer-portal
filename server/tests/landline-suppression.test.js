@@ -117,6 +117,18 @@ describe('landline suppression on delivery bounce', () => {
     expect(res.recorded).toBe(false);
   });
 
+  test('leaves the customers.line_type cache untouched when the verdict did not record', async () => {
+    // A stale 30006 (delayed callback losing to a newer START's clearance
+    // tombstone) or any standing row leaves recorded=false — the line_type
+    // cache write must stay silent too, or isLandline() re-blocks the
+    // opted-in recipient through the cache after START deleted the
+    // phone-keyed entry (codex r4 P1).
+    insertResult = [];
+    await suppressNonMobileOnBounce({ errorCode: '30006', to: '+18777175476' });
+    expect(db).not.toHaveBeenCalledWith('customers');
+    expect(lastCustomersChain).toBeNull();
+  });
+
   test('recordNonMobileSuppression writes reason non_mobile via insert-if-absent', async () => {
     const res = await recordNonMobileSuppression({ phone: '+18777175476', source: 'twilio_status_30006' });
     expect(res.ok).toBe(true);
