@@ -15887,7 +15887,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
           .first('id');
         reconciliationPending = !!(fence || orphan);
       } catch { /* unknown fence state — keep 'ambiguous' */ }
-      retryPrepayChargeStatus = reconciliationPending ? 'ambiguous' : 'processing';
+      // Bank tender only (same guard as the fresh-accept and recovery
+      // paths — hook P1): a non-succeeded CARD intent also parks the
+      // invoice 'processing', possibly with its attempt fence already
+      // resolved — a reload must not tell the customer a bank payment is
+      // processing when the card attempt is merely incomplete.
+      const retryTenderIsBank = String(invoice.payment_method || '') === 'us_bank_account';
+      retryPrepayChargeStatus = (reconciliationPending || !retryTenderIsBank) ? 'ambiguous' : 'processing';
     }
   }
 
