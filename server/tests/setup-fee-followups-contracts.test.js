@@ -16,7 +16,7 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(booking).toMatch(/stampDisclosedSetupFee\(trx, \{ allowStamp: false, stampServiceRow: serviceRow \}\)/);
     expect(booking).toMatch(/if \(!allowStamp \|\| !stampServiceRow\?\.id\) return;/);
     // Replays re-run the waiver disposition (never a stamp).
-    expect(booking).toMatch(/Double-submit replay[\s\S]{0,900}stampDisclosedSetupFee\(trx, \{ allowStamp: false \}\)/);
+    expect(booking).toMatch(/Double-submit replay[\s\S]{0,3500}stampDisclosedSetupFee\(trx, \{ allowStamp: false \}\)/);
     
     // ...and the pest seeding path still calls the same helper atomically.
     expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: serviceRow \}\)/);

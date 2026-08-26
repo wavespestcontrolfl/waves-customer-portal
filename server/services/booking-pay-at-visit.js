@@ -39,8 +39,17 @@ const VISITS_PER_YEAR_BY_PATTERN = {
   quarterly: 4, triannual: 3, semiannual: 2, biannual: 2, annual: 1, yearly: 1,
 };
 function resolveVisitsPerYear(s) {
-  if (Number(s.visitsPerYear) > 0) return Number(s.visitsPerYear);
-  if (Number(s.frequency) > 0) return Number(s.frequency);
+  // Numeric count aliases must AGREE: a row carrying e.g. visitsPerYear 6
+  // and visits 9 is contradictory, and picking one by precedence could
+  // activate the wrong cadence — fail closed instead. (`visits` is read at
+  // all because engine mosquito lines carry ONLY it — the gap that
+  // silently kept mosquito out of per-application pricing.)
+  const numericCounts = [s.visitsPerYear, s.visits, s.frequency]
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  if (numericCounts.length > 0) {
+    return numericCounts.every((v) => v === numericCounts[0]) ? numericCounts[0] : null;
+  }
   const { normalizeRecurringPattern } = require('./recurring-appointment-seeder');
   const pattern = normalizeRecurringPattern(s.frequency ?? s.cadence);
   return (pattern && VISITS_PER_YEAR_BY_PATTERN[pattern]) || null;
@@ -108,6 +117,48 @@ function derivePerApplicationAmount(estimate, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   const perVisit = picked ? perVisitAmountForEstimate(estimate, picked, bookingVisits) : null;
   return perVisit ? perVisit.followUpAmount : null;
+}
+
+// Cadence a pattern PROMISES — the quote's visit count must agree exactly
+// or the plan is ambiguous and seeding fails closed (e.g. a numeric 9-visit
+// mosquito line normalizes to 'bimonthly' by deliberate legacy rule, which
+// contradicts its 9 visits: such rows stay office-scheduled).
+const PATTERN_PROMISED_VISITS = {
+  weekly: 52, biweekly: 26, monthly: 12, every_6_weeks: 9, seasonal_feb_oct: 9,
+  bimonthly: 6, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+};
+
+// The recurring-series plan a wizard quote itself defines for the booked
+// service — the QUOTE is the cadence authority, never the client's
+// recurring_pattern. Non-null only when the estimate has exactly one priced
+// per-application recurring line, it matches the booked service family, no
+// supplemental program rides the annual total, and the line's cadence
+// pattern and visit count agree. Drives non-pest funnel series seeding
+// (owner GO 2026-08-26); every ambiguity = null = today's single-visit
+// office-scheduled behavior.
+function resolveWizardSeriesPlan(estimate, serviceKey) {
+  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
+  if (!picked || !serviceKey) return null;
+  if (serviceKeyOf(picked.svc) !== serviceKey) return null;
+  if (hasSupplementalRecurring(estimate)) return null;
+  // Family-aware cadence via the converter's authoritative resolver — the
+  // same rules the accept/seeding flows use (lawn/tree numeric-nine reads
+  // every_6_weeks, never the generic bimonthly bucket; codex #3504 r1).
+  const { explicitServiceCadence } = require('./estimate-converter');
+  let pattern = explicitServiceCadence(picked.svc) || null;
+  if (serviceKey === 'mosquito' && (picked.visits === 9 || picked.visits === 12)) {
+    // Engine tier truth outranks the persisted label for mosquito
+    // (MOSQUITO.tierVisits): 12 = monthly12; 9 = the seasonal9 Feb-Oct
+    // program — the real wizard producer stamps seasonal9 rows with
+    // frequency 'every_6_weeks' (estimate-public selectedMosquitoServiceRow),
+    // an approximation that would seed billable treatments YEAR-ROUND and
+    // bypass the winter-start guard (codex #3504 P0). Off-tier mosquito
+    // visit counts still fail the promise check below.
+    pattern = picked.visits === 12 ? 'monthly' : 'seasonal_feb_oct';
+  }
+  if (!pattern) return null;
+  if (PATTERN_PROMISED_VISITS[pattern] !== picked.visits) return null;
+  return { pattern, visits: picked.visits };
 }
 
 function serviceKeyOf(svc) {
@@ -204,4 +255,4 @@ function wizardDraftSelfServeBookable(row) {
   return true;
 }
 
-module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, wizardDraftSelfServeBookable };
+module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, resolveWizardSeriesPlan, wizardDraftSelfServeBookable };
