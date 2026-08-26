@@ -124,8 +124,26 @@ async function sendCardExpiryWarnings() {
     .where('customers.autopay_enabled', true)
     .whereNull('customers.deleted_at')
     .where('payment_methods.autopay_enabled', true)
+    // Guarded casts + legacy 2-digit normalization (codex #3495): a raw
+    // '26' hit make_date as year 0026 and new Date as 1926, staging a valid
+    // card as expired — and a non-numeric value made ::int THROW. Every
+    // cast sits inside a CASE THEN whose WHEN is regex-only (AND conjuncts
+    // may reorder; CASE arms may not).
     .whereRaw(
-      "make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) <= ?",
+      `CASE
+         WHEN NULLIF(BTRIM(payment_methods.exp_month), '') ~ '^[0-9]{1,2}$'
+           AND NULLIF(BTRIM(payment_methods.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+         THEN CASE
+                WHEN NULLIF(BTRIM(payment_methods.exp_month), '')::int BETWEEN 1 AND 12
+                THEN make_date(
+                       (CASE WHEN NULLIF(BTRIM(payment_methods.exp_year), '')::int < 100
+                             THEN NULLIF(BTRIM(payment_methods.exp_year), '')::int + 2000
+                             ELSE NULLIF(BTRIM(payment_methods.exp_year), '')::int END),
+                       NULLIF(BTRIM(payment_methods.exp_month), '')::int, 1) <= ?
+                ELSE FALSE
+              END
+         ELSE FALSE
+       END`,
       [etDateString(sixty)]
     )
     .select(
@@ -141,7 +159,10 @@ async function sendCardExpiryWarnings() {
 
   for (const r of rows) {
     try {
-      const expDate = new Date(r.exp_year, r.exp_month, 0);
+      // Same +2000 normalization as the SQL window and the charge path.
+      const rawExpYear = Number(r.exp_year);
+      const expYear = Number.isFinite(rawExpYear) && rawExpYear > 0 && rawExpYear < 100 ? rawExpYear + 2000 : rawExpYear;
+      const expDate = new Date(expYear, r.exp_month, 0);
       const expired = expDate < now;
       const eventType = expired ? 'card_expired' : 'card_expiring_soon';
       const daysUntil = Math.ceil((expDate.getTime() - now.getTime()) / 86400000);

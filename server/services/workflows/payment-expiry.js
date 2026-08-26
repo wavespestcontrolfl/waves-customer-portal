@@ -52,6 +52,16 @@ class PaymentExpiry {
             this.select(db.raw('1')).from('payments as p')
               .whereRaw('p.customer_id = c.id')
               .where('p.status', 'paid');
+          })
+          // Booked-but-stuck-at-new_lead (the documented lead-booking reuse
+          // gap in customer-stages.js): an upcoming visit is a real payment
+          // relationship even before the first paid ledger row — their card
+          // expiring matters (codex P2).
+          .orWhereExists(function () {
+            this.select(db.raw('1')).from('scheduled_services as ss')
+              .whereRaw('ss.customer_id = c.id')
+              .whereIn('ss.status', ['pending', 'confirmed'])
+              .whereRaw('ss.scheduled_date >= CURRENT_DATE');
           });
       })
       // Only the customer's ONE current method, charge-path semantics: the
