@@ -2574,15 +2574,25 @@ const AppointmentReminders = {
         // Unreadable freshness FAILS CLOSED: a newer START has already run,
         // so a landline cached after it has no clearing event left — the
         // customer would stay email-only indefinitely on a guess.
+        // Send time uses the same canonical adjustment as the suppression
+        // store (codex #3495 r15): pre-handoff-stamped rows are trusted
+        // as-is; UNSTAMPED legacy rows log after messages.create() returns,
+        // so they get the seconds-scale shave — a START whose clearance
+        // raced the log insert must still read as newer than the send.
         let cacheVerdict = 'fresh';
         try {
-          const bounceLog = sid ? await db('sms_log').where({ twilio_sid: sid }).first('created_at') : null;
+          const { hasPreHandoffStamp } = require('./messaging/suppression-ownership');
+          const SEND_RACE_GRACE_MS = 5 * 1000;
+          const bounceLog = sid ? await db('sms_log').where({ twilio_sid: sid }).first('created_at', 'metadata') : null;
+          const sentAtFloor = bounceLog?.created_at
+            ? new Date(new Date(bounceLog.created_at).getTime() - (hasPreHandoffStamp(bounceLog) ? 0 : SEND_RACE_GRACE_MS))
+            : null;
           const supPhone = String(to || '').replace(/[^\d+]/g, '');
           const supRow = supPhone
             ? await db('messaging_suppression').where({ phone: supPhone }).first('active', 'cleared_at')
             : null;
           const stale = !!(supRow && supRow.active === false && supRow.cleared_at
-            && (!bounceLog?.created_at || new Date(supRow.cleared_at) > new Date(bounceLog.created_at)));
+            && (!sentAtFloor || new Date(supRow.cleared_at) > sentAtFloor));
           if (stale) cacheVerdict = 'stale';
         } catch { cacheVerdict = 'unknown'; }
         if (cacheVerdict === 'fresh') {
