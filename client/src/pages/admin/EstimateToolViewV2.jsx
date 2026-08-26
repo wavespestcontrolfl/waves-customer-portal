@@ -2266,11 +2266,9 @@ export default function EstimateToolViewV2({
     exclMeshSoftLF: "0",
     exclMeshConcreteLF: "0",
     exclWaive: "NO",
-    rodentTrappingPlan: "standard",
     rodentTrappingEmergency: false,
     callbacksUsed: "0",
     extraCallbackCount: "0",
-    upgradeToUnlimited: false,
     sanitationTier: "standard",
     sanitationArea: "",
     sanitationDebris: "0",
@@ -4227,11 +4225,10 @@ export default function EstimateToolViewV2({
         rgExclusionCompleted: !!form.rgExclusionCompleted,
         rgSanitationBaseline: !!form.rgSanitationBaseline,
         rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
-        rodentTrappingPlan: form.rodentTrappingPlan || "standard",
+        rodentTrappingPlan: "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
         callbacksUsed: parseInt(form.callbacksUsed, 10) || 0,
         extraCallbackCount: parseInt(form.extraCallbackCount, 10) || 0,
-        upgradeToUnlimited: !!form.upgradeToUnlimited,
         trapOnlyRetainerPlan: form.trapOnlyRetainerPlan || "standard",
         trapOnlyRetainerBilling: form.trapOnlyRetainerBilling || "annual",
         trapOnlyResponseCallbacksUsed: parseInt(form.trapOnlyResponseCallbacksUsed, 10) || 0,
@@ -7675,27 +7672,18 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />{" "}
               {form.svcRodentTrap && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="text-12 text-zinc-600 mb-3">
+                    Standard plan — $350 flat, includes 2 callbacks/checks. Extra callbacks $125 each after the included ones are used.
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Trapping Plan">
-                      <SelectV2
-                        k="rodentTrappingPlan"
-                        options={[
-                          { value: "standard", label: "Standard - $350 - includes 2 callbacks" },
-                          { value: "unlimited", label: "Unlimited Callback - $450" },
-                        ]}
-                      />
-                    </FieldV2>
                     <FieldV2 label="Callbacks Used">
                       <InputV2 k="callbacksUsed" type="number" min="0" />
                     </FieldV2>
                     <FieldV2 label="Extra Callbacks">
                       <InputV2 k="extraCallbackCount" type="number" min="0" />
                     </FieldV2>
-                    <div className="pt-7">
-                      <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
-                    </div>
                     <div className="col-span-2">
-                      <CheckboxV2 k="upgradeToUnlimited" label="Upgrade Standard to Unlimited (+$125)" />
+                      <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
                     </div>
                   </div>
                 </div>

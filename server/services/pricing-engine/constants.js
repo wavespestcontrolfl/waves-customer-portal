@@ -1065,7 +1065,7 @@ const TERMITE = {
 // ============================================================
 // Staged-remediation pricing model (Apr 2026 v2):
 //   1. Inspection / diagnosis (creditable)
-//   2. Active trapping (setup + unlimited trap checks during active window)
+//   2. Active trapping (Standard: setup + 2 included callbacks/checks)
 //   3. Exclusion (per-point with home-size minimums + access multipliers)
 //   4. Sanitation (light / standard / heavy with sqft + debris scaling)
 //   5. Bundle discount (7% / 5% / 10% with floors)
@@ -1102,13 +1102,12 @@ const RODENT = {
   },
 
   // ── Trapping ──────────────────────────────────────────────
+  // Standard is the only plan (owner directive 2026-08-26): flat $350 with
+  // 2 included callbacks; extras bill per-callback. Unlimited/upgrade retired.
   trapping: {
     standardPrice: r(350),
-    unlimitedPrice: r(450),
-    upgradeToUnlimitedPrice: r(125),
     base: r(350),
     floor: r(350),
-    unlimitedFloor: r(450),
     ceilingBeforeCustom: r(795),
     includedFollowUps: 2,
     activeWindowDays: null,
@@ -1137,7 +1136,6 @@ const RODENT = {
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {
       standard: 'Rodent Trapping - Standard: initial setup plus 2 callbacks/checks. Additional callbacks after included visits are $125 each.',
-      unlimited: 'Rodent Trapping - Unlimited Callback: callbacks for the same active trapping job only. Does not include exclusion, sanitation, or warranty.',
     },
   },
 

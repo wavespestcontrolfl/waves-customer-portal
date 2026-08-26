@@ -1248,11 +1248,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     if (config.rodent_trapping) {
       const t = config.rodent_trapping;
       if (t.standard_price != null) constants.RODENT.trapping.standardPrice = r(t.standard_price);
-      if (t.unlimited_price != null) constants.RODENT.trapping.unlimitedPrice = r(t.unlimited_price);
-      if (t.upgrade_to_unlimited_price != null) constants.RODENT.trapping.upgradeToUnlimitedPrice = r(t.upgrade_to_unlimited_price);
+      // unlimited_price / upgrade_to_unlimited_price / unlimited_floor are
+      // retired (Standard is the only plan, owner 2026-08-26) — stale rows
+      // may still carry them; they are deliberately not mapped.
       if (t.base != null) constants.RODENT.trapping.base = r(t.base);
       if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
-      if (t.unlimited_floor != null) constants.RODENT.trapping.unlimitedFloor = r(t.unlimited_floor);
       if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
       if (t.included_followups != null) {
         constants.RODENT.trapping.includedFollowUps =

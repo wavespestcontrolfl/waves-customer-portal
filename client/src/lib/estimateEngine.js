@@ -3080,17 +3080,10 @@ export function calculateEstimate(inputs) {
   /* ── Rodent Trapping ─────────────────────────────────────── */
   if (svcRodentTrap && !isCommercial) {
     hasOT = true;
-    let p = 350;
-    p += interpolate(footprint, [
-      { at: 800, adj: -25 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
-      { at: 2500, adj: 20 }, { at: 3000, adj: 40 }, { at: 4000, adj: 65 },
-    ]);
-    p += interpolate(lotSqFt, [
-      { at: 5000, adj: 0 }, { at: 10000, adj: 10 },
-      { at: 15000, adj: 20 }, { at: 25000, adj: 35 },
-    ]);
-    const fp = otP(Math.max(350, p));
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + check visits' });
+    // Static mirror of the server's standard-only trapping plan (owner
+    // 2026-08-26): flat $350, no footprint/lot adjustments.
+    const fp = otP(350);
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + 2 included callbacks' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */

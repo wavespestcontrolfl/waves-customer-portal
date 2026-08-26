@@ -5,6 +5,7 @@ const {
   priceTrapOnlyRetainer,
   priceRodentWireMesh,
   priceRodentBirdBoxes,
+  priceRodentExclusionV2,
   applyRodentBundle,
   calculateRodentGuaranteeCombo,
 } = require('../services/pricing-engine');
@@ -22,12 +23,27 @@ function baseInput(overrides = {}) {
 }
 
 describe('revised rodent pricing rules', () => {
-  test('trapping plans and emergency pricing match fixed floors', () => {
+  test('trapping is Standard-only: flat $350, emergency surcharge on top', () => {
     expect(priceRodentTrapping(baseInput(), { plan: 'standard' }).price).toBe(350);
-    expect(priceRodentTrapping(baseInput(), { plan: 'unlimited' }).price).toBe(450);
     expect(priceRodentTrapping(baseInput(), { plan: 'standard', emergency: true }).price).toBe(425);
-    expect(priceRodentTrapping(baseInput(), { plan: 'unlimited', emergency: true }).price).toBe(540);
-    expect(priceRodentTrapping(baseInput(), { upgradeToUnlimited: true }).price).toBe(125);
+    // Large home / large lot: still flat — no footprint or lot adjustments.
+    expect(priceRodentTrapping(
+      baseInput({ homeSqFt: 5200, lotSqFt: 30000 }),
+      { plan: 'standard' }
+    ).price).toBe(350);
+  });
+
+  test('legacy unlimited/upgrade inputs coerce to Standard with a warning', () => {
+    const fromUnlimited = priceRodentTrapping(baseInput(), { plan: 'unlimited' });
+    expect(fromUnlimited.price).toBe(350);
+    expect(fromUnlimited.name).toBe('Rodent Trapping - Standard');
+    expect(fromUnlimited.rodentTrappingPlan).toBe('standard');
+    expect(fromUnlimited.unlimitedCallbacks).toBe(false);
+    expect(fromUnlimited.warnings.join(' ')).toMatch(/retired/i);
+
+    const fromUpgrade = priceRodentTrapping(baseInput(), { upgradeToUnlimited: true });
+    expect(fromUpgrade.price).toBe(350);
+    expect(fromUpgrade.warnings.join(' ')).toMatch(/retired/i);
   });
 
   test('standard trapping extra callbacks bill only after two included callbacks are used', () => {
@@ -48,12 +64,9 @@ describe('revised rodent pricing rules', () => {
 
   test('invoice descriptions use revised trapping copy', () => {
     const standard = priceRodentTrapping(baseInput(), { plan: 'standard' });
-    const unlimited = priceRodentTrapping(baseInput(), { plan: 'unlimited' });
 
     expect(standard.invoiceDescription).toContain('initial setup plus 2 callbacks/checks');
     expect(standard.invoiceDescription).toContain('$125 each');
-    expect(unlimited.invoiceDescription).not.toMatch(/14[- ]day/i);
-    expect(unlimited.invoiceDescription).toContain('same active trapping job only');
   });
 
   test('trap-only retainer plans, setup waiver, warranty, and callbacks', () => {
@@ -144,6 +157,67 @@ describe('revised rodent pricing rules', () => {
     expect(bait.discount.effectiveDiscount).toBe(0);
     expect(bait.discount.setupCredit).toBeUndefined();
     expect(estimate.summary.manualDiscount.amount).toBe(0);
+  });
+
+  test('exclusion V2 quotes each section as its own line item, summing to the total', () => {
+    const result = priceRodentExclusionV2({
+      standardWireMeshPoints: 2,
+      standardBirdBoxes: 1,
+      meshSoftLF: 20,
+    });
+
+    expect(result.price).toBe(705); // 150 wire + 150 boxes + 280 mesh + 125 inspect
+    const components = result.lineItems.map(li => li.component);
+    expect(components).toEqual(['wire_mesh_points', 'bird_boxes', 'linear_mesh', 'inspect_fee']);
+    expect(result.lineItems.map(li => li.price)).toEqual([150, 150, 280, 125]);
+    expect(result.lineItems.reduce((s, li) => s + li.price, 0)).toBe(result.price);
+    // Every row keeps the exclusion identity for catalog/adoption/completion.
+    expect(result.lineItems.every(li => li.service === 'rodent_exclusion')).toBe(true);
+    // Names must never contain "inspection" — estimate-public's
+    // isInspectionReviewOneTimeItem would classify such a row non-billable.
+    expect(result.lineItems.every(li => !/inspection/i.test(li.label))).toBe(true);
+  });
+
+  test('exclusion V2 job minimum and inspect waiver surface as explicit rows', () => {
+    const floored = priceRodentExclusionV2({
+      advancedWireMeshPoints: 1,
+      waiveInspection: true,
+    });
+    expect(floored.price).toBe(195); // $195 point-only job minimum
+    expect(floored.lineItems.map(li => [li.component, li.price])).toEqual([
+      ['wire_mesh_points', 150],
+      ['job_minimum', 45],
+    ]);
+    expect(floored.lineItems[0].detail).toContain('(inspect waived)');
+  });
+
+  test('generateEstimate carries V2 exclusion as per-section rows and still tiers the guarantee', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        exclusion: {
+          pricingVersion: 'v2',
+          advancedWireMeshPoints: 10, // 20 equivalent points → estate guarantee tier
+          waiveInspection: true,
+        },
+        rodentGuarantee: {
+          eligibility: {
+            trappingCompleted: true,
+            exclusionCompleted: true,
+            sanitationCompletedOrPhotoBaseline: true,
+            noActivityAfterFinalTrapCheck: true,
+          },
+        },
+      },
+    }));
+
+    const exclusionRows = estimate.lineItems.filter(li => li.service === 'rodent_exclusion');
+    expect(exclusionRows.map(li => li.component)).toEqual(['wire_mesh_points']);
+    expect(exclusionRows[0].price).toBe(1500);
+    // No combined summary row rides alongside the section rows.
+    expect(exclusionRows.filter(li => li.name === 'Rodent Exclusion')).toHaveLength(0);
+
+    const guarantee = estimate.lineItems.find(li => li.service === 'rodent_guarantee');
+    expect(guarantee).toMatchObject({ eligible: true, tier: 'estate', effectivePoints: 20 });
   });
 
   test('rodent guarantee combo does not discount bait-station components', () => {

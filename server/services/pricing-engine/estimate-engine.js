@@ -1442,6 +1442,10 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
+  // V2 exclusion summary — the guarantee block below needs the aggregate
+  // (equivalent points, mesh LF) even though the estimate now carries the
+  // V2 exclusion as per-section line items rather than one combined row.
+  let rodentExclusionV2Summary = null;
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control')) {
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.sanitation
@@ -1462,7 +1466,16 @@ function generateEstimate(input) {
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
       });
-      lineItems.push(result);
+      rodentExclusionV2Summary = result;
+      // Per-section rows (wire mesh points / bird boxes / linear mesh, plus
+      // job-minimum, urgency, and inspect-fee deltas) sum exactly to
+      // result.price. Empty when nothing was quoted — fall back to the
+      // combined summary row so the floor-only case still prices.
+      if (Array.isArray(result.lineItems) && result.lineItems.length > 0) {
+        lineItems.push(...result.lineItems);
+      } else {
+        lineItems.push(result);
+      }
     } else {
       const result = priceExclusion({
         simple: services.exclusion.simple || 0,
@@ -1599,7 +1612,10 @@ function generateEstimate(input) {
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
   if (services.rodentGuarantee && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
     const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
-    const exclusionResult = lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
+    // Prefer the V2 summary: the estimate carries V2 exclusion as per-section
+    // rows, and a section row has no aggregate equivalent-point fields.
+    const exclusionResult = rodentExclusionV2Summary
+      || lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
     const guaranteeOpts = {
       homeSqFt: opts.homeSqFt || property.footprint || 2000,
       stories: opts.stories || property.stories || 1,
