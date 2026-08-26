@@ -9723,6 +9723,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // acceptance back (a committed accepted-but-unconverted estimate is
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
+    // The customer's authorization moment (Codex r17): both post-commit
+    // enrollment calls pass this so an Auto Pay opt-out committed in
+    // another tab AFTER the acknowledged submit wins — enrollConsentedMethod
+    // refuses opted_out_after_authorization instead of re-enabling.
+    const acceptAuthorizedAt = new Date();
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -10520,6 +10525,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
       let invoiceKindResult = null;
       let annualPrepayConversionResult = null;
+      // In-trx credit fencing outcomes (Codex r16/r17) — consumed by the
+      // post-commit charge block.
+      let prepayOfferRedeemedInTxResult = false;
+      let prepayCoveredInTrxResult = false;
       // Narrow low-confidence commercial: skip the exact first-invoice mint so the
       // team invoices after on-site price confirmation (see holdFirstInvoiceFor
       // SiteConfirmation above). Acceptance still commits + books the program.
@@ -10671,21 +10680,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             }
             if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
               const { getBalance, computeApplication } = require('../services/customer-credit');
-              const balance = await getBalance(customerId);
-              const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId);
+              // Reads ride THIS transaction's handle (Codex r17): a second
+              // pool checkout from inside a held connection can deadlock
+              // the pool under a burst of concurrent accepts.
+              const balance = await getBalance(customerId, trx);
+              const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: trx });
               const projection = computeApplication({ total: revalidatedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
               revalidatedDue = Math.max(0, Math.round((revalidatedDue - (projection.newCreditApplied || 0)) * 100) / 100);
             }
             const { computeChargeAmount } = require('../services/stripe-pricing');
             const revalidated = computeChargeAmount(revalidatedDue, prepayChargePlan.method.methodType || 'card', { funding: prepayChargePlan.method.funding });
             if (revalidated.totalCents !== prepayChargePlan.quote.totalCents) {
-              throw estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+              // Distinct contract (Codex r17): a bare 409 lands in the
+              // client's generic slot-conflict branch and destroys the
+              // reservation — PREPAY_QUOTE_STALE keeps it and reopens the
+              // quote confirmation with the fresh total.
+              const staleErr = estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+              staleErr.code = 'PREPAY_QUOTE_STALE';
+              throw staleErr;
             }
           } catch (revalErr) {
             if (revalErr && revalErr.status) throw revalErr;
             // Unknown credit state = unknown total — same fail-closed
             // direction as the quote itself, retryable.
-            throw estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            const staleErr = estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            staleErr.code = 'PREPAY_QUOTE_STALE';
+            throw staleErr;
           }
         }
         const EstimateConverter = require('../services/estimate-converter');
@@ -10728,25 +10748,52 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
-        // FENCE the projected account balance by APPLYING it to the
-        // just-minted prepay invoice INSIDE this transaction (Codex r16):
-        // the revalidation above only READ the balance — a competing
-        // invoice waiting on the customer lock could consume it between
-        // this commit and the post-commit charge, making expectedTotal
-        // refuse a plan that is already booked. Applying here consumes the
-        // balance atomically with the acceptance, so nothing can
-        // double-spend it; the in-lock charge-time apply then covers only
-        // the post-commit inspection-offer redemption. Fail CLOSED: an
-        // apply error aborts the accept retryably (unknown credit state =
-        // unknown total). The deposit credit was already netted at mint.
+        // FENCE the projected credits atomically with the acceptance
+        // (Codex r16/r17): the revalidation above only READ them.
         if (prepayChargePlan && invoiceIdResult
           && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          // 1) Redeem the projected inspection offer IN THIS TRANSACTION
+          //    (r17): the booking row + its evidence event were written on
+          //    this connection, and redemption nests as a savepoint —
+          //    once redeemed the amount sits in the balance the apply
+          //    below consumes, so no competing booking can take the
+          //    promise between commit and collection. INCONCLUSIVE
+          //    results fall back to the existing post-commit defer path
+          //    (never a hard accept-refusal on possibly-missing booking
+          //    evidence); a conclusive no-offer proceeds on the equality
+          //    guard's drift semantics.
+          if (Number(prepayChargePlan.projectedOfferAmount) > 0
+            && annualPrepayConversionResult?.firstScheduledServiceId) {
+            try {
+              const redemption = await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+                customerId,
+                scheduledServiceId: annualPrepayConversionResult.firstScheduledServiceId,
+                createdBy: 'system:inspection_credit_estimate_accept',
+                dbh: trx,
+              });
+              prepayOfferRedeemedInTxResult = !!redemption && Number(redemption.redeemed) > 0;
+            } catch (redeemErr) {
+              logger.warn(`[estimate-accept] in-trx inspection-credit redemption failed for estimate ${estimate.id} — deferring to the post-commit path: ${redeemErr.message}`);
+            }
+          }
+          // 2) APPLY the (now offer-inclusive) balance to the just-minted
+          //    prepay invoice (r16): consumed atomically with acceptance,
+          //    so a competing invoice waiting on the customer lock cannot
+          //    double-spend it after commit. Fail CLOSED retryably.
           try {
             const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-            await applyAccountCreditToInvoice({ invoiceId: invoiceIdResult }, trx);
+            await applyAccountCreditToInvoice({ invoiceId: invoiceIdResult, createdBy: 'system:prepay_accept' }, trx);
           } catch (applyErr) {
-            throw estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            const staleErr = estimateAcceptError('We couldn’t re-verify your total just now — please try again in a moment.', 409);
+            staleErr.code = 'PREPAY_QUOTE_STALE';
+            throw staleErr;
           }
+          // 3) Full coverage detection (r17): the apply can flip the
+          //    invoice to 'prepaid' — the post-commit block must run the
+          //    credit-coverage settlement instead of a charge call that
+          //    would refuse the settled status as a decline.
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status');
+          prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
         }
       }
 
@@ -11023,6 +11070,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoiceServiceLabel: invoiceServiceLabelResult,
         invoiceKind: invoiceKindResult,
         annualPrepayConversion: annualPrepayConversionResult,
+        prepayOfferRedeemedInTx: prepayOfferRedeemedInTxResult,
+        prepayCoveredInTrx: prepayCoveredInTrxResult,
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
         standardInvoiceAttached,
@@ -11162,6 +11211,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // customer-paid — the enrollment's in-lock payer check must not
           // fall back to the account payer and refuse.
           scheduledServiceId: postCommitPayerScopeSsId,
+          authorizedAt: acceptAuthorizedAt,
           // In-lane prepay renders + records the prepay authorization
           // (immediate 12-month charge) instead of the base card text. Keyed
           // off what the capture UI RENDERED (in-lane prepay accept), not
@@ -11204,6 +11254,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           details: { via: 'saved_method_auto_enroll', estimate_id: estimate.id },
           // Same visit scope the policy resolver judged with (#3395 r13 P1).
           scheduledServiceId: postCommitPayerScopeSsId,
+          // Post-acknowledgement opt-outs win (Codex r17).
+          authorizedAt: acceptAuthorizedAt,
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted
@@ -11621,7 +11673,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // (which re-runs this same redemption from the stamped booking).
       const INSPECTION_CREDIT_INCONCLUSIVE = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'error'];
       let prepayCreditUnresolved = false;
-      if (Number(prepayChargePlan.projectedOfferAmount) > 0) {
+      if (Number(prepayChargePlan.projectedOfferAmount) > 0 && txResult.prepayOfferRedeemedInTx !== true) {
         const prepayBookingId = txResult.annualPrepayConversion?.firstScheduledServiceId || null;
         const redemption = prepayBookingId ? inspectionCreditRedemptions.get(String(prepayBookingId)) : null;
         const redeemedOk = !!redemption && Number(redemption.redeemed) > 0;
@@ -11630,6 +11682,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
         prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+      } else if (txResult.prepayCoveredInTrx) {
+        // The in-trx apply fully covered the invoice ('prepaid') — nothing
+        // to charge, and chargeInvoiceWithSavedCard would refuse the
+        // settled status as a decline (Codex r17). Run the SAME settlement
+        // side effects the charge service's covered_by_credit path runs
+        // (best-effort, idempotent), then report the credit coverage.
+        try {
+          await require('../services/invoice-followups').stopOnPayment(invoiceId);
+        } catch (e) { logger.warn(`[estimate-accept] stopOnPayment after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        try {
+          await require('../services/payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
+        } catch (e) { logger.warn(`[estimate-accept] plan completion after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        try {
+          const coveredInvoiceRow = await db('invoices').where({ id: invoiceId }).first();
+          if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
+        } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
+        require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
+        prepayAutoCharge = { status: 'paid', coveredByCredit: true };
+        invoicePayUrl = null;
+        logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})`);
       } else if (prepayCreditUnresolved) {
         prepayAutoCharge = { status: 'ambiguous', reason: 'inspection_credit_unresolved' };
         invoicePayUrl = null;
@@ -11817,6 +11889,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   throwOnError: true,
                 });
                 if (resolved?.payerId) {
+                  // Return the HOMEOWNER's account credit BEFORE the bill
+                  // becomes the payer's (Codex r17): the accept applied it
+                  // in-transaction to what was then a self-pay invoice —
+                  // delivering that invoice to AP with the credit still
+                  // netted would fund the payer's bill from the
+                  // homeowner's ledger. A failed reversal keeps the
+                  // invoice self-pay and defers (no stamp, no delivery).
+                  const creditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
+                  const appliedCredit = Number(creditRow?.credit_applied) || 0;
+                  if (appliedCredit > 0) {
+                    await require('../services/customer-credit').reverseAppliedCredit({
+                      invoiceId,
+                      amount: appliedCredit,
+                      createdBy: 'system:prepay_payer_reroute',
+                      note: 'Account credit returned — invoice re-routed to third-party payer',
+                    });
+                  }
                   await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
                     payer_id: resolved.payerId,
                     ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
@@ -12520,7 +12609,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
     if (err && err.status >= 400 && err.status < 500) {
-      return res.status(err.status).json({ error: err.message });
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     next(err);
   }

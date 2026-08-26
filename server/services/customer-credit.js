@@ -39,8 +39,11 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-async function getBalance(customerId) {
-  const row = await db('customers').where({ id: customerId }).first('account_credits');
+async function getBalance(customerId, dbh = db) {
+  // dbh: callers holding an open transaction MUST pass it (Codex #3492
+  // r17) — a pool checkout from inside a held-connection request can
+  // deadlock the pool under a burst.
+  const row = await dbh('customers').where({ id: customerId }).first('account_credits');
   if (!row) return null;
   return round2(row.account_credits || 0);
 }

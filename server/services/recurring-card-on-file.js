@@ -925,6 +925,20 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
               throwOnError: true,
             });
             if (resolved?.payerId) {
+              // Return the homeowner's applied account credit BEFORE the
+              // bill becomes the payer's (Codex r17) — mirror of the
+              // in-flow re-route; a failed reversal throws and the job
+              // stays claimed for the lease.
+              const creditRow = await db('invoices').where({ id: job.invoice_id }).first('credit_applied');
+              const appliedCredit = Number(creditRow?.credit_applied) || 0;
+              if (appliedCredit > 0) {
+                await require('./customer-credit').reverseAppliedCredit({
+                  invoiceId: job.invoice_id,
+                  amount: appliedCredit,
+                  createdBy: 'system:prepay_payer_reroute',
+                  note: 'Account credit returned — invoice re-routed to third-party payer',
+                });
+              }
               await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
                 payer_id: resolved.payerId,
                 ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),

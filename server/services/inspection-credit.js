@@ -521,9 +521,11 @@ async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) 
  *
  * Returns true only when money actually posted. Never throws.
  */
-async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, bookingCreatedAt, createdBy, now }) {
+async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, bookingCreatedAt, createdBy, now, dbh = db }) {
   try {
-    await db.transaction(async (trx) => {
+    // dbh.transaction on a caller transaction nests as a SAVEPOINT — the
+    // claim/mint stays atomic either way (Codex #3492 r17).
+    await dbh.transaction(async (trx) => {
       const claimed = await trx('inspection_credit_offers')
         .where({ id: offerId })
         // 'expired' is provisional, never money-terminal (pre-push P0):
@@ -623,6 +625,12 @@ async function redeemInspectionCreditForBooking({
   bookingStatus = null,
   createdBy = 'system:inspection_credit_rebook',
   now = new Date(),
+  // In-transaction callers (the prepay accept redeems atomically with
+  // acceptance — Codex #3492 r17) pass their handle: the booking row and
+  // its evidence event were written on that same connection and are
+  // invisible elsewhere until commit; redeemSpecificOffer then nests as a
+  // savepoint.
+  dbh = db,
 }) {
   // NOT an early return on the gate (Codex #3178 r34 P0): standing-promise
   // offers (rodent — the estimator's $125-creditable pledge on already-sent
@@ -638,7 +646,7 @@ async function redeemInspectionCreditForBooking({
   }
   // The booking's live status, read from the row (Codex #3178 r6 P0).
   try {
-    const row = await db('scheduled_services')
+    const row = await dbh('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('created_at', 'status');
     if (!row) return { redeemed: 0, reason: 'booking_not_found' };
@@ -660,7 +668,7 @@ async function redeemInspectionCreditForBooking({
   // fault — never mint on an unknown moment.
   let bookedAt;
   try {
-    const evt = await db('inspection_credit_booking_events')
+    const evt = await dbh('inspection_credit_booking_events')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('created_at');
     if (!evt?.created_at) return { redeemed: 0, reason: 'no_booking_evidence' };
@@ -671,7 +679,7 @@ async function redeemInspectionCreditForBooking({
   }
 
   try {
-    const openQ = db('inspection_credit_offers')
+    const openQ = dbh('inspection_credit_offers')
       .where({ customer_id: customerId })
       // 'expired' included on purpose — provisional, and the time-window
       // guards below (re-validated under the claim) are the real arbiter.
@@ -703,6 +711,7 @@ async function redeemInspectionCreditForBooking({
         bookingCreatedAt: bookedAt,
         createdBy,
         now,
+        dbh,
       });
       if (ok) {
         redeemed += 1;
@@ -1726,14 +1735,15 @@ async function inspectionCreditReportNote(service) {
 // expectedTotal equality check refuses and the pay-link fallback (which
 // auto-applies the real credit at delivery) takes over. Read-only; never
 // throws.
-async function projectRedeemableOfferAmount(customerId, { now = new Date() } = {}) {
+async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh = db } = {}) {
   if (!customerId) return 0;
   // THROWS on a query failure (Codex #3492 r10 P0) — a swallowed error
   // returning 0 is indistinguishable from "no offer", and the prepay quote
   // (the only caller) uses that distinction as a money guard: an unknown
   // offer state must reject the quote, never silently price the gross
-  // amount over an outstanding promised credit.
-  const q = db('inspection_credit_offers')
+  // amount over an outstanding promised credit. dbh: in-transaction
+  // callers pass their handle (r17 — pool-deadlock guard).
+  const q = dbh('inspection_credit_offers')
     .where({ customer_id: customerId })
     .whereIn('status', ['offered', 'expired'])
     .where('created_at', '<=', now)

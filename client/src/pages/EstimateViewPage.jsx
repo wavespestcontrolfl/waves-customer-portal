@@ -4937,6 +4937,17 @@ function EstimateViewPageInner() {
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'PREPAY_QUOTE_STALE') {
+            // The acknowledged prepay total drifted (credit/deposit change
+            // during the round trip — Codex #3492 r17). NOT a scheduling
+            // conflict: keep the reservation and preference; drop the
+            // stale quote/ack so the next Confirm re-quotes and reopens
+            // the exact-total confirmation with the fresh amount.
+            prepayChargeAckRef.current = null;
+            setPrepayChargeQuote(null);
+            setPrepayConsentChecked(false);
+            throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
+          }
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
             setReservation(null);
