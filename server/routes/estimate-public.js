@@ -11773,34 +11773,58 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // (Codex r20): the quote projected the SUM of the open offers.
         prepayCreditUnresolved = !redemption || INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
       }
+      // Definitive payer routing for the fallback flags (Codex r22 + hook
+      // P0): BOTH flags include lookup-failure (fail-closed) states — an
+      // uncertain payer must never be treated as CONFIRMED payer-billed
+      // (delivery would hand the HOMEOWNER a pay link on a possibly
+      // third-party bill and retire the job). Classify payer_billed only
+      // off an existing payer_id or a successful live resolve-and-stamp
+      // (with the homeowner's in-trx credit reversed first); a confirmed
+      // self-pay resolve falls through to the normal charge chain; anything
+      // uncertain defers with NO delivery.
+      let prepayPayerRouting = null; // 'payer_billed' | 'self_pay' | 'unresolved'
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
-        // Return the HOMEOWNER's in-trx-applied account credit before the
-        // bill goes to the payer (Codex r22 — same rule as the
-        // PAYER_BILLED_GUARD catch): an unlinked accept can turn
-        // payer-billed only at the post-commit re-check, AFTER the
-        // transaction applied the homeowner's credit. A failed reversal
-        // defers (no delivery, sweep retries) rather than sending AP a
-        // bill discounted from the homeowner's ledger.
-        let payerCreditsReturned = true;
         try {
-          const payerCreditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
-          const payerAppliedCredit = Number(payerCreditRow?.credit_applied) || 0;
-          if (payerAppliedCredit > 0) {
-            await require('../services/customer-credit').reverseAppliedCredit({
-              invoiceId,
-              amount: payerAppliedCredit,
-              createdBy: 'system:prepay_payer_reroute',
-              note: 'Account credit returned — invoice re-routed to third-party payer',
+          const payerInvRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'credit_applied', 'scheduled_service_id');
+          if (payerInvRow?.payer_id) {
+            prepayPayerRouting = 'payer_billed';
+          } else {
+            const PayerService = require('../services/payer');
+            const resolvedRouting = await PayerService.resolveForInvoice({
+              customerId,
+              scheduledServiceId: postCommitPayerScopeSsId || payerInvRow?.scheduled_service_id || null,
+              throwOnError: true,
             });
+            if (resolvedRouting?.payerId) {
+              const payerAppliedCredit = Number(payerInvRow?.credit_applied) || 0;
+              if (payerAppliedCredit > 0) {
+                await require('../services/customer-credit').reverseAppliedCredit({
+                  invoiceId,
+                  amount: payerAppliedCredit,
+                  createdBy: 'system:prepay_payer_reroute',
+                  note: 'Account credit returned — invoice re-routed to third-party payer',
+                });
+              }
+              await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
+                payer_id: resolvedRouting.payerId,
+                ...(resolvedRouting.poNumber ? { po_number: resolvedRouting.poNumber } : {}),
+                ...(resolvedRouting.snapshot ? { payer_snapshot: JSON.stringify(resolvedRouting.snapshot) } : {}),
+              });
+              prepayPayerRouting = 'payer_billed';
+            } else {
+              prepayPayerRouting = 'self_pay';
+            }
           }
-        } catch (payerCreditErr) {
-          payerCreditsReturned = false;
-          logger.warn(`[estimate-accept] payer-fallback credit reversal failed for invoice ${invoiceId} — deferring delivery: ${payerCreditErr.message}`);
+        } catch (routingErr) {
+          prepayPayerRouting = 'unresolved';
+          logger.warn(`[estimate-accept] payer routing unresolved for invoice ${invoiceId} — deferring (no delivery): ${routingErr.message}`);
         }
-        prepayAutoCharge = payerCreditsReturned
-          ? { status: 'skipped', reason: 'payer_billed' }
-          : { status: 'ambiguous', reason: 'payer_unresolved' };
-        if (!payerCreditsReturned) invoicePayUrl = null;
+      }
+      if (prepayPayerRouting === 'payer_billed') {
+        prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+      } else if (prepayPayerRouting === 'unresolved') {
+        prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+        invoicePayUrl = null;
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing
         // to charge, and chargeInvoiceWithSavedCard would refuse the
