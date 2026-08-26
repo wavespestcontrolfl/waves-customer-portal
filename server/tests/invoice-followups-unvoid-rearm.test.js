@@ -32,9 +32,16 @@ jest.mock('../services/customer-contact', () => ({ getInvoiceEmailRecipients: je
 jest.mock('../services/email-template', () => ({ currency: jest.fn() }));
 jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
 
+jest.mock('../services/pay-combined', () => ({
+  lockCombinedCustomers: jest.fn(async () => undefined),
+  isCombinedPiMetadata: jest.fn(() => false),
+  paymentIntentOwnsInvoice: jest.fn(() => false),
+  clearPaymentIntentStamps: jest.fn(async () => undefined),
+}));
+
 const db = require('../models/db');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { scheduleForInvoice } = require('../services/invoice-followups');
+const { scheduleForInvoice, stopSequence } = require('../services/invoice-followups');
 
 function voidStoppedSeq(overrides = {}) {
   return {
@@ -144,6 +151,25 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.next_touch_at).toBeNull();
   });
 
+  test('restores a retained pre-void ADMIN PAUSE instead of activating dunning (Codex #3493 r3)', async () => {
+    const seq = voidStoppedSeq({ paused_reason: 'customer dispute', paused_by_admin_id: 'admin-1' });
+    const repaused = { ...seq, status: 'paused', stopped_reason: null };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: repaused });
+
+    const row = await scheduleForInvoice('inv-1');
+
+    expect(row).toBe(repaused);
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('paused');
+    expect(payload.next_touch_at).toBeNull();
+    expect(payload.stopped_reason).toBeNull();
+    // The pause fields themselves are retained, not rewritten.
+    expect(payload).not.toHaveProperty('paused_reason');
+    expect(payload).not.toHaveProperty('paused_by_admin_id');
+    // Dunning never activates on this path, so autopay is not consulted.
+    expect(customerOnAutopay).not.toHaveBeenCalled();
+  });
+
   test("an admin's own stop is returned untouched — no update runs", async () => {
     const adminStop = voidStoppedSeq({ stopped_by_admin_id: 'admin-1' });
     const { seqUpdate } = setupDb({ seq: adminStop, invoice: sentInvoice });
@@ -173,5 +199,67 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
 
     expect(seqUpdate).toHaveBeenCalled();
     expect(row).toBe(seq);
+  });
+});
+
+// stopSequence must not let a SYSTEM stop (e.g. the void lifecycle stop)
+// erase an ADMIN stop's attribution — that attribution is the only evidence
+// the unvoid→resend re-arm has that an admin killed dunning (Codex #3493 r3).
+describe('stopSequence — admin-stop attribution preservation', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function setupStopDb({ seq }) {
+    const seqUpdate = jest.fn(async () => 1);
+    db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        // No customer_id → the combined-session lock loop is skipped; no
+        // stripe_payment_intent_id → no PI triage.
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ id: 'inv-1', customer_id: null })) };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => seq),
+          update: seqUpdate,
+        };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    return { seqUpdate };
+  }
+
+  test('a SYSTEM stop over an existing admin stop keeps the admin attribution', async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_by_admin_id: 'admin-1' } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('stopped');
+    expect(payload).not.toHaveProperty('stopped_reason');
+    expect(payload).not.toHaveProperty('stopped_by_admin_id');
+  });
+
+  test('an explicit ADMIN stop still re-attributes', async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_by_admin_id: 'admin-1' } });
+
+    await stopSequence('inv-1', { reason: 'admin_stop', adminId: 'admin-2' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.stopped_reason).toBe('admin_stop');
+    expect(payload.stopped_by_admin_id).toBe('admin-2');
+  });
+
+  test('a SYSTEM stop on a non-stopped row writes its own reason as before', async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'active', stopped_by_admin_id: null } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.stopped_reason).toBe('invoice_voided');
+    expect(payload.stopped_by_admin_id).toBeNull();
   });
 });

@@ -354,6 +354,24 @@ async function scheduleForInvoice(invoiceId) {
         && existing.stopped_reason === 'invoice_voided'
         && !existing.stopped_by_admin_id;
       if (isSystemVoidStop) {
+        // A pre-void ADMIN PAUSE survives the void stop as the retained
+        // paused_* fields (stopSequence never clears them) — restore the
+        // PAUSE, not active dunning (Codex #3493 r3). Same conditional
+        // shape as the re-arm below so a racing admin write still wins.
+        if (existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) {
+          const [repaused] = await trx('invoice_followup_sequences')
+            .where({ id: existing.id, status: 'stopped', stopped_reason: 'invoice_voided' })
+            .whereNull('stopped_by_admin_id')
+            .update({
+              updated_at: trx.fn.now(),
+              status: 'paused',
+              stopped_reason: null,
+              stopped_by_admin_id: null,
+              next_touch_at: null,
+            })
+            .returning('*');
+          return repaused || existing;
+        }
         const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
         const holdForAutopay = existing.is_autopay_held
           || await customerOnAutopay(customerNow, { db: trx });
@@ -1402,12 +1420,27 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
         logger.warn(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number}: combined PI ${pi.id} is ${pi.status} — money may be in flight, not touched`);
       }
     }
+    // Preserve a pre-existing ADMIN stop's attribution under a SYSTEM stop
+    // (Codex #3493 r3): the void lifecycle stop used to overwrite
+    // stopped_reason/stopped_by_admin_id, erasing the only evidence that an
+    // admin had already stopped dunning — the unvoid→resend re-arm then
+    // read the row as system-owned and revived reminders the admin had
+    // killed. An explicit admin stop (adminId present) still re-attributes.
+    const priorSeq = await trx('invoice_followup_sequences')
+      .where({ invoice_id: invoiceId })
+      .first('status', 'stopped_by_admin_id');
+    const preserveAdminStop = !adminId
+      && priorSeq
+      && priorSeq.status === 'stopped'
+      && priorSeq.stopped_by_admin_id;
     await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
       updated_at: trx.fn.now(),
       status: 'stopped',
-      stopped_reason: reason || null,
-      stopped_by_admin_id: adminId || null,
       next_touch_at: null,
+      ...(preserveAdminStop ? {} : {
+        stopped_reason: reason || null,
+        stopped_by_admin_id: adminId || null,
+      }),
     });
   });
 }

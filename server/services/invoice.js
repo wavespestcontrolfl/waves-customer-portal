@@ -211,6 +211,65 @@ function invoiceHasDepositCreditLine(invoice) {
   );
 }
 
+// Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
+// pre-transaction as a fast fail, and again INSIDE the restore transaction
+// on the freshly-locked invoice row — a cancellation, free re-service
+// conversion, or annual-prepay stamping can commit between the two, and the
+// cancellation sweep only voids non-void invoices, so it would miss a
+// restore that commits on a stale verdict. All reads fail CLOSED.
+async function assertUnvoidableLinkedVisit(conn, invoiceRow) {
+  if (!invoiceRow.scheduled_service_id) return;
+  let svc = null;
+  try {
+    svc = await conn("scheduled_services")
+      .where({ id: invoiceRow.scheduled_service_id })
+      .first();
+  } catch (err) {
+    throw new Error(
+      `Could not verify the linked service visit — refusing to unvoid (${err.message})`,
+    );
+  }
+  if (!svc) return;
+  // Cancellation deliberately voids the visit's open invoices
+  // (voidOpenInvoicesForCancelledService) — restoring one while the visit
+  // stays cancelled/rescheduled would bill work that is no longer
+  // scheduled.
+  const svcStatus = String(svc.status || "").toLowerCase();
+  if (["cancelled", "canceled", "rescheduled"].includes(svcStatus)) {
+    throw new Error(
+      `Cannot unvoid — the linked service visit is ${svcStatus}; restore or re-book the visit before restoring its invoice`,
+    );
+  }
+  // Free re-service conversion (admin-schedule update-details) zero-prices
+  // the visit and voids its unpaid invoices ON PURPOSE — charge-now and
+  // completion reuse a non-void invoice by scheduled_service_id, so a
+  // restored stale charge would be presented/collected for a visit that is
+  // now free.
+  if (svc.is_callback && !(Number(svc.estimated_price) > 0)) {
+    throw new Error(
+      "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
+    );
+  }
+  // Annual-prepay stamping: prepaid_method + amount + term link mean the
+  // base work's money lives on the term's prepay invoice (the dispatch
+  // add-ons fallback voids exactly these invoices with NO invoice-level
+  // term stamp). annualPrepayCoversVisit is deliberately NOT used here: it
+  // fails OPEN (returns false on read errors) — right for billing
+  // suppression, wrong for a restore guard. The stamps alone refuse: fail
+  // closed, no async failure modes, and the annual-prepay flows own any
+  // stale-stamp cleanup.
+  const AnnualPrepay = require("./annual-prepay-renewals");
+  if (
+    svc.prepaid_method === AnnualPrepay.ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(svc.prepaid_amount) > 0
+    && svc.annual_prepay_term_id
+  ) {
+    throw new Error(
+      "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+}
+
 function appendPayUrlParams(url, params = null) {
   if (!params || typeof params !== "object") return url;
   try {
@@ -4409,49 +4468,9 @@ const InvoiceService = {
         "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly",
       );
     }
-    // Linked-visit guards (Codex #3493 r2). Both read the scheduled service
-    // the invoice bills; fail CLOSED on read errors like every other fence.
-    if (current.scheduled_service_id) {
-      let svc = null;
-      try {
-        svc = await db("scheduled_services")
-          .where({ id: current.scheduled_service_id })
-          .first();
-      } catch (err) {
-        throw new Error(
-          `Could not verify the linked service visit — refusing to unvoid (${err.message})`,
-        );
-      }
-      if (svc) {
-        // Cancellation deliberately voids the visit's open invoices
-        // (voidOpenInvoicesForCancelledService) — restoring one while the
-        // visit stays cancelled/rescheduled would bill work that is no
-        // longer scheduled.
-        const svcStatus = String(svc.status || "").toLowerCase();
-        if (["cancelled", "canceled", "rescheduled"].includes(svcStatus)) {
-          throw new Error(
-            `Cannot unvoid — the linked service visit is ${svcStatus}; restore or re-book the visit before restoring its invoice`,
-          );
-        }
-        // A live annual-prepay-covered visit's invoice may have been voided
-        // WITHOUT any invoice-level term stamp (the dispatch add-ons
-        // fallback) — the base work is already paid on the annual, so
-        // restoring the full total would double-bill it.
-        let covered = false;
-        try {
-          covered = await require("./annual-prepay-renewals").annualPrepayCoversVisit(svc, db);
-        } catch (err) {
-          throw new Error(
-            `Could not verify the annual prepay coverage for the linked visit — refusing to unvoid (${err.message})`,
-          );
-        }
-        if (covered) {
-          throw new Error(
-            "Cannot unvoid — an active annual prepay covers this visit, so its base work is already paid; bill any extras on a new invoice instead",
-          );
-        }
-      }
-    }
+    // Linked-visit guards, fast-fail pass (re-checked inside the restore
+    // transaction — see assertUnvoidableLinkedVisit).
+    await assertUnvoidableLinkedVisit(db, current);
     // Phase 2 mirror of voidInvoice: a voided line was EXCLUDED from its
     // statement's rollup — restoring it under a finalized/sent statement
     // would change the document under the frozen total.
@@ -4566,6 +4585,12 @@ const InvoiceService = {
           `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
         );
       }
+      // Linked-visit TOCTOU re-check on the locked row (Codex #3493 r3): a
+      // cancellation / re-service conversion / prepay stamping that
+      // committed after the fast-fail pass rolls the restore back — its own
+      // invoice sweep skips 'void' rows, so it cannot repair a restore that
+      // commits on the stale verdict.
+      await assertUnvoidableLinkedVisit(trx, updated);
       // Quiet-hours rails queued BEFORE the void survive it as
       // status='scheduled' sms_log rows (while void, the executor's
       // staleness recheck suppresses them as terminal — but a restored

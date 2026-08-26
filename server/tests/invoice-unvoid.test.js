@@ -16,9 +16,8 @@ const mockRetrievePI = jest.fn();
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePI(...args),
 }));
-const mockCoversVisit = jest.fn(async () => false);
 jest.mock('../services/annual-prepay-renewals', () => ({
-  annualPrepayCoversVisit: (...args) => mockCoversVisit(...args),
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay',
   syncTermForInvoicePayment: jest.fn(async () => undefined),
 }));
 jest.mock('../services/invoice-followups', () => ({
@@ -77,7 +76,6 @@ function mockHappyPath({ restored } = {}) {
 describe('InvoiceService.unvoidInvoice', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockCoversVisit.mockResolvedValue(false);
     db.transaction = jest.fn(async (fn) => fn(db));
   });
 
@@ -213,18 +211,49 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('refuses when an active annual prepay covers the linked visit — the dispatch add-ons void carries no term stamp (Codex #3493 r2)', async () => {
-    const svc = { id: 'svc-1', status: 'completed', annual_prepay_term_id: 'term-1' };
+  test('refuses a visit stamped prepaid by an annual term — deterministic stamp check, never the fail-open coverage helper (Codex #3493 r3)', async () => {
+    const svc = {
+      id: 'svc-1',
+      status: 'completed',
+      prepaid_method: 'annual_prepay',
+      prepaid_amount: 120,
+      annual_prepay_term_id: 'term-1',
+    };
     db
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ first: svc }));
-    mockCoversVisit.mockResolvedValueOnce(true);
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
-      /an active annual prepay covers this visit/,
+      /stamped prepaid by an annual prepay term/,
     );
-    expect(mockCoversVisit).toHaveBeenCalledWith(svc, db);
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses a visit converted to a free re-service — its invoice was retired with the conversion (Codex #3493 r3)', async () => {
+    const svc = { id: 'svc-1', status: 'pending', is_callback: true, estimated_price: 0 };
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: svc }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      /converted to a free re-service/,
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('re-checks the linked visit on the locked row — a cancellation landing mid-restore rolls it back (Codex #3493 r3)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow()) // term pre-guard
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'confirmed' } })) // fast-fail pass: visit live
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
+      .mockReturnValueOnce(noRow()) // TOCTOU term re-check
+      .mockReturnValueOnce(noRow()) // money guard
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'cancelled' } })); // in-trx visit re-check
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice',
+    );
+    expect(mockReconcile).not.toHaveBeenCalled();
   });
 
   test('fails CLOSED when the linked service cannot be read (Codex #3493 r2)', async () => {
