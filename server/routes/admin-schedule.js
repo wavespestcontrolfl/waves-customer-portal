@@ -2108,6 +2108,19 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   if (!target || !cols) return;
   const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
+  // An operator-scoped $0 series must stay an explicit $0 on spawned rows
+  // too (Codex #3505 r2 P1): the zero-subtotal → NULL contract above is
+  // shared by every spawn path and stays unchanged for ordinary parents,
+  // but when the series template OVERRIDES carry an explicit zero (only
+  // the price/service scope lane writes them), NULL would let non-callback
+  // billing fall back to the customer's monthly rate on the very visits
+  // the operator just made free. Gate-guarded like the overlay itself, so
+  // the kill switch restores today's behavior byte-for-byte.
+  if (cols.estimated_price && financials.price == null
+    && isEnabled('editApptPriceServiceScope')) {
+    const scopedOverrides = parseTemplateOverrides(parent?.recurring_template_overrides);
+    if (scopedOverrides && scopedOverrides.estimated_price === 0) target.estimated_price = 0;
+  }
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
   // Re-service callbacks must stay flagged on every cloned visit (ongoing
   // roll-forward, recurring-alert extend/convert, following-reschedule). The
@@ -2356,8 +2369,14 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     .orderBy('scheduled_date', 'asc');
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
   const targets = await targetQuery;
+  // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
+  // invoices describe the old service by line item, and a service-scoped
+  // appointment discount keys off the service identity — so the invoice
+  // reconciliation and the per-sibling financial re-derive both run for
+  // either changed group.
+  const billingRelevant = priceChanged || serviceChanged;
   let invoiceLinkColumn = false;
-  if (priceChanged && targets.length > 0) {
+  if (billingRelevant && targets.length > 0) {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
     // rationale): a partially applied reprice would leave the office
     // believing a series was repriced while paid visits kept old numbers.
@@ -2365,13 +2384,13 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = targets.find((visit) => visit.id === firstId);
-      throw httpError(409, `Can't apply this price to the rest of the series: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
+      throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
     }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
   }
   const updatedIds = [];
   for (const sibling of targets) {
-    if (priceChanged && invoiceLinkColumn) {
+    if (billingRelevant && invoiceLinkColumn) {
       // Statement-accrued lines belong to a third-party payer's monthly
       // statement — repricing underneath one needs the payer flow, not a
       // silent row update. Fail closed like the covered check above.
@@ -2381,7 +2400,7 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         .whereNotNull('payer_statement_id')
         .first('id');
       if (accrued) {
-        throw httpError(409, `Can't apply this price to the rest of the series: the ${dateOnly(sibling.scheduled_date) || 'later'} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
+        throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${dateOnly(sibling.scheduled_date) || 'later'} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
       }
       const staleInvoiceIds = await conn('invoices')
         .where({ scheduled_service_id: sibling.id })
@@ -2417,7 +2436,13 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       );
       if (briefClear) Object.assign(siblingUpdates, briefClear);
     }
-    if (priceChanged) {
+    // Re-derived for a service change too, not just a price change: a
+    // sibling whose stored appointment discount is SERVICE-SCOPED
+    // (discount_service_*_filter) keys off the identity this update just
+    // rewrote, so its estimated_price/discount_dollars must be recomputed
+    // from the new snapshots (Codex #3505 r2 P1). With an unscoped
+    // discount the recompute reproduces the stored numbers.
+    if (billingRelevant) {
       let siblingAddons = [];
       try {
         // Savepoint, not a bare try/catch: a missing scheduled_service_addons
@@ -7337,6 +7362,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const conversionScopedThisOnly = wantsPriceServiceScope
           && normalizePriceServiceScope(priceServiceScope) === 'this_only';
         const isTemplateEdit = !!seriesCols.recurring_parent_id && !self?.recurring_parent_id;
+        // A this_only conversion on the TEMPLATE must also pin the template
+        // overrides at their pre-edit values (Codex #3505 r2 P1): the parent
+        // row's own columns now say re-service/$0, and without the pin the
+        // next auto-extension copies them — the supposedly one-appointment
+        // conversion would keep minting free callback visits. The generic
+        // scope block below stands down for conversions, so the pin lives
+        // here. Same per-group decision as the generic pin.
+        if (conversionScopedThisOnly && isTemplateEdit && priceServiceBeforeRow
+          && seriesCols.recurring_template_overrides) {
+          const conversionGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+          const conversionPin = pickUnpinnedGroupFields(
+            parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
+            conversionGroups,
+            priceServiceBeforeRow,
+          );
+          if (Object.keys(conversionPin).length > 0) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, conversionPin, seriesCols);
+          }
+        }
         if (isTemplateEdit && !conversionScopedThisOnly) {
           const seriesUpdates = {};
           if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
@@ -7461,11 +7505,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates
             // pending children after this block (see the helper's contract).
+            // A child edit anchors "following" on the occurrence's LOCKED
+            // pre-edit date, never the date this same save moves it to
+            // (Codex #3505 r2 P1): the operator chose the scope looking at
+            // the visit in its old position, and the assignment-scope path
+            // reads the occurrence before updating it for the same reason.
             fromDateStr: editedIsParent
               ? null
-              : (dateOnly(updates.scheduled_date !== undefined
-                ? updates.scheduled_date
-                : priceServiceBeforeRow.scheduled_date) || etDateString()),
+              : (dateOnly(priceServiceBeforeRow.scheduled_date) || etDateString()),
             fields: groups.fields,
             serviceChanged: groups.serviceChanged,
             priceChanged: groups.priceChanged,

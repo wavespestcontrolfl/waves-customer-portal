@@ -25,6 +25,7 @@ const {
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
+  applyStoredVisitFinancials,
   PRICE_SERVICE_OVERRIDE_KEYS,
 } = adminScheduleRouter._test;
 
@@ -294,7 +295,7 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(byId.s2.estimated_price).toBe(80);
   });
 
-  it('a service-only change updates identity fields (and the appointment tag) without touching price', async () => {
+  it('a service-only change updates identity fields and RE-DERIVES financials (service-scoped discounts key off the identity)', async () => {
     const siblings = [{
       id: 's1', primary_line_price: '25.00', estimated_price: '25.00',
       pre_service_brief_type: null,
@@ -309,7 +310,8 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(updates[0].data.service_type).toBe('Pest Control Service');
     expect(updates[0].data.service_id).toBe(9);
     expect(updates[0].data.appointment_type).toBeDefined();
-    expect(updates[0].data.estimated_price).toBeUndefined();
+    // Unscoped discount → the recompute reproduces the stored number.
+    expect(updates[0].data.estimated_price).toBe(25);
   });
 
   it('never writes a column the schema lacks', async () => {
@@ -362,6 +364,25 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
       serviceChanged: false, priceChanged: true, cols: COLS,
     })).rejects.toMatchObject({ status: 409 });
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe('applyStoredVisitFinancials — scoped explicit-$0 carries to spawned rows', () => {
+  const cols = { estimated_price: {} };
+
+  it('a template override of estimated_price 0 keeps the extension row at an explicit 0', () => {
+    const target = {};
+    applyStoredVisitFinancials(target, cols, {
+      primary_line_price: 0, estimated_price: 0,
+      recurring_template_overrides: { primary_line_price: 0, estimated_price: 0 },
+    }, [], []);
+    expect(target.estimated_price).toBe(0);
+  });
+
+  it('the shared NULL-for-zero contract is untouched for parents WITHOUT overrides', () => {
+    const target = {};
+    applyStoredVisitFinancials(target, cols, { primary_line_price: 0, estimated_price: 0 }, [], []);
+    expect(target.estimated_price).toBeUndefined();
   });
 });
 
@@ -436,5 +457,18 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   it("a booster can never be a 'following' propagation source", () => {
     expect(src).toMatch(/!priceServiceBeforeRow\.is_recurring && priceServiceBeforeRow\.recurring_parent_id/);
     expect(src).toMatch(/Booster visits keep their own pricing/);
+  });
+
+  it("a this_only template re-service conversion pins the pre-edit template", () => {
+    expect(src).toMatch(/conversionScopedThisOnly && isTemplateEdit && priceServiceBeforeRow/);
+    expect(src).toMatch(/const conversionPin = pickUnpinnedGroupFields\(/);
+  });
+
+  it("a child edit anchors 'following' on the LOCKED pre-edit date, never the date the same save moves it to", () => {
+    expect(src).toMatch(/: \(dateOnly\(priceServiceBeforeRow\.scheduled_date\) \|\| etDateString\(\)\),/);
+  });
+
+  it('invoice reconciliation and the financial re-derive run for a service change too', () => {
+    expect(src).toMatch(/const billingRelevant = priceChanged \|\| serviceChanged;/);
   });
 });

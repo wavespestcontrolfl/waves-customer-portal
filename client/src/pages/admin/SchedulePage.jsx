@@ -1749,6 +1749,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     String(form.price ?? "") !== String(initialPrimaryRef.current.price ?? "");
   const primaryServiceDirty =
     (form.serviceType || "") !== (initialPrimaryRef.current.serviceType || "");
+  // The appointment discount is part of the propagatable price group on the
+  // server, and the Discount control always opens empty (it never seeds the
+  // stored discount), so a non-empty selection is always a change made in
+  // this session — without this the operator could never apply a discount
+  // change to following visits.
+  const discountDirty = discountType !== "";
   // Base-series rows only: boosters share recurring_parent_id but carry
   // is_recurring=false and their OWN pricing — a booster edit must stay
   // per-visit, never rewrite the base series (the server refuses a posted
@@ -1758,7 +1764,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     serviceHasSeries &&
     isBaseSeriesRow &&
     seriesSummary?.canScopePriceService === true &&
-    (primaryPriceDirty || primaryServiceDirty);
+    (primaryPriceDirty || primaryServiceDirty || discountDirty);
 
   // Plan length on a series that already exists. The save sends a length only
   // when the number is trustworthy — either the live plan came back from the
