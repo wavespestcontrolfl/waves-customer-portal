@@ -612,7 +612,36 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // means the year was collected; 'processing' is an initiated ACH
       // debit; refunded/canceled/void mean NO collected prepay — record the
       // real outcome and hand it to the office, never mark it paid.
-      if (['paid', 'prepaid'].includes(invStatus)) { await resolve('paid', { reason: 'already_settled' }); continue; }
+      if (['paid', 'prepaid'].includes(invStatus)) {
+        if (invStatus === 'prepaid') {
+          // Credit-covered inside the accept transaction with a crash
+          // before the post-commit settlement (hook P0 r17): no Stripe
+          // charge ran, so no webhook backstop exists — run the SAME
+          // idempotent full-coverage side effects the in-request path and
+          // chargeInvoiceWithSavedCard run, or the annual term stays
+          // payment-pending and covered visits are never stamped prepaid
+          // (per-application billing over an already-spent year).
+          try {
+            await require('./invoice-followups').stopOnPayment(invoice.id);
+          } catch (e) { logger.warn(`[recurring-cof] sweep stopOnPayment after credit coverage failed for ${invoice.id}: ${e.message}`); }
+          try {
+            await require('./payment-plans').completeActivePlansForPaidInvoice(invoice.id, 'credit_coverage');
+          } catch (e) { logger.warn(`[recurring-cof] sweep plan completion after credit coverage failed for ${invoice.id}: ${e.message}`); }
+          try {
+            const coveredRow = await db('invoices').where({ id: invoice.id }).first();
+            if (coveredRow) await require('./annual-prepay-renewals').syncTermForInvoicePayment(coveredRow);
+          } catch (e) {
+            // Term sync is the money-critical effect (covered visits stay
+            // billable without it) — keep the job claimed so the lease
+            // retries the whole settlement rather than retiring it.
+            logger.warn(`[recurring-cof] sweep term sync after credit coverage failed for ${invoice.id} — deferring: ${e.message}`);
+            continue;
+          }
+          require('./project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
+        }
+        await resolve('paid', { reason: 'already_settled' });
+        continue;
+      }
       if (invStatus === 'processing') {
         // 'processing' is ALSO how an ambiguous saved-card attempt parks an
         // invoice for reconciliation (pre-push Codex P0 r7) — that status
