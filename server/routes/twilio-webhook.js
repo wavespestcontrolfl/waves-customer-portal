@@ -1403,9 +1403,16 @@ router.post('/status', async (req, res) => {
                     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${ownDigits}`])
                     .whereNull('deleted_at')
                     .select('id');
-                  for (const holder of holders) {
+                  // UNIQUE ownership only (codex r8 P2): a later START's
+                  // prefs restore goes through findSingleCustomerByPhone,
+                  // which refuses ambiguous numbers — flipping every
+                  // sharer here would be irreversible for all of them.
+                  // Ambiguous ⇒ skip the flip; the phone-keyed suppression
+                  // row still blocks sends, and the d18 daily reconciler
+                  // surfaces the prefs-vs-suppression drift.
+                  if (holders.length === 1) {
                     await trx('notification_prefs')
-                      .insert({ customer_id: holder.id, sms_enabled: false })
+                      .insert({ customer_id: holders[0].id, sms_enabled: false })
                       .onConflict('customer_id')
                       .merge({ sms_enabled: false });
                   }
