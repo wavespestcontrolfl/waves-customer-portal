@@ -230,6 +230,38 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
 async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, disclosureVersion = null, trx = db }) {
+  // Reciprocal lane exclusion (PR #3496 r16 P1, deletion dropped in r20
+  // P1): an accept that pins the hold to a visit ALREADY carrying a
+  // /secure appointment-card row creates two competing card-consent
+  // lanes. NOTHING is deleted here — even a pending, SetupIntent-less row
+  // may back a customer-exposed /secure link (returned inline or with an
+  // SMS mid-dispatch), and destroying an issued tokenized link is worse
+  // than the conflict. The hold still records (the accept must not fail),
+  // the conflict is logged loudly, and every money leg (completion charge
+  // AND no-show fee) refuses the conflicted visit fail-closed with a
+  // deduped office bell — which consent owns the visit is an operator
+  // decision at billing time, never a silent winner-pick here.
+  if (scheduledServiceId) {
+    // Serialize on the scheduled_services row FIRST (pre-push r18 P1) —
+    // the same lock, in the same order, that every appointment-card lane
+    // writer takes before ITS absence check. FOR UPDATE on lane rows alone
+    // cannot serialize two absence checks (nothing exists to lock), so
+    // without this anchor both sides could observe emptiness and each
+    // insert its own lane. For a freshly-inserted accept visit this is a
+    // no-op self-lock; for an adopted existing visit it is the fence.
+    // Lock order (visit row → lane/hold rows) matches
+    // autoSecureFromSavedMethod and the request-funnel insert
+    // transactions; the hold lane never enrolls Auto Pay, so the
+    // customers-row ordering concern documented there does not apply.
+    await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
+    const laneRow = await trx('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .forUpdate()
+      .first('id', 'status', 'stripe_setup_intent_id');
+    if (laneRow) {
+      logger.error('[estimate-card-holds] hold recorded onto a visit carrying a /secure appointment-card row — competing consents; every money leg fails toward review until reconciled', { estimateId, scheduledServiceId, laneStatus: laneRow.status });
+    }
+  }
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
@@ -372,6 +404,147 @@ async function heldCardForScheduledService(scheduledServiceId) {
     .first();
 }
 
+// Reschedule-orphan DETECTION (owner lane 2026-08-25, prod incident): an
+// operator reschedule composed as cancel + fresh create — no single code
+// path does cancel+recreate, so no hook can follow it — leaves the hold's
+// scheduled_service_id pointing at the dead visit. The completion charge
+// then misses (no_hold) and the customer gets a pay link despite a live
+// consent-backed hold, and NOTHING surfaces the stranded hold.
+//
+// This lane deliberately moves NO money and repoints NOTHING (pre-push r5
+// P0): estimate lineage — even in the unambiguous 1:1 shape below — is not
+// a durable old→new reschedule link, and no flow exists today that could
+// mint one for an operator-composed two-step. Charging a visit other than
+// the one the customer consented to is an owner decision per case. So on a
+// primary-lookup miss this detection finds the stranded hold, BELLS the
+// office with the exact operator command (ops/agents/
+// repoint-orphaned-card-hold.js — FOR-UPDATE preconditions, dry-run
+// default), and the completion proceeds to the unchanged pay-link
+// fallback. Read-only, so no locking is needed.
+//
+// Detection guards (all fail toward silence — a miss just stays no_hold):
+// - exact estimate lineage: scheduled_services.source_estimate_id must
+//   equal the hold's estimate_id — a hold never crosses estimates;
+// - same customer on both rows;
+// - one-time visits only — the hold rail owns estimate-flow one-time
+//   bookings;
+// - EXACTLY ONE held candidate for the estimate;
+// - the hold's linked visit must be DEAD (cancelled/rescheduled) or the
+//   link NULL. A live linked visit still owns its hold; a COMPLETED one is
+//   the backfill-review posture (already belled) — never re-flagged here;
+// - service identity: when both visits carry a service_type, they must
+//   match;
+// - NO OTHER live one-time sibling from the same estimate.
+// Gate: strict opt-in via GATE_CARD_HOLD_RESCHEDULE_ADOPT; while dark,
+// completion behavior is byte-identical to today.
+function isRescheduleAdoptEnabled() {
+  try {
+    return require('../config/feature-gates').isEnabled('cardHoldRescheduleAdopt');
+  } catch (err) {
+    logger.warn('[estimate-card-holds] reschedule-adopt gate read failed — treating as off', { error: err.message });
+    return false;
+  }
+}
+
+const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
+// Sibling filtering uses the FULL non-live set (PR #3496 review r3 P2):
+// skipped/no_show/completed siblings are terminal (migration
+// 20260615000005) and cannot claim the hold — treating them as live made
+// an otherwise-unambiguous reschedule stay silent. The hold's ORIGINAL
+// visit keeps the stricter cancelled/rescheduled test above: only those
+// two states say "the booking moved", which is the orphan premise.
+const NON_LIVE_VISIT_STATUSES = ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'];
+// Canonical recurring-lineage test (pay-v2.js): a series "booster" visit
+// deliberately carries is_recurring=false with recurring_parent_id set —
+// a bare is_recurring check admits it as one-time (r3 P1).
+const isRecurringLineageVisit = (v) => !!(v && (v.is_recurring === true || v.recurring_parent_id || v.recurring_pattern));
+
+async function detectOrphanedHoldForCompletion(scheduledServiceId) {
+  if (!isRescheduleAdoptEnabled()) return null;
+  try {
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('id', 'customer_id', 'source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'service_type');
+    if (!visit || !visit.customer_id || !visit.source_estimate_id || isRecurringLineageVisit(visit)) return null;
+    const candidates = await db('estimate_card_holds')
+      .where({ estimate_id: visit.source_estimate_id, customer_id: visit.customer_id, status: 'held' })
+      .orderBy('held_at', 'desc')
+      .select('id', 'scheduled_service_id');
+    if (!Array.isArray(candidates) || candidates.length !== 1) return null;
+    const cand = candidates[0];
+    if (cand.scheduled_service_id && String(cand.scheduled_service_id) === String(scheduledServiceId)) return null;
+    let oldVisit = null;
+    if (cand.scheduled_service_id) {
+      oldVisit = await db('scheduled_services')
+        .where({ id: cand.scheduled_service_id })
+        .first('status', 'service_type');
+      if (oldVisit && !DEAD_VISIT_STATUSES.includes(String(oldVisit.status || ''))) return null;
+    }
+    if (oldVisit && oldVisit.service_type && visit.service_type
+      && String(oldVisit.service_type) !== String(visit.service_type)) return null;
+    const siblings = await db('scheduled_services')
+      .where({ customer_id: visit.customer_id, source_estimate_id: visit.source_estimate_id })
+      .whereNot('id', scheduledServiceId)
+      .select('id', 'status', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    for (const sib of siblings || []) {
+      if (cand.scheduled_service_id && String(sib.id) === String(cand.scheduled_service_id)) continue;
+      if (isRecurringLineageVisit(sib)) continue;
+      if (!NON_LIVE_VISIT_STATUSES.includes(String(sib.status || ''))) return null;
+    }
+    return { holdId: cand.id, fromScheduledServiceId: cand.scheduled_service_id, customerId: visit.customer_id };
+  } catch (err) {
+    logger.warn('[estimate-card-holds] orphan-hold detection failed', { scheduledServiceId, error: err.message });
+    return null;
+  }
+}
+
+// Office bell for a detected orphan — the operator moves the money, never
+// this lane. Best-effort, same posture as the other withheld-charge alerts.
+// The collection claim in the body follows the ACTUAL caller/settlement
+// state (PR #3496 review r3 P2): the dispatch path inspects the invoice —
+// an already-settled bill must not be described as a pay link, and the
+// recap path mints no invoice at all (its appointment-card fallback may
+// still bill), so each context gets an honest sentence instead of one
+// hard-coded story.
+async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId = null, context = 'dispatch' }) {
+  logger.warn('[estimate-card-holds] completion found a stranded card hold — routed to operator review', {
+    scheduledServiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, context,
+  });
+  let outcomeLine;
+  if (context === 'recap') {
+    outcomeLine = 'The hold rail charged nothing; this recap closeout mints no invoice on the no-hold path, and the /secure appointment-card fallback may still bill the visit — review which consent should own collection.';
+  } else {
+    outcomeLine = 'The hold rail charged nothing.';
+    if (invoiceId) {
+      try {
+        const inv = await db('invoices').where({ id: invoiceId }).first('status');
+        const st = String(inv?.status || '').toLowerCase();
+        if (['paid', 'prepaid'].includes(st)) {
+          outcomeLine = `The hold rail charged nothing, and the visit's invoice is already settled (status: ${st}) — another rail or payment covered it; review whether the stranded hold should simply be released.`;
+        } else if (inv) {
+          outcomeLine = `The hold rail charged nothing — the visit's invoice (status: ${st}) proceeded on the pay-link flow.`;
+        }
+      } catch (e) { logger.warn('[estimate-card-holds] orphan-alert invoice read failed — neutral copy', { error: e.message }); }
+    }
+  }
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Stranded card hold matches this completion — review',
+      `A completed one-time visit has no card hold of its own, but the same estimate holds a saved-card consent stranded on a cancelled/rescheduled visit (the cancel+recreate reschedule pattern). ${outcomeLine} To collect on the hold, verify the successor and run ops/agents/repoint-orphaned-card-hold.js (dry-run first).`,
+      {
+        link: orphan.customerId ? `/admin/customers/${orphan.customerId}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, invoiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, source: 'reschedule_orphan_detection' },
+        // One bell per hold/target pair (PR #3496 review P1): recap edits
+        // and other replays re-run this detection; the admin dedupe (same
+        // mechanism as notifyCustomer) keeps the billing feed to a single
+        // bell until the pair changes.
+        dedupeKey: `orphan_hold_review:${orphan.holdId}:${scheduledServiceId}`,
+      },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] orphan-hold review alert failed', { error: e.message }); }
+}
+
 // Resolve the internal payment_methods.id (UUID) for a hold's saved card —
 // chargeInvoiceWithSavedCard takes our row id, not the Stripe pm id. Attaches
 // the card now if the post-accept attach was deferred/failed.
@@ -426,11 +599,33 @@ async function alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invo
 // collectibility so an invoice already settled by prepay / account credit
 // simply releases the hold. Never throws into the completion flow — a real
 // charge failure reverts to 'held' for retry and alerts.
-async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
+async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expectedHoldId = null }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!invoiceId) return { charged: false, reason: 'no_invoice' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { charged: false, reason: 'no_hold' };
+  // expectedHoldId (ops repair path, pre-push r11 P0): the caller repointed
+  // a SPECIFIC consent row and the charge must ride exactly that row —
+  // scheduled_service_id carries no uniqueness constraint, so "newest held
+  // row for the visit" could otherwise select a different consent/card
+  // that appeared concurrently. A mismatch refuses with nothing touched;
+  // the claim below (held→charging by id) then keeps the charge pinned to
+  // this row.
+  if (hold && expectedHoldId && String(hold.id) !== String(expectedHoldId)) {
+    logger.warn('[estimate-card-holds] completion charge refused — resolved hold is not the expected row', { scheduledServiceId, expectedHoldId, resolvedHoldId: hold.id });
+    return { charged: false, reason: 'hold_mismatch' };
+  }
+  if (!hold) {
+    // Primary miss → reschedule-orphan detection (gated, read-only): a
+    // stranded same-estimate hold is BELLED to the office with the ops
+    // command; nothing is charged or repointed here, and the caller's
+    // pay-link fallback proceeds unchanged.
+    const orphan = await detectOrphanedHoldForCompletion(scheduledServiceId);
+    if (orphan) {
+      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId });
+      return { charged: false, reason: 'orphan_hold_review' };
+    }
+    return { charged: false, reason: 'no_hold' };
+  }
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { charged: false, reason: 'invoice_missing' };
@@ -483,7 +678,38 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
   try {
     const pmRowId = await resolveHoldPaymentMethodRowId(hold);
     if (!pmRowId) throw new Error('hold card not attached to customer');
-    const payment = await StripeService.chargeInvoiceWithSavedCard(invoiceId, pmRowId);
+    // maxAuthorizedSubtotal: the frozen consent cap is RE-ENFORCED inside
+    // the charge authority against the invoice re-read under its own FOR
+    // UPDATE lock (pre-push r4 P0) — the pre-check above uses an unlocked
+    // snapshot, so an invoice edit between check and charge must fail the
+    // locked comparison rather than collect above what was accepted. Same
+    // wiring as the appointment-card rail (appointment-card-request.js).
+    // requireSelfPayScheduledServiceId re-verifies the visit↔invoice↔
+    // customer binding and self-pay state under the charge transaction's
+    // own FOR UPDATE locks (pre-push r5 P0) — same wiring as the
+    // appointment-card rail (requireAutopayForCustomerId/requireOneTimeLane
+    // are that rail's autopay-specific legs; the hold rail's customers are
+    // never autopay-gated).
+    const payment = await StripeService.chargeInvoiceWithSavedCard(invoiceId, pmRowId, {
+      maxAuthorizedSubtotal: acceptedAmount,
+      requireSelfPayScheduledServiceId: scheduledServiceId,
+      // The completion invoice must still be THIS visit's bill under the
+      // same locks (pre-push r6 P0) — the ops repair script's charge leg
+      // rides this call after its own transaction commits, so the binding
+      // is re-proven at the money move, not just at the repoint.
+      requireInvoiceScheduledServiceBinding: true,
+      // And the visit itself must still be a completed one-time visit at
+      // the Stripe boundary (pre-push r9 P0) — the dispatch route flips
+      // status to 'completed' (transitionJobStatus) before this rail runs,
+      // so the runtime path always satisfies it; only a stale/raced caller
+      // is refused.
+      requireCompletedOneTimeVisit: true,
+      // A /secure lane row on the visit is a competing (possibly newer)
+      // consent — refuse under the same locks rather than suppress it
+      // (pre-push r13 P0; creation-time counterpart lives in
+      // appointment-card-request.js).
+      requireNoAppointmentCardLane: true,
+    });
     // Account credit fully covered the invoice inside the charge call — no card
     // was charged; release the hold cleanly rather than claim a phantom charge.
     if (payment?.covered_by_credit) {
@@ -541,6 +767,31 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
         }).catch(() => {});
       logger.warn('[estimate-card-holds] completion charge already in progress — hold restored for retry and this request suppresses alternate collection', { scheduledServiceId });
       return { charged: false, reason: 'charge_in_progress', error: err.message };
+    }
+    // Competing /secure consent (pre-push r17 P1): both card rails refuse
+    // this visit, so without a bell the conflict recordCardHoldHeld logged
+    // at accept time would die as a generic charge_failed line while the
+    // customer silently gets a pay link. Distinct reason + the billing
+    // review bell (deduped per hold/visit pair — completions can replay);
+    // the hold returns to 'held' untouched: which consent owns the visit
+    // is an operator decision, never a retry.
+    if (err.code === 'COMPETING_CARD_CONSENT') {
+      await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+        .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
+      logger.error('[estimate-card-holds] completion charge refused — competing /secure appointment-card consent on the visit', { scheduledServiceId, holdId: hold.id });
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Two card consents on one visit — review before billing',
+          'A completed one-time visit carries BOTH an estimate card hold and a /secure appointment-card consent. Neither rail auto-charged (fail closed) and the pay-link flow proceeded. Decide which consent owns the visit, then charge manually or via the ops repair script.',
+          {
+            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, invoiceId, holdId: hold.id, source: 'competing_card_consent' },
+            dedupeKey: `competing_consent:${hold.id}:${scheduledServiceId}`,
+          },
+        );
+      } catch (e) { logger.warn('[estimate-card-holds] competing-consent alert failed', { error: e.message }); }
+      return { charged: false, reason: 'competing_consent_review', error: err.message };
     }
     // Genuine pre-charge failure (no money moved) — safe to retry later.
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
@@ -627,7 +878,34 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { charged: false, reason: 'no_hold' };
+  if (!hold) {
+    // Same reschedule-orphan detection as the dispatch completion path
+    // (gated, read-only) — a rescheduled visit completed through
+    // pest-recap must not leave its stranded hold silent either. The
+    // recap-specific NO-CHARGE cases stay quiet (pre-push r4 P1): a
+    // prior-non-performed re-completion, a field prepayment, or an
+    // unverifiable prepayment would refuse collection anyway, so no bell —
+    // the ops sweep still lists the orphan.
+    if (priorNonPerformed) return { charged: false, reason: 'no_hold' };
+    let prepaidProbe;
+    try {
+      prepaidProbe = await db('scheduled_services').where({ id: scheduledServiceId }).first('prepaid_amount');
+    } catch (err) {
+      logger.warn('[estimate-card-holds] recap orphan detection skipped — prepaid probe failed', { scheduledServiceId, error: err.message });
+      return { charged: false, reason: 'no_hold' };
+    }
+    if (prepaidProbe && Number(prepaidProbe.prepaid_amount) > 0) return { charged: false, reason: 'no_hold' };
+    const orphan = await detectOrphanedHoldForCompletion(scheduledServiceId);
+    if (orphan) {
+      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, context: 'recap' });
+      // Still no_hold (pre-push r6 P1): pest-recap's appointment-card
+      // fallback only runs on no_hold/feature_disabled, and a recreated
+      // visit with its own /secure consent must keep that rail — the
+      // detection is a bell beside the flow, never a new terminal state
+      // on this path.
+    }
+    return { charged: false, reason: 'no_hold' };
+  }
 
   // The recap is re-completing a visit the record classifies as NOT performed
   // (incomplete / inspection-only / customer-declined) — don't auto-charge a
@@ -695,6 +973,39 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
+  // Cross-lane refusal, mirroring the completion leg (pre-push r19 P0): a
+  // /secure appointment-card row on the visit — recordCardHoldHeld's
+  // logged conflict case, or a raced insert — is a competing, possibly
+  // NEWER consent, and drawing the fee from the hold's possibly older
+  // card would silently pick a winner. The hold stays 'held' (which
+  // consent owns the visit is an operator decision, never a retry), the
+  // office is belled once per pair, and NOTHING is charged. Fail closed
+  // on an unreadable table — a fee whose lane exclusivity can't be
+  // verified is never drawn.
+  try {
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (laneRow) {
+      logger.error('[estimate-card-holds] no-show fee refused — competing /secure appointment-card consent on the visit', { scheduledServiceId, holdId: hold.id });
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Two card consents on one visit — review before billing',
+          'A no-show/late-cancel fee was due, but the visit carries BOTH an estimate card hold and a /secure appointment-card row. Neither card was charged (fail closed). Decide which consent owns the visit, then bill the fee manually if it applies.',
+          {
+            link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, holdId: hold.id, source: 'competing_card_consent_fee' },
+            dedupeKey: `competing_consent_fee:${hold.id}:${scheduledServiceId}`,
+          },
+        );
+      } catch (e) { logger.warn('[estimate-card-holds] competing-consent fee alert failed', { error: e.message }); }
+      return { charged: false, reason: 'competing_consent_review' };
+    }
+  } catch (err) {
+    logger.error('[estimate-card-holds] no-show fee lane-exclusivity check failed — fee refused', { scheduledServiceId, error: err.message });
+    return { charged: false, reason: 'lane_check_failed' };
+  }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
 
   // Staleness guard (sibling of the cancel branch's post-start grace — see
@@ -1555,5 +1866,7 @@ module.exports = {
     holdGeneration,
     resolveHoldPaymentMethodRowId,
     sendNoShowFeeReceipt,
+    detectOrphanedHoldForCompletion,
+    isRescheduleAdoptEnabled,
   },
 };
