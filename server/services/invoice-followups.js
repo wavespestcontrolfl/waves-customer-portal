@@ -1300,9 +1300,43 @@ async function resumeSequence(invoiceId, dbc = db) {
     });
     return;
   }
+  // A paused row still carrying the hold marker (e.g. a legacy
+  // autopay_hold flattened by the 20260601000012 backfill and restored to
+  // the quiet 'paused' state by the unvoid re-arm) must NOT resume into
+  // active dunning while the customer is still enrolled — ordinary payment
+  // reminders would fire before the failure threshold ever releases the
+  // hold. Re-enter the hold on LIVE eligibility; a stale flag (customer
+  // since unenrolled) is dropped and the cadence resumes. Fail toward the
+  // QUIET state on a read error (Codex #3493 r15).
+  if (seq.is_autopay_held) {
+    let stillEnrolled = true;
+    try {
+      const customer = await dbc('customers').where({ id: seq.customer_id }).first();
+      stillEnrolled = customer ? await customerOnAutopay(customer, { db: dbc }) : false;
+    } catch (err) {
+      logger.warn(`[invoice-followups] resume autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
+      stillEnrolled = true;
+    }
+    if (stillEnrolled) {
+      await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+        updated_at: dbc.fn.now(),
+        status: 'autopay_hold',
+        paused_reason: null,
+        paused_until: null,
+        paused_by_admin_id: null,
+        stopped_reason: null,
+        stopped_by_admin_id: null,
+        next_touch_at: null,
+      });
+      return;
+    }
+  }
   await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
     updated_at: dbc.fn.now(),
     status: 'active',
+    // The stored hold marker survived only as far as the live-enrollment
+    // check above — a resumed active cadence must not read as held.
+    is_autopay_held: false,
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,

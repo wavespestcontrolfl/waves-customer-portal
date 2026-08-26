@@ -27,11 +27,16 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => undefined),
   stopSequence: jest.fn(async () => undefined),
 }));
+const mockRunTerminalHook = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/messaging/deferred-replay-registry', () => ({
+  requiresTerminalHook: (ep) => ep === 'dispatch_completion_deferred' || ep === 'autopay_completion_decline_deferred',
+  runTerminalHookDurably: (...args) => mockRunTerminalHook(...args),
+}));
 
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 
-function chain({ first, returning } = {}) {
+function chain({ first, returning, select } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
@@ -41,6 +46,7 @@ function chain({ first, returning } = {}) {
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
+  q.select = jest.fn(async () => select || []);
   return q;
 }
 
@@ -59,12 +65,15 @@ function voidInvoice(overrides = {}) {
 //   load → annual_prepay_terms canonical-link pre-guard → (trx) conditional
 //   restore → annual_prepay_terms TOCTOU re-check → payments money guard →
 //   in-flight touch fence → active-sequence stop repair → sms_log
-//   deferred-send cancel → sms_log in-flight 'sending' fence.
+//   deferred-row SELECT → [plain-row cancel UPDATE, if any] → [one stamped
+//   cancel UPDATE per terminal-hook row] → sms_log in-flight 'sending' fence.
 // (No sequence re-arm here: that lives in scheduleForInvoice at resend.)
-function mockHappyPath({ restored } = {}) {
+const HOOK_ENTRY_POINTS = ['dispatch_completion_deferred', 'autopay_completion_decline_deferred'];
+
+function mockHappyPath({ restored, deferredRows = [] } = {}) {
   const updateChain = chain({ returning: [restored] });
   const seqStopChain = chain();
-  const smsChain = chain();
+  const smsSelectChain = chain({ select: deferredRows });
   const sendingChain = noRow();
   db
     .mockReturnValueOnce(chain({ first: voidInvoice() }))
@@ -74,9 +83,24 @@ function mockHappyPath({ restored } = {}) {
     .mockReturnValueOnce(noRow()) // fresh-row money guard
     .mockReturnValueOnce(noRow()) // in-flight touch fence
     .mockReturnValueOnce(seqStopChain)
-    .mockReturnValueOnce(smsChain)
-    .mockReturnValueOnce(sendingChain);
-  return { updateChain, seqStopChain, smsChain, sendingChain };
+    .mockReturnValueOnce(smsSelectChain);
+  const metaOf = (r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) || {};
+  const hasPlain = deferredRows.some((r) => !HOOK_ENTRY_POINTS.includes(metaOf(r).entry_point));
+  const hookCount = deferredRows.filter((r) => HOOK_ENTRY_POINTS.includes(metaOf(r).entry_point)).length;
+  let smsCancelChain = null;
+  if (hasPlain) {
+    smsCancelChain = chain();
+    db.mockReturnValueOnce(smsCancelChain);
+  }
+  const hookCancelChains = [];
+  for (let i = 0; i < hookCount; i += 1) {
+    const c = chain();
+    c.update = jest.fn(async () => 1);
+    hookCancelChains.push(c);
+    db.mockReturnValueOnce(c);
+  }
+  db.mockReturnValueOnce(sendingChain);
+  return { updateChain, seqStopChain, smsSelectChain, smsCancelChain, hookCancelChains, sendingChain };
 }
 
 describe('InvoiceService.unvoidInvoice', () => {
@@ -110,18 +134,71 @@ describe('InvoiceService.unvoidInvoice', () => {
 
   test('cancels queued deferred pay-link/dunning sms_log rows atomically with the restore (Codex #3493)', async () => {
     const restored = voidInvoice({ status: 'draft' });
-    const { smsChain } = mockHappyPath({ restored });
+    const row = { id: 'sms-1', metadata: JSON.stringify({ entry_point: 'invoice_send_deferred', invoice_id: 'inv-1' }) };
+    const { smsSelectChain, smsCancelChain } = mockHappyPath({ restored, deferredRows: [row] });
 
     await InvoiceService.unvoidInvoice('inv-1');
 
-    expect(smsChain.where).toHaveBeenCalledWith({ status: 'scheduled' });
-    expect(smsChain.whereRaw).toHaveBeenCalledWith(
+    expect(smsSelectChain.where).toHaveBeenCalledWith({ status: 'scheduled' });
+    expect(smsSelectChain.whereRaw).toHaveBeenCalledWith(
       "metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')",
     );
-    expect(smsChain.whereRaw).toHaveBeenCalledWith("metadata->>'invoice_id' = ?", ['inv-1']);
-    expect(smsChain.update).toHaveBeenCalledWith(
+    expect(smsSelectChain.whereRaw).toHaveBeenCalledWith("metadata->>'invoice_id' = ?", ['inv-1']);
+    expect(smsCancelChain.whereIn).toHaveBeenCalledWith('id', ['sms-1']);
+    // The cancel keeps the status='scheduled' predicate: a row a worker
+    // claimed after the select stays untouched for the 'sending' fence.
+    expect(smsCancelChain.where).toHaveBeenCalledWith({ status: 'scheduled' });
+    expect(smsCancelChain.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'cancelled' }),
     );
+    // A pay-link/dunning rail has no terminal hook — nothing to run.
+    expect(mockRunTerminalHook).not.toHaveBeenCalled();
+  });
+
+  test("a cancelled completion replay is stamped terminal_pending WITH the cancel and its registry hook runs post-commit — the service record's 'deferred' obligation must be handed back (Codex #3493 r15)", async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    const meta = { entry_point: 'dispatch_completion_deferred', invoice_id: 'inv-1', service_record_id: 'rec-1', bundled_review_request_id: 'rev-1' };
+    const { hookCancelChains } = mockHappyPath({ restored, deferredRows: [{ id: 'sms-2', metadata: JSON.stringify(meta) }] });
+
+    await InvoiceService.unvoidInvoice('inv-1');
+
+    const [hookChain] = hookCancelChains;
+    expect(hookChain.where).toHaveBeenCalledWith({ id: 'sms-2', status: 'scheduled' });
+    const payload = hookChain.update.mock.calls[0][0];
+    expect(payload.status).toBe('cancelled');
+    // The durable obligation is stamped ATOMICALLY with the cancel — a
+    // crash before the post-commit hook pass leaves the sweep a row to
+    // re-run instead of a stranded 'deferred' service record.
+    expect(payload.metadata.__raw).toContain("'terminal_pending', true");
+    expect(mockRunTerminalHook).toHaveBeenCalledWith('sms-2', 'dispatch_completion_deferred', meta, { alreadyClaimed: true });
+  });
+
+  test('a decline-notice replay cancels through the same terminal-hook rail (Codex #3493 r15)', async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    const meta = { entry_point: 'autopay_completion_decline_deferred', invoice_id: 'inv-1', service_record_id: 'rec-2' };
+    mockHappyPath({ restored, deferredRows: [{ id: 'sms-3', metadata: JSON.stringify(meta) }] });
+
+    await InvoiceService.unvoidInvoice('inv-1');
+
+    expect(mockRunTerminalHook).toHaveBeenCalledWith('sms-3', 'autopay_completion_decline_deferred', meta, { alreadyClaimed: true });
+  });
+
+  test('a post-commit reconcile failure never reports the committed restore as failed (Codex #3493 r15)', async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    mockHappyPath({ restored });
+    mockReconcile.mockRejectedValueOnce(new Error('db went away'));
+
+    await expect(InvoiceService.unvoidInvoice('inv-1')).resolves.toBe(restored);
+  });
+
+  test('a post-commit terminal-hook failure never reports the committed restore as failed — the sweep owns the retry (Codex #3493 r15)', async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    const meta = { entry_point: 'dispatch_completion_deferred', invoice_id: 'inv-1', service_record_id: 'rec-3' };
+    mockHappyPath({ restored, deferredRows: [{ id: 'sms-4', metadata: JSON.stringify(meta) }] });
+    mockRunTerminalHook.mockRejectedValueOnce(new Error('hook exploded'));
+
+    await expect(InvoiceService.unvoidInvoice('inv-1')).resolves.toBe(restored);
+    expect(mockReconcile).toHaveBeenCalledWith(restored);
   });
 
   test('applies the missed void-time lifecycle stop to a still-ACTIVE sequence atomically with the restore (Codex #3493 r4)', async () => {

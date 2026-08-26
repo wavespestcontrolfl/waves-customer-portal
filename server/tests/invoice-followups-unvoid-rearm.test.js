@@ -41,7 +41,7 @@ jest.mock('../services/pay-combined', () => ({
 
 const db = require('../models/db');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { scheduleForInvoice, stopSequence, releaseFromAutopayHold } = require('../services/invoice-followups');
+const { scheduleForInvoice, stopSequence, releaseFromAutopayHold, resumeSequence } = require('../services/invoice-followups');
 
 function voidStoppedSeq(overrides = {}) {
   return {
@@ -462,5 +462,102 @@ describe('releaseFromAutopayHold — write conditional on the observed hold', ()
     await releaseFromAutopayHold('inv-1');
 
     expect(seqUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// resumeSequence is the documented deliberate-resume path for the quiet
+// 'paused' restore — a paused row still carrying is_autopay_held (e.g. a
+// legacy autopay_hold flattened by the 20260601000012 backfill) must not
+// resume into ordinary payment reminders while the customer is still
+// enrolled (Codex #3493 r15).
+describe('resumeSequence — retained autopay hold marker', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function setupResumeDb({ seq, invoice, customer = { id: 'cust-1' }, customerThrows = false }) {
+    const seqUpdate = jest.fn(async () => 1);
+    db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    db.mockImplementation((table) => {
+      if (table === 'invoice_followup_sequences') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => seq),
+          update: seqUpdate,
+        };
+        return q;
+      }
+      if (table === 'invoices') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => invoice) };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => {
+            if (customerThrows) throw new Error('boom');
+            return customer;
+          }),
+        };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    return { seqUpdate };
+  }
+
+  const pausedHeldSeq = {
+    id: 'seq-1',
+    customer_id: 'cust-1',
+    status: 'paused',
+    is_autopay_held: true,
+    step_index: 0,
+    anchor_at: new Date().toISOString(),
+  };
+  const resumableInvoice = { id: 'inv-1', status: 'sent', created_at: new Date().toISOString() };
+
+  test('a held row resumes into autopay_hold, never active dunning, while the customer is still enrolled', async () => {
+    const { seqUpdate } = setupResumeDb({ seq: pausedHeldSeq, invoice: resumableInvoice });
+    customerOnAutopay.mockResolvedValue(true);
+
+    await resumeSequence('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('autopay_hold');
+    expect(payload.next_touch_at).toBeNull();
+    expect(payload.paused_reason).toBeNull();
+    expect(payload.stopped_reason).toBeNull();
+  });
+
+  test('a stale hold marker (customer since unenrolled) is dropped and the cadence resumes', async () => {
+    const { seqUpdate } = setupResumeDb({ seq: pausedHeldSeq, invoice: resumableInvoice });
+    customerOnAutopay.mockResolvedValue(false);
+
+    await resumeSequence('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('active');
+    expect(payload.is_autopay_held).toBe(false);
+    expect(payload.next_touch_at).toBeTruthy();
+  });
+
+  test('an eligibility read error fails toward the QUIET state — the hold is kept', async () => {
+    const { seqUpdate } = setupResumeDb({ seq: pausedHeldSeq, invoice: resumableInvoice, customerThrows: true });
+
+    await resumeSequence('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('autopay_hold');
+    expect(payload.next_touch_at).toBeNull();
+  });
+
+  test('an unheld paused row resumes active exactly as before — no customer lookup runs', async () => {
+    const seq = { ...pausedHeldSeq, is_autopay_held: false };
+    const { seqUpdate } = setupResumeDb({ seq, invoice: resumableInvoice });
+
+    await resumeSequence('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.status).toBe('active');
+    expect(payload.next_touch_at).toBeTruthy();
+    expect(customerOnAutopay).not.toHaveBeenCalled();
   });
 });

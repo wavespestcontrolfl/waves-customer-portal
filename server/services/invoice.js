@@ -4557,6 +4557,11 @@ const InvoiceService = {
       }
     }
     let invoice = null;
+    // Cancelled deferred rows whose entry point registers an onTerminal
+    // hook — collected inside the transaction, hooks run after commit
+    // (the terminal_pending stamp written WITH the cancel makes the
+    // obligation durable: the registry sweep re-runs it if we crash first).
+    const cancelledHookRows = [];
     await db.transaction(async (trx) => {
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
@@ -4695,15 +4700,57 @@ const InvoiceService = {
       // draft is collectible again and the frozen body/pay-link text is
       // stale by definition). Cancel them atomically with the restore; an
       // explicit post-restore resend re-queues fresh copy (Codex #3493).
-      await trx("sms_log")
+      // The completion rails (dispatch_completion_deferred /
+      // autopay_completion_decline_deferred) register onTerminal hooks
+      // that hand the send back to the service record (the 'deferred'
+      // stamp is an owned obligation — left in place it suppresses every
+      // future completion attempt and strands any bundled review
+      // fallback), so those rows are cancelled WITH the terminal_pending
+      // stamp (durable obligation, same contract as the executor's
+      // terminal flips) and their hooks run after commit (Codex #3493 r15).
+      const { requiresTerminalHook } = require("./messaging/deferred-replay-registry");
+      const deferredRows = await trx("sms_log")
         .where({ status: "scheduled" })
         .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
         .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
-        .update({
-          status: "cancelled",
-          updated_at: new Date(),
-          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'invoice_unvoided')"),
-        });
+        .select("id", "metadata");
+      const hookRows = [];
+      const plainIds = [];
+      for (const row of deferredRows) {
+        let meta = row.metadata;
+        if (typeof meta === "string") {
+          try { meta = JSON.parse(meta); } catch { meta = {}; }
+        }
+        meta = meta || {};
+        if (requiresTerminalHook(meta.entry_point)) {
+          hookRows.push({ id: row.id, meta });
+        } else {
+          plainIds.push(row.id);
+        }
+      }
+      // Both cancels keep the status='scheduled' predicate: a row a worker
+      // claimed between the read above and this write stays untouched and
+      // the 'sending' fence below refuses (rolling everything back).
+      if (plainIds.length) {
+        await trx("sms_log")
+          .whereIn("id", plainIds)
+          .where({ status: "scheduled" })
+          .update({
+            status: "cancelled",
+            updated_at: new Date(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'invoice_unvoided')"),
+          });
+      }
+      for (const row of hookRows) {
+        const cancelled = await trx("sms_log")
+          .where({ id: row.id, status: "scheduled" })
+          .update({
+            status: "cancelled",
+            updated_at: new Date(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'invoice_unvoided', 'terminal_pending', true, 'terminal_attempts', COALESCE((metadata->>'terminal_attempts')::int, 0) + 1)"),
+          });
+        if (cancelled) cancelledHookRows.push(row);
+      }
       // In-flight claim fence (Codex #3493 r2): the scheduled-SMS worker
       // claims rows scheduled→'sending' BEFORE its staleness recheck. A row
       // claimed just before this restore is missed by the cancel above, and
@@ -4740,9 +4787,28 @@ const InvoiceService = {
     // scheduleForInvoice conditionally lifts the 'invoice_voided' system
     // stop under the invoice lock (preserving admin stops and the autopay
     // hold) — see the re-arm branch there (Codex #3493 r2).
-    // Coverage-changing transition (mirrors void/edit): the restored charge
-    // may satisfy the setup-fee alert again.
-    await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
+    // Post-commit work is BEST-EFFORT: the restore is committed, so a
+    // failure here must never surface as a failed unvoid — the operator
+    // would retry into the not-void conflict while the invoice already
+    // sits in draft (Codex #3493 r15). Each obligation has its own
+    // recovery rail: the terminal hooks are stamped terminal_pending
+    // (the registry sweep re-runs them), and the setup-fee reconcile is
+    // idempotent and re-runs on the next coverage-changing transition.
+    for (const row of cancelledHookRows) {
+      try {
+        const { runTerminalHookDurably } = require("./messaging/deferred-replay-registry");
+        await runTerminalHookDurably(row.id, row.meta.entry_point, row.meta, { alreadyClaimed: true });
+      } catch (err) {
+        logger.warn(`[invoice] unvoid terminal hook failed for sms_log ${row.id} — sweep will retry: ${err.message}`);
+      }
+    }
+    try {
+      // Coverage-changing transition (mirrors void/edit): the restored
+      // charge may satisfy the setup-fee alert again.
+      await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
+    } catch (err) {
+      logger.warn(`[invoice] unvoid committed but setup-fee alert reconcile failed for invoice ${invoice.id}: ${err.message}`);
+    }
     return invoice;
   },
 
