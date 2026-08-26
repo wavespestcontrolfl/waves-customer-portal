@@ -2819,7 +2819,14 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     // scheduleForInvoice takes its own invoice lock and re-verifies
     // schedulability, and a concurrent plan creation serializes on that same
     // lock (its in-trx stop runs before or after this whole arm).
-    if (rearm === 'schedule') {
+    // 'untouched' runs it too (Codex #3493 r7): a plan created on an
+    // UNVOIDED invoice can't take ownership of its retained system void
+    // stop (the plan restamp skips non-plan stop reasons), so the cancel's
+    // own re-arm helper leaves that row stranded 'invoice_voided'.
+    // scheduleForInvoice's re-arm branch lifts exactly that stop — plan now
+    // gone — and is a no-op for every other untouched stop/pause (admin
+    // controls, drafts, other reasons stay put).
+    if (rearm === 'schedule' || rearm === 'untouched') {
       try {
         const FollowUpsSvc = require('../services/invoice-followups');
         await FollowUpsSvc.scheduleForInvoice(id);
@@ -2902,8 +2909,13 @@ router.get('/:id/followup', async (req, res, next) => {
 router.post('/:id/followup/pause', requireAdmin, async (req, res, next) => {
   try {
     const { reason, until } = req.body || {};
+    // adminAuthenticate populates req.technicianId (never req.user) — the
+    // old req.user?.id recorded every pause with a NULL admin id, leaving a
+    // blank-reason pause with no durable admin fingerprint for the
+    // void-stop re-arm to preserve (Codex #3493 r7; same bug the stop
+    // route had).
     await FollowUps.pauseSequence(req.params.id, {
-      reason, until, adminId: req.user?.id || null,
+      reason, until, adminId: req.technicianId || null,
     });
     res.json({ ok: true });
   } catch (err) { next(err); }

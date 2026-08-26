@@ -881,8 +881,13 @@ const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
 // sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
 // Best-effort + idempotent; the resolver only matches open, never-converted
 // leads and never throws.
-async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus }) {
-  if (!customerId || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
+  // priorDelivered: the invoice carried delivery stamps (sent_at /
+  // sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
+  // with its historical stamps retained, so priorStatus alone would read
+  // its resend as a first delivery and the contact fallback could mark an
+  // unrelated newer lead won (Codex #3493 r7).
+  if (!customerId || priorDelivered || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
     await convertLeadFromEvent({ source: "invoice_sent", customerId });
@@ -2549,7 +2554,7 @@ const InvoiceService = {
       // the wrapper owns the finalize + conversion, so skip here to avoid a double
       // pass. Resend-safe via the priorStatus gate inside the helper.
       if (!allowClaimed) {
-        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
       }
 
       return { sent: true, payUrl };
@@ -2595,7 +2600,7 @@ const InvoiceService = {
           .catch(() => {});
         if (!allowClaimed) {
           try {
-            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
           } catch (e) {
             logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
@@ -2869,7 +2874,7 @@ const InvoiceService = {
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
       // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
       // the inner sendViaSMS hook only runs on SMS success, so an
       // email-only delivery finalized here armed nothing — a fresh invoice
@@ -2959,7 +2964,7 @@ const InvoiceService = {
     // this call performed the write; the helper's priorStatus gate (read pre-
     // update) keeps a resend of an already-sent invoice from converting.
     if (updated) {
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
     }
 
     // Queue the review request only when THIS call performed the finalization

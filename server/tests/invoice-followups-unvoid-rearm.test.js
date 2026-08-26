@@ -134,28 +134,31 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.next_touch_at).toBeTruthy();
   });
 
-  test('restores autopay_hold (never active dunning) when the row was autopay-held before the void', async () => {
+  test('an autopay-held row re-holds only on LIVE enrollment — a stale stored flag is dropped (Codex #3493 r7)', async () => {
+    // Customer disabled autopay while the invoice was void: stored flag true,
+    // live check false → active cadence, not a hold nothing can ever release.
     const seq = voidStoppedSeq({ is_autopay_held: true });
-    const rearmed = { ...seq, status: 'autopay_hold', stopped_reason: null };
-    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed });
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: seq });
     customerOnAutopay.mockResolvedValue(false);
 
     await scheduleForInvoice('inv-1');
 
     const payload = seqUpdate.mock.calls[0][0];
-    expect(payload.status).toBe('autopay_hold');
-    expect(payload.is_autopay_held).toBe(true);
-    expect(payload.next_touch_at).toBeNull();
+    expect(payload.status).toBe('active');
+    expect(payload.is_autopay_held).toBe(false);
+    expect(payload.next_touch_at).toBeTruthy();
   });
 
-  test('re-checks autopay standing live — a customer enrolled while stopped holds too', async () => {
-    const { seqUpdate } = setupDb({ seq: voidStoppedSeq(), invoice: sentInvoice, rearmed: voidStoppedSeq() });
+  test('a still-enrolled customer re-enters autopay_hold, never active dunning', async () => {
+    const seq = voidStoppedSeq({ is_autopay_held: true });
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed: seq });
     customerOnAutopay.mockResolvedValue(true);
 
     await scheduleForInvoice('inv-1');
 
     const payload = seqUpdate.mock.calls[0][0];
     expect(payload.status).toBe('autopay_hold');
+    expect(payload.is_autopay_held).toBe(true);
     expect(payload.next_touch_at).toBeNull();
   });
 

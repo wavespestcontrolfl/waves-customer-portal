@@ -384,8 +384,14 @@ async function scheduleForInvoice(invoiceId) {
           return repaused || existing;
         }
         const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
-        const holdForAutopay = existing.is_autopay_held
-          || await customerOnAutopay(customerNow, { db: trx });
+        // LIVE autopay standing only (Codex #3493 r7): the stored
+        // is_autopay_held flag goes stale when the customer disables
+        // autopay while the invoice sits void — restoring the hold from it
+        // would suppress reminders forever (no future autopay attempt can
+        // fail and release it). A still-enrolled customer re-enters the
+        // hold via the live check; a disenrolled one re-enters the active
+        // cadence.
+        const holdForAutopay = await customerOnAutopay(customerNow, { db: trx });
         // Anchor like the ordinary scheduling path: the cadence is measured
         // from when the invoice went out (sent_at → sms_sent_at →
         // created_at), NOT the due date — a due date weeks past delivery
