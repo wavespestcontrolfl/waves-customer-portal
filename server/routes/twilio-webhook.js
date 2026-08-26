@@ -487,6 +487,7 @@ router.post('/sms', async (req, res) => {
             .merge({ sms_enabled: true });
         }
       };
+      let optInLanded = true;
       try {
         await db.transaction(async (trx) => {
           await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
@@ -539,33 +540,63 @@ router.post('/sms', async (req, res) => {
           // never be dropped: land the plain clear as the last resort,
           // with the derived state best-effort behind it.
           logger.error(`[sms-optin] locked retry also failed (${retryErr.code || retryErr.message}) — last-resort plain clear`);
-          await clearSuppression({
+          const lastResort = await clearSuppression({
             phone: optInPhone,
             source: `twilio_webhook_${optCommand.detectionMethod}`,
           });
-          try {
-            await applyStartDerivedState(db, { failLoud: false });
-          } catch (e) { logger.error(`[sms-optin] derived-state fallback failed: ${e.message}`); }
+          // clearSuppression swallows DB errors to { ok: false } — the
+          // last resort must not report success on top of a failed clear
+          // (hook #3495 r17): suppression would stay ACTIVE while the
+          // customer is told START worked and nothing alerts anyone.
+          // Fail LOUD to the admin bell (the compliance backstop rings
+          // even when the bell policy would mute 'system'), skip the
+          // derived consent restore (it must not outrank a standing
+          // suppression), and leave the failure in the log.
+          if (lastResort?.ok === false) {
+            optInLanded = false;
+            logger.error(`[sms-optin] LAST-RESORT clear also failed for ${maskPhone(From)} — suppression may still be active after an explicit START`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'START opt-in could not be recorded',
+                `An explicit START from ${maskPhone(From)} could not clear the SMS suppression after three attempts (DB errors). The number may still be blocked — clear the suppression by hand from the do-not-text list.`,
+                { bell: true, metadata: { source: `twilio_webhook_${optCommand.detectionMethod}` } },
+              );
+            } catch (notifyErr) {
+              logger.error(`[sms-optin] opt-in failure notify also failed: ${notifyErr.message}`);
+            }
+          } else {
+            try {
+              await applyStartDerivedState(db, { failLoud: false });
+            } catch (e) { logger.error(`[sms-optin] derived-state fallback failed: ${e.message}`); }
+          }
         }
       }
-      logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
-
-      // (inbound sms_log row inserted above, BEFORE the clear — see the
-      // ordering comment at the top of this branch.)
-      if (customer) {
-        await db('activity_log').insert({
-          customer_id: customer.id, action: 'sms_opt_in',
-          description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
-        }).catch(() => {});
+      // Success reporting is gated on the clear actually landing (hook
+      // #3495 r17): after a failed last-resort clear the suppression may
+      // still be ACTIVE — logging, timeline-stamping, and replying
+      // "re-subscribed" would all misreport it, and nothing else would
+      // surface the miss (the admin bell above owns that). The reply then
+      // stays factual: the request was received, not honored yet.
+      if (optInLanded) {
+        logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
+        // (inbound sms_log row inserted above, BEFORE the clear — see the
+        // ordering comment at the top of this branch.)
+        if (customer) {
+          await db('activity_log').insert({
+            customer_id: customer.id, action: 'sms_opt_in',
+            description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
+          }).catch(() => {});
+        }
       }
 
       // A START/opt-in can still CONTAIN a correction ("START. My email
       // changed to …") — enqueue like the other consumed branches (r35).
       await fireContactCorrection(null);
 
-      return res.type('text/xml').send(
-        `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
-      );
+      return res.type('text/xml').send(optInLanded
+        ? `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
+        : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
     if (smsReaction) {
