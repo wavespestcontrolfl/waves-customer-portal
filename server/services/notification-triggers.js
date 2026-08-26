@@ -178,6 +178,9 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'urgent',
     group: 'Communication',
+    // Schedule-surface alert a field tech must see (their visit may still
+    // be armed) — one of the few triggers in the non-admin bell feed.
+    techVisible: true,
     build: (p) => ({
       title: `Reschedule request: ${p.name || 'customer'}`,
       body: [
@@ -193,6 +196,9 @@ const TRIGGER_REGISTRY = {
     label: 'SMS reply received',
     category: 'inbound_sms',
     priority: 'high',
+    // Communications is a tech-visible surface — inbound customer texts
+    // belong in the non-admin bell feed (fail-closed allowlist).
+    techVisible: true,
     group: 'Communication',
     build: (p) => ({
       title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,

@@ -213,21 +213,24 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     expect(q.orWhereRaw).not.toHaveBeenCalled();
   });
 
-  test('technician list excludes adminRoleOnly trigger rows', async () => {
+  test('technician list is a fail-closed techVisible allowlist', async () => {
     const q = setupAdminDb({ rows: [] });
     await NotificationService.getAdminNotifications(50, 0, { role: 'technician' });
-    expect(q.whereNull).toHaveBeenCalledWith('metadata');
-    expect(q.orWhereRaw).toHaveBeenCalled();
-    const [sql, bindings] = q.orWhereRaw.mock.calls[0];
+    expect(q.whereRaw).toHaveBeenCalled();
+    const [sql, bindings] = q.whereRaw.mock.calls[0];
     expect(sql).toContain("metadata->>'triggerKey'");
-    expect(bindings).toContain('new_job_application');
+    expect(sql).toContain(' IN (');
+    // Tech-visible triggers are IN the allowlist; owner-only ones are not.
+    expect(bindings).toContain('sms_reply');
+    expect(bindings).toContain('appointment_reschedule_intent');
+    expect(bindings).not.toContain('new_job_application');
   });
 
-  test('technician unread count applies the same predicate and parses the count', async () => {
+  test('technician unread count applies the same allowlist and parses the count', async () => {
     const q = setupAdminDb({ count: '4' });
     const count = await NotificationService.getAdminUnreadCount({ role: 'technician' });
     expect(count).toBe(4);
-    expect(q.orWhereRaw).toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalled();
     expect(q.whereNull).toHaveBeenCalledWith('read_at');
   });
 
@@ -235,17 +238,17 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     const q = setupAdminDb({ updated: 0 });
     const ok = await NotificationService.markReadAdmin('n-hidden', { role: 'technician' });
     expect(ok).toBe(false);
-    expect(q.orWhereRaw).toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalled();
   });
 
   test('markAllReadAdmin scopes by role; admin stays global', async () => {
     const techQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'technician' });
-    expect(techQ.orWhereRaw).toHaveBeenCalled();
+    expect(techQ.whereRaw).toHaveBeenCalled();
 
     const adminQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'admin' });
-    expect(adminQ.orWhereRaw).not.toHaveBeenCalled();
+    expect(adminQ.whereRaw).not.toHaveBeenCalled();
     expect(adminQ.update).toHaveBeenCalled();
   });
 });

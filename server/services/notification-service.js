@@ -15,10 +15,13 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'weather_alerts',
 ]);
 
-// Admin-feed role scoping: the persisted admin bell is shared (one
-// recipient-less row), but triggers marked adminRoleOnly link to
-// requireAdmin surfaces — a technician reading them would get a dead 403
-// link. Hide those rows from non-admin readers. Lazy require avoids the
+// Admin-feed role scoping, FAIL CLOSED: the persisted admin bell is shared
+// (one recipient-less row) and carries owner-only content — estimate and
+// finance alerts with customer names and amounts, plus adminRoleOnly
+// triggers linking to requireAdmin surfaces. A NON-ADMIN reader therefore
+// sees ONLY rows whose triggerKey is explicitly marked techVisible in the
+// registry; everything else — including legacy rows with no metadata — is
+// hidden and its read state untouchable. Lazy require avoids the
 // notification-triggers ↔ notification-service cycle. A caller that passes
 // no role (internal jobs, tests) sees the full feed, unchanged.
 function scopeAdminFeedToRole(query, role) {
@@ -27,18 +30,19 @@ function scopeAdminFeedToRole(query, role) {
   try {
     const { TRIGGER_REGISTRY } = require('./notification-triggers');
     keys = Object.entries(TRIGGER_REGISTRY)
-      .filter(([, trigger]) => trigger.adminRoleOnly)
+      .filter(([, trigger]) => trigger.techVisible)
       .map(([key]) => key);
   } catch (err) {
     logger.warn(`[notifications] role-scope registry load failed: ${err.message}`);
   }
-  if (!keys.length) return query;
-  return query.where((q) => {
-    q.whereNull('metadata').orWhereRaw(
-      `COALESCE(metadata->>'triggerKey', '') NOT IN (${keys.map(() => '?').join(', ')})`,
-      keys,
-    );
-  });
+  if (!keys.length) {
+    // No tech-visible triggers resolvable → non-admin sees nothing.
+    return query.whereRaw('1 = 0');
+  }
+  return query.whereRaw(
+    `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
+    keys,
+  );
 }
 
 async function customerPreferenceEnabled(customerId, preferenceKey) {
