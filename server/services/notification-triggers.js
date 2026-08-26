@@ -146,6 +146,26 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Fired by the public careers funnel (routes/public-careers.js) on a new
+  // job application. Applicants are never customers/leads; the owner calls
+  // or texts every applicant himself from the recruiting queue.
+  new_job_application: {
+    label: 'New job application',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    build: (p) => ({
+      title: `Job application: ${p.role || 'technician'}`,
+      body: [
+        p.name || 'An applicant',
+        p.city ? `(${p.city})` : null,
+        p.phone ? `Phone: ${maskPhone(p.phone)}` : null,
+      ].filter(Boolean).join(' - '),
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
   // Fired by reschedule-intent-flagger when an inbound SMS reads as a
   // reschedule/away request while a visit is still armed — the automation
   // does not act on these, so the owner must (2026-08-05 incident class:
