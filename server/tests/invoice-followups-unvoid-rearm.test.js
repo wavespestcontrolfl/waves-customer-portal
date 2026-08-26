@@ -60,12 +60,13 @@ function voidStoppedSeq(overrides = {}) {
 
 function setupDb({ seq, invoice, rearmed, activePlan = null }) {
   const seqUpdate = jest.fn(() => ({ returning: jest.fn(async () => (rearmed ? [rearmed] : [])) }));
+  const seqWhere = jest.fn();
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.transaction = jest.fn(async (fn) => fn(db));
   db.mockImplementation((table) => {
     if (table === 'invoice_followup_sequences') {
       const q = {
-        where: jest.fn(() => q),
+        where: jest.fn((...args) => { seqWhere(...args); return q; }),
         whereNull: jest.fn(() => q),
         first: jest.fn(async () => seq),
         update: seqUpdate,
@@ -90,7 +91,7 @@ function setupDb({ seq, invoice, rearmed, activePlan = null }) {
     }
     throw new Error(`unexpected table ${table}`);
   });
-  return { seqUpdate };
+  return { seqUpdate, seqWhere };
 }
 
 const sentInvoice = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', created_at: new Date().toISOString() };
@@ -134,16 +135,21 @@ describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
     expect(payload.next_touch_at).toBeTruthy();
   });
 
-  test("lifts the LEGACY migration stamp 'invoice_terminal_status:void' too (Codex #3493 r12 P0)", async () => {
+  test("lifts the LEGACY migration stamp 'invoice_terminal_status:void' too — conditional UPDATE keyed on the CAPTURED stamp (Codex #3493 r12 P0 / r13 P0)", async () => {
     const seq = voidStoppedSeq({ stopped_reason: 'invoice_terminal_status:void' });
     const rearmed = { ...seq, status: 'active', stopped_reason: null };
-    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice, rearmed });
+    const { seqUpdate, seqWhere } = setupDb({ seq, invoice: sentInvoice, rearmed });
     customerOnAutopay.mockResolvedValue(false);
 
     const row = await scheduleForInvoice('inv-1');
 
     expect(row).toBe(rearmed);
     expect(seqUpdate.mock.calls[0][0].status).toBe('active');
+    // The UPDATE's own predicate must match the row it is re-arming — a
+    // literal 'invoice_voided' key silently updated ZERO rows here.
+    expect(seqWhere).toHaveBeenCalledWith(
+      expect.objectContaining({ stopped_reason: 'invoice_terminal_status:void' }),
+    );
   });
 
   test('a sequence releaseFromAutopayHold already escalated (held marker cleared) resumes its cadence even for an enrolled customer (Codex #3493 r12)', async () => {

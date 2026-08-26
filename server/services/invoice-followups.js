@@ -418,7 +418,7 @@ async function scheduleForInvoice(invoiceId) {
             existing.step_index,
           );
         const [rearmed] = await trx('invoice_followup_sequences')
-          .where({ id: existing.id, status: 'stopped', stopped_reason: 'invoice_voided' })
+          .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
           .whereNull('stopped_by_admin_id')
           .update({
             updated_at: trx.fn.now(),
