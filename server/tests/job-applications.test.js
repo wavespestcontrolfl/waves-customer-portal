@@ -246,6 +246,9 @@ describe('new_job_application bell', () => {
       if (key === '__private') continue;
       expect(Boolean(t.adminRoleOnly && t.techVisible)).toBe(false);
     }
+    // Triggers whose linked surface is owner-only (role lockdown #3501)
+    // are owner-only end to end — push AND bell.
+    expect(TRIGGER_REGISTRY.new_lead.adminRoleOnly).toBe(true);
   });
 
   test('push tag is per-application so pushes never collapse', () => {
