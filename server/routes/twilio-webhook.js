@@ -1261,12 +1261,31 @@ router.post('/status', async (req, res) => {
           } catch (lookupErr) {
             logger.warn(`[twilio-status] 21610 sms_log lookup failed: ${lookupErr.message}`);
           }
+          // Ordering token (hook r9 P1): each 21610 callback writes source
+          // 'twilio_status_21610:<MessageSid>', so provenance identifies
+          // WHICH callback authored the row. An older callback defers
+          // entirely when the standing row belongs to a callback for a
+          // NEWER send — otherwise delayed callback A could overwrite
+          // callback B's row and then clear B's newer verdict against a
+          // START that sits between the two sends.
+          const suppressionSource = `twilio_status_21610:${MessageSid}`;
           let clearedAfterSend = false;
+          let newerCallbackOwnsRow = false;
           try {
-            const supRow = await db('messaging_suppression').where({ phone: optOutPhone }).first('active', 'cleared_at');
+            const supRow = await db('messaging_suppression').where({ phone: optOutPhone }).first('active', 'cleared_at', 'source');
             clearedAfterSend = !!(supRow && supRow.active === false && supRow.cleared_at
               && sentAt && new Date(supRow.cleared_at) > new Date(sentAt));
+            const ownerSid = /^twilio_status_21610:(.+)$/.exec(supRow?.source || '')?.[1];
+            if (supRow?.active === true && ownerSid && ownerSid !== MessageSid && sentAt) {
+              const ownerLog = await db('sms_log').where({ twilio_sid: ownerSid }).first('created_at');
+              if (ownerLog?.created_at && new Date(ownerLog.created_at) > new Date(sentAt)) {
+                newerCallbackOwnsRow = true; // their send postdates ours — their verdict stands
+              }
+            }
           } catch { /* no row / no read → apply the opt-out normally */ }
+          if (newerCallbackOwnsRow) {
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred — a callback for a newer send owns the suppression`);
+          } else {
           if (clearedAfterSend) {
             logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} predates a later opt-in clearance — not re-suppressing`);
           } else {
@@ -1276,7 +1295,7 @@ router.post('/status', async (req, res) => {
             const result = await recordSuppression({
               phone: optOutPhone,
               reason: 'opt_out',
-              source: 'twilio_status_21610',
+              source: suppressionSource,
             });
             if (result?.ok === false) {
               throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
@@ -1345,7 +1364,7 @@ router.post('/status', async (req, res) => {
               await db.transaction(async (trx) => {
                 const supRow = await trx('messaging_suppression')
                   .where({ phone: optOutPhone }).forUpdate().first('active', 'source');
-                if (!supRow || supRow.active !== true || supRow.source !== 'twilio_status_21610') return;
+                if (!supRow || supRow.active !== true || supRow.source !== suppressionSource) return;
                 await trx('messaging_suppression')
                   .where({ phone: optOutPhone })
                   .update({
@@ -1426,6 +1445,7 @@ router.post('/status', async (req, res) => {
           }
           } // end !laterOptIn
           } // end !clearedAfterSend
+          } // end !newerCallbackOwnsRow
         }
 
         // Appointment-text fallback: if this undelivered message was an appointment
