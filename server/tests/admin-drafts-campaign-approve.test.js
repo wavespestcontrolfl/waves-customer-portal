@@ -477,7 +477,7 @@ describe('PUT /admin/drafts/:id/approve', () => {
 });
 
 describe('PUT /admin/drafts/:id/revise', () => {
-  test('campaign draft revise also sends under the draft purpose (no consent bypass)', async () => {
+  test('campaign draft revise also sends under the draft purpose (no consent bypass; legacy reactivation purpose normalizes to marketing_seasonal)', async () => {
     const draft = campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' });
     enqueue('message_drafts', { returning: [draft] });
     enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
@@ -492,7 +492,7 @@ describe('PUT /admin/drafts/:id/revise', () => {
     });
 
     const input = sendCustomerMessage.mock.calls[0][0];
-    expect(input.purpose).toBe('marketing');
+    expect(input.purpose).toBe('marketing_seasonal');
     expect(input.audience).toBe('customer');
     expect(input.consentBasis?.status).toBe('opted_in');
     expect(input.entryPoint).toBe('admin_draft_revise');

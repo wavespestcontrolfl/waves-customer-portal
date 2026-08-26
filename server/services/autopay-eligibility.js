@@ -45,7 +45,7 @@ function isChargeableAutopayMethod(method, now = new Date()) {
       && BLOCKED_PM_ACH_STATUSES.includes(method.ach_status));
 }
 
-async function getChargeableAutopayMethod(customer, knex, now = new Date()) {
+async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now = new Date() } = {}) {
   if (!customer?.id) return false;
 
   try {
@@ -74,19 +74,28 @@ async function getChargeableAutopayMethod(customer, knex, now = new Date()) {
     // state and accept the card. Callers commonly pass a bare { id }
     // (completion/quote paths), so an absent ach_status is LOOKED UP, never
     // assumed healthy (codex #3495 P1); a failed lookup treats ACH as
-    // blocked (fail toward the card, matching the charge path's caution).
+    // blocked (fail toward the card) — or rethrows for failClosed callers,
+    // same contract as the outer catch.
     let achStatus = customer.ach_status;
     if (achStatus === undefined) {
       try {
         achStatus = (await knex('customers').where({ id: customer.id }).first('ach_status'))?.ach_status ?? null;
-      } catch {
+      } catch (achErr) {
+        if (rethrow) throw achErr;
         achStatus = 'suspended';
       }
     }
     const achBlockedForCustomer = !!(achStatus && achStatus !== 'active');
     return (candidates || []).find((m) => isChargeableAutopayMethod(m, now)
       && !(achBlockedForCustomer && isBankMethodType(m.method_type))) || null;
-  } catch {
+  } catch (err) {
+    // Swallowed by default (a broken read means "no chargeable method" for
+    // display/scheduling call sites). Callers whose SAFE direction is
+    // "still enrolled" — e.g. deciding whether to lift an autopay hold —
+    // pass failClosed and handle the throw themselves: a swallowed read
+    // error here reads as confirmed unenrollment and activates reminders
+    // for an enrolled customer (Codex #3493 r16).
+    if (rethrow) throw err;
     return null;
   }
 }
@@ -97,7 +106,10 @@ async function customerOnAutopay(customer, options = {}) {
   if (customer.autopay_enabled === false) return false;
   if (isPaused(customer, options.now)) return false;
 
-  const paymentMethod = await getChargeableAutopayMethod(customer, knex, options.now);
+  const paymentMethod = await getChargeableAutopayMethod(customer, knex, {
+    rethrow: options.failClosed === true,
+    now: options.now,
+  });
   if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {

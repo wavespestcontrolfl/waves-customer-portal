@@ -182,6 +182,10 @@ const RECURRING_FUNNEL_MAPPABLE_SERVICES = new Set([
 
 function wizardDraftSelfServeBookable(row) {
   if (!row || row.source !== 'quote_wizard' || row.status !== 'draft') return false;
+  // A retired (archived) draft was consumed — by a self-booked series that
+  // stamped its setup fee, or by staff. Its handoff token dies with it; a
+  // fresh wizard run revives the draft (/calculate clears archived_at).
+  if (row.archived_at) return false;
   const data = row.estimate_data || {};
   if (data.commercialEstimatedPricing || data.quoteRequired) return false;
   const summary = data.engineResult?.summary || {};

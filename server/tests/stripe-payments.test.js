@@ -523,6 +523,10 @@ describe('invoice assertInvoiceVoidable', () => {
     expect(() => assertInvoiceVoidable('processing')).toThrow(/in flight/);
   });
 
+  test('sending invoice (live send claim) — refuse to void (Codex #3493 r10)', () => {
+    expect(() => assertInvoiceVoidable('sending')).toThrow(/send is already in progress/);
+  });
+
   test('prepaid invoice — NOW voidable (void path restores the applied credit)', () => {
     // The void path calls restoreAccountCreditForVoidedInvoice, so the applied
     // account credit returns to the balance instead of being stranded.

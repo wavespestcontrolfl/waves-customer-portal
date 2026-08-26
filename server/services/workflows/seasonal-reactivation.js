@@ -147,13 +147,14 @@ class SeasonalReactivation {
         }
 
         // Pending draft for owner approval — NEVER a send. The approve route
-        // sends under purpose 'marketing' with the full consent chain.
+        // sends under purpose 'marketing_seasonal' (seasonal_tips consent
+        // lane) with the full consent chain.
         await db('message_drafts').insert({
           customer_id: customer.id,
           draft_response: toGsm7Safe(body),
           status: 'pending',
           campaign_type: 'reactivation',
-          purpose: 'marketing',
+          purpose: 'marketing_seasonal',
           source_ref: `customers:${customer.id}`,
           context_summary: `Seasonal reactivation (${seasonal.type}): ${hookText}`,
         });

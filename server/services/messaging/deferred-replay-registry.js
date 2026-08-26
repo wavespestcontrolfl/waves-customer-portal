@@ -1180,8 +1180,12 @@ async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}, { alrea
 async function sweepPendingTerminalHooks({ limit = 25, now = new Date() } = {}) {
   let rows = [];
   try {
+    // 'cancelled' rows carry the stamp too: an invoice unvoid cancels
+    // still-scheduled completion/decline replays and stamps
+    // terminal_pending atomically with the cancel — a crash before its
+    // post-commit hook pass lands here (Codex #3493 r15).
     rows = await db('sms_log')
-      .whereIn('status', ['blocked', 'failed'])
+      .whereIn('status', ['blocked', 'failed', 'cancelled'])
       .whereRaw("metadata->>'terminal_pending' = 'true'")
       .where('updated_at', '<', new Date(now.getTime() - 5 * 60 * 1000))
       .orderBy('updated_at', 'asc')

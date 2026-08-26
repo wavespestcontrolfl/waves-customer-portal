@@ -275,13 +275,13 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     // preferences (same basis the drafts/campaign senders assert), never
     // asserted by the admin action itself. Fail closed before any send.
     const prefs = await db('notification_prefs').where('customer_id', customer.id).first();
-    // At least one marketing consent column must be EXPLICITLY true (the
-    // policy's any-of set: seasonal_tips OR marketing_offers) — a NULL
+    // Upsell = Promotions & Offers, so marketing_offers must be EXPLICITLY
+    // true (OWNER RULING 08-25: the two marketing toggles are independent —
+    // a seasonal-tips opt-in does not authorize promotional SMS). A NULL
     // (default-seeded or backfilled row — customer never asked) is not
-    // captured consent, and a promotions-only opt-in is honored.
+    // captured consent.
     if (!prefs || prefs.sms_enabled === false
-      || prefs.seasonal_tips === false
-      || !(prefs.seasonal_tips === true || prefs.marketing_offers === true)) {
+      || prefs.marketing_offers !== true) {
       return res.status(422).json({
         error: 'Customer has not opted in to marketing SMS — no outreach.',
         code: 'NO_MARKETING_CONSENT',

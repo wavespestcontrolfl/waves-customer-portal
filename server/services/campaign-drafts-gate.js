@@ -103,27 +103,27 @@ function parseOpportunityRef(sourceRef) {
 }
 
 /**
- * Marketing-grade gate: sms_enabled must not be explicitly false AND at
- * least one consent column must be EXPLICITLY true — the same any-of set
- * the marketing policy declares (seasonal_tips for seasonal campaigns,
- * marketing_offers for promotions), so a promotions-only opt-in is
- * honored here too. Campaign sending asserts an opted_in consentBasis
- * downstream, so NULL flags (system-seeded default row or backfill — the
- * customer was never asked) or a missing row is NOT captured consent and
- * fails closed.
+ * Marketing-grade gate — OWNER RULING 08-25: the two marketing toggles are
+ * INDEPENDENT permissions, so the campaign's OWN consent column must be
+ * EXPLICITLY true (reactivation = seasonal content → seasonal_tips; upsell
+ * = promotions → marketing_offers). Campaign sending asserts an opted_in
+ * consentBasis downstream, so NULL flags (system-seeded default row or
+ * backfill — the customer was never asked), a missing row, or an unmapped
+ * campaign type is NOT captured consent and fails closed. Keep this map in
+ * step with the split 'marketing' / 'marketing_seasonal' policies.
  */
-async function prefsAllowMarketingSms(customerId) {
+const CAMPAIGN_CONSENT_COLUMN = {
+  upsell: 'marketing_offers',
+  reactivation: 'seasonal_tips',
+};
+async function prefsAllowMarketingSms(customerId, campaignType) {
+  const consentColumn = CAMPAIGN_CONSENT_COLUMN[campaignType];
+  if (!consentColumn) return false;
   const prefs = await db('notification_prefs')
     .where({ customer_id: customerId })
     .first('sms_enabled', 'seasonal_tips', 'marketing_offers');
   if (!prefs) return false;
-  // seasonal_tips === false is the master marketing kill switch (the
-  // central validator's prefsColumn opt-out enforces it too) — without
-  // this leg a promotions-only row with seasonal_tips=false would pass
-  // here, then hard-block at the validator, stranding drafts pending.
-  return prefs.sms_enabled !== false
-    && prefs.seasonal_tips !== false
-    && (prefs.seasonal_tips === true || prefs.marketing_offers === true);
+  return prefs.sms_enabled !== false && prefs[consentColumn] === true;
 }
 
 /**
@@ -222,7 +222,7 @@ async function evaluateCampaignSendGate({
       }
     }
 
-    if (!(await prefsAllowMarketingSms(customerId))) {
+    if (!(await prefsAllowMarketingSms(customerId, campaignType))) {
       return { ok: false, code: 'prefs_opted_out', customer: cust };
     }
 
