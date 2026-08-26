@@ -2,11 +2,15 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const gbpService = require('../services/google-business');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: GBP mutations (profile edits, Google pushes)
+// are owner-only. Reads stay staff-wide — the tech-visible Settings page
+// fetches /admin/gbp/locations for OAuth status display.
+router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 

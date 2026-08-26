@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
@@ -495,6 +495,11 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown (first-hire prep): estimates are a sales/pricing
+// surface — every MUTATION (create/edit/send/accept/delete) is owner-only.
+// Reads stay staff-wide because tech-visible surfaces (Customer 360's
+// estimates panel) render estimate data read-only.
+router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
 
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
