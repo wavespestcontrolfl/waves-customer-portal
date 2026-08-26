@@ -214,6 +214,8 @@ const TRIGGER_REGISTRY = {
   // this, such voicemails end terminal and are only visible by scrolling
   // the comms inbox.
   customer_voicemail_callback: {
+    // Tech-visible: links to a day-to-day surface (comms) a field tech works in.
+    techVisible: true,
     label: 'Voicemail needs callback',
     category: 'voicemail_callback',
     priority: 'high',
@@ -256,6 +258,8 @@ const TRIGGER_REGISTRY = {
   // Fired by the service-report delivery queue when an email report has
   // exhausted its retries — the customer never received their report.
   service_report_delivery_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
     label: 'Service report email failed to send',
     category: 'system',
     priority: 'high',
@@ -269,6 +273,8 @@ const TRIGGER_REGISTRY = {
   // Fired by the PDF render queue when a report PDF can't be generated. The
   // report link still works; the attachment/share copy is missing until re-rendered.
   service_report_pdf_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
     label: 'Service report PDF render failed',
     category: 'system',
     priority: 'normal',
@@ -368,6 +374,8 @@ const TRIGGER_REGISTRY = {
     }),
   },
   job_complete: {
+    // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
+    techVisible: true,
     label: 'Tech marked job complete',
     category: 'service',
     priority: 'low',

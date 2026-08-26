@@ -14,6 +14,12 @@ const { cleanText, cleanValidEmailOrNull, normalizeNanpPhone } = require('../uti
 const { properCase } = require('../utils/name-case');
 
 const ROLES = ['technician', 'sales', 'other'];
+// v1 intake accepts TECHNICIAN ONLY (owner ruling 2026-08-25: tech first).
+// The AI screen's rubric is technician-specific — accepting other roles
+// would misrank them under a rubric built for field work (codex P1). The
+// table CHECK stays wide so widening later is a one-line change here plus
+// a role-specific rubric in job-application-screen.js.
+const INTAKE_ROLES = ['technician'];
 const STATUSES = ['new', 'reviewed', 'interview', 'offer', 'hired', 'rejected', 'withdrawn'];
 const LANGUAGES = ['en', 'es'];
 
@@ -109,7 +115,7 @@ async function createJobApplication({ body = {}, database }) {
   }
   const city = cityRaw || null;
 
-  const role = ROLES.includes(body.role) ? body.role : null;
+  const role = INTAKE_ROLES.includes(body.role) ? body.role : null;
   if (!role) {
     throw badRequest('Please pick the role you are applying for.');
   }
@@ -136,6 +142,7 @@ async function createJobApplication({ body = {}, database }) {
 
 module.exports = {
   ROLES,
+  INTAKE_ROLES,
   STATUSES,
   ANSWER_KEYS,
   normalizeAnswers,

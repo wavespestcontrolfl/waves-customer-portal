@@ -101,11 +101,15 @@ describe('createJobApplication', () => {
     expect(JSON.parse(inserted.answers)).toEqual(VALID_BODY.answers);
   });
 
-  test('rejects missing name, bad phone, unknown role with 400', async () => {
+  test('rejects missing name, bad phone, and non-v1 roles with 400', async () => {
     for (const bad of [
       { ...VALID_BODY, name: '' },
       { ...VALID_BODY, phone: '123' },
       { ...VALID_BODY, role: 'ceo' },
+      // v1 intake is technician-only (owner ruling): the AI rubric is
+      // technician-specific, so other roles reject rather than misrank.
+      { ...VALID_BODY, role: 'sales' },
+      { ...VALID_BODY, role: 'other' },
       { ...VALID_BODY, role: undefined },
     ]) {
       const database = mockDb();
@@ -218,6 +222,30 @@ describe('new_job_application bell', () => {
 
   test('delivery is scoped to admin-role users (recruiting is requireAdmin)', () => {
     expect(TRIGGER_REGISTRY.new_job_application.adminRoleOnly).toBe(true);
+  });
+
+  test('techVisible classification covers exactly the day-to-day-surface triggers', () => {
+    // Regression pin for the fail-closed non-admin bell feed: these are the
+    // triggers whose links land on technician-allowed surfaces. Adding a
+    // trigger a field tech must see means marking it techVisible AND
+    // updating this list — silence here means it never reaches their bell.
+    const techVisible = Object.entries(TRIGGER_REGISTRY)
+      .filter(([, t]) => t.techVisible)
+      .map(([key]) => key)
+      .sort();
+    expect(techVisible).toEqual([
+      'appointment_reschedule_intent',
+      'customer_voicemail_callback',
+      'job_complete',
+      'service_report_delivery_failed',
+      'service_report_pdf_failed',
+      'sms_reply',
+    ]);
+    // Owner-only triggers must never be both adminRoleOnly and techVisible.
+    for (const [key, t] of Object.entries(TRIGGER_REGISTRY)) {
+      if (key === '__private') continue;
+      expect(Boolean(t.adminRoleOnly && t.techVisible)).toBe(false);
+    }
   });
 
   test('push tag is per-application so pushes never collapse', () => {
