@@ -585,6 +585,13 @@ const TwilioService = {
         const postPushBlocked = await runPreSendCheck();
         if (postPushBlocked) return postPushBlocked;
       }
+      // Captured BEFORE the provider handoff and stamped as created_at
+      // below: the delayed-callback paths (21610 / 30006) compare a START
+      // clearance's cleared_at against this row to decide whether the
+      // clearance outranks the bounced send — an insert-time default is
+      // post-handoff and can postdate a START that raced the log write,
+      // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
+      const handoffAt = new Date();
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
@@ -613,6 +620,7 @@ const TwilioService = {
           message_body: body,
           twilio_sid: message.sid,
           status: "sent",
+          created_at: handoffAt,
           message_type: options.messageType || "manual",
           admin_user_id: options.adminUserId || null,
           // Decision linkage makes the sent row recoverable: if the process

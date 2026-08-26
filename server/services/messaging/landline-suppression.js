@@ -74,10 +74,17 @@ async function suppressNonMobileOnBounce({ errorCode, to, sid = null } = {}) {
     // START received after this message went out) survives — a delayed
     // 30006 for an older send is stale evidence against a number that
     // provably texted us since. Unknown send time ⇒ never supersede.
+    // The primary send path stamps created_at PRE-handoff, but other
+    // outbound writers still log after messages.create() returns — shave
+    // that race window so a START whose clearance raced the log insert
+    // keeps its clearance (hook P1); a genuine landline just bounces the
+    // next send with a clearly-newer sentAt and suppresses then.
+    const SEND_RACE_GRACE_MS = 60 * 1000;
     let sentAt = null;
     if (sid) {
       try {
-        sentAt = (await db('sms_log').where({ twilio_sid: sid }).first('created_at'))?.created_at || null;
+        const row = await db('sms_log').where({ twilio_sid: sid }).first('created_at');
+        if (row?.created_at) sentAt = new Date(new Date(row.created_at).getTime() - SEND_RACE_GRACE_MS);
       } catch { /* undatable ⇒ conservative */ }
     }
 

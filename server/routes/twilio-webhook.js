@@ -1265,6 +1265,20 @@ router.post('/status', async (req, res) => {
               await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
               const logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at');
               const sentAt = logRow?.created_at || null;
+              // The primary send path stamps created_at PRE-handoff, but
+              // other outbound writers still log after messages.create()
+              // returns — so created_at can postdate the actual Twilio
+              // handoff by the API latency. Shave that race window when
+              // comparing against a START: a clearance inside it keeps
+              // winning (don't re-suppress an opted-in recipient), and the
+              // recheck below scans the same widened window so the raced
+              // START is seen. Self-healing if we defer wrongly: the next
+              // send bounces with a clearly-newer sentAt, and the d18 daily
+              // reconciler backstops prefs drift (hook P1).
+              const SEND_RACE_GRACE_MS = 60 * 1000;
+              const sentAtFloor = sentAt
+                ? new Date(new Date(sentAt).getTime() - SEND_RACE_GRACE_MS)
+                : null;
               const optOutCustomerId = logRow?.customer_id || null;
               const supRow = await trx('messaging_suppression')
                 .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
@@ -1272,7 +1286,7 @@ router.post('/status', async (req, res) => {
               // callback after a START) — and an unknown send timestamp
               // still applies the opt-out (fail toward not texting).
               if (supRow && supRow.active === false && supRow.cleared_at
-                  && sentAt && new Date(supRow.cleared_at) > new Date(sentAt)) {
+                  && sentAtFloor && new Date(supRow.cleared_at) > sentAtFloor) {
                 outcome.deferred = 'cleared-after-send'; return;
               }
               // A standing row authored by a callback for a NEWER send owns
@@ -1306,7 +1320,7 @@ router.post('/status', async (req, res) => {
               if (sentAt) {
                 const inbound = await trx('sms_log')
                   .where({ from_phone: optOutPhone })
-                  .where('created_at', '>', sentAt)
+                  .where('created_at', '>', sentAtFloor)
                   .orderBy('created_at', 'desc')
                   .limit(200)
                   .select('message_body');
