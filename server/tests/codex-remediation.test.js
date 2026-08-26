@@ -669,8 +669,8 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
   });
 
   // Owner directive 2026-08-26: the autonomous caller may thread a scoped
-  // namedCompetitorAutopublish eligibility (operator-intercept provenance +
-  // both gates) — the named-competitor park then does not fire and the fix
+  // namedCompetitorAutopublish eligibility (TRUE-intercept marker + both
+  // gates) — the named-competitor park then does not fire and the fix
   // pushes. Absent/false keeps the park (test above).
   test('namedCompetitorAutopublish eligibility threaded by the caller lets an intercept fix continue past the named-competitor park', async () => {
     const gh = makeGh();
@@ -680,6 +680,55 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     });
     expect(r.parked).toBeUndefined();
     expect(gh._calls.putFile).toHaveLength(1);
+  });
+
+  test('maybeRemediateAutonomousPr derives that eligibility from the brief TRUE-intercept marker (integration, hook r3 P1)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      const HEAD_SHA = 'abc1234def5678';
+      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' };
+      const harness = (intercept) => {
+        const db = makeDb({
+          autonomous_runs: [runRow],
+          opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
+        });
+        const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+        const pr = { number: 7, state: 'open', head: { sha: HEAD_SHA, ref: 'content/autonomous-x' } };
+        gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+        return maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+          db, gh, callAnthropic: makeCall('FIXED'),
+          // Named-competitor content in the fix: only the threaded
+          // eligibility lets it continue past the park.
+          validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+          validateAutonomousRunGates: async () => ({ ok: true }),
+          autonomousRunner: {
+            _loadReviewedBrief: async () => ({
+              action_type: 'new_supporting_blog',
+              gsc_signal: { bucket: 'operator_intercept', intercept },
+              voice_constraints: { operator_brief: { working_title: 'X' } },
+            }),
+            _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null }),
+          },
+        });
+      };
+
+      const eligible = await harness(true);
+      expect(eligible.remediated).toBe(true);
+
+      // Category/spoke seed shape (shared bucket + operator_brief, no
+      // TRUE-intercept marker) still parks.
+      const seed = await harness(false);
+      expect(seed.parked).toBe(true);
+      expect(seed.reason).toMatch(/named-competitor/);
+    } finally {
+      fg.isEnabled.mockRestore();
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
   });
 
   // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
@@ -1177,6 +1226,26 @@ describe('validateAutonomousRunGates', () => {
     const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/named-competitor/);
+  });
+
+  test('run-context comparison requiresHumanReview passes for an opted-in TRUE-intercept run (owner directive 2026-08-26)', async () => {
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      const deps = goodDeps();
+      // The canonical TRUE-intercept marker — bucket/operator_brief alone
+      // must NOT qualify (category/spoke seeds share those).
+      deps.autonomousRunner._loadReviewedBrief = async () => ({
+        page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
+      });
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
+      const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
+      expect(r.ok).toBe(true);
+    } finally {
+      fg.isEnabled.mockRestore();
+    }
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {

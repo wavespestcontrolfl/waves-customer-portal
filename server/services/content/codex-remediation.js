@@ -66,6 +66,21 @@ const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connector[bot]']);
 
+// Owner directive 2026-08-26: scoped named-competitor autopublish
+// eligibility. TRUE only for a brief carrying the canonical TRUE-intercept
+// marker gsc_signal.intercept (category/spoke seeds share the
+// operator_intercept bucket and operator_brief payload, so neither is
+// sufficient) with BOTH named-competitor gates on. Fail-closed: any read
+// failure returns false and the named-competitor review parks stand.
+function namedCompetitorAutopublishEligible(brief) {
+  try {
+    if (brief?.gsc_signal?.intercept !== true) return false;
+    const fg = require('../../config/feature-gates');
+    return fg.isEnabled('namedCompetitorAutopublish') === true
+      && fg.isEnabled('namedCompetitorComparison') === true;
+  } catch (_) { return false; }
+}
+
 function remediationEnabled() {
   const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
@@ -1162,7 +1177,10 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       const codes = (((comparisonResult && comparisonResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => f.code);
       return { ok: false, reason: `run-context comparison gate: ${codes.join(',') || 'no result'}` };
     }
-    if (comparisonResult.requiresHumanReview === true) {
+    // Owner directive 2026-08-26: an opted-in TRUE-intercept run continues —
+    // the same scoped eligibility the runner applies at its review-park
+    // decision (fail-closed: no marker / gates off → park as before).
+    if (comparisonResult.requiresHumanReview === true && !namedCompetitorAutopublishEligible(brief)) {
       return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
     }
 
@@ -2143,11 +2161,10 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // never merges.
   let operatorFaqException = false;
   // Owner directive 2026-08-26: scoped named-competitor autopublish
-  // eligibility for the park in runRemediationForPr — TRUE only for a run
-  // with operator-intercept provenance (the same non-empty
-  // operatorBriefTextForComparisonGate predicate the runner's review-park
-  // decision uses) AND both named-competitor gates on. Fail-closed: any
-  // lookup/derivation failure leaves it false and the park stands.
+  // eligibility for the park in runRemediationForPr — see
+  // namedCompetitorAutopublishEligible (TRUE-intercept marker + both
+  // gates). Fail-closed: any lookup/derivation failure leaves it false and
+  // the park stands.
   let namedCompetitorAutopublish = false;
   // Full run-context for the preflight gate: the static frontmatter-derived
   // evaluate would P0 brief-mandated links, checked-existing routes, and
@@ -2171,15 +2188,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
         };
-        try {
-          const interceptProvenance = (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
-            ? runner._internals.operatorBriefTextForComparisonGate(opp, brief) !== ''
-            : false;
-          const fg = require('../../config/feature-gates');
-          namedCompetitorAutopublish = interceptProvenance
-            && fg.isEnabled('namedCompetitorAutopublish') === true
-            && fg.isEnabled('namedCompetitorComparison') === true;
-        } catch (_) { namedCompetitorAutopublish = false; }
+        namedCompetitorAutopublish = namedCompetitorAutopublishEligible(brief);
       }
     }
   } catch (e) {

@@ -2969,17 +2969,13 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, bucket = 'operator_intercept', operatorBrief = {
-    working_title: 'In-Wall Systems Compared for SWFL Homes',
-    primary_kw: 'taexx system review',
-    thesis: 'Compare in-wall systems for SWFL homes.',
-  } }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
         id: 'opp_named_1',
         action_type: 'new_supporting_blog',
-        bucket,
+        bucket: 'operator_intercept',
         claimed_at: claimedAt,
       }),
       complete: jest.fn().mockResolvedValue(true),
@@ -2993,9 +2989,18 @@ describe('named-competitor autopublish gate', () => {
         action_type: 'new_supporting_blog',
         page_type: 'supporting-blog',
         human_review_required: false,
-        // Operator-intercept provenance (no slug pin — the pin path has its
-        // own coverage above); null clears it for the out-of-scope tests.
-        ...(operatorBrief ? { voice_constraints: { operator_brief: operatorBrief } } : {}),
+        // Category/spoke seeds share the bucket and operator_brief payload —
+        // only gsc_signal.intercept marks a TRUE competitor intercept, and
+        // that marker is the autopublish provenance predicate. No slug pin:
+        // the pin path has its own coverage above.
+        gsc_signal: { bucket: 'operator_intercept', intercept },
+        voice_constraints: {
+          operator_brief: {
+            working_title: 'In-Wall Systems Compared for SWFL Homes',
+            primary_kw: 'taexx system review',
+            thesis: 'Compare in-wall systems for SWFL homes.',
+          },
+        },
       }),
     };
     const dispatcher = {
@@ -3092,23 +3097,10 @@ describe('named-competitor autopublish gate', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('autopublish is scoped to operator-intercept provenance — a named-competitor draft WITHOUT the operator brief still parks (hook r2 P1)', async () => {
+  test('autopublish is scoped to the TRUE-intercept marker — a category/spoke seed (shared bucket + operator_brief, intercept:false) still parks (hook r3 P1)', async () => {
     process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
     const publisher = { publishOrUpdatePage: jest.fn() };
-    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, operatorBrief: null });
-
-    const result = await runner.runNext();
-
-    expect(result.outcome).toBe('completed_pending_review');
-    expect(result.skip_reason).toBe('named_competitor_review');
-    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
-  });
-
-  test('autopublish is scoped to the operator_intercept bucket — another bucket parks even with an operator-brief-shaped payload (hook r2 P1)', async () => {
-    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
-    const publisher = { publishOrUpdatePage: jest.fn() };
-    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, bucket: 'demand_mined' });
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, intercept: false });
 
     const result = await runner.runNext();
 
