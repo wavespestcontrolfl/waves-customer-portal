@@ -9441,18 +9441,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const acknowledged = Number(req.body?.prepayChargeAcknowledgedTotalCents);
         const acknowledgedMethodKey = typeof req.body?.prepayChargeAcknowledgedMethodKey === 'string'
           ? req.body.prepayChargeAcknowledgedMethodKey : '';
-        // Auto-satisfy accepts (saved method / Auto Pay already active)
-        // have NO capture checkbox, so the v11 immediate-charge
-        // authorization is presented AT the quote step instead — the
-        // resubmit must attest the customer checked it (Codex #3492 r11);
-        // the recorded snapshot below then matches copy the customer
-        // actually saw. Fresh-capture accepts rendered it at the capture
-        // checkbox already.
-        const prepayConsentRequiredAtQuote = recurringCardPolicy.required !== true;
+        // EVERY in-lane prepay charge requires the consent attestation
+        // (Codex r11 + hook P0 r12): auto-satisfy accepts render the v11
+        // authorization at the quote step; fresh captures rendered it at
+        // the capture checkbox and the client attests its LIVE state on
+        // the final confirm — without the universal requirement a crafted
+        // client could echo the quoted cents/method key with no
+        // attestation and the server would charge AND record a consent
+        // snapshot that was never attested.
         const prepayConsentAccepted = req.body?.prepayChargeConsentAccepted === true;
         if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
           || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey
-          || (prepayConsentRequiredAtQuote && !prepayConsentAccepted)) {
+          || !prepayConsentAccepted) {
           return res.status(402).json({
             code: 'PREPAY_CHARGE_QUOTE',
             error: 'Confirm your exact annual prepay total to finish booking',
@@ -9465,7 +9465,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               funding: prepayChargeMethod.funding || null,
               methodType: prepayChargeMethod.methodType || 'card',
               last4: prepayChargeMethod.last4 || null,
-              consentRequired: prepayConsentRequiredAtQuote,
+              // Universal (hook P0 r12): the client decides WHICH consent
+              // surface satisfies it (quote-step checkbox for auto-satisfy,
+              // the live capture checkbox for fresh captures).
+              consentRequired: true,
             },
           });
         }

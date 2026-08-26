@@ -6236,12 +6236,27 @@ function EstimateViewPageInner() {
               into view along with the confirm card. Cleared on every retry
               (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
           <EstimateErrorBanner error={error} />
-          {prepayChargeQuote ? (
+          {prepayChargeQuote ? (() => {
             // In-lane prepay exact-total step (consent v11 promise: "the
             // exact surcharge and total will be shown before payment"). The
             // server refused the accept until this total is acknowledged;
             // the button re-submits with the acknowledged cents and the
-            // charge is frozen to them server-side.
+            // charge is frozen to them server-side. The server also
+            // requires a consent attestation on EVERY in-lane charge (hook
+            // P0 r12) — which surface satisfies it depends on the accept:
+            //   • fresh INLINE capture: the capture UI stays mounted and
+            //     its checkbox is still editable — attest its LIVE state
+            //     (unchecking the visible authorization disables confirm).
+            //   • MODAL capture: the checkbox was required to save the
+            //     card and the modal is gone — the attestation stands.
+            //   • auto-satisfy (no capture): render the tender-correct v11
+            //     authorization checkbox right here.
+            const captureConsentLive = (inlineAutoPayActive && inlineCardIntent)
+              ? inlineCardState.agreed === true
+              : (recurringCardSetupIntentIdRef.current ? true : null);
+            const quoteCheckboxNeeded = captureConsentLive === null;
+            const consentSatisfied = quoteCheckboxNeeded ? prepayConsentChecked === true : captureConsentLive === true;
+            return (
             <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, textAlign: 'center' }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                 Confirm your annual prepay total
@@ -6254,13 +6269,7 @@ function EstimateViewPageInner() {
                   ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
                   : `Charged to your saved payment method${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
               </div>
-              {prepayChargeQuote.consentRequired ? (
-                // Auto-satisfy accepts never saw the capture checkbox, so
-                // the v11 immediate-charge authorization renders here —
-                // tender-correct (saved bank methods get the ACH variant) —
-                // and gates the confirm button (Codex #3492 r11). The
-                // server records this exact variant as the snapshot of
-                // record and refuses the accept without the attestation.
+              {quoteCheckboxNeeded ? (
                 <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 12, textAlign: 'left', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
@@ -6275,23 +6284,12 @@ function EstimateViewPageInner() {
               ) : null}
               <button
                 type="button"
-                disabled={ctaPhase === 'submitting'
-                  || (prepayChargeQuote.consentRequired && !prepayConsentChecked)
-                  // Fresh inline capture (Codex #3492 r12): the capture UI
-                  // stays mounted through the quote round-trip and its
-                  // authorization checkbox is still editable — a customer
-                  // who UNCHECKS the visible authorization must not be
-                  // charged by this button. The quote confirm tracks the
-                  // live checkbox state exactly like the underlying review
-                  // CTA does.
-                  || (inlineAutoPayActive && inlineCardIntent && !inlineCardState.agreed)}
+                disabled={ctaPhase === 'submitting' || !consentSatisfied}
                 onClick={() => {
                   prepayChargeAckRef.current = {
                     totalCents: prepayChargeQuote.totalCents,
                     methodKey: prepayChargeQuote.methodKey || null,
-                    consentAccepted: prepayChargeQuote.consentRequired
-                      ? prepayConsentChecked === true
-                      : ((inlineAutoPayActive && inlineCardIntent) ? inlineCardState.agreed === true : undefined),
+                    consentAccepted: consentSatisfied,
                   };
                   setPrepayChargeQuote(null);
                   handleConfirm();
@@ -6299,7 +6297,8 @@ function EstimateViewPageInner() {
                 style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 15 }}
               >{`Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
             </div>
-          ) : null}
+            );
+          })() : null}
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
