@@ -107,8 +107,12 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
           );
       if (pointerRow && eligible({ ...pointerRow, is_default: true })) {
         // charge() accepts the pointer regardless of is_default (the
-        // pointer normally IS the default; enrollment repoints both).
-        return pointerRow;
+        // pointer normally IS the default; enrollment repoints both) —
+        // return the NORMALIZED row, because customerOnAutopay rechecks it
+        // with isChargeableAutopayMethod, which requires is_default (hook
+        // P1: a raw non-default pointer row would pass here and then fail
+        // the recheck, reading as not-on-autopay).
+        return { ...pointerRow, is_default: true };
       }
     }
     return (candidates || []).find(eligible) || null;
@@ -183,7 +187,8 @@ function autopayActivePredicate(now = new Date()) {
           -- Restricted to NON-bank rows (hook r4 P1): a blocked bank row
           -- with populated expiry fields must not slip through this branch.
           OR (
-          pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+          (pm.method_type IS NULL
+            OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
           AND CASE
             WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
               AND NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'

@@ -60,9 +60,21 @@ class PaymentExpiry {
       // dedupe a customer gets one notice per stale default). Replaced
       // cards linger with is_default=false and never match (hook P1 ×2).
       .whereRaw(`(
-        (c.autopay_payment_method_id IS NOT NULL AND pm.id = c.autopay_payment_method_id)
+        (pm.id = c.autopay_payment_method_id AND pm.autopay_enabled = true)
         OR (
-          c.autopay_payment_method_id IS NULL AND pm.is_default = true
+          pm.is_default = true
+          -- fallback fires when the pointer is absent OR ineligible
+          -- (disabled, or a bank row) — mirroring the charge path's
+          -- pointer-then-default walk; a stale pointer must not suppress
+          -- the real card's warning (hook P1).
+          AND NOT EXISTS (
+            SELECT 1 FROM payment_methods pp
+             WHERE pp.id = c.autopay_payment_method_id
+               AND pp.customer_id = c.id
+               AND pp.processor = 'stripe' AND pp.autopay_enabled = true
+               AND (pp.method_type IS NULL
+                    OR pp.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
+          )
           AND NOT EXISTS (
             SELECT 1 FROM payment_methods pm2
              WHERE pm2.customer_id = pm.customer_id

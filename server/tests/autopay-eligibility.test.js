@@ -120,7 +120,7 @@ describe('autopay eligibility', () => {
     // The card-expiry branch is restricted to NON-bank rows (hook r4 P1) —
     // a blocked bank row with populated expiry fields must not pass it.
     expect(normalizedSql).toContain(
-      "OR ( pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account') AND CASE",
+      "OR ( (pm.method_type IS NULL OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')) AND CASE",
     );
     expect(normalizedSql).toContain('ELSE FALSE END');
     expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
