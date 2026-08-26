@@ -284,6 +284,31 @@ async function clearSuppression({ phone, source, dbh = db }) {
         logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
       }
     }
+    // The LEGACY primary-phone cache too (hook #3495 P1): the 30006 path
+    // also stores customers.line_type='landline', and the appointment
+    // reader treats it as authoritative after the phone_line_types miss —
+    // without this, an explicit START un-suppresses the number but
+    // appointment SMS stays blocked forever. The inbound text itself
+    // proves the number can SMS; NULLing the cache makes the next send
+    // re-evaluate fresh via Lookup. UNIQUE primary-phone ownership only
+    // (same rule as the prefs flip): a shared number must not clear a
+    // sibling's verdict. Best-effort on the GLOBAL connection for the
+    // same abort-safety reason as the delete above.
+    try {
+      const digits = String(phone).replace(/\D/g, '').slice(-10);
+      if (digits.length === 10) {
+        const holders = await db('customers')
+          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+          .whereNull('deleted_at')
+          .whereNotNull('line_type')
+          .select('id');
+        if (holders.length === 1) {
+          await db('customers').where({ id: holders[0].id }).update({ line_type: null });
+        }
+      }
+    } catch (legacyErr) {
+      logger.warn(`[messaging:suppression] legacy line_type clear failed: ${legacyErr.message}`);
+    }
     return { ok: true };
   } catch (err) {
     logger.warn(`[messaging:suppression] clearSuppression failed: ${err.message}`);

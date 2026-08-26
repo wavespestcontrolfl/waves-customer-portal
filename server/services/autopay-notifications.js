@@ -111,6 +111,20 @@ async function sendPreChargeReminders() {
   return { sent, skipped, total: customers.length };
 }
 
+// ET calendar parts, not local Date construction (hook #3495 P1):
+// `new Date(y, m, 0) < now` runs in Railway's UTC and marks the card
+// expired throughout its final calendar day. Charge-path semantics: a card
+// is valid through the END of its expiry month in ET, so diff the month's
+// last day against ET-today as plain dates (UTC-midnight anchors both
+// sides — the timezone cancels out of the difference). expYear arrives
+// already +2000-normalized by the caller.
+function cardExpiryOutlook(expYear, expMonth, now) {
+  const lastDayOfExpMonth = new Date(Date.UTC(expYear, Number(expMonth), 0));
+  const etTodayUtc = new Date(`${etDateString(now)}T00:00:00Z`);
+  const daysUntil = Math.round((lastDayOfExpMonth.getTime() - etTodayUtc.getTime()) / 86400000);
+  return { daysUntil, expired: daysUntil < 0 };
+}
+
 async function sendCardExpiryWarnings() {
   const now = new Date();
   const sixty = addETDays(now, 60);
@@ -162,10 +176,8 @@ async function sendCardExpiryWarnings() {
       // Same +2000 normalization as the SQL window and the charge path.
       const rawExpYear = Number(r.exp_year);
       const expYear = Number.isFinite(rawExpYear) && rawExpYear > 0 && rawExpYear < 100 ? rawExpYear + 2000 : rawExpYear;
-      const expDate = new Date(expYear, r.exp_month, 0);
-      const expired = expDate < now;
+      const { daysUntil, expired } = cardExpiryOutlook(expYear, r.exp_month, now);
       const eventType = expired ? 'card_expired' : 'card_expiring_soon';
-      const daysUntil = Math.ceil((expDate.getTime() - now.getTime()) / 86400000);
       const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : null));
 
       const emailPromise = reminderStage
@@ -232,4 +244,4 @@ async function sendCardExpiryWarnings() {
   return { sent, skipped, total: rows.length };
 }
 
-module.exports = { sendPreChargeReminders, sendCardExpiryWarnings };
+module.exports = { sendPreChargeReminders, sendCardExpiryWarnings, cardExpiryOutlook };
