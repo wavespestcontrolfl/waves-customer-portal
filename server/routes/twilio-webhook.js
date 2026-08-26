@@ -1242,194 +1242,96 @@ router.post('/status', async (req, res) => {
         // this branch the number stays textable on every surface and every
         // lane keeps burning sends against it forever. Feed the canonical
         // suppression store + flip prefs, mirroring the inbound STOP handler
-        // above; fail LOUD like dropped-call-sms's 21610 path — a swallowed
-        // write means other workflows keep texting an opted-out number.
+        // above; fail LOUD — a swallowed write means other workflows keep
+        // texting an opted-out number.
+        //
+        // CONCURRENCY (codex #3495 rounds 1-10): the whole flow runs in ONE
+        // transaction under a per-phone advisory lock, so competing 21610
+        // callbacks (older send A vs newer send B) fully serialize — every
+        // callback runs THIS code, so the lock closes A-vs-B. The START
+        // handler orders via log-then-clear: its inbound sms_log row lands
+        // before its clearSuppression, so either our upsert precedes the
+        // clear (START removes it) or our post-write recheck sees the
+        // logged START and undoes inside the same transaction. Ordering
+        // between callbacks uses the source token twilio_status_21610:<sid>
+        // — an older callback defers when the standing row's author has the
+        // newer send. All bells/logs fire post-commit.
         if (String(ErrorCode) === '21610') {
           const optOutPhone = normalizeE164(To) || To;
-          // Late/redelivered-callback guard (codex #3495 r1 P1): Twilio can
-          // retry a 21610 callback until AFTER the recipient has since sent
-          // START and had the suppression cleared. Apply the opt-out only
-          // when no clearance postdates the SEND this callback describes —
-          // otherwise the retry would reverse the newer explicit opt-in and
-          // block every SMS indefinitely.
-          let sentAt = null;
-          let optOutCustomerId = null;
-          try {
-            const logRow = await db('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at');
-            sentAt = logRow?.created_at || null;
-            optOutCustomerId = logRow?.customer_id || null;
-          } catch (lookupErr) {
-            logger.warn(`[twilio-status] 21610 sms_log lookup failed: ${lookupErr.message}`);
-          }
-          // Ordering token (hook r9 P1): each 21610 callback writes source
-          // 'twilio_status_21610:<MessageSid>', so provenance identifies
-          // WHICH callback authored the row. An older callback defers
-          // entirely when the standing row belongs to a callback for a
-          // NEWER send — otherwise delayed callback A could overwrite
-          // callback B's row and then clear B's newer verdict against a
-          // START that sits between the two sends.
           const suppressionSource = `twilio_status_21610:${MessageSid}`;
-          let clearedAfterSend = false;
-          let newerCallbackOwnsRow = false;
-          try {
-            const supRow = await db('messaging_suppression').where({ phone: optOutPhone }).first('active', 'cleared_at', 'source');
-            clearedAfterSend = !!(supRow && supRow.active === false && supRow.cleared_at
-              && sentAt && new Date(supRow.cleared_at) > new Date(sentAt));
-            const ownerSid = /^twilio_status_21610:(.+)$/.exec(supRow?.source || '')?.[1];
-            if (supRow?.active === true && ownerSid && ownerSid !== MessageSid && sentAt) {
-              const ownerLog = await db('sms_log').where({ twilio_sid: ownerSid }).first('created_at');
-              if (ownerLog?.created_at && new Date(ownerLog.created_at) > new Date(sentAt)) {
-                newerCallbackOwnsRow = true; // their send postdates ours — their verdict stands
-              }
-            }
-          } catch { /* no row / no read → apply the opt-out normally */ }
-          if (newerCallbackOwnsRow) {
-            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred — a callback for a newer send owns the suppression`);
-          } else {
-          if (clearedAfterSend) {
-            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} predates a later opt-in clearance — not re-suppressing`);
-          } else {
-          try {
-            // recordSuppression resolves { ok: false } on a swallowed DB
-            // error — it does NOT reject — so check the result, not the catch.
-            const result = await recordSuppression({
-              phone: optOutPhone,
-              reason: 'opt_out',
-              source: suppressionSource,
-            });
-            if (result?.ok === false) {
-              throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
-            }
-            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
-          } catch (suppressErr) {
-            logger.warn(`[twilio-status] 21610 opt-out suppression write FAILED for ${maskPhone(optOutPhone)}: ${suppressErr.code || suppressErr.name || 'db_error'}`);
-            try {
-              await require('../services/notification-service').notifyAdmin(
-                'system',
-                'Opt-out suppression write failed',
-                `A Twilio 21610 opt-out for ${maskPhone(optOutPhone)} could not be saved to the suppression list (delivery status callback). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
-                // bell: true — compliance backstop must ring even when the
-                // bell policy would suppress the 'system' category.
-                { bell: true, metadata: { source: 'twilio_status_21610', error: suppressErr.code || suppressErr.name || 'db_error' } },
-              );
-            } catch (notifyErr) {
-              logger.error(`[twilio-status] 21610 suppression-failure notify also failed: ${notifyErr.message}`);
-            }
-          }
-          // Post-write reconciliation (hook r2 P1): the clearance read and
-          // the suppression upsert are not atomic, and a START that arrived
-          // before any suppression row existed leaves no clearance marker
-          // for the pre-write guard to see. After writing, re-check the
-          // inbound log: any opt-in-shaped inbound from this number AFTER
-          // the send wins — undo the suppression and skip the downstream
-          // verdicts. Write-then-recheck converges to the recipient's
-          // newest verdict regardless of interleaving.
-          // Only the NEWEST post-send opt command is authoritative (hook r3
-          // P1): a START followed by a newer STOP must keep the suppression,
-          // and an unknown send timestamp keeps it too (fail toward not
-          // texting) — never the epoch fallback that would let a pre-send
-          // START override the current 21610.
-          let laterOptIn = false;
-          if (sentAt) {
-            try {
-              // SQL prefilter to opt-command-SHAPED rows only (hook r5 P1):
-              // a bare LIMIT over all traffic could bury the decisive START
-              // under ordinary replies. The regex mirrors the detector's
-              // EXACT_OPT_IN/EXACT_OPT_OUT vocabulary as a coarse superset;
-              // detectSmsOptCommand stays the authority on each match.
-              const inbound = await db('sms_log')
-                .where({ from_phone: optOutPhone })
-                .where('created_at', '>', sentAt)
-                .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'’]?t text)\\y'")
-                .orderBy('created_at', 'desc')
-                .limit(50)
-                .select('message_body');
-              const newestCommand = inbound
-                .map((r) => detectSmsOptCommand(r.message_body || '').action)
-                .find((a) => a === 'opt_in' || a === 'opt_out');
-              laterOptIn = newestCommand === 'opt_in';
-            } catch { /* unreadable log → keep the suppression */ }
-          }
-          if (laterOptIn) {
-            try {
-              // The undo runs under FOR UPDATE with a provenance check
-              // (hook r8 P1): a concurrent inbound STOP re-suppresses via
-              // recordSuppression, whose upsert serializes on this row lock.
-              // We clear ONLY a row this callback's own write authored
-              // (source twilio_status_21610) — a row a STOP overwrote keeps
-              // its newer verdict, and a STOP arriving after our commit
-              // re-suppresses last-write-wins. The direct trx update mirrors
-              // clearSuppression's fields because that helper cannot join a
-              // transaction; keep the two in sync.
-              await db.transaction(async (trx) => {
-                const supRow = await trx('messaging_suppression')
-                  .where({ phone: optOutPhone }).forUpdate().first('active', 'source');
-                if (!supRow || supRow.active !== true || supRow.source !== suppressionSource) return;
-                await trx('messaging_suppression')
-                  .where({ phone: optOutPhone })
-                  .update({
-                    active: false,
-                    cleared_at: trx.fn.now(),
-                    source: 'cleared_by:twilio_status_21610_late_callback_undo',
-                  });
-              });
-              // Line-type cache drop mirrors clearSuppression's follow-up;
-              // best-effort outside the transaction.
-              try { await db('phone_line_types').where({ phone: optOutPhone }).del(); } catch { /* cache miss harmless */ }
-              logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression cleared`);
-            } catch (undoErr) {
-              logger.error(`[twilio-status] 21610 late-callback undo FAILED for ${maskPhone(optOutPhone)}: ${undoErr.code || undoErr.message} — recipient may be wrongly suppressed`);
-              try {
-                await require('../services/notification-service').notifyAdmin(
-                  'system',
-                  'Opt-out clear failed after late 21610 callback',
-                  `A later inbound opt-in from ${maskPhone(optOutPhone)} should have cleared the suppression written by a late 21610 callback, but the clear failed. Clear this number from the do-not-text list manually.`,
-                  { bell: true, metadata: { source: 'twilio_status_21610_late_callback_undo' } },
-                );
-              } catch (notifyErr) {
-                logger.error(`[twilio-status] 21610 undo-failure notify also failed: ${notifyErr.message}`);
-              }
-            }
-          } else {
-          // The downstream verdicts run under FOR UPDATE on the suppression
-          // row (hook r4 P1): clearSuppression is an UPDATE on that same
-          // row, so a concurrent START either commits its clear first (we
-          // observe active=false and skip) or blocks until we commit (and
-          // then clears + re-confirms, winning as the newer verdict). The
-          // recipient-declined write shares the transaction's ordering
-          // guarantee; a lock/read failure fails toward NOT texting.
+          const outcome = {};
           try {
             await db.transaction(async (trx) => {
+              await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
+              const logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at');
+              const sentAt = logRow?.created_at || null;
+              const optOutCustomerId = logRow?.customer_id || null;
               const supRow = await trx('messaging_suppression')
-                .where({ phone: optOutPhone }).forUpdate().first('active');
-              if (!supRow || supRow.active !== true) return; // START won — respect it
-              // Recipient double opt-in (codex #3495 r1 P1): when the failed
-              // message was the opt-in ask itself, the generic ask_failed
-              // handler below leaves the recipient row in a state
-              // markRecipientOptin('confirmed') deliberately ignores — so a
-              // later START would clear the global suppression while
-              // appointment fanout stayed blocked forever. A 21610 is the
-              // recipient's VERDICT: record declined, same as inbound STOP.
-              try {
-                // Returns a row count on success (0 = no recipient asks for
-                // this phone — the common case) and FALSE on a swallowed DB
-                // error (hook r6 P1): a failed decline leaves the row for
-                // the generic ask_failed handler, which a later START
-                // deliberately cannot confirm — fanout would stay blocked.
-                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
-                if (declined === false) {
-                  logger.warn(`[twilio-status] 21610 recipient-decline write FAILED for ${maskPhone(optOutPhone)}`);
-                  try {
-                    await require('../services/notification-service').notifyAdmin(
-                      'system',
-                      'Recipient decline write failed on 21610',
-                      `A Twilio 21610 for ${maskPhone(optOutPhone)} could not record the recipient decline. If this number had a pending opt-in ask, mark it declined manually or the next START cannot unblock their appointment texts.`,
-                      { bell: true, metadata: { source: 'twilio_status_21610' } },
-                    );
-                  } catch (nErr) {
-                    logger.error(`[twilio-status] decline-failure notify also failed: ${nErr.message}`);
-                  }
+                .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
+              // A clearance newer than this send wins (late/redelivered
+              // callback after a START) — and an unknown send timestamp
+              // still applies the opt-out (fail toward not texting).
+              if (supRow && supRow.active === false && supRow.cleared_at
+                  && sentAt && new Date(supRow.cleared_at) > new Date(sentAt)) {
+                outcome.deferred = 'cleared-after-send'; return;
+              }
+              // A standing row authored by a callback for a NEWER send owns
+              // the verdict — an older callback must not overwrite it.
+              const ownerSid = /^twilio_status_21610:(.+)$/.exec(supRow?.source || '')?.[1];
+              if (supRow?.active === true && ownerSid && ownerSid !== MessageSid && sentAt) {
+                const ownerLog = await trx('sms_log').where({ twilio_sid: ownerSid }).first('created_at');
+                if (ownerLog?.created_at && new Date(ownerLog.created_at) > new Date(sentAt)) {
+                  outcome.deferred = 'newer-callback-owns-row'; return;
                 }
+              }
+              // recordSuppression resolves { ok: false } on a swallowed DB
+              // error — check the result; a throw here rolls everything back.
+              const result = await recordSuppression({
+                phone: optOutPhone, reason: 'opt_out', source: suppressionSource, dbh: trx,
+              });
+              if (result?.ok === false) {
+                throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
+              }
+              // Post-write recheck: the NEWEST post-send opt command wins.
+              // SQL prefilter to opt-command-shaped rows (coarse superset of
+              // the detector vocabulary; detectSmsOptCommand stays the
+              // authority; \y is PostgreSQL's word boundary).
+              let laterOptIn = false;
+              if (sentAt) {
+                const inbound = await trx('sms_log')
+                  .where({ from_phone: optOutPhone })
+                  .where('created_at', '>', sentAt)
+                  .whereRaw("message_body ~* '^\\s*(start|subscribe|yes|unstop|opt ?in|stop( ?all)?|unsub(scribe)?|cancel|quit|end|remove|opt ?out|do ?n[o'\u2019]?t text)\\y'")
+                  .orderBy('created_at', 'desc')
+                  .limit(50)
+                  .select('message_body');
+                const newestCommand = inbound
+                  .map((r) => detectSmsOptCommand(r.message_body || '').action)
+                  .find((a) => a === 'opt_in' || a === 'opt_out');
+                laterOptIn = newestCommand === 'opt_in';
+              }
+              if (laterOptIn) {
+                // Undo our own write in the same transaction; a failed clear
+                // throws so the upsert rolls back too — never commit a
+                // suppression the recipient has already opted back out of.
+                const cleared = await clearSuppression({
+                  phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo', dbh: trx,
+                });
+                if (cleared?.ok === false) {
+                  throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+                }
+                outcome.undone = true; return;
+              }
+              // Verdicts. A 21610 on the opt-in ask records the recipient as
+              // DECLINED (same as inbound STOP) — the generic ask_failed
+              // state is one markRecipientOptin('confirmed') ignores, which
+              // would leave fanout blocked after a later START cleared the
+              // suppression. Returns a row count on success (0 = no
+              // recipient asks, the common case) and FALSE on a swallowed
+              // DB error.
+              try {
+                const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
+                if (declined === false) outcome.declineFailed = true;
               } catch { /* markRecipientOptin does not reject; belt only */ }
               // Prefs flip — the suppression row is the enforcement;
               // sms_enabled keeps the admin UI honest (same split as STOP).
@@ -1439,13 +1341,46 @@ router.post('/status', async (req, res) => {
                   .onConflict('customer_id')
                   .merge({ sms_enabled: false });
               }
+              outcome.applied = true;
             });
-          } catch (verdictErr) {
-            logger.error(`[twilio-status] 21610 verdict writes failed: ${verdictErr.message}`);
+          } catch (suppressErr) {
+            outcome.failed = suppressErr.code || suppressErr.name || 'db_error';
           }
-          } // end !laterOptIn
-          } // end !clearedAfterSend
-          } // end !newerCallbackOwnsRow
+          // ── Post-commit reporting (never inside the transaction) ──
+          if (outcome.applied) {
+            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
+          } else if (outcome.undone) {
+            // Best-effort line-type cache drop mirrors clearSuppression's
+            // follow-up (it ran with dbh=trx; the cache del is idempotent).
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression not kept`);
+          } else if (outcome.deferred) {
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred (${outcome.deferred})`);
+          } else if (outcome.failed) {
+            logger.warn(`[twilio-status] 21610 opt-out handling FAILED for ${maskPhone(optOutPhone)}: ${outcome.failed}`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'Opt-out suppression write failed',
+                `A Twilio 21610 opt-out for ${maskPhone(optOutPhone)} could not be recorded (delivery status callback; ${outcome.failed}). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
+                { bell: true, metadata: { source: 'twilio_status_21610', error: outcome.failed } },
+              );
+            } catch (notifyErr) {
+              logger.error(`[twilio-status] 21610 failure notify also failed: ${notifyErr.message}`);
+            }
+          }
+          if (outcome.declineFailed) {
+            logger.warn(`[twilio-status] 21610 recipient-decline write FAILED for ${maskPhone(optOutPhone)}`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'Recipient decline write failed on 21610',
+                `A Twilio 21610 for ${maskPhone(optOutPhone)} could not record the recipient decline. If this number had a pending opt-in ask, mark it declined manually or the next START cannot unblock their appointment texts.`,
+                { bell: true, metadata: { source: 'twilio_status_21610' } },
+              );
+            } catch (nErr) {
+              logger.error(`[twilio-status] decline-failure notify also failed: ${nErr.message}`);
+            }
+          }
         }
 
         // Appointment-text fallback: if this undelivered message was an appointment

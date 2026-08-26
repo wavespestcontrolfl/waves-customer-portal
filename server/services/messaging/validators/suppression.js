@@ -140,18 +140,18 @@ async function loadSuppressionState(input, contactState) {
  * the moment STOP / wrong-number is detected, before any outbound queue
  * fires. Idempotent — repeated calls just re-stamp the row.
  */
-async function recordSuppression({ phone, reason, source, capturedBody }) {
+async function recordSuppression({ phone, reason, source, capturedBody, dbh = db }) {
   if (!phone) throw new Error('recordSuppression: phone is required');
   if (!reason) throw new Error('recordSuppression: reason is required');
   try {
-    await db('messaging_suppression')
+    await dbh('messaging_suppression')
       .insert({
         phone,
         reason,
         source: source || null,
         captured_body: capturedBody ? String(capturedBody).slice(0, 1000) : null,
         active: true,
-        created_at: db.fn.now(),
+        created_at: dbh.fn.now(),
       })
       .onConflict('phone')
       .merge({
@@ -207,14 +207,14 @@ async function recordNonMobileSuppression({ phone, source }) {
 /**
  * Clear a suppression record (e.g. on inbound START keyword).
  */
-async function clearSuppression({ phone, source }) {
+async function clearSuppression({ phone, source, dbh = db }) {
   if (!phone) throw new Error('clearSuppression: phone is required');
   try {
-    await db('messaging_suppression')
+    await dbh('messaging_suppression')
       .where({ phone })
       .update({
         active: false,
-        cleared_at: db.fn.now(),
+        cleared_at: dbh.fn.now(),
         source: source ? `cleared_by:${source}` : null,
       });
     // Also drop any cached line-type so a START/admin clear fully un-blocks the
@@ -224,7 +224,7 @@ async function clearSuppression({ phone, source }) {
     // would stay blocked forever despite the clear. Next send re-evaluates fresh.
     // Best-effort: the table may not exist yet, and a cache miss is harmless.
     try {
-      await db('phone_line_types').where({ phone }).del();
+      await dbh('phone_line_types').where({ phone }).del();
     } catch (cacheErr) {
       if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
         logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
