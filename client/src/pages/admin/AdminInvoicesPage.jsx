@@ -1763,7 +1763,7 @@ function InvoiceList({
                               Reverse prepaid
                             </button>
                           )}
-                          {inv.status === "void" && (
+                          {isAdminUser && inv.status === "void" && (
                             <button
                               onClick={() => handleUnvoid(inv.id)}
                               disabled={rowActionBusy === inv.id}

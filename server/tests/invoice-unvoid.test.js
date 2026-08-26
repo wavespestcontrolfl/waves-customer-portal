@@ -16,11 +16,14 @@ const mockRetrievePI = jest.fn();
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePI(...args),
 }));
-const mockResumeSequence = jest.fn(async () => undefined);
-const mockScheduleForInvoice = jest.fn(async () => undefined);
+const mockCoversVisit = jest.fn(async () => false);
+jest.mock('../services/annual-prepay-renewals', () => ({
+  annualPrepayCoversVisit: (...args) => mockCoversVisit(...args),
+  syncTermForInvoicePayment: jest.fn(async () => undefined),
+}));
 jest.mock('../services/invoice-followups', () => ({
-  resumeSequence: (...args) => mockResumeSequence(...args),
-  scheduleForInvoice: (...args) => mockScheduleForInvoice(...args),
+  resumeSequence: jest.fn(async () => undefined),
+  scheduleForInvoice: jest.fn(async () => undefined),
   stopSequence: jest.fn(async () => undefined),
 }));
 
@@ -52,25 +55,29 @@ function voidInvoice(overrides = {}) {
 }
 
 // Happy-path db() slot order inside unvoidInvoice:
-//   load → annual_prepay_terms canonical-link guard → (trx) conditional
-//   restore → payments money guard → sms_log deferred-send cancel →
-//   (post-commit) void-stopped sequence lookup.
-function mockHappyPath({ restored, seqRow } = {}) {
+//   load → annual_prepay_terms canonical-link pre-guard → (trx) conditional
+//   restore → annual_prepay_terms TOCTOU re-check → payments money guard →
+//   sms_log deferred-send cancel → sms_log in-flight 'sending' fence.
+// (No sequence re-arm here: that lives in scheduleForInvoice at resend.)
+function mockHappyPath({ restored } = {}) {
   const updateChain = chain({ returning: [restored] });
   const smsChain = chain();
+  const sendingChain = noRow();
   db
     .mockReturnValueOnce(chain({ first: voidInvoice() }))
-    .mockReturnValueOnce(noRow()) // no owning annual_prepay_terms row
+    .mockReturnValueOnce(noRow()) // pre-guard: no owning annual_prepay_terms row
     .mockReturnValueOnce(updateChain)
+    .mockReturnValueOnce(noRow()) // TOCTOU: still no owning term
     .mockReturnValueOnce(noRow()) // fresh-row money guard
     .mockReturnValueOnce(smsChain)
-    .mockReturnValueOnce(chain({ first: seqRow }));
-  return { updateChain, smsChain };
+    .mockReturnValueOnce(sendingChain);
+  return { updateChain, smsChain, sendingChain };
 }
 
 describe('InvoiceService.unvoidInvoice', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockCoversVisit.mockResolvedValue(false);
     db.transaction = jest.fn(async (fn) => fn(db));
   });
 
@@ -113,23 +120,19 @@ describe('InvoiceService.unvoidInvoice', () => {
     );
   });
 
-  test('re-arms ONLY the system void-stop dunning sequence after restore (Codex #3493)', async () => {
-    const restored = voidInvoice({ status: 'draft' });
-    mockHappyPath({ restored, seqRow: { id: 'seq-1' } });
-
-    await InvoiceService.unvoidInvoice('inv-1');
-
-    expect(mockResumeSequence).toHaveBeenCalledWith('inv-1');
-    expect(mockScheduleForInvoice).toHaveBeenCalledWith('inv-1');
-
-    // No void-stopped row (none, or an admin's own stop — the query filters
-    // on stopped_reason='invoice_voided' + no admin id) → leave it alone.
-    jest.clearAllMocks();
-    db.transaction = jest.fn(async (fn) => fn(db));
-    mockHappyPath({ restored, seqRow: undefined });
-    await InvoiceService.unvoidInvoice('inv-1');
-    expect(mockResumeSequence).not.toHaveBeenCalled();
-    expect(mockScheduleForInvoice).not.toHaveBeenCalled();
+  test('refuses while a claimed deferred send is mid-dispatch — the cancel cannot reach a claimed row (Codex #3493 r2)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice() }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ first: { id: 'sms-9' } })); // 'sending' claim present → rollback
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute',
+    );
+    expect(mockReconcile).not.toHaveBeenCalled();
   });
 
   test('refuses an invoice that is not void', async () => {
@@ -160,6 +163,27 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('re-checks the term link on the FRESH locked row — a concurrent /annual-prepay stamp rolls the restore back (Codex #3493 r2)', async () => {
+    // Stamp landed on the row between the pre-guards and the conditional update.
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice() }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', annual_prepay_term_id: 'term-9' })] }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/annual prepay term/);
+    expect(mockReconcile).not.toHaveBeenCalled();
+
+    // Term created concurrently without the denormalized stamp.
+    jest.clearAllMocks();
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice() }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
+      .mockReturnValueOnce(chain({ first: { id: 'term-9' } }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/annual prepay term/);
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+
   test('refuses a prepay-switch-superseded invoice — its guarded restore path owns it (Codex #3493)', async () => {
     db
       .mockReturnValueOnce(chain({
@@ -175,6 +199,44 @@ describe('InvoiceService.unvoidInvoice', () => {
   test('refuses an annual-prepay-term invoice (denormalized stamp)', async () => {
     db.mockReturnValueOnce(chain({ first: voidInvoice({ annual_prepay_term_id: 'term-1' }) }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/annual prepay term/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses when the linked service visit is cancelled/rescheduled — its invoices were voided on purpose (Codex #3493 r2)', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'cancelled' } }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice',
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses when an active annual prepay covers the linked visit — the dispatch add-ons void carries no term stamp (Codex #3493 r2)', async () => {
+    const svc = { id: 'svc-1', status: 'completed', annual_prepay_term_id: 'term-1' };
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: svc }));
+    mockCoversVisit.mockResolvedValueOnce(true);
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      /an active annual prepay covers this visit/,
+    );
+    expect(mockCoversVisit).toHaveBeenCalledWith(svc, db);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('fails CLOSED when the linked service cannot be read (Codex #3493 r2)', async () => {
+    const svcChain = chain();
+    svcChain.first = jest.fn(async () => { throw new Error('boom'); });
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(svcChain);
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      'Could not verify the linked service visit — refusing to unvoid (boom)',
+    );
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
@@ -200,6 +262,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
+      .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ first: { id: 'pay-9' } })); // fresh-row money guard hit → rollback
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
       'Cannot unvoid an invoice with payment already applied (payment pay-9)',
@@ -241,6 +304,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ first: voidInvoice({ stripe_payment_intent_id: 'pi_1' }) }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ returning: [restored] }))
+      .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain())
       .mockReturnValueOnce(noRow());

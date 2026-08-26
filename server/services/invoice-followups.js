@@ -333,6 +333,47 @@ async function scheduleForInvoice(invoiceId) {
     // one atomic decision, or two concurrent arms race the unique(invoice_id).
     const existing = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
     if (existing) {
+      // Unvoid → resend lifecycle re-arm (Codex #3493 r2): voidInvoice
+      // terminally stops the sequence with the SYSTEM stop
+      // 'invoice_voided' (no admin id). An unvoided invoice keeps that
+      // stop while it sits in draft — dunning must never fire against an
+      // unpublished draft — and the RESEND (which is what calls this
+      // function, after the status flip out of draft) is the lifecycle
+      // point where reminders become legitimate again. Re-arm holds the
+      // invoice lock here, and the UPDATE stays conditional on the exact
+      // system stop, so a concurrent admin pause/stop (which rewrites
+      // status/stopped_* under this same lock) wins and is never
+      // clobbered. An autopay-held row goes back to 'autopay_hold', not
+      // 'active' — activating it would dun an autopay customer (same rule
+      // as the payment-plan reopen path); autopay standing is also
+      // re-checked live in case enrollment changed while the row was
+      // stopped. An exhausted cadence restores terminal 'completed' so
+      // the legacy late-payment checker owns the invoice again (mirrors
+      // resumeSequence's exhausted branch).
+      const isSystemVoidStop = existing.status === 'stopped'
+        && existing.stopped_reason === 'invoice_voided'
+        && !existing.stopped_by_admin_id;
+      if (isSystemVoidStop) {
+        const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
+        const holdForAutopay = existing.is_autopay_held
+          || await customerOnAutopay(customerNow, { db: trx });
+        const nextTouchAt = holdForAutopay
+          ? null
+          : computeNextTouchAt(existing.anchor_at || invoice.due_date || invoice.created_at, existing.step_index);
+        const [rearmed] = await trx('invoice_followup_sequences')
+          .where({ id: existing.id, status: 'stopped', stopped_reason: 'invoice_voided' })
+          .whereNull('stopped_by_admin_id')
+          .update({
+            updated_at: trx.fn.now(),
+            status: holdForAutopay ? 'autopay_hold' : (nextTouchAt ? 'active' : 'completed'),
+            is_autopay_held: !!holdForAutopay,
+            stopped_reason: null,
+            stopped_by_admin_id: null,
+            next_touch_at: nextTouchAt,
+          })
+          .returning('*');
+        return rearmed || existing;
+      }
       // Don't clobber admin-controlled state; just make sure we're aligned.
       if (existing.status === 'stopped' || existing.status === 'completed') return existing;
       return existing;
