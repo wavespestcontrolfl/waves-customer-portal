@@ -72,11 +72,11 @@ function makeConn(handler) {
       return b;
     };
     fn.transaction = (cb) => Promise.resolve().then(() => cb(make()));
-    // Schema probes (invoice reconciliation + billing-covered checks): a
-    // pre-migration "table/column absent" answer keeps those paths inert so
-    // each test opts into them explicitly.
+    // Schema probes: the add-on table exists (its reads are exercised);
+    // the invoice link column and the billing-covered tables answer absent
+    // so those paths stay inert unless a test opts in via row fields.
     fn.schema = {
-      hasTable: async () => false,
+      hasTable: async (name) => name === 'scheduled_service_addons',
       hasColumn: async () => false,
     };
     fn.fn = { now: () => new Date() };
@@ -251,6 +251,7 @@ describe('stampRecurringTemplateOverrides', () => {
 describe('propagatePriceServiceToFollowingSiblings', () => {
   function propagationScenario({ siblings, addonsByVisit = {} }) {
     const updates = [];
+    const reminderUpdates = [];
     const targetQueries = [];
     const conn = makeConn(({ table, calls, op, data }) => {
       if (op === 'await' && table === 'scheduled_services') {
@@ -262,13 +263,18 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
         return addonsByVisit[whereCall?.[1]?.scheduled_service_id] || [];
       }
       if (op === 'update') {
-        const whereCall = calls.find(([name, arg]) => name === 'where' && arg && arg.id);
+        const whereCall = calls.find(([name, arg]) => name === 'where' && arg && (arg.id || arg.scheduled_service_id));
+        if (table === 'appointment_reminders') {
+          reminderUpdates.push({ id: whereCall?.[1]?.scheduled_service_id, data });
+          return 1;
+        }
+        if (table !== 'scheduled_services') return 1;
         updates.push({ id: whereCall?.[1]?.id, data });
         return 1;
       }
       return null;
     });
-    return { conn, updates, targetQueries };
+    return { conn, updates, reminderUpdates, targetQueries };
   }
 
   it('re-derives each sibling price from its OWN add-on rows instead of copying the edited total', async () => {
@@ -312,6 +318,22 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     expect(updates[0].data.appointment_type).toBeDefined();
     // Unscoped discount → the recompute reproduces the stored number.
     expect(updates[0].data.estimated_price).toBe(25);
+  });
+
+  it("relabels the sibling's live reminders on a service change — senders render the stored label", async () => {
+    const siblings = [{
+      id: 's1', primary_line_price: '25.00', estimated_price: '25.00',
+      pre_service_brief_type: null,
+    }];
+    const { conn, reminderUpdates } = propagationScenario({ siblings });
+    await propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited', parentId: 'p1', fromDateStr: '2098-01-15',
+      fields: { service_type: 'Pest Control Service', service_id: 9 },
+      serviceChanged: true, priceChanged: false, cols: COLS,
+    });
+    expect(reminderUpdates).toHaveLength(1);
+    expect(reminderUpdates[0].id).toBe('s1');
+    expect(reminderUpdates[0].data.service_type).toBe('Pest Control Service');
   });
 
   it('never writes a column the schema lacks', async () => {
@@ -447,8 +469,11 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
     expect(src).toMatch(/spawnScopeCols\.recurring_template_overrides && parent\.recurring_template_overrides/);
   });
 
-  it('a scoped save serializes on the per-parent recurring-series maintenance lock', () => {
-    expect(src).toMatch(/\|\| wantsPriceServiceScope;\s*\n\s*if \(wantsExistingPlanMutation && commsPeek\)/);
+  it('every template writer serializes on the per-parent recurring-series maintenance lock', () => {
+    expect(src).toMatch(/\|\| wantsPriceServiceScope\n/);
+    // The gate-enabled NO-scope path (legacy coherence refresh + conversion
+    // stamp) joins the same lock decision.
+    expect(src).toMatch(/&& Object\.keys\(updates\)\.some\(\(key\) => PRICE_SERVICE_OVERRIDE_KEYS\.has\(key\)\)\);\s*\n\s*if \(wantsExistingPlanMutation && commsPeek\)/);
   });
 
   it('re-service conversions honor a posted scope instead of silently ignoring it', () => {
@@ -483,5 +508,17 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   it('the no-scope coherence refresh is VALUE-gated against the locked before-image, never presence-gated', () => {
     expect(src).toMatch(/const legacyGroups = computePriceServiceGroupChanges\(priceServiceBeforeRow, updates\);/);
     expect(src).toMatch(/if \(legacyGroups\.changed\) \{/);
+  });
+
+  it('a series-wide conversion stamps its values into existing template overrides', () => {
+    expect(src).toMatch(/stampRecurringTemplateOverrides\(trx, req\.params\.id, conversionGroups\.fields, seriesCols\)/);
+  });
+
+  it('a reprice fails closed when a selected stale invoice could not actually be voided', () => {
+    expect(src).toMatch(/voidedIds\.length < staleInvoiceIds\.length/);
+  });
+
+  it('sibling add-on reads fail closed — only the missing-table compat case proceeds add-on-less', () => {
+    expect(src).toMatch(/const addonTableExists = billingRelevant && targets\.length > 0/);
   });
 });

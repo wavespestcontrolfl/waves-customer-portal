@@ -2396,6 +2396,11 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
   }
+  // Missing-table compat probe, ONCE — inside the loop the add-on reads run
+  // bare so an operational failure aborts the save (see below).
+  const addonTableExists = billingRelevant && targets.length > 0
+    ? await conn.schema.hasTable('scheduled_service_addons')
+    : false;
   const updatedIds = [];
   for (const sibling of targets) {
     if (billingRelevant && invoiceLinkColumn) {
@@ -2421,9 +2426,18 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
           voidUpdate.updated_at = conn.fn.now();
         }
         // The helper locks each row and SKIPS anything with recorded or
-        // in-flight money (those shapes were refused above), restoring
-        // consumed deposit/account credit on the ones it voids.
-        await voidConversionInvoicesRestoringCredits({ trx: conn, ids: staleInvoiceIds, voidUpdate });
+        // in-flight money, restoring consumed deposit/account credit on
+        // the ones it voids.
+        const voidedIds = await voidConversionInvoicesRestoringCredits({ trx: conn, ids: staleInvoiceIds, voidUpdate });
+        // A customer can confirm /pay setup between the probe above and
+        // the helper's row lock — the helper then skips that now-in-flight
+        // invoice, and repricing the visit while the live old-amount
+        // invoice survives is exactly the stale-collect bug. Fail closed
+        // when anything selected wasn't actually voided (Codex #3505 r4
+        // P1); the 409 is retryable once the payment settles or fails.
+        if (voidedIds.length < staleInvoiceIds.length) {
+          throw httpError(409, `Can't apply this price/service change to the rest of the series: a payment on the ${dateOnly(sibling.scheduled_date) || 'later'} visit's invoice is in flight. Retry after it settles, or set the change to this appointment only.`);
+        }
       }
     }
     const siblingUpdates = { updated_at: new Date() };
@@ -2443,6 +2457,15 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         sibling.pre_service_brief_type,
       );
       if (briefClear) Object.assign(siblingUpdates, briefClear);
+      // The 72h/24h reminder rows carry their own stored service label —
+      // senders render the customer-facing service name from it, and the
+      // reminder sync trigger only covers date/window/status moves — so a
+      // propagated service change must relabel the sibling's live
+      // reminders or customers get texts naming the old service (Codex
+      // #3505 r4 P1).
+      await conn('appointment_reminders')
+        .where({ scheduled_service_id: sibling.id, cancelled: false })
+        .update({ service_type: fields.service_type, updated_at: new Date() });
     }
     // Re-derived for a service change too, not just a price change: a
     // sibling whose stored appointment discount is SERVICE-SCOPED
@@ -2451,13 +2474,15 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     // from the new snapshots (Codex #3505 r2 P1). With an unscoped
     // discount the recompute reproduces the stored numbers.
     if (billingRelevant) {
+      // Fail CLOSED on the read (Codex #3505 r4 P1): recomputing a priced
+      // sibling from an empty add-on list would silently strip its add-on
+      // charges, so an operational query failure must abort the scoped
+      // save — only the missing-table compat case (probed once above)
+      // proceeds add-on-less.
       let siblingAddons = [];
-      try {
-        // Savepoint, not a bare try/catch: a missing scheduled_service_addons
-        // table (pre-migration env) must not poison the caller's transaction.
-        siblingAddons = await conn.transaction((sp) =>
-          sp('scheduled_service_addons').where({ scheduled_service_id: sibling.id }));
-      } catch { siblingAddons = []; }
+      if (addonTableExists) {
+        siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
+      }
       const overlaid = { ...sibling, ...fields };
       const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
       const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
@@ -6851,7 +6876,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // save merging the same override JSON) — Codex #3505 r1 P1.
       const wantsExistingPlanMutation = wantsVisitCountReconcile
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
-        || wantsPriceServiceScope;
+        || wantsPriceServiceScope
+        // The no-scope override-coherence refresh (and the conversion
+        // override stamp) write the template too, from legacy surfaces
+        // that post no scope — EVERY template writer must serialize with
+        // the extension readers on this same lock (Codex #3505 r4 P1).
+        || (isEnabled('editApptPriceServiceScope')
+          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
       if (wantsExistingPlanMutation && commsPeek) {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
       }
@@ -7394,13 +7425,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // add-on charges from every future visit, so refuse it (Codex
         // #3505 r3 P1); templates without priced add-ons pin cleanly below.
         if (conversionScopedThisOnly && isTemplateEdit && reServiceConversionZeroPrice) {
+          // Fail CLOSED on the read (Codex #3505 r4 P1): an unreadable
+          // add-on table must block the conversion rather than waving it
+          // through as "no priced add-ons". Only the missing-table compat
+          // case (pre-migration env) proceeds add-on-less.
           let templateAddons = [];
-          try {
-            // Savepoint — a missing scheduled_service_addons table
-            // (pre-migration env) must not poison the transaction.
-            templateAddons = await trx.transaction((sp) =>
-              sp('scheduled_service_addons').where({ scheduled_service_id: req.params.id }));
-          } catch { templateAddons = []; }
+          if (await trx.schema.hasTable('scheduled_service_addons')) {
+            templateAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id });
+          }
           const hasPricedAddon = templateAddons.some((addon) =>
             Number(addon.estimated_price) > 0 || Number(addon.base_price) > 0);
           if (hasPricedAddon) {
@@ -7420,6 +7452,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
         if (isTemplateEdit && !conversionScopedThisOnly) {
+          // Keep the template overrides coherent with a series-wide
+          // conversion (Codex #3505 r4 P1): a parent already stamped or
+          // pinned by an earlier scoped edit would otherwise hand the NEXT
+          // auto-extension the stale regular-service/priced values —
+          // minting a billable visit on a series the office just converted
+          // to free callbacks. Stamp when overrides already exist or the
+          // operator posted the scope; a legacy no-overrides conversion
+          // keeps today's behavior (extensions copy the parent columns).
+          if (seriesCols.recurring_template_overrides && priceServiceBeforeRow
+            && (wantsPriceServiceScope
+              || parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides))) {
+            const conversionGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+            if (conversionGroups.changed) {
+              await stampRecurringTemplateOverrides(trx, req.params.id, conversionGroups.fields, seriesCols);
+            }
+          }
           const seriesUpdates = {};
           if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
           if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
