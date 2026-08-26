@@ -592,6 +592,45 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
   return trx ? run(trx) : db.transaction(run);
 }
 
+/**
+ * Atomically return ALL applied homeowner credit on an invoice and stamp the
+ * resolved third-party payer, in one transaction (Codex r29 P1 on PR #3492):
+ * the reversal amount is re-read under the invoice row lock — never a caller
+ * snapshot, so credit applied between the caller's read and this call is
+ * included — and the payer stamp commits with the reversal or not at all
+ * (a stamp failure rolls the reversal back too). Throws
+ * CREDIT_REVERSAL_INCOMPLETE when the full current amount cannot be returned
+ * (reverseAppliedCredit's settled/in-flight refusal included), which rolls
+ * everything back — the invoice stays self-pay for the caller's defer path.
+ * An invoice already carrying a payer_id is left untouched
+ * ({ alreadyStamped: true }): another writer won, same semantics as the
+ * callers' previous whereNull guard.
+ */
+async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null, payerSnapshot = null, createdBy = 'system', note = null }) {
+  if (!payerId) throw new Error('reverseCreditAndStampPayer requires a payerId');
+  return db.transaction(async (trx) => {
+    const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
+      .first('id', 'credit_applied', 'payer_id');
+    if (!inv) throw new Error(`reverseCreditAndStampPayer: invoice ${invoiceId} not found`);
+    if (inv.payer_id) return { stamped: false, alreadyStamped: true, reversed: 0 };
+    const applied = round2(inv.credit_applied || 0);
+    if (applied > 0) {
+      const reversal = await reverseAppliedCredit({ invoiceId, amount: applied, createdBy, note }, trx);
+      if ((Number(reversal?.reversed) || 0) + 0.005 < applied) {
+        const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+        stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+        throw stuck;
+      }
+    }
+    await trx('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
+      payer_id: payerId,
+      ...(poNumber ? { po_number: poNumber } : {}),
+      ...(payerSnapshot ? { payer_snapshot: JSON.stringify(payerSnapshot) } : {}),
+    });
+    return { stamped: true, alreadyStamped: false, reversed: applied };
+  });
+}
+
 module.exports = {
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
@@ -608,6 +647,7 @@ module.exports = {
   autoApplyAccountCreditIfEnabled,
   runPostFullCoverageSideEffects,
   reverseAppliedCredit,
+  reverseCreditAndStampPayer,
   restoreAccountCreditForVoidedInvoice,
   returnAppliedCreditOnRefund,
 };

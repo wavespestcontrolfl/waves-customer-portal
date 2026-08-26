@@ -11816,7 +11816,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let prepayPayerRouting = null; // 'payer_billed' | 'self_pay' | 'unresolved'
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
         try {
-          const payerInvRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'credit_applied', 'scheduled_service_id');
+          const payerInvRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_service_id');
           if (payerInvRow?.payer_id) {
             prepayPayerRouting = 'payer_billed';
           } else {
@@ -11838,32 +11838,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // PREPAY_JOB_NOT_OWNED into the routing catch → cede
               // (no stamp, no delivery, the owner resolves).
               await chargeUnderJobFence(async () => {
-                const payerAppliedCredit = Number(payerInvRow?.credit_applied) || 0;
-                if (payerAppliedCredit > 0) {
-                  // The reversal REFUSES settled/in-flight invoices (e.g. the
-                  // in-trx apply already covered the year → status 'prepaid')
-                  // by returning { reversed: 0, skipped } instead of throwing
-                  // (Codex r26 P1). Stamping the payer over an un-returned
-                  // homeowner credit would hand AP a bill funded from the
-                  // homeowner's ledger — require the FULL reversal before the
-                  // re-route; anything less throws into the routing catch
-                  // (→ 'unresolved': defer, no stamp, no delivery).
-                  const reversal = await require('../services/customer-credit').reverseAppliedCredit({
-                    invoiceId,
-                    amount: payerAppliedCredit,
-                    createdBy: 'system:prepay_payer_reroute',
-                    note: 'Account credit returned — invoice re-routed to third-party payer',
-                  });
-                  if ((Number(reversal?.reversed) || 0) + 0.005 < payerAppliedCredit) {
-                    const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
-                    stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
-                    throw stuck;
-                  }
-                }
-                await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
-                  payer_id: resolvedRouting.payerId,
-                  ...(resolvedRouting.poNumber ? { po_number: resolvedRouting.poNumber } : {}),
-                  ...(resolvedRouting.snapshot ? { payer_snapshot: JSON.stringify(resolvedRouting.snapshot) } : {}),
+                // Atomic reverse-and-stamp (Codex r29 P1): ONE transaction
+                // locks the invoice, re-reads the CURRENT credit_applied
+                // (never the payerInvRow snapshot — credit added since is
+                // included), returns all of it, and stamps the payer — a
+                // stamp failure rolls the reversal back too. The reversal's
+                // settled/in-flight refusal (Codex r26 P1, e.g. 'prepaid'
+                // from in-trx coverage) surfaces as
+                // CREDIT_REVERSAL_INCOMPLETE, which rolls back and throws
+                // into the routing catch (→ 'unresolved': defer, no stamp,
+                // no delivery).
+                await require('../services/customer-credit').reverseCreditAndStampPayer({
+                  invoiceId,
+                  payerId: resolvedRouting.payerId,
+                  poNumber: resolvedRouting.poNumber || null,
+                  payerSnapshot: resolvedRouting.snapshot || null,
+                  createdBy: 'system:prepay_payer_reroute',
+                  note: 'Account credit returned — invoice re-routed to third-party payer',
                 });
               });
               prepayPayerRouting = 'payer_billed';
@@ -12163,30 +12154,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   // Under the ownership fence (hook P0 r23): payer/credit
                   // mutations only while this executor still owns the job.
                   await chargeUnderJobFence(async () => {
-                    const creditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
-                    const appliedCredit = Number(creditRow?.credit_applied) || 0;
-                    if (appliedCredit > 0) {
-                      // The reversal returns { reversed: 0, skipped } (no
-                      // throw) on settled/in-flight invoices (Codex r26
-                      // P1) — require the FULL amount back before the
-                      // payer stamp; an incomplete reversal throws out of
-                      // the fence into the payerErr catch (no stamp, defer).
-                      const reversal = await require('../services/customer-credit').reverseAppliedCredit({
-                        invoiceId,
-                        amount: appliedCredit,
-                        createdBy: 'system:prepay_payer_reroute',
-                        note: 'Account credit returned — invoice re-routed to third-party payer',
-                      });
-                      if ((Number(reversal?.reversed) || 0) + 0.005 < appliedCredit) {
-                        const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
-                        stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
-                        throw stuck;
-                      }
-                    }
-                    await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
-                      payer_id: resolved.payerId,
-                      ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
-                      ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
+                    // Atomic reverse-and-stamp (Codex r29 P1): one
+                    // transaction locks the invoice, reverses its CURRENT
+                    // credit_applied in full, and stamps the payer — or
+                    // rolls both back. The settled/in-flight refusal
+                    // (Codex r26 P1) surfaces as
+                    // CREDIT_REVERSAL_INCOMPLETE out of the fence into the
+                    // payerErr catch (no stamp, defer).
+                    await require('../services/customer-credit').reverseCreditAndStampPayer({
+                      invoiceId,
+                      payerId: resolved.payerId,
+                      poNumber: resolved.poNumber || null,
+                      payerSnapshot: resolved.snapshot || null,
+                      createdBy: 'system:prepay_payer_reroute',
+                      note: 'Account credit returned — invoice re-routed to third-party payer',
                     });
                   });
                   payerStamped = true;

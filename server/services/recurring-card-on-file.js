@@ -1102,25 +1102,20 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
               // fence (hook P0 r23): payer/credit mutations only while
               // this pass still owns the job.
               const fencedStamp = await withJobFence(async () => {
-                const creditRow = await db('invoices').where({ id: job.invoice_id }).first('credit_applied');
-                const appliedCredit = Number(creditRow?.credit_applied) || 0;
-                if (appliedCredit > 0) {
-                  const reversal = await require('./customer-credit').reverseAppliedCredit({
-                    invoiceId: job.invoice_id,
-                    amount: appliedCredit,
-                    createdBy: 'system:prepay_payer_reroute',
-                    note: 'Account credit returned — invoice re-routed to third-party payer',
-                  });
-                  if ((Number(reversal?.reversed) || 0) + 0.005 < appliedCredit) {
-                    const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
-                    stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
-                    throw stuck;
-                  }
-                }
-                await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
-                  payer_id: resolved.payerId,
-                  ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
-                  ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
+                // Atomic reverse-and-stamp (Codex r29 P1, mirror of the
+                // in-flow sites): one transaction locks the invoice,
+                // reverses its CURRENT credit_applied in full, and stamps
+                // the payer — or rolls both back. The settled/in-flight
+                // refusal (Codex r26 P1) surfaces as
+                // CREDIT_REVERSAL_INCOMPLETE into the payerErr catch (no
+                // stamp, job stays claimed for the lease).
+                await require('./customer-credit').reverseCreditAndStampPayer({
+                  invoiceId: job.invoice_id,
+                  payerId: resolved.payerId,
+                  poNumber: resolved.poNumber || null,
+                  payerSnapshot: resolved.snapshot || null,
+                  createdBy: 'system:prepay_payer_reroute',
+                  note: 'Account credit returned — invoice re-routed to third-party payer',
                 });
               });
               payerStamped = fencedStamp.ceded !== true;
