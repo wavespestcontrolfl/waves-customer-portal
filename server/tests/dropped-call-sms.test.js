@@ -494,8 +494,13 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21610' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_PROVIDER_OPT_OUT_21610' });
+    // The suppression store write belongs to the sendSMS choke point
+    // (recordSyncProviderOptOut — attempt-timestamped, advisory-locked,
+    // START-reconciled); this lane must NOT duplicate it with an
+    // unconditional write that could clobber a deferred verdict (codex
+    // #3495 r17). Local claim/card state only.
     const { recordSuppression } = require('../services/messaging/validators/suppression');
-    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: PHONE, reason: 'opt_out' }));
+    expect(recordSuppression).not.toHaveBeenCalled();
     expect(state.deletes).toHaveLength(0);
     const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
     expect(claimStamp.payload.outcome).toBe('opted_out');
