@@ -211,6 +211,70 @@ function invoiceHasDepositCreditLine(invoice) {
   );
 }
 
+// Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
+// pre-transaction as a fast fail, and again INSIDE the restore transaction
+// on the freshly-locked invoice row — a cancellation, free re-service
+// conversion, or annual-prepay stamping can commit between the two, and the
+// cancellation sweep only voids non-void invoices, so it would miss a
+// restore that commits on a stale verdict. All reads fail CLOSED.
+async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
+  if (!invoiceRow.scheduled_service_id) return;
+  let svc = null;
+  try {
+    // The in-transaction pass takes the visit row lock (Codex #3493 r8): a
+    // concurrent writer holding the row (coverage stamping, cancellation)
+    // is uncommitted-invisible to a plain MVCC read, so a lockless second
+    // read could pass on the stale version while both commit. FOR UPDATE
+    // waits for the in-flight writer and reads the committed result.
+    let q = conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id });
+    if (lock) q = q.forUpdate();
+    svc = await q.first();
+  } catch (err) {
+    throw new Error(
+      `Could not verify the linked service visit — refusing to unvoid (${err.message})`,
+    );
+  }
+  if (!svc) return;
+  // Cancellation and no-show deliberately void the visit's open invoices
+  // (voidOpenInvoicesForCancelledService; the no-show flow may also charge
+  // the no-show fee) — restoring one while the visit stays terminal would
+  // bill work that was not performed.
+  const svcStatus = String(svc.status || "").toLowerCase();
+  if (["cancelled", "canceled", "rescheduled", "no_show", "skipped"].includes(svcStatus)) {
+    throw new Error(
+      `Cannot unvoid — the linked service visit is ${svcStatus}; restore or re-book the visit before restoring its invoice`,
+    );
+  }
+  // Free re-service conversion (admin-schedule update-details) zero-prices
+  // the visit and voids its unpaid invoices ON PURPOSE — charge-now and
+  // completion reuse a non-void invoice by scheduled_service_id, so a
+  // restored stale charge would be presented/collected for a visit that is
+  // now free.
+  if (svc.is_callback && !(Number(svc.estimated_price) > 0)) {
+    throw new Error(
+      "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
+    );
+  }
+  // Annual-prepay stamping: prepaid_method + amount + term link mean the
+  // base work's money lives on the term's prepay invoice (the dispatch
+  // add-ons fallback voids exactly these invoices with NO invoice-level
+  // term stamp). annualPrepayCoversVisit is deliberately NOT used here: it
+  // fails OPEN (returns false on read errors) — right for billing
+  // suppression, wrong for a restore guard. The stamps alone refuse: fail
+  // closed, no async failure modes, and the annual-prepay flows own any
+  // stale-stamp cleanup.
+  const AnnualPrepay = require("./annual-prepay-renewals");
+  if (
+    svc.prepaid_method === AnnualPrepay.ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(svc.prepaid_amount) > 0
+    && svc.annual_prepay_term_id
+  ) {
+    throw new Error(
+      "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+}
+
 function appendPayUrlParams(url, params = null) {
   if (!params || typeof params !== "object") return url;
   try {
@@ -822,8 +886,13 @@ const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
 // sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
 // Best-effort + idempotent; the resolver only matches open, never-converted
 // leads and never throws.
-async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus }) {
-  if (!customerId || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
+  // priorDelivered: the invoice carried delivery stamps (sent_at /
+  // sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
+  // with its historical stamps retained, so priorStatus alone would read
+  // its resend as a first delivery and the contact fallback could mark an
+  // unrelated newer lead won (Codex #3493 r7).
+  if (!customerId || priorDelivered || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
     await convertLeadFromEvent({ source: "invoice_sent", customerId });
@@ -2490,7 +2559,7 @@ const InvoiceService = {
       // the wrapper owns the finalize + conversion, so skip here to avoid a double
       // pass. Resend-safe via the priorStatus gate inside the helper.
       if (!allowClaimed) {
-        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
       }
 
       return { sent: true, payUrl };
@@ -2536,7 +2605,7 @@ const InvoiceService = {
           .catch(() => {});
         if (!allowClaimed) {
           try {
-            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
+            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
           } catch (e) {
             logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
@@ -2810,7 +2879,19 @@ const InvoiceService = {
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+      // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
+      // the inner sendViaSMS hook only runs on SMS success, so an
+      // email-only delivery finalized here armed nothing — a fresh invoice
+      // got no dunning, and an unvoided one stayed under its
+      // 'invoice_voided' stop forever. Idempotent when the SMS leg already
+      // scheduled (existing rows are returned unchanged; the void-stop
+      // re-arm is conditional).
+      try {
+        await require("./invoice-followups").scheduleForInvoice(invoiceId);
+      } catch (e) {
+        logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+      }
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
       // No channel delivered — reverse the credit this seam auto-applied before
@@ -2888,7 +2969,7 @@ const InvoiceService = {
     // this call performed the write; the helper's priorStatus gate (read pre-
     // update) keeps a resend of an already-sent invoice from converting.
     if (updated) {
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
     }
 
     // Queue the review request only when THIS call performed the finalization
@@ -4336,6 +4417,425 @@ const InvoiceService = {
     // Coverage-changing transition (PR #3476): a voided stamped/linked
     // invoice may have been the setup-fee alert's coverage — reopen it.
     await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
+    return invoice;
+  },
+
+  /**
+   * Restore a VOIDED invoice to an editable, collectible 'draft' — the
+   * operator's undo for an accidental void. Deliberately narrow: any void
+   * that returned money state REFUSES (fail closed) and names the correct
+   * path instead of trying to re-take the money here:
+   *   - deposit_credit line: voidInvoice's ledger restore re-opened the
+   *     deposit rows (they may have rolled forward onto another invoice
+   *     since) but the negative line stays on this invoice — restoring it
+   *     would collect a total reduced by credit the ledger no longer holds
+   *     against it. The replacement path is a NEW invoice, where the
+   *     deposit credit re-applies through the normal roll-forward.
+   *   - annual prepay term: voidInvoice synced the term; the term flow owns
+   *     its prepay invoice lifecycle.
+   * Applied ACCOUNT credit needs no guard: restoreAccountCreditForVoidedInvoice
+   * zeroed credit_applied (and the prepaid/paid stamps) on this row when it
+   * returned the balance, so the restored draft collects its full total and
+   * the operator can re-apply credit deliberately. A payment plan cancelled
+   * at void time stays cancelled — recreate it on the restored invoice.
+   */
+  async unvoidInvoice(id) {
+    const current = await db("invoices").where({ id }).first();
+    if (!current) throw new Error("Invoice not found");
+    if (current.status !== "void") {
+      throw new Error(
+        `Only a voided invoice can be unvoided (current status: ${current.status})`,
+      );
+    }
+    if (current.annual_prepay_term_id) {
+      throw new Error(
+        "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
+      );
+    }
+    // The denormalized stamp above is NOT a reliable test on its own:
+    // annual_prepay_term_id is null on some prod prepay invoices (see the
+    // pending-completion sweep in annual-prepay-renewals — it compares
+    // against the TERM's prepay_invoice_id for the same reason). A term's
+    // own prepay invoice restored as an ordinary draft would collect the
+    // annual's money beside (or instead of) the term's coverage. Fail
+    // CLOSED on read errors, same as the payment-plan guard (Codex #3493).
+    let owningTerm = null;
+    try {
+      owningTerm = await db("annual_prepay_terms")
+        .where({ prepay_invoice_id: id })
+        .first("id");
+    } catch (err) {
+      throw new Error(
+        `Could not verify the annual prepay term link — refusing to unvoid (${err.message})`,
+      );
+    }
+    if (owningTerm) {
+      throw new Error(
+        "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
+      );
+    }
+    // A conversion-minted annual prepay invoice whose TERM creation failed
+    // was voided with NO term row and NO invoice stamp (estimate-converter's
+    // fail-closed catch) — the guards above can't see it, but restoring it
+    // would collect an annual charge that activates no coverage. The
+    // converter titles these invoices distinctively; refuse on the title and
+    // route the rebuild through the annual-prepay flow (Codex #3493 r4).
+    if (/annual prepay/i.test(String(current.title || ""))) {
+      throw new Error(
+        "Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment",
+      );
+    }
+    // A void carrying the prepay-switch marker was deliberately superseded
+    // by an annual prepay: its guarded restore path
+    // (restoreSwitchSupersededInvoicesForPrepay) re-checks coverage and
+    // partial re-billing when the prepay is reversed/refunded. Restoring it
+    // here while the prepay stays active would double-bill the covered
+    // visit (Codex #3493).
+    if (/\[prepay-switch-superseded-by:[^\]]+\]/.test(String(current.notes || ""))) {
+      throw new Error(
+        "Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied",
+      );
+    }
+    if (invoiceHasDepositCreditLine(current)) {
+      throw new Error(
+        "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly",
+      );
+    }
+    // A voided invoice still carrying the annual-coverage settlement stamp
+    // was settled as NON-CASH coverage before the void — its paid/prepaid
+    // stamps and 'annual_prepay_covered' follow-up stop are retained, and
+    // the coverage reopen path ignores non-'prepaid' rows. Restoring this
+    // shape would make a covered charge collectible with reminders
+    // permanently suppressed (Codex #3493 r14).
+    if (current.annual_prepay_covered_term_id) {
+      throw new Error(
+        "Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead",
+      );
+    }
+    // Linked-visit guards, fast-fail pass (re-checked inside the restore
+    // transaction — see assertUnvoidableLinkedVisit).
+    await assertUnvoidableLinkedVisit(db, current);
+    // Phase 2 mirror of voidInvoice: a voided line was EXCLUDED from its
+    // statement's rollup — restoring it under a finalized/sent statement
+    // would change the document under the frozen total.
+    if (current.payer_statement_id) {
+      const stmt = await db("payer_statements")
+        .where({ id: current.payer_statement_id })
+        .first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error(
+          "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
+        );
+      }
+    }
+    // Stale pay-session stamp triage (fail closed, mirrors voidInvoice's):
+    // void cancels the open PaymentIntent but keeps the stamp on this row.
+    // Verify it is really dead before clearing — restoring a collectible
+    // invoice beside a live client secret would let a stale pay page charge
+    // an amount nothing reconciles.
+    if (current.stripe_payment_intent_id) {
+      const StripeService = require("./stripe");
+      let pi;
+      try {
+        pi = await StripeService.retrievePaymentIntent(
+          current.stripe_payment_intent_id,
+        );
+      } catch (e) {
+        throw new Error(
+          `Open payment session ${current.stripe_payment_intent_id} could not be verified (${e.message}); resolve it before unvoiding`,
+        );
+      }
+      if (!pi) {
+        throw new Error(
+          `Open payment session ${current.stripe_payment_intent_id} could not be verified (payment service unavailable); resolve it before unvoiding`,
+        );
+      }
+      if (pi.status !== "canceled") {
+        throw new Error(
+          `This invoice still has a live payment session (${pi.status}); resolve it before unvoiding`,
+        );
+      }
+    }
+    let invoice = null;
+    // Cancelled deferred rows whose entry point registers an onTerminal
+    // hook — collected inside the transaction, hooks run after commit
+    // (the terminal_pending stamp written WITH the cancel makes the
+    // obligation durable: the registry sweep re-runs it if we crash first).
+    const cancelledHookRows = [];
+    await db.transaction(async (trx) => {
+      // Statement re-check under lock (a concurrent close could finalize it
+      // between the fast pre-check above and this write).
+      if (current.payer_statement_id) {
+        const locked = await trx("payer_statements")
+          .where({ id: current.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error(
+            "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
+          );
+        }
+      }
+      const [updated] = await trx("invoices")
+        .where({ id, status: "void" })
+        .update({
+          status: "draft",
+          // A draft can't stay tucked under the Archived filter.
+          archived_at: null,
+          // Verified-canceled above; a kept stamp would trip the edit
+          // guard's "already started paying" fence forever.
+          stripe_payment_intent_id: null,
+          scheduled_send_at: null,
+          scheduled_send_attempts: 0,
+          scheduled_send_error: null,
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        })
+        .returning("*");
+      if (!updated) {
+        throw new Error("Invoice status changed while unvoiding — re-check and retry");
+      }
+      // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
+      // #3493 r2): a concurrent /annual-prepay can create the term and
+      // stamp the invoice between the pre-transaction guards and this
+      // update. Throwing rolls the restore back.
+      if (updated.annual_prepay_term_id) {
+        throw new Error(
+          "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
+        );
+      }
+      let owningTermNow = null;
+      try {
+        owningTermNow = await trx("annual_prepay_terms")
+          .where({ prepay_invoice_id: id })
+          .first("id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the annual prepay term link — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (owningTermNow) {
+        throw new Error(
+          "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
+        );
+      }
+      // Money-landed-after-void guard, on the FRESH row under the lock
+      // (mirrors voidInvoice's ordering): a late webhook can record a
+      // payment against a voided row without flipping the status this
+      // update keys on. Rolling back beats restoring beside collected
+      // money, which would double-collect.
+      const appliedPayment = await trx("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
+        .first("id");
+      if (updated.payment_recorded_at || appliedPayment) {
+        throw new Error(
+          `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
+        );
+      }
+      // Saved-card reconciliation fence (Codex #3493 r12): a timed-out or
+      // rolled-back saved-card charge leaves durable
+      // stripe_invoice_charge_attempts / stripe_orphan_charges records with
+      // NO payment row and NO PaymentIntent stamp on the invoice — Stripe
+      // may already have collected the card. Restoring a collectible draft
+      // beside that would enable a second collection; the shared fence
+      // fails closed until reconciliation resolves it.
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+      // Linked-visit TOCTOU re-check on the locked row (Codex #3493 r3): a
+      // cancellation / re-service conversion / prepay stamping that
+      // committed after the fast-fail pass rolls the restore back — its own
+      // invoice sweep skips 'void' rows, so it cannot repair a restore that
+      // commits on the stale verdict.
+      await assertUnvoidableLinkedVisit(trx, updated, { lock: true });
+      // In-flight dunning touch fence (Codex #3493 r9, same fence as the
+      // edit path): fireStep stamps touch_claimed_at for the duration of a
+      // touch and writes the sequence back UNCONDITIONALLY afterward — a
+      // void+unvoid landing inside that window would let the in-flight
+      // touch send its stale reminder and then re-arm the sequence on the
+      // restored draft. Refuse (rolling back) while a fresh claim exists;
+      // crashed senders self-heal past the 10-minute freshness window.
+      // Fail CLOSED on read errors, matching the edit fence.
+      const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
+      let inFlightTouch = null;
+      try {
+        inFlightTouch = await trx("invoice_followup_sequences")
+          .where({ invoice_id: id })
+          .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+          .first("id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the follow-up send state — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (inFlightTouch) {
+        throw new Error(
+          "Cannot unvoid — a payment reminder for this invoice is sending right now; retry in a few minutes",
+        );
+      }
+      // The void-time lifecycle stop is BEST-EFFORT (stopInvoiceFollowupSequence
+      // swallows failures, so voidInvoice can succeed with the sequence still
+      // ACTIVE), and runPending excludes only terminal invoice statuses — an
+      // active row would dun the restored draft before any resend. Apply the
+      // missed stop atomically with the restore (idempotent; the resend
+      // re-arm owns the revival) (Codex #3493 r4).
+      // 'autopay_hold' repairs too (Codex #3493 r10): a held row on the
+      // restored draft can be ACTIVATED later by an autopay failure
+      // (releaseFromAutopayHold treats draft as nonterminal) — the
+      // is_autopay_held flag is left in place so the resend re-arm can
+      // restore the hold for a still-enrolled customer.
+      await trx("invoice_followup_sequences")
+        .where({ invoice_id: id })
+        .whereIn("status", ["active", "autopay_hold"])
+        .update({
+          status: "stopped",
+          stopped_reason: "invoice_voided",
+          stopped_by_admin_id: null,
+          next_touch_at: null,
+          updated_at: new Date(),
+        });
+      // Deferred rails queued BEFORE the void survive it as
+      // status='scheduled' sms_log rows (while void, the executor's
+      // staleness recheck suppresses them as terminal — but a restored
+      // draft is collectible again and the frozen body/pay-link text is
+      // stale by definition). Cancel them atomically with the restore; an
+      // explicit post-restore resend re-queues fresh copy (Codex #3493).
+      // The completion rails (dispatch_completion_deferred /
+      // autopay_completion_decline_deferred) register onTerminal hooks
+      // that hand the send back to the service record (the 'deferred'
+      // stamp is an owned obligation — left in place it suppresses every
+      // future completion attempt and strands any bundled review
+      // fallback), so those rows are cancelled WITH the terminal_pending
+      // stamp (durable obligation, same contract as the executor's
+      // terminal flips) and their hooks run after commit (Codex #3493 r15).
+      const { requiresTerminalHook } = require("./messaging/deferred-replay-registry");
+      const deferredRows = await trx("sms_log")
+        .where({ status: "scheduled" })
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+        .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
+        // A finalize_only row is NOT an unsent message: its SMS already
+        // DELIVERED and the scheduled replay re-runs only the post-delivery
+        // finalization. Cancelling it would drop that obligation (and run
+        // onTerminal — marking a delivered completion failed and arming a
+        // duplicate review). The finalization fence below refuses the whole
+        // restore instead (Codex #3493 r16).
+        .whereRaw("COALESCE(metadata->>'finalize_only', 'false') <> 'true'")
+        .select("id", "metadata");
+      const hookRows = [];
+      const plainIds = [];
+      for (const row of deferredRows) {
+        let meta = row.metadata;
+        if (typeof meta === "string") {
+          try { meta = JSON.parse(meta); } catch { meta = {}; }
+        }
+        meta = meta || {};
+        if (requiresTerminalHook(meta.entry_point)) {
+          hookRows.push({ id: row.id, meta });
+        } else {
+          plainIds.push(row.id);
+        }
+      }
+      // Both cancels keep the status='scheduled' predicate: a row a worker
+      // claimed between the read above and this write stays untouched and
+      // the 'sending' fence below refuses (rolling everything back).
+      if (plainIds.length) {
+        await trx("sms_log")
+          .whereIn("id", plainIds)
+          .where({ status: "scheduled" })
+          .update({
+            status: "cancelled",
+            updated_at: new Date(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'invoice_unvoided')"),
+          });
+      }
+      for (const row of hookRows) {
+        const cancelled = await trx("sms_log")
+          .where({ id: row.id, status: "scheduled" })
+          .update({
+            status: "cancelled",
+            updated_at: new Date(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'invoice_unvoided', 'terminal_pending', true, 'terminal_attempts', COALESCE((metadata->>'terminal_attempts')::int, 0) + 1)"),
+          });
+        if (cancelled) cancelledHookRows.push(row);
+      }
+      // In-flight claim fence (Codex #3493 r2): the scheduled-SMS worker
+      // claims rows scheduled→'sending' BEFORE its staleness recheck. A row
+      // claimed just before this restore is missed by the cancel above, and
+      // once we commit, the worker's recheck reads a collectible draft and
+      // dispatches the stale frozen body. The cancel above has already
+      // locked every still-'scheduled' row, so no NEW claim can slip in;
+      // refuse (rolling back) while an existing claim is mid-dispatch — the
+      // worker either delivered against the still-void invoice (its recheck
+      // suppresses terminal statuses) or the operator retries in a minute.
+      const dispatchingNow = await trx("sms_log")
+        .where({ status: "sending" })
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+        .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
+        .first("id");
+      if (dispatchingNow) {
+        throw new Error(
+          "Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute",
+        );
+      }
+      // Post-delivery finalization fence (Codex #3493 r16): a deferred SMS
+      // that already reached the provider leaves either status='sent' with
+      // finalize_pending (settlement stamped, finalization hook not yet
+      // run) or status='scheduled' with finalize_only (the recovery
+      // sweep's bounded finalization replay). Both represent a DELIVERED
+      // send whose state writes (invoice sent flip, follow-up arming,
+      // receipt claims) have not landed — committing the restore under
+      // them would let that finalizer mark the restored draft sent and arm
+      // follow-ups without a resend. Runs LAST, after the 'sending' fence,
+      // so a dispatch that settled mid-transaction is still caught here.
+      const finalizingNow = await trx("sms_log")
+        .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+        .whereRaw("metadata->>'invoice_id' = ?", [String(updated.id)])
+        .whereRaw("((status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'finalize_only' = 'true'))")
+        .first("id");
+      if (finalizingNow) {
+        throw new Error(
+          "Cannot unvoid — a delivered message for this invoice is still finalizing; retry in a few minutes",
+        );
+      }
+      // Phase 2: an accrued draft re-enters its still-open statement total in
+      // the same transaction (rollupStatement excludes only status='void').
+      if (updated.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(
+          updated.payer_statement_id,
+          trx,
+        );
+      }
+      invoice = updated;
+    });
+    logger.info(`[invoice] Unvoided to draft: ${invoice.invoice_number}`);
+    // Dunning stays under the system void stop while the restored invoice
+    // sits in draft — reminders against an unpublished draft would be
+    // wrong. The RESEND is the lifecycle point that re-arms it:
+    // scheduleForInvoice conditionally lifts the 'invoice_voided' system
+    // stop under the invoice lock (preserving admin stops and the autopay
+    // hold) — see the re-arm branch there (Codex #3493 r2).
+    // Post-commit work is BEST-EFFORT: the restore is committed, so a
+    // failure here must never surface as a failed unvoid — the operator
+    // would retry into the not-void conflict while the invoice already
+    // sits in draft (Codex #3493 r15). Each obligation has its own
+    // recovery rail: the terminal hooks are stamped terminal_pending
+    // (the registry sweep re-runs them), and the setup-fee reconcile is
+    // idempotent and re-runs on the next coverage-changing transition.
+    for (const row of cancelledHookRows) {
+      try {
+        const { runTerminalHookDurably } = require("./messaging/deferred-replay-registry");
+        await runTerminalHookDurably(row.id, row.meta.entry_point, row.meta, { alreadyClaimed: true });
+      } catch (err) {
+        logger.warn(`[invoice] unvoid terminal hook failed for sms_log ${row.id} — sweep will retry: ${err.message}`);
+      }
+    }
+    try {
+      // Coverage-changing transition (mirrors void/edit): the restored
+      // charge may satisfy the setup-fee alert again.
+      await require("./setup-fee-alert-reconcile").reconcileSetupFeeAlertForInvoice(invoice);
+    } catch (err) {
+      logger.warn(`[invoice] unvoid committed but setup-fee alert reconcile failed for invoice ${invoice.id}: ${err.message}`);
+    }
     return invoice;
   },
 
