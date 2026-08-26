@@ -541,8 +541,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         "(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'pending'"
         + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'created_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute'))"
         + " OR ((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = 'claimed'"
-        + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'claimed_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute')))",
-        [olderThanMinutes, claimStaleMinutes],
+        + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'claimed_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute')"
+        // A FRESH executing_at is a live executor mid-money-operation
+        // (r24): the takeover must wait for that marker to age out too,
+        // or the durable execution fence means nothing.
+        + " AND COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'executing_at')::timestamptz, 'epoch'::timestamptz) < now() - (? * interval '1 minute')))",
+        [olderThanMinutes, claimStaleMinutes, claimStaleMinutes],
       )
       .orderByRaw("COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'created_at')::timestamptz, 'epoch'::timestamptz) asc")
       .limit(limit)
@@ -568,8 +572,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
         const current = base?.prepayAutoChargeJob;
         if (!current || !current.invoice_id) return;
+        const staleCutoffMs = Date.now() - claimStaleMinutes * 60 * 1000;
         const claimStale = current.status === 'claimed'
-          && (!current.claimed_at || new Date(current.claimed_at) < new Date(Date.now() - claimStaleMinutes * 60 * 1000));
+          && (!current.claimed_at || new Date(current.claimed_at) < new Date(staleCutoffMs))
+          // Fresh executing marker = live executor mid-money-operation (r24).
+          && (!current.executing_at || new Date(current.executing_at) < new Date(staleCutoffMs));
         if (current.status !== 'pending' && !claimStale) return; // another worker owns it / already resolved
         if (current.status === 'pending' && current.created_at && new Date(current.created_at) > cutoff) return; // in-flow executor may still be running
         // Ownership token (hook P0 r19): resolutions are conditioned on it
@@ -629,31 +636,25 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // P0) can reach the invoice row and the shared payer-delivery helper.
     let invoice = null;
     let deliverToPayerAndResolve = async () => {};
-    // ATOMIC ownership fence (Codex r23 + hook P0): a worker paused past
-    // the 60-minute lease can be superseded — the successor may already
-    // have delivered a pay link, and the Stripe attempt fence cannot stop
-    // a SEQUENTIAL charge after a fallback that made no Stripe attempt.
-    // A read-then-act check leaves a gap, so every collection/payer side
-    // effect runs under FOR UPDATE on the estimate row: claim steals and
-    // token rewrites are UPDATEs on that same row and must WAIT until the
-    // fenced side effect finishes — the token check and the action are
-    // one critical section. Returns { ceded: true } without acting when
-    // the token was lost (or the fence itself fails — fail closed).
+    // Ownership fence (hook P0 r23, reworked r24): a DURABLE EXECUTION
+    // MARKER instead of a held row lock — holding a pool connection through
+    // Stripe/delivery calls (which check out their own connections) could
+    // exhaust the pool. One atomic CAS stamps executing_at WHERE this
+    // pass's claim token still stands ({ ceded: true } when superseded);
+    // the stale-lease takeover refuses any job whose executing_at is
+    // fresh, so a marked executor cannot be superseded mid-action.
     const withJobFence = async (fn) => {
-      try {
-        return await db.transaction(async (fenceTrx) => {
-          await fenceTrx('estimates').where({ id: row.id }).forUpdate().first('id');
-          const freshRow = await fenceTrx('estimates').where({ id: row.id }).first('estimate_data');
-          let base = freshRow?.estimate_data;
-          if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
-          if (base?.prepayAutoChargeJob?.claim_token !== job.claim_token) return { ceded: true };
-          const result = await fn(fenceTrx);
-          return { ceded: false, result };
+      const marked = await db('estimates')
+        .where({ id: row.id })
+        .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [job.claim_token || ''])
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify({ executing_at: new Date().toISOString() })],
+          ),
         });
-      } catch (fenceErr) {
-        if (fenceErr && (fenceErr.code || fenceErr.reconciliationRequired)) throw fenceErr;
-        throw fenceErr;
-      }
+      if (marked !== 1) return { ceded: true };
+      return { ceded: false, result: await fn() };
     };
     try {
       invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
@@ -762,16 +763,16 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             // mutate the successor's job — PI revalidation, cancellation,
             // and the stamp all run inside the fenced critical section
             // (stamp via fenceTrx: the fence holds the row lock).
-            const fencedTriage = await withJobFence(async (fenceTrx) => {
+            const fencedTriage = await withJobFence(async () => {
               const invPi = await db('invoices').where({ id: invoice.id }).first('stripe_payment_intent_id');
               const stuckPiId = invPi?.stripe_payment_intent_id;
               const stuckPi = stuckPiId ? await StripeService.retrievePaymentIntent(stuckPiId) : null;
               if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
                 await StripeService.cancelPaymentIntent(stuckPiId);
-                await fenceTrx('estimates').where({ id: row.id })
-                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                await db('estimates').where({ id: row.id })
+                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [job.claim_token || ''])
                   .update({
-                    estimate_data: fenceTrx.raw(
+                    estimate_data: db.raw(
                       "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
                       [JSON.stringify({ authentication_required: true })],
                     ),

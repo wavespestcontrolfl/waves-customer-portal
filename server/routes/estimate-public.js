@@ -8576,6 +8576,12 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+  // The customer's authorization moment = SERVER RECEIPT of the submit
+  // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
+  // opt-out committed in another tab after the click — even during the
+  // membership/payer/Stripe preflights — always postdates this and WINS in
+  // enrollConsentedMethod's opted_out_after_authorization check.
+  const acceptAuthorizedAt = new Date();
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     // Every bearer-token surface fails closed on the DURABLE call-side
@@ -9743,11 +9749,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // acceptance back (a committed accepted-but-unconverted estimate is
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
-    // The customer's authorization moment (Codex r17): both post-commit
-    // enrollment calls pass this so an Auto Pay opt-out committed in
-    // another tab AFTER the acknowledged submit wins — enrollConsentedMethod
-    // refuses opted_out_after_authorization instead of re-enabling.
-    const acceptAuthorizedAt = new Date();
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -11729,25 +11730,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] prepay job claim failed for estimate ${estimate.id} — ceding to the sweep: ${claimErr.message}`);
       }
     }
-    // ATOMIC ownership fence for the accept executor (hook P0 r23): the
-    // token check and the money side effect run under FOR UPDATE on the
-    // estimate row, so a sweep's stale-lease takeover (an UPDATE on that
-    // row) must WAIT until the fenced action completes — a stale accept
-    // can never charge after a successor delivered a pay link. Throws
-    // PREPAY_JOB_NOT_OWNED (handled as an ambiguous defer) when the token
-    // was superseded.
-    const chargeUnderJobFence = async (fn) => db.transaction(async (fenceTrx) => {
-      await fenceTrx('estimates').where({ id: estimate.id }).forUpdate().first('id');
-      const freshRow = await fenceTrx('estimates').where({ id: estimate.id }).first('estimate_data');
-      let base = freshRow?.estimate_data;
-      if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = null; } }
-      if (base?.prepayAutoChargeJob?.claim_token !== prepayJobClaimToken) {
+    // Ownership fence for the accept executor (hook P0 r23, reworked r24):
+    // a DURABLE EXECUTION MARKER instead of a held row lock — holding a
+    // pool connection through a Stripe call (which checks out its own
+    // connections) could exhaust the pool under a burst of concurrent
+    // accepts. One atomic CAS stamps executing_at WHERE our claim token
+    // still stands (0 rows = superseded → PREPAY_JOB_NOT_OWNED, an
+    // ambiguous defer); the sweep's stale-lease takeover refuses any job
+    // whose executing_at is fresh, so a marked executor cannot be
+    // superseded mid-charge. No connection is held while the money moves.
+    const chargeUnderJobFence = async (fn) => {
+      const marked = await db('estimates')
+        .where({ id: estimate.id })
+        .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+            [JSON.stringify({ executing_at: new Date().toISOString() })],
+          ),
+        });
+      if (marked !== 1) {
         const notOwned = new Error('prepay job claim superseded');
         notOwned.code = 'PREPAY_JOB_NOT_OWNED';
         throw notOwned;
       }
-      return fn(fenceTrx);
-    });
+      return fn();
+    };
     if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
       && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
       // Another executor owns the job (or the claim write failed) — never
@@ -12031,17 +12039,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // the job stamp run under the ownership fence — a superseded
               // executor must not cancel a successor's PI (stamp via the
               // fence's trx: it holds the row lock).
-              await chargeUnderJobFence(async (fenceTrx) => {
+              await chargeUnderJobFence(async () => {
                 const StripeSvc = require('../services/stripe');
                 const invPiRow = await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id');
                 const stuckPiId = invPiRow?.stripe_payment_intent_id;
                 const stuckPi = stuckPiId ? await StripeSvc.retrievePaymentIntent(stuckPiId) : null;
                 if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
                   await StripeSvc.cancelPaymentIntent(stuckPiId);
-                  await fenceTrx('estimates').where({ id: estimate.id })
-                    .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                  await db('estimates').where({ id: estimate.id })
+                    .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token' = ?", [prepayJobClaimToken || ''])
                     .update({
-                      estimate_data: fenceTrx.raw(
+                      estimate_data: db.raw(
                         "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
                         [JSON.stringify({ authentication_required: true })],
                       ),
