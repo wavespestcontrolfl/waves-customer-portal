@@ -372,6 +372,108 @@ async function heldCardForScheduledService(scheduledServiceId) {
     .first();
 }
 
+// Reschedule-orphan DETECTION (owner lane 2026-08-25, prod incident): an
+// operator reschedule composed as cancel + fresh create — no single code
+// path does cancel+recreate, so no hook can follow it — leaves the hold's
+// scheduled_service_id pointing at the dead visit. The completion charge
+// then misses (no_hold) and the customer gets a pay link despite a live
+// consent-backed hold, and NOTHING surfaces the stranded hold.
+//
+// This lane deliberately moves NO money and repoints NOTHING (pre-push r5
+// P0): estimate lineage — even in the unambiguous 1:1 shape below — is not
+// a durable old→new reschedule link, and no flow exists today that could
+// mint one for an operator-composed two-step. Charging a visit other than
+// the one the customer consented to is an owner decision per case. So on a
+// primary-lookup miss this detection finds the stranded hold, BELLS the
+// office with the exact operator command (ops/agents/
+// repoint-orphaned-card-hold.js — FOR-UPDATE preconditions, dry-run
+// default), and the completion proceeds to the unchanged pay-link
+// fallback. Read-only, so no locking is needed.
+//
+// Detection guards (all fail toward silence — a miss just stays no_hold):
+// - exact estimate lineage: scheduled_services.source_estimate_id must
+//   equal the hold's estimate_id — a hold never crosses estimates;
+// - same customer on both rows;
+// - one-time visits only — the hold rail owns estimate-flow one-time
+//   bookings;
+// - EXACTLY ONE held candidate for the estimate;
+// - the hold's linked visit must be DEAD (cancelled/rescheduled) or the
+//   link NULL. A live linked visit still owns its hold; a COMPLETED one is
+//   the backfill-review posture (already belled) — never re-flagged here;
+// - service identity: when both visits carry a service_type, they must
+//   match;
+// - NO OTHER live one-time sibling from the same estimate.
+// Gate: strict opt-in via GATE_CARD_HOLD_RESCHEDULE_ADOPT; while dark,
+// completion behavior is byte-identical to today.
+function isRescheduleAdoptEnabled() {
+  try {
+    return require('../config/feature-gates').isEnabled('cardHoldRescheduleAdopt');
+  } catch (err) {
+    logger.warn('[estimate-card-holds] reschedule-adopt gate read failed — treating as off', { error: err.message });
+    return false;
+  }
+}
+
+const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
+
+async function detectOrphanedHoldForCompletion(scheduledServiceId) {
+  if (!isRescheduleAdoptEnabled()) return null;
+  try {
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('id', 'customer_id', 'source_estimate_id', 'is_recurring', 'service_type');
+    if (!visit || !visit.customer_id || !visit.source_estimate_id || visit.is_recurring === true) return null;
+    const candidates = await db('estimate_card_holds')
+      .where({ estimate_id: visit.source_estimate_id, customer_id: visit.customer_id, status: 'held' })
+      .orderBy('held_at', 'desc')
+      .select('id', 'scheduled_service_id');
+    if (!Array.isArray(candidates) || candidates.length !== 1) return null;
+    const cand = candidates[0];
+    if (cand.scheduled_service_id && String(cand.scheduled_service_id) === String(scheduledServiceId)) return null;
+    let oldVisit = null;
+    if (cand.scheduled_service_id) {
+      oldVisit = await db('scheduled_services')
+        .where({ id: cand.scheduled_service_id })
+        .first('status', 'service_type');
+      if (oldVisit && !DEAD_VISIT_STATUSES.includes(String(oldVisit.status || ''))) return null;
+    }
+    if (oldVisit && oldVisit.service_type && visit.service_type
+      && String(oldVisit.service_type) !== String(visit.service_type)) return null;
+    const siblings = await db('scheduled_services')
+      .where({ customer_id: visit.customer_id, source_estimate_id: visit.source_estimate_id })
+      .whereNot('id', scheduledServiceId)
+      .select('id', 'status', 'is_recurring');
+    for (const sib of siblings || []) {
+      if (cand.scheduled_service_id && String(sib.id) === String(cand.scheduled_service_id)) continue;
+      if (sib.is_recurring === true) continue;
+      if (!DEAD_VISIT_STATUSES.includes(String(sib.status || ''))) return null;
+    }
+    return { holdId: cand.id, fromScheduledServiceId: cand.scheduled_service_id, customerId: visit.customer_id };
+  } catch (err) {
+    logger.warn('[estimate-card-holds] orphan-hold detection failed', { scheduledServiceId, error: err.message });
+    return null;
+  }
+}
+
+// Office bell for a detected orphan — the operator moves the money, never
+// this lane. Best-effort, same posture as the other withheld-charge alerts.
+async function alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId = null }) {
+  logger.warn('[estimate-card-holds] completion found a stranded card hold — routed to operator review', {
+    scheduledServiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId,
+  });
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Stranded card hold matches this completion — review',
+      'A completed one-time visit has no card hold of its own, but the same estimate holds a saved-card consent stranded on a cancelled/rescheduled visit (the cancel+recreate reschedule pattern). Nothing was charged — the pay-link flow proceeded. To collect on the hold, verify the successor and run ops/agents/repoint-orphaned-card-hold.js (dry-run first).',
+      {
+        link: orphan.customerId ? `/admin/customers/${orphan.customerId}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, invoiceId, holdId: orphan.holdId, fromScheduledServiceId: orphan.fromScheduledServiceId, source: 'reschedule_orphan_detection' },
+      },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] orphan-hold review alert failed', { error: e.message }); }
+}
+
 // Resolve the internal payment_methods.id (UUID) for a hold's saved card —
 // chargeInvoiceWithSavedCard takes our row id, not the Stripe pm id. Attaches
 // the card now if the post-accept attach was deferred/failed.
@@ -426,11 +528,33 @@ async function alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invo
 // collectibility so an invoice already settled by prepay / account credit
 // simply releases the hold. Never throws into the completion flow — a real
 // charge failure reverts to 'held' for retry and alerts.
-async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
+async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expectedHoldId = null }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!invoiceId) return { charged: false, reason: 'no_invoice' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { charged: false, reason: 'no_hold' };
+  // expectedHoldId (ops repair path, pre-push r11 P0): the caller repointed
+  // a SPECIFIC consent row and the charge must ride exactly that row —
+  // scheduled_service_id carries no uniqueness constraint, so "newest held
+  // row for the visit" could otherwise select a different consent/card
+  // that appeared concurrently. A mismatch refuses with nothing touched;
+  // the claim below (held→charging by id) then keeps the charge pinned to
+  // this row.
+  if (hold && expectedHoldId && String(hold.id) !== String(expectedHoldId)) {
+    logger.warn('[estimate-card-holds] completion charge refused — resolved hold is not the expected row', { scheduledServiceId, expectedHoldId, resolvedHoldId: hold.id });
+    return { charged: false, reason: 'hold_mismatch' };
+  }
+  if (!hold) {
+    // Primary miss → reschedule-orphan detection (gated, read-only): a
+    // stranded same-estimate hold is BELLED to the office with the ops
+    // command; nothing is charged or repointed here, and the caller's
+    // pay-link fallback proceeds unchanged.
+    const orphan = await detectOrphanedHoldForCompletion(scheduledServiceId);
+    if (orphan) {
+      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId, invoiceId });
+      return { charged: false, reason: 'orphan_hold_review' };
+    }
+    return { charged: false, reason: 'no_hold' };
+  }
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { charged: false, reason: 'invoice_missing' };
@@ -483,7 +607,33 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
   try {
     const pmRowId = await resolveHoldPaymentMethodRowId(hold);
     if (!pmRowId) throw new Error('hold card not attached to customer');
-    const payment = await StripeService.chargeInvoiceWithSavedCard(invoiceId, pmRowId);
+    // maxAuthorizedSubtotal: the frozen consent cap is RE-ENFORCED inside
+    // the charge authority against the invoice re-read under its own FOR
+    // UPDATE lock (pre-push r4 P0) — the pre-check above uses an unlocked
+    // snapshot, so an invoice edit between check and charge must fail the
+    // locked comparison rather than collect above what was accepted. Same
+    // wiring as the appointment-card rail (appointment-card-request.js).
+    // requireSelfPayScheduledServiceId re-verifies the visit↔invoice↔
+    // customer binding and self-pay state under the charge transaction's
+    // own FOR UPDATE locks (pre-push r5 P0) — same wiring as the
+    // appointment-card rail (requireAutopayForCustomerId/requireOneTimeLane
+    // are that rail's autopay-specific legs; the hold rail's customers are
+    // never autopay-gated).
+    const payment = await StripeService.chargeInvoiceWithSavedCard(invoiceId, pmRowId, {
+      maxAuthorizedSubtotal: acceptedAmount,
+      requireSelfPayScheduledServiceId: scheduledServiceId,
+      // The completion invoice must still be THIS visit's bill under the
+      // same locks (pre-push r6 P0) — the ops repair script's charge leg
+      // rides this call after its own transaction commits, so the binding
+      // is re-proven at the money move, not just at the repoint.
+      requireInvoiceScheduledServiceBinding: true,
+      // And the visit itself must still be a completed one-time visit at
+      // the Stripe boundary (pre-push r9 P0) — the dispatch route flips
+      // status to 'completed' (transitionJobStatus) before this rail runs,
+      // so the runtime path always satisfies it; only a stale/raced caller
+      // is refused.
+      requireCompletedOneTimeVisit: true,
+    });
     // Account credit fully covered the invoice inside the charge call — no card
     // was charged; release the hold cleanly rather than claim a phantom charge.
     if (payment?.covered_by_credit) {
@@ -627,7 +777,34 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { charged: false, reason: 'no_hold' };
+  if (!hold) {
+    // Same reschedule-orphan detection as the dispatch completion path
+    // (gated, read-only) — a rescheduled visit completed through
+    // pest-recap must not leave its stranded hold silent either. The
+    // recap-specific NO-CHARGE cases stay quiet (pre-push r4 P1): a
+    // prior-non-performed re-completion, a field prepayment, or an
+    // unverifiable prepayment would refuse collection anyway, so no bell —
+    // the ops sweep still lists the orphan.
+    if (priorNonPerformed) return { charged: false, reason: 'no_hold' };
+    let prepaidProbe;
+    try {
+      prepaidProbe = await db('scheduled_services').where({ id: scheduledServiceId }).first('prepaid_amount');
+    } catch (err) {
+      logger.warn('[estimate-card-holds] recap orphan detection skipped — prepaid probe failed', { scheduledServiceId, error: err.message });
+      return { charged: false, reason: 'no_hold' };
+    }
+    if (prepaidProbe && Number(prepaidProbe.prepaid_amount) > 0) return { charged: false, reason: 'no_hold' };
+    const orphan = await detectOrphanedHoldForCompletion(scheduledServiceId);
+    if (orphan) {
+      await alertOrphanedHoldForCompletion({ orphan, scheduledServiceId });
+      // Still no_hold (pre-push r6 P1): pest-recap's appointment-card
+      // fallback only runs on no_hold/feature_disabled, and a recreated
+      // visit with its own /secure consent must keep that rail — the
+      // detection is a bell beside the flow, never a new terminal state
+      // on this path.
+    }
+    return { charged: false, reason: 'no_hold' };
+  }
 
   // The recap is re-completing a visit the record classifies as NOT performed
   // (incomplete / inspection-only / customer-declined) — don't auto-charge a
@@ -1555,5 +1732,7 @@ module.exports = {
     holdGeneration,
     resolveHoldPaymentMethodRowId,
     sendNoShowFeeReceipt,
+    detectOrphanedHoldForCompletion,
+    isRescheduleAdoptEnabled,
   },
 };

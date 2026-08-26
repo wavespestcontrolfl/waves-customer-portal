@@ -1848,7 +1848,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2027,8 +2027,23 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring');
+            .first('id', 'customer_id', 'is_recurring', 'status');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          // Completed-one-time eligibility under the SAME lock (hold-rail
+          // pre-push r9 P0): a completion charge is only authorized for a
+          // visit that IS completed and still one-time at the moment of
+          // the Stripe submission — a caller's preflight verdict can be
+          // outrun by a concurrent cancel/reschedule or a recurring
+          // conversion, and the collected money would then belong to no
+          // delivered one-time visit. Opt-in.
+          if (requireCompletedOneTimeVisit) {
+            if (String(lockedSvc.status || '') !== 'completed') {
+              throw new Error('The visit is no longer completed. Review before charging.');
+            }
+            if (lockedSvc.is_recurring === true) {
+              throw new Error('The visit is no longer one-time. Review before charging.');
+            }
+          }
           // Completion-lane revalidation under the locks (Codex #3153 r23
           // P1): a billing-mode change (membership/prepay/per-application)
           // or the visit turning recurring after the caller's snapshot
@@ -2052,6 +2067,18 @@ const StripeService = {
           // state and then charge the OLD customer's invoice and card.
           if (String(lockedSvc.customer_id) !== String(lockedInvoice.customer_id)) {
             throw new Error('The appointment was reassigned to a different customer. Review before charging.');
+          }
+          // Invoice↔visit binding under the SAME locks (hold-rail pre-push
+          // r6 P0): shared customer + self-pay does not prove the invoice
+          // is THIS visit's bill — a concurrent rebind between a caller's
+          // preflight and this transaction could point the charge at
+          // another of the customer's invoices. Opt-in, because some
+          // legitimate callers charge ad-hoc invoices that carry no visit
+          // link; a caller that asserts the binding refuses any invoice
+          // not linked to exactly the supplied visit.
+          if (requireInvoiceScheduledServiceBinding
+            && String(lockedInvoice.scheduled_service_id || '') !== String(requireSelfPayScheduledServiceId)) {
+            throw new Error('The invoice is no longer bound to this appointment. Review before charging.');
           }
           const resolvedPayer = await require('./payer').resolveForInvoice({
             database: trx,
