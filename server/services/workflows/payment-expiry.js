@@ -60,9 +60,12 @@ class PaymentExpiry {
       // dedupe a customer gets one notice per stale default). Replaced
       // cards linger with is_default=false and never match (hook P1 ×2).
       .whereRaw(`(
-        (pm.id = c.autopay_payment_method_id AND pm.autopay_enabled = true)
+        (pm.id = c.autopay_payment_method_id AND pm.autopay_enabled = true
+          AND pm.stripe_payment_method_id IS NOT NULL)
         OR (
           pm.is_default = true
+          AND pm.autopay_enabled = true
+          AND pm.stripe_payment_method_id IS NOT NULL
           -- fallback fires when the pointer is absent OR ineligible
           -- (disabled, or a bank row) — mirroring the charge path's
           -- pointer-then-default walk; a stale pointer must not suppress
@@ -73,12 +76,23 @@ class PaymentExpiry {
                AND pp.customer_id = c.id
                AND pp.processor = 'stripe' AND pp.autopay_enabled = true
                AND pp.stripe_payment_method_id IS NOT NULL
-               AND (pp.method_type IS NULL
-                    OR pp.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
                -- the pointer only suppresses the fallback when charge()
-               -- would actually accept it: an EXPIRED or shell pointer row
-               -- falls back to the default card, whose warning must fire
-               -- (hook P1). Same guarded-cast + 2-digit rule as the window.
+               -- would actually accept it (hook P1 ×2): a healthy BANK
+               -- pointer counts (the customer is charged via ACH, so no
+               -- card notice should fire at all); a CARD pointer counts
+               -- only unexpired (guarded casts + 2-digit rule); an
+               -- expired/shell/blocked pointer falls back to the default
+               -- card, whose warning must fire.
+               AND (
+                 (
+                   pp.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+                   AND (c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active')
+                   AND (pp.ach_status IS NULL
+                        OR pp.ach_status NOT IN ('pending_verification', 'verification_failed'))
+                 )
+                 OR (
+                 (pp.method_type IS NULL
+                    OR pp.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
                AND CASE
                      WHEN NULLIF(BTRIM(pp.exp_month), '') ~ '^[0-9]{1,2}$'
                        AND NULLIF(BTRIM(pp.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
@@ -93,13 +107,18 @@ class PaymentExpiry {
                      )
                      ELSE FALSE
                    END
+                 )
+               )
           )
           AND NOT EXISTS (
             SELECT 1 FROM payment_methods pm2
              WHERE pm2.customer_id = pm.customer_id
                AND pm2.processor = 'stripe' AND pm2.is_default = true
-               -- only another CARD default can outrank this one — a newer
-               -- default bank row must not hide the card's warning (hook P1)
+               AND pm2.autopay_enabled = true
+               AND pm2.stripe_payment_method_id IS NOT NULL
+               -- only another CHARGEABLE CARD default can outrank this one —
+               -- a newer bank/disabled/shell default must not hide the real
+               -- card's warning (hook P1 ×2)
                AND (pm2.method_type IS NULL
                     OR pm2.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
                AND (pm2.updated_at > pm.updated_at
