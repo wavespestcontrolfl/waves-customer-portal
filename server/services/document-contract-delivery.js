@@ -338,17 +338,15 @@ function isMarketingCustomerGuide(contract = {}) {
 async function marketingSmsConsentBasisForContract(contract = {}) {
   const prefs = await db('notification_prefs')
     .where({ customer_id: contract.customer_id })
-    .first('sms_enabled', 'seasonal_tips', 'marketing_offers', 'created_at', 'updated_at')
+    .first('sms_enabled', 'seasonal_tips', 'created_at', 'updated_at')
     .catch(() => null);
-  // Any-of, mirroring the central 'marketing' policy: promotions-only
-  // opt-in counts; seasonal_tips === false stays the master kill.
-  if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips === false) return null;
-  if (prefs.seasonal_tips !== true && prefs.marketing_offers !== true) return null;
+  // Customer guides are seasonal/educational content — OWNER RULING 08-25:
+  // seasonal_tips === true specifically (toggles are independent; a
+  // promotions-only opt-in does not authorize this lane).
+  if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips !== true) return null;
   return {
     status: 'opted_in',
-    source: prefs.seasonal_tips === true
-      ? 'notification_prefs.seasonal_tips'
-      : 'notification_prefs.marketing_offers',
+    source: 'notification_prefs.seasonal_tips',
     capturedAt: prefs.updated_at || prefs.created_at || undefined,
   };
 }
@@ -383,7 +381,7 @@ async function deliveryOptionsForContract(contract = {}, {
   }
 
   return {
-    smsPurpose: 'marketing',
+    smsPurpose: 'marketing_seasonal',
     smsConsentBasis: consentBasis,
     smsEntryPoint: smsEntryPoint || (action === 'reminder'
       ? 'bulk_product_safety_guide_manual_reminder'
@@ -615,7 +613,7 @@ function smsBody({ contract, customer, signingUrl, action, smsPurpose = 'documen
   const prefix = action === 'reminder'
     ? `Hi ${firstName(customer)}, reminder from Waves: ${title} is still ready for ${needsSignature ? 'review and signature' : 'review'}.`
     : `Hi ${firstName(customer)}, Waves has a document ready for your ${needsSignature ? 'review and signature' : 'review'}: ${title}.`;
-  if (smsPurpose === 'marketing' || isMarketingCustomerGuide(contract)) {
+  if (smsPurpose === 'marketing' || smsPurpose === 'marketing_seasonal' || isMarketingCustomerGuide(contract)) {
     return `${prefix} ${signingUrl} Reply STOP to opt out. Msg & data rates may apply.`;
   }
   return `${prefix} ${signingUrl} Reply with any questions.`;

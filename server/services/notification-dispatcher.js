@@ -29,7 +29,8 @@ function purposeForNotificationType(type) {
   if (type === 'payment_receipt') return 'payment_receipt';
   if (type === 'review_request') return 'review_request';
   if (type === 'referral') return 'referral';
-  if (type === 'seasonal' || type === 'marketing') return 'marketing';
+  if (type === 'seasonal') return 'marketing_seasonal';
+  if (type === 'marketing') return 'marketing';
   return 'conversational';
 }
 
@@ -182,18 +183,17 @@ const NotificationDispatcher = {
 
     // Marketing-purpose SMS is opt-IN (TCPA), not merely not-opted-out:
     // the consentBasis below reads stored prefs as captured consent, so the
-    // SMS leg requires an EXPLICIT true on one of the policy's consent
-    // columns (seasonal_tips OR marketing_offers — a promotions opt-in
-    // covers seasonal SMS too, matching the validator's any-of), with
-    // seasonal_tips === false staying the master marketing kill (already
-    // enforced for the seasonal type by the toggle check above). EMAIL
-    // legs keep the opt-out semantics content emails have always had —
-    // NULL ("never asked") must not silence them.
+    // SMS leg requires an EXPLICIT true on the notification type's OWN
+    // toggle — OWNER RULING 08-25: seasonal and promotions are independent
+    // permissions, neither toggle authorizes the other category (matches
+    // the split 'marketing' / 'marketing_seasonal' policies). EMAIL legs
+    // keep the opt-out semantics content emails have always had — NULL
+    // ("never asked") must not silence them.
     const purpose = purposeForNotificationType(notificationType);
-    const marketingSmsOptIn = purpose !== 'marketing'
-      || (prefs
-        && prefs.seasonal_tips !== false
-        && (prefs.seasonal_tips === true || prefs.marketing_offers === true));
+    const marketingPurpose = purpose === 'marketing' || purpose === 'marketing_seasonal';
+    const marketingConsentColumn = purpose === 'marketing_seasonal' ? 'seasonal_tips' : 'marketing_offers';
+    const marketingSmsOptIn = !marketingPurpose
+      || (prefs && prefs[marketingConsentColumn] === true);
 
     // Send SMS
     if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone && !marketingSmsOptIn) {
@@ -211,9 +211,9 @@ const NotificationDispatcher = {
           customerId: customer.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'notification_dispatcher',
-          consentBasis: purpose === 'marketing' ? {
+          consentBasis: marketingPurpose ? {
             status: 'opted_in',
-            source: 'notification_prefs',
+            source: `notification_prefs.${marketingConsentColumn}`,
             capturedAt: prefs?.updated_at || prefs?.created_at || new Date().toISOString(),
           } : undefined,
           metadata: {

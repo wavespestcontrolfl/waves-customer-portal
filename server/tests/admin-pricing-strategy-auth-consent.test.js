@@ -35,7 +35,7 @@ function withServer(fn) {
 }
 
 const LIVE = { id: 'c1', first_name: 'Test', phone: '+15550000001', deleted_at: null, active: true };
-const PREFS = { customer_id: 'c1', sms_enabled: true, seasonal_tips: true, updated_at: '2026-08-01T00:00:00.000Z' };
+const PREFS = { customer_id: 'c1', sms_enabled: true, marketing_offers: true, updated_at: '2026-08-01T00:00:00.000Z' };
 
 // Per-table mock: customers.first → customer, notification_prefs.first → prefs.
 function setupDb({ customer = LIVE, prefs = PREFS, updateResult = [{ id: 'r1' }] } = {}) {
@@ -114,7 +114,8 @@ describe('POST /trigger-upsell/:customerId', () => {
   test.each([
     ['no prefs row', null],
     ['sms disabled', { ...PREFS, sms_enabled: false }],
-    ['seasonal_tips off', { ...PREFS, seasonal_tips: false }],
+    ['marketing_offers off', { ...PREFS, marketing_offers: false }],
+    ['seasonal-only opt-in (marketing_offers NULL) — toggles are independent', { ...PREFS, marketing_offers: null, seasonal_tips: true }],
   ])('%s → 422 NO_MARKETING_CONSENT before any send', async (_label, prefs) => {
     setupDb({ prefs });
     await withServer(async (base) => {

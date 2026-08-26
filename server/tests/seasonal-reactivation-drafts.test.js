@@ -176,7 +176,7 @@ describe('gate on — pending campaign drafts', () => {
       customer_id: 'cust-1',
       status: 'pending',
       campaign_type: 'reactivation',
-      purpose: 'marketing',
+      purpose: 'marketing_seasonal',
       source_ref: 'customers:cust-1',
     });
     // toGsm7Safe: em-dash → '-', ellipsis → '...'

@@ -96,6 +96,7 @@ const MESSAGE_PURPOSES = [
   'referral',
   'retention',
   'marketing',
+  'marketing_seasonal',
   'internal_briefing',
   'support_resolution',
 ];
@@ -406,19 +407,26 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
+  // OWNER RULING 08-25: the two marketing toggles are INDEPENDENT
+  // permissions — Promotions & Offers SMS requires marketing_offers === true,
+  // Seasonal Tips SMS requires seasonal_tips === true, and neither toggle
+  // authorizes (or kills) the other category. 'marketing' = promotions;
+  // 'marketing_seasonal' = seasonal campaigns/tips/reactivation/guides.
   marketing: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'marketing',
+    prefsColumn: 'marketing_offers',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  marketing_seasonal: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'marketing',
     prefsColumn: 'seasonal_tips',
-    // Stored opt-in accepted from EITHER toggle: the 'marketing' purpose
-    // carries both seasonal campaigns (seasonal_tips) and promotions
-    // (marketing_offers) — a customer who explicitly opted into promotions
-    // must not be blocked because seasonal_tips is NULL. prefsColumn above
-    // keeps its opt-OUT semantics (seasonal_tips=false is the master
-    // marketing kill switch, pre-existing behavior).
-    consentColumns: ['seasonal_tips', 'marketing_offers'],
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

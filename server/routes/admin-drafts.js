@@ -244,7 +244,7 @@ async function guardClickFollowupSend(draft) {
 
 // Purposes whose policy row requires marketing-grade consent
 // (policy.js requireConsent: 'marketing').
-const MARKETING_GRADE_PURPOSES = new Set(['marketing', 'retention']);
+const MARKETING_GRADE_PURPOSES = new Set(['marketing', 'marketing_seasonal', 'retention']);
 
 /**
  * Audience/purpose/consent fields for a draft send.
@@ -265,11 +265,20 @@ function draftSendPolicyFields(draft, recipient) {
   if (!draft.purpose) {
     return { audience: 'lead', purpose: 'conversational' };
   }
+  // Legacy-row normalization (consent split, owner ruling 08-25):
+  // reactivation drafts written before the split stored purpose
+  // 'marketing'. The campaign gate already checks seasonal_tips for them;
+  // passing the stale purpose through would make the central validator
+  // require marketing_offers instead — blocking valid seasonal-only
+  // recipients. The campaign_type is the content's truth.
+  const purpose = (draft.campaign_type === 'reactivation' && draft.purpose === 'marketing')
+    ? 'marketing_seasonal'
+    : draft.purpose;
   const fields = {
     audience: recipient.customerId ? 'customer' : 'lead',
-    purpose: draft.purpose,
+    purpose,
   };
-  if (MARKETING_GRADE_PURPOSES.has(draft.purpose)) {
+  if (MARKETING_GRADE_PURPOSES.has(purpose)) {
     fields.consentBasis = {
       status: 'opted_in',
       source: 'customer_marketing_preferences',
