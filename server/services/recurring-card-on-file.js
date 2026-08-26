@@ -579,13 +579,23 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         // Atomic JSON-path merge (pre-push Codex P0 r5): the advisory lock
         // serializes SWEEP workers only — other estimate writers (linkage
         // invalidation etc.) are not under it, so the update must touch
-        // ONLY the job key, never rewrite the whole blob.
-        await trx('estimates').where({ id: row.id }).update({
-          estimate_data: trx.raw(
-            "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-            [JSON.stringify(claim)],
-          ),
-        });
+        // ONLY the job key, never rewrite the whole blob. And COMPARE-AND-
+        // SWAP on the state this pass just read (hook P0 r20): the ACCEPT
+        // executor does not hold the sweep's advisory lock, so it can claim
+        // between our re-read and this write — an unconditional update
+        // would overwrite its token and leave two owners charging/
+        // delivering independently.
+        const claimedRows = await trx('estimates')
+          .where({ id: row.id })
+          .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = ?", [current.status])
+          .whereRaw("COALESCE(estimate_data -> 'prepayAutoChargeJob' ->> 'claim_token', '') = ?", [current.claim_token || ''])
+          .update({
+            estimate_data: trx.raw(
+              "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+              [JSON.stringify(claim)],
+            ),
+          });
+        if (claimedRows !== 1) return; // another executor claimed in the gap
         job = { ...current, ...claim };
       });
     } catch (claimErr) {
@@ -810,8 +820,10 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         } catch (redeemErr) {
           redemption = { redeemed: 0, reason: 'error', error: redeemErr.message };
         }
-        const redeemedOk = !!redemption && Number(redemption.redeemed) > 0;
-        if (!redemption || (!redeemedOk && INCONCLUSIVE_REDEMPTION.includes(redemption.reason))) {
+        // A named inconclusive reason defers even beside a partial mint
+        // (Codex r20): the authorized total projected the SUM of the
+        // open offers.
+        if (!redemption || INCONCLUSIVE_REDEMPTION.includes(redemption.reason)) {
           logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: inspection-credit redemption inconclusive (${redemption?.reason || 'no result'}${redemption?.error ? `: ${redemption.error}` : ''})`);
           continue;
         }

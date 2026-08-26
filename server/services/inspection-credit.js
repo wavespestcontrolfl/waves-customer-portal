@@ -724,14 +724,14 @@ async function redeemInspectionCreditForBooking({
         failures += 1;
       }
     }
-    if (failures > 0 && redeemed === 0) {
-      // A genuine db/ledger FAILURE left the promise open and unminted —
-      // NOT the same as "no offer" or a settled skip (Codex #3492 r19):
-      // money callers treat a conclusive absence as safe-to-proceed, and a
-      // swallowed failure here would let a frozen prepay charge decline
-      // into a gross pay link while the promise is still open. Name it so
-      // they defer and retry instead.
-      return { redeemed: 0, reason: 'redemption_incomplete' };
+    if (failures > 0) {
+      // ANY genuine db/ledger FAILURE leaves part of the promise open and
+      // unminted — even beside a successful mint (Codex #3492 r19/r20): a
+      // money caller that projected the SUM of the open offers would
+      // otherwise proceed on a partial credit and decline into a gross pay
+      // link. Name it so they defer and retry; the minted portion is
+      // already in the balance and the retry redeems only the remainder.
+      return { redeemed, amount: total, reason: 'redemption_incomplete' };
     }
     return { redeemed, amount: total };
   } catch (err) {

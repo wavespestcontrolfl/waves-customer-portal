@@ -9300,6 +9300,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // expectedTotal equality and the whole cohort degrades to pay-link.
     // Same unambiguous match the policy resolver and converter run.
     let acceptResolvedCustomerId = estimate.customer_id || null;
+    // Grouped multi-property accepts (Codex r20): the transaction resolves
+    // the customer through an accepted SIBLING (a shared phone with several
+    // profiles deliberately fails the phone match) — the quote must use the
+    // same owner or its tax/credit projection diverges and every retry
+    // rejects PREPAY_QUOTE_STALE. Read-only approximation of the trx's
+    // sibling pick; the trx re-resolves authoritatively under its lock.
+    if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.estimate_group_id) {
+      try {
+        const quoteSibling = await db('estimates')
+          .where({ estimate_group_id: estimate.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNotNull('customer_id')
+          .orderBy('accepted_at', 'asc')
+          .first('customer_id');
+        if (quoteSibling?.customer_id) {
+          const liveSiblingCustomer = await db('customers').where({ id: quoteSibling.customer_id }).whereNull('deleted_at').first('id');
+          acceptResolvedCustomerId = liveSiblingCustomer?.id || null;
+        }
+      } catch { /* fall through to the phone match */ }
+    }
     if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.customer_phone) {
       try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
     }
@@ -10771,7 +10791,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 createdBy: 'system:inspection_credit_estimate_accept',
                 dbh: trx,
               });
-              prepayOfferRedeemedInTxResult = !!redemption && Number(redemption.redeemed) > 0;
+              prepayOfferRedeemedInTxResult = !!redemption && Number(redemption.redeemed) > 0 && !redemption.reason;
             } catch (redeemErr) {
               logger.warn(`[estimate-accept] in-trx inspection-credit redemption failed for estimate ${estimate.id} — deferring to the post-commit path: ${redeemErr.message}`);
             }
@@ -11721,18 +11741,41 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (Number(prepayChargePlan.projectedOfferAmount) > 0 && txResult.prepayOfferRedeemedInTx !== true) {
         const prepayBookingId = txResult.annualPrepayConversion?.firstScheduledServiceId || null;
         const redemption = prepayBookingId ? inspectionCreditRedemptions.get(String(prepayBookingId)) : null;
-        const redeemedOk = !!redemption && Number(redemption.redeemed) > 0;
-        const conclusiveNoOffer = !!redemption && !redeemedOk && !INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
-        prepayCreditUnresolved = !(redeemedOk || conclusiveNoOffer);
+        // A named inconclusive reason DEFERS even beside a partial mint
+        // (Codex r20): the quote projected the SUM of the open offers.
+        prepayCreditUnresolved = !redemption || INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
       }
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
         prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing
         // to charge, and chargeInvoiceWithSavedCard would refuse the
-        // settled status as a decline (Codex r17). Run the SAME settlement
-        // side effects the charge service's covered_by_credit path runs
-        // (best-effort, idempotent), then report the credit coverage.
+        // settled status as a decline (Codex r17). Coverage bypassed the
+        // charge's in-lock payer re-resolution, so RE-RESOLVE the payer
+        // HERE before settling (Codex r20): a payer assigned between the
+        // commit and this block must not have the term activated on the
+        // homeowner's credit and the job retired terminal — defer instead
+        // (the stamp stays pending, and the sweep's prepaid-branch payer
+        // validation surfaces it for the office).
+        let coveragePayerClear = false;
+        try {
+          const coveragePayer = await require('../services/payer').resolveForInvoice({
+            customerId,
+            scheduledServiceId: postCommitPayerScopeSsId || null,
+            throwOnError: true,
+          });
+          coveragePayerClear = !coveragePayer?.payerId;
+        } catch (coveragePayerErr) {
+          logger.warn(`[estimate-accept] coverage payer recheck failed for invoice ${invoiceId} — deferring settlement to the sweep: ${coveragePayerErr.message}`);
+        }
+        if (!coveragePayerClear) {
+          prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+          invoicePayUrl = null;
+          logger.warn(`[estimate-accept] prepay coverage settlement deferred for invoice ${invoiceId} (estimate ${estimate.id}): payer ownership changed or unconfirmable`);
+        } else {
+        // Run the SAME settlement side effects the charge service's
+        // covered_by_credit path runs (best-effort, idempotent), then
+        // report the credit coverage.
         try {
           await require('../services/invoice-followups').stopOnPayment(invoiceId);
         } catch (e) { logger.warn(`[estimate-accept] stopOnPayment after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
@@ -11759,6 +11802,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         };
         invoicePayUrl = null;
         logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})${coverageTermSynced ? '' : ' — term sync pending, sweep will retry'}`);
+        }
       } else if (prepayCreditUnresolved) {
         prepayAutoCharge = { status: 'ambiguous', reason: 'inspection_credit_unresolved' };
         invoicePayUrl = null;
