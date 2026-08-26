@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
 const { isEnabled } = require('../config/feature-gates');
@@ -17,6 +17,11 @@ const {
 const { SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: every draft MUTATION (approve/send, revise,
+// reject) is owner-only — approving a draft sends a customer SMS, and the
+// owner sends all customer comms. Reads stay staff-wide: the tech-visible
+// Communications surface loads draft cards inline (GET /:id).
+router.use((req, res, next) => (req.method === 'GET' ? next() : requireAdmin(req, res, next)));
 
 function parseFlags(value) {
   if (!value) return {};
