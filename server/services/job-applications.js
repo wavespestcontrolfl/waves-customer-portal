@@ -84,7 +84,10 @@ async function createJobApplication({ body = {}, database }) {
     throw badRequest('Please provide a valid phone number.');
   }
 
-  const email = cleanValidEmailOrNull(body.email);
+  // 254 is the RFC 5321 ceiling; anything longer is not a deliverable
+  // address, only a storage-bloat vector (codex P1) — treat as absent.
+  const emailRaw = cleanValidEmailOrNull(body.email);
+  const email = emailRaw && emailRaw.length <= 254 ? emailRaw : null;
   const city = cleanText(body.city || '').slice(0, 80) || null;
 
   const role = ROLES.includes(body.role) ? body.role : null;

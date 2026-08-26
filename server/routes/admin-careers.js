@@ -25,6 +25,12 @@ const MAX_NOTE_CHARS = 1000;
 
 router.get('/', async (req, res) => {
   try {
+    // Offset pagination so a >200-row status can never permanently hide
+    // lower-ranked or unscored applicants behind the AI ordering (codex P1)
+    // — the ranking is assist-only; every row must stay reachable.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
     let query = db('job_applications')
       .select(
         'id', 'role', 'status', 'language', 'contact_snapshot',
@@ -33,7 +39,8 @@ router.get('/', async (req, res) => {
       // Best-first: the AI screen exists so the owner reads the queue in
       // ranked order; unscored rows sink, recency breaks ties.
       .orderByRaw('ai_score DESC NULLS LAST, created_at DESC')
-      .limit(200);
+      .limit(limit)
+      .offset(offset);
 
     if (STATUSES.includes(req.query.status)) {
       query = query.where({ status: req.query.status });
@@ -56,6 +63,8 @@ router.get('/', async (req, res) => {
         ai_summary: row.ai_screen?.summary || null,
       })),
       counts: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
+      limit,
+      offset,
     });
   } catch (err) {
     logger.error(`[admin-careers] list failed: ${err.message}`);

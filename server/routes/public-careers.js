@@ -23,6 +23,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { normalizeNanpPhone } = require('../utils/intake-normalize');
+const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const { createJobApplication } = require('../services/job-applications');
 
 // Legitimate applicants submit once; tight caps cost real users nothing.
@@ -31,6 +32,9 @@ const applyIpLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 6,
   message: { error: 'Too many submissions, please try again shortly.' },
+  // Shared /64-collapsing key — raw req.ip lets an IPv6 client rotate
+  // addresses within its subnet for a fresh bucket each time (codex P1).
+  keyGenerator: (req) => ipFallbackKey(req.ip),
   skip: () => process.env.NODE_ENV !== 'production',
 });
 

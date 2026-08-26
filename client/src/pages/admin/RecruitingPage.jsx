@@ -10,7 +10,7 @@
  * Deep link: ?application=<id> opens that application's detail (the bell
  * notification links here).
  */
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
 import {
@@ -99,17 +99,25 @@ export default function RecruitingPage() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async (status) => {
-    setLoading(true);
+  // Monotonic request id: a slow response from a previously selected tab
+  // must never overwrite the current tab's list (codex P2).
+  const requestSeq = useRef(0);
+
+  const load = useCallback(async (status, { offset = 0, append = false } = {}) => {
+    const seq = ++requestSeq.current;
+    if (!append) setLoading(true);
     setError(null);
     try {
-      const data = await adminFetch(`/admin/careers?status=${encodeURIComponent(status)}`);
-      setApplications(data.applications || []);
+      const data = await adminFetch(
+        `/admin/careers?status=${encodeURIComponent(status)}&offset=${offset}`,
+      );
+      if (seq !== requestSeq.current) return; // superseded by a newer request
+      setApplications((prev) => (append ? [...prev, ...(data.applications || [])] : (data.applications || [])));
       setCounts(data.counts || {});
     } catch (err) {
-      setError(err.message);
+      if (seq === requestSeq.current) setError(err.message);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, []);
 
@@ -147,6 +155,9 @@ export default function RecruitingPage() {
         body: JSON.stringify({ status, note: note.trim() || undefined }),
       });
       setDetail(data.application);
+      // A note belongs to exactly one transition — a second status click
+      // must not re-append it under the wrong entry (codex P2).
+      setNote("");
       await load(tab);
     } catch (err) {
       setError(err.message);
@@ -210,7 +221,7 @@ export default function RecruitingPage() {
                           {app.language === "es" && <span className="text-zinc-400 font-normal"> · ES</span>}
                         </div>
                         {app.ai_summary && (
-                          <div className="text-13 text-zinc-500 mt-0.5 truncate">{app.ai_summary}</div>
+                          <div className="text-14 text-zinc-500 mt-0.5 truncate">{app.ai_summary}</div>
                         )}
                       </div>
                       <div className="flex items-center gap-3 shrink-0">
@@ -218,7 +229,7 @@ export default function RecruitingPage() {
                         <span className={cn("text-16 tabular-nums font-medium", scoreTone(app.ai_score))}>
                           {app.ai_score != null ? app.ai_score : "—"}
                         </span>
-                        <span className="text-12 text-zinc-400">{formatETDateTime(app.created_at)}</span>
+                        <span className="text-14 text-zinc-400">{formatETDateTime(app.created_at)}</span>
                       </div>
                     </div>
                   </button>
@@ -226,6 +237,17 @@ export default function RecruitingPage() {
               </Card>
             );
           })}
+          {applications.length < (counts[tab] || 0) && (
+            <div className="text-center mt-1">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => load(tab, { offset: applications.length, append: true })}
+              >
+                Load more ({applications.length} of {counts[tab]})
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -265,14 +287,14 @@ export default function RecruitingPage() {
                       {detail.ai_score}
                     </span>
                     <RecommendationBadge recommendation={detail.ai_recommendation} />
-                    <span className="text-12 text-zinc-400">AI screen — ranking assist only</span>
+                    <span className="text-14 text-zinc-400">AI screen — ranking assist only</span>
                   </div>
                   {screen.summary && <div className="text-14 text-zinc-700 mb-1.5">{screen.summary}</div>}
                   {screen.strengths?.length > 0 && (
-                    <div className="text-13 text-zinc-600">Strengths: {screen.strengths.join(" · ")}</div>
+                    <div className="text-14 text-zinc-600">Strengths: {screen.strengths.join(" · ")}</div>
                   )}
                   {screen.flags?.length > 0 && (
-                    <div className="text-13 text-amber-700 mt-0.5">Probe: {screen.flags.join(" · ")}</div>
+                    <div className="text-14 text-amber-700 mt-0.5">Probe: {screen.flags.join(" · ")}</div>
                   )}
                 </div>
               )}
@@ -282,7 +304,7 @@ export default function RecruitingPage() {
                   .filter(([key]) => detail.answers?.[key])
                   .map(([key, label]) => (
                     <div key={key}>
-                      <div className="text-12 uppercase tracking-label text-zinc-500">{label}</div>
+                      <div className="text-14 uppercase tracking-label text-zinc-500">{label}</div>
                       <div className="text-14 text-zinc-800 whitespace-pre-wrap">{detail.answers[key]}</div>
                     </div>
                   ))}
