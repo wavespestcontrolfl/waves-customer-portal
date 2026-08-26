@@ -3037,6 +3037,12 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               // already have succeeded; assert nothing beyond confirmation.
               return `We're confirming your annual prepay payment${chargedText} — we'll follow up shortly.`;
             }
+            if (acceptResult.prepayChargeStatus === 'deferred') {
+              // No charge was attempted yet (Codex r26 P2) — the recovery
+              // sweep completes it. Assert neither an attempt nor its
+              // absence; just that nothing is owed from the customer now.
+              return `We're finishing up your annual prepay payment${chargedText} on our side — no action is needed, and we'll follow up shortly.`;
+            }
             if (acceptResult?.prepayCoveredByCredit) {
               // Account credit covered the whole quoted amount — no card
               // charge ran and no receipt is coming (Codex r9): confirm the

@@ -11829,12 +11829,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             if (resolvedRouting?.payerId) {
               const payerAppliedCredit = Number(payerInvRow?.credit_applied) || 0;
               if (payerAppliedCredit > 0) {
-                await require('../services/customer-credit').reverseAppliedCredit({
+                // The reversal REFUSES settled/in-flight invoices (e.g. the
+                // in-trx apply already covered the year → status 'prepaid')
+                // by returning { reversed: 0, skipped } instead of throwing
+                // (Codex r26 P1). Stamping the payer over an un-returned
+                // homeowner credit would hand AP a bill funded from the
+                // homeowner's ledger — require the FULL reversal before the
+                // re-route; anything less throws into the routing catch
+                // (→ 'unresolved': defer, no stamp, no delivery).
+                const reversal = await require('../services/customer-credit').reverseAppliedCredit({
                   invoiceId,
                   amount: payerAppliedCredit,
                   createdBy: 'system:prepay_payer_reroute',
                   note: 'Account credit returned — invoice re-routed to third-party payer',
                 });
+                if ((Number(reversal?.reversed) || 0) + 0.005 < payerAppliedCredit) {
+                  const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+                  stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+                  throw stuck;
+                }
               }
               await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
                 payer_id: resolvedRouting.payerId,
@@ -11854,7 +11867,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (prepayPayerRouting === 'payer_billed') {
         prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
       } else if (prepayPayerRouting === 'unresolved') {
-        prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+        // 'deferred', not 'ambiguous' (Codex r26 P2): no charge was
+        // attempted here — the job simply waits for the recovery sweep.
+        // Pay link stays suppressed, but the copy must not claim a
+        // payment attempt is being reconciled.
+        prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
         invoicePayUrl = null;
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing
@@ -11878,7 +11895,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           logger.warn(`[estimate-accept] coverage payer recheck failed for invoice ${invoiceId} — deferring settlement to the sweep: ${coveragePayerErr.message}`);
         }
         if (!coveragePayerClear) {
-          prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+          prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
           invoicePayUrl = null;
           logger.warn(`[estimate-accept] prepay coverage settlement deferred for invoice ${invoiceId} (estimate ${estimate.id}): payer ownership changed or unconfirmable`);
         } else {
@@ -11913,7 +11930,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})${coverageTermSynced ? '' : ' — term sync pending, sweep will retry'}`);
         }
       } else if (prepayCreditUnresolved) {
-        prepayAutoCharge = { status: 'ambiguous', reason: 'inspection_credit_unresolved' };
+        prepayAutoCharge = { status: 'deferred', reason: 'inspection_credit_unresolved' };
         invoicePayUrl = null;
         logger.warn(`[estimate-accept] prepay auto-charge deferred for invoice ${invoiceId} (estimate ${estimate.id}): projected inspection credit not conclusively redeemed`);
       } else if (!prepayChargePmRowId) {
@@ -11960,7 +11977,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           return false;
         }
       })())) {
-        prepayAutoCharge = { status: 'ambiguous', reason: 'consent_snapshot_failed' };
+        prepayAutoCharge = { status: 'deferred', reason: 'consent_snapshot_failed' };
         invoicePayUrl = null;
       } else {
         try {
@@ -12130,12 +12147,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                     const creditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
                     const appliedCredit = Number(creditRow?.credit_applied) || 0;
                     if (appliedCredit > 0) {
-                      await require('../services/customer-credit').reverseAppliedCredit({
+                      // The reversal returns { reversed: 0, skipped } (no
+                      // throw) on settled/in-flight invoices (Codex r26
+                      // P1) — require the FULL amount back before the
+                      // payer stamp; an incomplete reversal throws out of
+                      // the fence into the payerErr catch (no stamp, defer).
+                      const reversal = await require('../services/customer-credit').reverseAppliedCredit({
                         invoiceId,
                         amount: appliedCredit,
                         createdBy: 'system:prepay_payer_reroute',
                         note: 'Account credit returned — invoice re-routed to third-party payer',
                       });
+                      if ((Number(reversal?.reversed) || 0) + 0.005 < appliedCredit) {
+                        const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+                        stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+                        throw stuck;
+                      }
                     }
                     await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
                       payer_id: resolved.payerId,
@@ -12152,7 +12179,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             if (payerStamped) {
               prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
             } else {
-              prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+              // The payer guard refused BEFORE any money moved — this is a
+              // deferral to the sweep, not an ambiguous attempt (Codex r26
+              // P2). Pay link stays suppressed.
+              prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
               invoicePayUrl = null;
             }
             logger.warn(`[estimate-accept] prepay auto-charge refused by payer guard for invoice ${invoiceId} (estimate ${estimate.id}): ${payerStamped ? 'payer stamped, invoice routes to payer' : 'payer unresolved — deferred to sweep'}`);
@@ -12162,10 +12192,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
         }
       }
-      if (prepayAutoCharge.status === 'ambiguous') {
+      if (['ambiguous', 'deferred'].includes(prepayAutoCharge.status)) {
         await require('../services/notification-service').notifyAdmin(
           'billing',
-          'Annual prepay accepted — charge outcome needs reconciliation',
+          prepayAutoCharge.status === 'deferred'
+            ? 'Annual prepay accepted — auto-charge deferred to the recovery sweep'
+            : 'Annual prepay accepted — charge outcome needs reconciliation',
           prepayAutoCharge.reason === 'inspection_credit_unresolved'
             ? 'The promised inspection credit could not be confirmed as redeemed, so the auto-charge was deferred to the recovery sweep. No charge was attempted and no pay link was sent.'
             : prepayAutoCharge.reason === 'payer_unresolved'
@@ -12507,7 +12539,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected && !['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status)) {
+        } else if (annualPrepaySelected && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)) {
           // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
           // Codex P1): the template promises an invoice to pay, which
           // contradicts a year already collected/collecting — the charge
@@ -12601,7 +12633,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // auto-charges it. Invoice-mode and prepay accepts keep their delivery;
     // an auto-charged (paid) prepay invoice has nothing to deliver — the
     // charge path already handles the receipt.
-    if (invoiceId && !['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
+    if (invoiceId && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
       || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
@@ -12828,7 +12860,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
         // that nobody is asked to pay.
-        prepayChargeOutcome: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status)
+        prepayChargeOutcome: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
           ? prepayAutoCharge.status
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
@@ -12880,14 +12912,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // the success payload must say "confirmed", never "pay your prepay
       // invoice" (same override the already-accepted retry path derives
       // from the live invoice status).
-      invoiceSettled: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status),
+      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status),
       // 'ambiguous' is preserved (Codex r6 P1) — the client renders
       // tender-neutral "we're confirming your payment" copy for it, never
       // a bank-debit assertion.
-      prepayChargeStatus: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status)
+      prepayChargeStatus: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
         ? prepayAutoCharge.status
         : null,
-      prepayChargedTotal: ['paid', 'processing', 'ambiguous'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
+      prepayChargedTotal: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
@@ -16445,11 +16477,16 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
-      // An unresolved auto-charge job renders like an ambiguous settle:
-      // confirmed outcome, no pay step, tender-neutral "we're confirming
-      // your payment" copy — the sweep owns the resolution (hook P0 r13).
+      // An unresolved auto-charge job renders as a confirmed outcome with
+      // no pay step — the sweep owns the resolution (hook P0 r13). A
+      // 'pending' stamp means no attempt is in flight (initial state, or a
+      // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
+      // may have an executor mid-charge → tender-neutral 'ambiguous'
+      // "we're confirming your payment" copy (Codex r26 P2).
       invoiceSettled: invoiceSettled || prepaySweepPending,
-      prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending ? 'ambiguous' : null),
+      prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
+        ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
+        : null),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     alreadyAccepted: true,
@@ -16708,6 +16745,20 @@ function buildAcceptNotificationPayload({
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — payment outcome pending reconciliation; NO pay link sent.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and we're confirming your annual prepay payment. We'll follow up shortly.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'deferred') {
+      // No charge was ATTEMPTED (Codex r26 P2) — the durable job waits for
+      // the recovery sweep. Distinct from 'ambiguous': never tell the
+      // customer a payment is "being confirmed", and never tell staff an
+      // attempt needs reconciliation. Still no pay ask (the sweep owns
+      // collection).
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — auto-charge deferred to the recovery sweep (not yet attempted); NO pay link sent.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. We're finishing up your annual prepay payment on our side — no action is needed, and we'll follow up shortly.`,
         customerLink: '/?tab=billing',
       };
     }

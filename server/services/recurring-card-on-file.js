@@ -1094,20 +1094,28 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             if (resolved?.payerId) {
               // Return the homeowner's applied account credit BEFORE the
               // bill becomes the payer's (Codex r17) — mirror of the
-              // in-flow re-route; a failed reversal throws and the job
-              // stays claimed for the lease. Under the ownership fence
-              // (hook P0 r23): payer/credit mutations only while this pass
-              // still owns the job.
+              // in-flow re-route; a failed OR refused reversal throws and
+              // the job stays claimed for the lease. reverseAppliedCredit
+              // returns { reversed: 0, skipped } without throwing on
+              // settled/in-flight invoices (Codex r26 P1) — require the
+              // FULL amount back before the stamp. Under the ownership
+              // fence (hook P0 r23): payer/credit mutations only while
+              // this pass still owns the job.
               const fencedStamp = await withJobFence(async () => {
                 const creditRow = await db('invoices').where({ id: job.invoice_id }).first('credit_applied');
                 const appliedCredit = Number(creditRow?.credit_applied) || 0;
                 if (appliedCredit > 0) {
-                  await require('./customer-credit').reverseAppliedCredit({
+                  const reversal = await require('./customer-credit').reverseAppliedCredit({
                     invoiceId: job.invoice_id,
                     amount: appliedCredit,
                     createdBy: 'system:prepay_payer_reroute',
                     note: 'Account credit returned — invoice re-routed to third-party payer',
                   });
+                  if ((Number(reversal?.reversed) || 0) + 0.005 < appliedCredit) {
+                    const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+                    stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+                    throw stuck;
+                  }
                 }
                 await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
                   payer_id: resolved.payerId,
