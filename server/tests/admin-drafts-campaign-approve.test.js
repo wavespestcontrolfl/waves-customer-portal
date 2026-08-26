@@ -39,6 +39,7 @@ jest.mock('../middleware/admin-auth', () => ({
     return next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),

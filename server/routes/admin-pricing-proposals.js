@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const dbBridge = require('../services/pricing-engine/db-bridge');
 const { validatePricingConfigData, parseConfigData } = require('./admin-pricing-config');
 
@@ -11,7 +11,7 @@ const { validatePricingConfigData, parseConfigData } = require('./admin-pricing-
 // db-bridge), so it must carry the same admin gate as the direct
 // pricing-config writes or a technician could change pricing through the
 // proposal queue instead.
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // ---- helpers -------------------------------------------------------------
 

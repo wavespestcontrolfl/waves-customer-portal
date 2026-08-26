@@ -6,6 +6,7 @@ import {
   ADMIN_MOBILE_TABS,
   ADMIN_NAV_ITEMS,
   isAdminNavItemActive,
+  isPathAdminOnly,
 } from "./adminNavigation";
 
 function compactSections(sections) {
@@ -218,6 +219,69 @@ describe("isAdminNavItemActive", () => {
       "/admin/communications",
     ]) {
       expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.more, pathname)).toBe(false);
+    }
+  });
+});
+
+describe("role scoping (adminOnly)", () => {
+  // The technician-role day-to-day surface. Changing this set is a product
+  // decision — update deliberately, with the owner's sign-off.
+  const TECH_VISIBLE_IDS = [
+    "schedule",
+    "staff",
+    "jobs",
+    "communications",
+    "customers",
+    "assessments",
+    "equipment",
+    "inventory",
+    "knowledge",
+    "settings",
+    "more",
+  ];
+
+  it("scopes every destination outside the day-to-day set to admin", () => {
+    const techVisible = Object.values(ADMIN_NAV_ITEMS)
+      .filter((item) => !item.adminOnly)
+      .map(({ id }) => id);
+    expect(new Set(techVisible)).toEqual(new Set(TECH_VISIBLE_IDS));
+  });
+
+  it("flags owner-only deep links, including nested and non-nav paths", () => {
+    expect(isPathAdminOnly("/admin/banking")).toBe(true);
+    expect(isPathAdminOnly("/admin/invoices/123")).toBe(true);
+    expect(isPathAdminOnly("/admin/seo")).toBe(true);
+    expect(isPathAdminOnly("/admin/pricing-logic")).toBe(true);
+    // Routes absent from the nav taxonomy are still owner-only (codex P1).
+    expect(isPathAdminOnly("/admin/estimates/est-1/proposal")).toBe(true);
+    expect(isPathAdminOnly("/admin/_design-system")).toBe(true);
+    expect(isPathAdminOnly("/admin/leads")).toBe(true);
+    expect(isPathAdminOnly("/admin/credentials")).toBe(true);
+    expect(isPathAdminOnly("/admin/revenue")).toBe(true);
+    // Default-deny: unknown/future routes are owner-only until allowlisted.
+    expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
+    // Owner-only pages nested under technician-allowed prefixes (codex P1).
+    expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
+    expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
+
+    expect(isPathAdminOnly("/admin")).toBe(false);
+    // Dashboard's API is requireAdmin — owner-only despite being a mobile tab.
+    expect(isPathAdminOnly("/admin/dashboard")).toBe(true);
+    expect(isPathAdminOnly("/admin/schedule")).toBe(false);
+    expect(isPathAdminOnly("/admin/dispatch")).toBe(false);
+    expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);
+    expect(isPathAdminOnly("/admin/knowledge")).toBe(false);
+    expect(isPathAdminOnly("/admin/settings")).toBe(false);
+  });
+
+  it("keeps every technician-visible nav destination reachable past the guard", () => {
+    for (const item of Object.values(ADMIN_NAV_ITEMS)) {
+      if (item.adminOnly || item.id === "more") continue;
+      const pathname = item.path.split("?")[0];
+      expect({ id: item.id, blocked: isPathAdminOnly(pathname) }).toEqual({
+        id: item.id,
+        blocked: false,
+      });
     }
   });
 });

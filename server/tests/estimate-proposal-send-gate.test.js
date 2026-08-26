@@ -20,6 +20,7 @@ jest.mock('../models/db', () => {
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn() }));

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   CheckCircle2,
@@ -192,10 +192,40 @@ const LEAF_META = {
 
 const ALL_LEAF_TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 
+// Vendor credentials, pricing sync/approvals, scrape health, and service
+// margins are owner-only (2026-08-25 role lockdown) — techs keep products,
+// planning, content, and protocols. Server-gated in admin-inventory.js.
+const OWNER_ONLY_INVENTORY_TABS = new Set([
+  "price-sync",
+  "approvals",
+  "vendors",
+  "scrape",
+  "margins",
+  // Content authoring (product registry copy, lawn facts/content modules)
+  // is owner-only too — its PATCH/PUT surface 403s the technician role.
+  "registry",
+  "lawnFacts",
+  "lawnContent",
+  // Protocol config reads carry per-product cost/COGS data (owner-only);
+  // techs get protocol reference in the tech portal instead.
+  "protocols",
+]);
+
 export default function InventoryPage() {
   const [searchParams] = useSearchParams();
-  const initialTab = ALL_LEAF_TABS.includes(searchParams.get("tab"))
-    ? searchParams.get("tab")
+  // Server-verified role from the shell's Outlet context (never localStorage).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
+  const visibleGroups = TAB_GROUPS
+    .map((g) => ({
+      ...g,
+      tabs: g.tabs.filter((t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t)),
+    }))
+    .filter((g) => g.tabs.length > 0);
+  const requestedTab = searchParams.get("tab");
+  const initialTab = ALL_LEAF_TABS.includes(requestedTab)
+    && (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
+    ? requestedTab
     : "products";
   const [tab, setTab] = useState(initialTab);
 
@@ -224,8 +254,8 @@ export default function InventoryPage() {
   };
 
   const activeGroup =
-    TAB_GROUPS.find((g) => g.tabs.includes(tab)) || TAB_GROUPS[0];
-  const groupSections = TAB_GROUPS.map((g) => {
+    visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
+  const groupSections = visibleGroups.map((g) => {
     let pending = 0;
     if (g.tabs.includes("approvals")) pending += stats?.approvals?.pending || 0;
     if (g.tabs.includes("restock")) pending += stats?.restockRequests?.open || 0;
@@ -252,13 +282,14 @@ export default function InventoryPage() {
         sections={groupSections}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = TAB_GROUPS.find((x) => x.key === key);
+          const g = visibleGroups.find((x) => x.key === key);
           if (g) setTab(g.tabs[0]);
         }}
         ariaLabel="Inventory section"
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
         action={
-          tab === "products"
+          // Product authoring is owner-only (POST/PUT/DELETE 403 for techs).
+          tab === "products" && isAdminRole
             ? {
                 label: "Add Product",
                 icon: Plus,
@@ -347,12 +378,14 @@ export default function InventoryPage() {
               value: stats.vendors?.total,
               color: D.teal,
               action: () => setTab("vendors"),
+              adminOnly: true,
             },
             {
               label: "Pending Approvals",
               value: stats.approvals?.pending,
               color: stats.approvals?.pending > 0 ? D.amber : D.green,
               action: () => setTab("approvals"),
+              adminOnly: true,
             },
             {
               label: "Restock",
@@ -365,8 +398,11 @@ export default function InventoryPage() {
               value: stats.scrapeJobs?.completed,
               color: D.purple,
               action: () => setTab("scrape"),
+              adminOnly: true,
             },
-          ].map((s) => (
+            // Shortcut cards into owner-only tabs are hidden for techs —
+            // clicking them would land on a tab the role can't open.
+          ].filter((s) => isAdminRole || !s.adminOnly).map((s) => (
             <div
               key={s.label}
               onClick={() => {
@@ -418,6 +454,7 @@ export default function InventoryPage() {
           onFilterChange={setProductFilter}
           showAddForm={showAddForm}
           setShowAddForm={setShowAddForm}
+          canAuthor={isAdminRole}
         />
       )}
       {tab === "lawnFacts" && <LawnFactsTab showToast={showToast} />}
@@ -1915,6 +1952,9 @@ function ProductsTab({
   onFilterChange,
   showAddForm,
   setShowAddForm,
+  // Product create/edit/delete is owner-only (server 403s techs) — hide
+  // the authoring affordances rather than rendering doomed forms.
+  canAuthor = false,
 }) {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -1952,7 +1992,10 @@ function ProductsTab({
       adminFetch(
         `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
       ),
-      adminFetch("/admin/inventory/vendors"),
+      // Vendors are owner-only under the role lockdown — a technician's
+      // Products load must not hang on that 403 (codex P1). Empty vendor
+      // list just hides per-vendor pricing affordances they can't use.
+      adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
     ]);
     setProducts(pData.products || []);
     setCategories(pData.categories || []);
@@ -2091,7 +2134,7 @@ function ProductsTab({
           ))}
         </select>{" "}
       </div>
-      {showAddForm && (
+      {canAuthor && showAddForm && (
         <div
           style={{
             background: D.card,
@@ -2517,7 +2560,7 @@ function ProductsTab({
                       style={{ display: "flex", gap: 4 }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      {isEditing ? (
+                      {canAuthor && (isEditing ? (
                         <>
                           {" "}
                           <button
@@ -2628,7 +2671,7 @@ function ProductsTab({
                             </button>
                           )}
                         </>
-                      )}
+                      ))}
                     </div>{" "}
                   </td>
                 </tr>,
@@ -2939,7 +2982,10 @@ function ExpandedProduct({
   const loadMovements = useCallback(async () => {
     setMovementLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
+      // Movements are owner-only (rows carry costUsed) — a technician's
+      // expanded product just shows no history instead of erroring.
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
+        .catch(() => ({ movements: [] }));
       setMovements(data.movements || []);
     } catch {
       setMovements([]);

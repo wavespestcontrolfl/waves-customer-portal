@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const { runScan } = require('../services/data-hygiene');
 const {
@@ -21,7 +21,9 @@ const {
   NORMALIZATION_FIELDS,
 } = require('../services/data-hygiene/auto-apply');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: hygiene scans and proposal approve/reject
+// mutate customer data and back an owner-only surface — admin role only.
+router.use(adminAuthenticate, requireAdmin);
 
 const ALLOWED_STATUSES = new Set(['pending', 'auto_applied', 'approved', 'rejected', 'superseded', 'stale', 'reverted', 'all']);
 const ALLOWED_PHASES = new Set(['normalization', 'extraction']);

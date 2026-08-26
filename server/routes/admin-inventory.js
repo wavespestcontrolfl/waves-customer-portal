@@ -2,7 +2,7 @@ const express = require('express');
 const { parse: parseCsvSync } = require('csv-parse/sync');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -26,6 +26,34 @@ const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: technicians keep DAY-TO-DAY stock operations —
+// product list, movements, stock adjustments, service-usage logging, and
+// the planning reads (forecast / unit review / restock). Everything touching
+// vendors (encrypted credentials), pricing, approvals, price history,
+// scrape/system sync, aliases, AI price lookups, and product create/edit/
+// delete is owner-only. Fail closed: any path not explicitly staff-allowed
+// requires the admin role.
+const STAFF_INVENTORY_REQUEST = (req) => {
+  const p = req.path;
+  if (req.method === 'GET') {
+    // NOTE: /protocol-health, /service-usage, and /:id/movements carry
+    // per-product cost/COGS fields — owner-only, like the pricing
+    // projection on GET / (codex P0). Techs use /tech/protocols for
+    // protocol reference.
+    return p === '/' || p === '/stats' || p === '/waveguard-forecast'
+      || p === '/unit-review' || p === '/restock-requests';
+  }
+  // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
+  // application rates that drive COGS/pricing) — owner-only. Per-job usage
+  // is logged by the dispatch completion flow, not these endpoints.
+  return /^\/[^/]+\/adjust$/.test(p)
+    || /^\/waveguard-forecast\/[^/]+\/restock-request$/.test(p)
+    || /^\/restock-requests\/[^/]+\/action$/.test(p)
+    || /^\/unit-review\/[^/]+\/fix$/.test(p);
+};
+router.use((req, res, next) => (
+  STAFF_INVENTORY_REQUEST(req) ? next() : requireAdmin(req, res, next)
+));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -484,6 +512,21 @@ function normalizeAvailabilityStatus(value) {
     return normalized;
   }
   return value ? 'unknown' : null;
+}
+
+// Technician projection for the product list: stock/agronomic/registry
+// fields only. Vendor pricing rows, catalog costs, and cached best-price
+// data are owner-only (2026-08-25 role lockdown) — hiding the Vendors &
+// Pricing tabs means nothing here may leak the same data (codex P1).
+const OWNER_ONLY_PRODUCT_FIELDS = [
+  'bestPrice', 'bestVendor', 'bestVendorPricingId', 'bestPriceAmountCached',
+  'bestPriceVendorIdCached', 'bestPriceUpdatedAt', 'bestPriceStatus',
+  'costPerUnit', 'costUnit', 'monthlyCost',
+];
+function stripOwnerPricing(mapped) {
+  const safe = { ...mapped, vendorPricing: [], unitPrices: null };
+  for (const field of OWNER_ONLY_PRODUCT_FIELDS) delete safe[field];
+  return safe;
 }
 
 function mapProduct(product, vendorPricing = []) {
@@ -1042,13 +1085,17 @@ router.get('/', async (req, res, next) => {
       pendingApprovals = parseInt(r.count);
     } catch { /* table not created yet */ }
 
+    const isAdminRequest = req.techRole === 'admin';
     res.json({
-      products: products.map(p => mapProduct(p, pricingMap[p.id] || [])),
+      products: products.map(p => {
+        const mapped = mapProduct(p, pricingMap[p.id] || []);
+        return isAdminRequest ? mapped : stripOwnerPricing(mapped);
+      }),
       stats: {
         total: parseInt(stats?.total || 0),
         priced: parseInt(stats?.priced || 0),
         needsPrice: parseInt(stats?.needs_price || 0),
-        avgPrice: stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
+        avgPrice: isAdminRequest && stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
         pendingApprovals,
       },
       categories: categories.map(c => ({ name: c.category, count: parseInt(c.count) })),
@@ -2966,6 +3013,25 @@ router.get('/stats', async (req, res, next) => {
       }
     } catch { /* table not created yet */ }
 
+    // Technician projection (codex P2): only what their UI renders —
+    // product totals, low stock, and open restock counts. Pricing averages
+    // and the vendor/approval/scrape aggregates belong to hidden owner-only
+    // workspaces.
+    if (req.techRole !== 'admin') {
+      return res.json({
+        products: {
+          total: parseInt(productStats.total_products),
+          priced: parseInt(productStats.priced),
+          needsPrice: parseInt(productStats.needs_price),
+          lowStock: parseInt(productStats.low_stock || 0),
+          avgPrice: null,
+        },
+        vendors: null,
+        approvals: null,
+        scrapeJobs: null,
+        restockRequests: { open: restockOpen },
+      });
+    }
     res.json({
       products: {
         total: parseInt(productStats.total_products),

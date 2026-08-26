@@ -22,7 +22,9 @@ const VALID_METRICS = new Set(SNAPSHOT_METRICS.map(([key]) => key));
 
 // Staff-role guard at router level (adminAuthenticate alone verifies the
 // token/active row, not req.techRole); writes additionally requireAdmin.
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: company KPI targets (revenue-per-job, RPMH,
+// margins, MRR) are owner-only; the Settings leaf is hidden for techs.
+router.use(adminAuthenticate, requireAdmin);
 
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {

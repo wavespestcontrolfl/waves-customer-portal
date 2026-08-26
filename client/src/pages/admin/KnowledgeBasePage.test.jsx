@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../components/admin/AdminCommandHeader", () => ({
@@ -29,19 +29,27 @@ function LocationProbe() {
   return <output data-testid="location-search">{location.search}</output>;
 }
 
+// The real page reads the shell's Outlet context for the server-verified
+// role (audit/tokens tabs are owner-only) — mirror it with an admin stub.
+function AdminShellStub() {
+  return <Outlet context={{ user: { role: "admin" } }} />;
+}
+
 function renderKnowledgeBase(entry) {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
-        <Route
-          path="/admin/knowledge"
-          element={(
-            <>
-              <KnowledgeBasePage embedded />
-              <LocationProbe />
-            </>
-          )}
-        />
+        <Route element={<AdminShellStub />}>
+          <Route
+            path="/admin/knowledge"
+            element={(
+              <>
+                <KnowledgeBasePage embedded />
+                <LocationProbe />
+              </>
+            )}
+          />
+        </Route>
       </Routes>
     </MemoryRouter>,
   );

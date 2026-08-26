@@ -267,6 +267,18 @@ export default function SettingsPage() {
       .catch(() => setLoading(false));
   }, []);
 
+  // A ?tab= deep link into an owner-only group resolves to General once the
+  // server-verified profile arrives. Declared ABOVE the early returns —
+  // hooks must run on every render path or React throws "Rendered more
+  // hooks than during the previous render" (codex P1).
+  useEffect(() => {
+    if (user && user.role !== "admin"
+      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system"].includes(tab)) {
+      selectTab("general");
+    }
+    // selectTab is stable; errors-only lint config has no exhaustive-deps.
+  }, [user, tab]);
+
   // On mobile — and when NOT deep-linked into a specific tab — render the
   // Square-style section index instead of the desktop tab panel.
   if (isMobile && !searchParams.get("tab")) return <MobileSettingsPage />;
@@ -280,8 +292,25 @@ export default function SettingsPage() {
 
   const gates = health?.gates || {};
 
+  // Service Reports (coverage config) and Scheduling (blackout days) are
+  // requireAdmin end to end server-side — hide the whole groups from
+  // non-admin roles instead of rendering panels that can only 403
+  // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
+  const isAdminRole = user?.role === "admin";
+  // Non-admin Settings: General (account/team view) + Operating Costs +
+  // Portal Usage. Integrations (its tab renders "Admin access required"),
+  // Service Reports, Scheduling, KPI targets, feature gates, and System
+  // are owner-only.
+  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "gates", "system", "service-reports", "blackout-days"];
+  const visibleGroups = SETTINGS_TAB_GROUPS.filter(
+    (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
+  ).map((g) => (
+    isAdminRole
+      ? g
+      : { ...g, tabs: g.tabs.filter((t) => !OWNER_ONLY_SETTINGS_LEAVES.includes(t)) }
+  )).filter((g) => g.tabs.length > 0);
   const activeGroup =
-    SETTINGS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) || SETTINGS_TAB_GROUPS[0];
+    visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 
   return (
     <div>
@@ -289,10 +318,10 @@ export default function SettingsPage() {
       <AdminCommandHeader
         title="Settings"
         icon={SettingsIcon}
-        sections={SETTINGS_TAB_GROUPS}
+        sections={visibleGroups}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = SETTINGS_TAB_GROUPS.find((x) => x.key === key);
+          const g = visibleGroups.find((x) => x.key === key);
           if (g) selectTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
@@ -528,6 +557,10 @@ export default function SettingsPage() {
               ))}
             </div>{" "}
           </Card>{" "}
+          {/* Pest Pressure config is owner-only (/admin/settings/pest-pressure
+              is an OWNER_ONLY_NESTED_PATH — the deep-link guard bounces
+              non-admins), so don't render a dead card for them. */}
+          {user?.role === "admin" && (
           <Card>
             <Link
               to="/admin/settings/pest-pressure"
@@ -560,6 +593,7 @@ export default function SettingsPage() {
               <ChevronRight size={18} color={D.muted} />
             </Link>
           </Card>
+          )}
         </div>
       )}
       {/* ── INTEGRATIONS ── */}

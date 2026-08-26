@@ -14,16 +14,18 @@
 // SettingsPage now reads that param on mount.
 
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useOutletContext } from "react-router-dom";
 import { Search } from "lucide-react";
 
 const SECTIONS = [
-  { key: "invoices", label: "Invoices", to: "/admin/invoices" },
-  { key: "payments", label: "Payments", to: "/admin/banking" },
+  { key: "invoices", label: "Invoices", to: "/admin/invoices", adminOnly: true },
+  { key: "payments", label: "Payments", to: "/admin/banking", adminOnly: true },
   {
     key: "tap-to-pay",
     label: "Tap to Pay",
     to: "/admin/settings?tab=integrations",
+    // IntegrationsTab renders "Admin access required" for other roles.
+    adminOnly: true,
   },
   {
     key: "communications",
@@ -35,41 +37,52 @@ const SECTIONS = [
     key: "service-reports",
     label: "Service Reports",
     to: "/admin/settings?tab=service-reports",
+    adminOnly: true,
   },
   {
     key: "blackout-days",
     label: "Blackout Days",
     to: "/admin/settings?tab=blackout-days",
+    adminOnly: true,
   },
   {
     key: "kpi-targets",
     label: "KPI Targets",
     to: "/admin/settings?tab=kpi-targets",
+    adminOnly: true,
   },
   {
     key: "integrations",
     label: "Integrations",
     to: "/admin/settings?tab=integrations",
+    adminOnly: true,
   },
   { key: "account", label: "Account", to: "/admin/settings?tab=general" },
-  { key: "system", label: "System", to: "/admin/settings?tab=system" },
+  { key: "system", label: "System", to: "/admin/settings?tab=system", adminOnly: true },
   { key: "usage", label: "Portal Usage", to: "/admin/settings?tab=usage" },
   {
     key: "feature-flags",
     label: "Early feature access",
     to: "/admin/_design-system/flags",
+    adminOnly: true,
   },
 ];
 
 export default function MobileSettingsPage() {
   const navigate = useNavigate();
   const [q, setQ] = useState("");
+  // Server-verified role from the shell's Outlet context: owner-only
+  // destinations (finance, config, system) are hidden for other roles —
+  // the deep-link guard would only bounce them anyway (2026-08-25 lockdown).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
 
   const filtered = useMemo(() => {
+    const visible = SECTIONS.filter((sec) => isAdminRole || !sec.adminOnly);
     const s = q.trim().toLowerCase();
-    if (!s) return SECTIONS;
-    return SECTIONS.filter((sec) => sec.label.toLowerCase().includes(s));
-  }, [q]);
+    if (!s) return visible;
+    return visible.filter((sec) => sec.label.toLowerCase().includes(s));
+  }, [q, isAdminRole]);
 
   return (
     <div className="md:hidden">

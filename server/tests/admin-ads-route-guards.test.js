@@ -104,11 +104,16 @@ describe('requireAdmin on spend/state-mutating endpoints', () => {
     expect(res.status).toBe(403);
   });
 
-  test('reads stay open to technicians (GET /campaigns)', async () => {
+  // 2026-08-25 role lockdown (first-hire prep): ads is an owner-only
+  // surface — the router base is requireAdmin now, reads included.
+  test('reads are owner-only too (GET /campaigns 403s a technician)', async () => {
     mockCurrentRole = 'technician';
     const res = await call('get', '/api/admin/ads/campaigns');
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('campaigns');
+    expect(res.status).toBe(403);
+    mockCurrentRole = 'admin';
+    const adminRes = await call('get', '/api/admin/ads/campaigns');
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.body).toHaveProperty('campaigns');
   });
 });
 

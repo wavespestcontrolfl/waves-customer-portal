@@ -86,6 +86,7 @@ jest.mock('../services/expense-categorizer', () => ({
   categoryDeductibleAmount: jest.requireActual('../services/expense-categorizer').categoryDeductibleAmount,
 }));
 jest.mock('../middleware/admin-auth', () => ({
+  requireAdmin: (req, res, next) => next(),
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));

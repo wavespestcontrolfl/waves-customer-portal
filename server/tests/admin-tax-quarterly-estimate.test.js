@@ -50,6 +50,7 @@ mockDb.fn = { now: jest.fn(() => 'now()'), uuid: jest.fn(() => 'uuid()') };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
+  requireAdmin: (req, res, next) => next(),
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));

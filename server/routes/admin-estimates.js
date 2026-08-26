@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
@@ -495,6 +495,24 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown (first-hire prep): estimates are a sales/pricing
+// surface — owner-only, with a NARROW staff read allowlist for the flows
+// tech-visible surfaces actually use: the single-estimate read (/:id) and
+// the schedule-source read the Create Appointment modal fires. The
+// collection list, analytics (actuals-variance, win-loss, source
+// performance), proposals, pricing audits, and every mutation require the
+// admin role.
+const STAFF_ESTIMATE_GET_RE = /^\/[A-Za-z0-9-]+(\/schedule-source)?$/;
+const OWNER_ONLY_NAMED_GETS = new Set([
+  '/actuals-variance', '/win-loss-slices', '/source-performance',
+]);
+router.use((req, res, next) => (
+  req.method === 'GET'
+    && STAFF_ESTIMATE_GET_RE.test(req.path)
+    && !OWNER_ONLY_NAMED_GETS.has(req.path)
+    ? next()
+    : requireAdmin(req, res, next)
+));
 
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {

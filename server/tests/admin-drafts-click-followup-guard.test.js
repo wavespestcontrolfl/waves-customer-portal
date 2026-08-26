@@ -40,6 +40,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => { req.technicianId = 'tech-1'; next(); },
   requireTechOrAdmin: (req, res, next) => next(),
+  requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn(() => null),
