@@ -2570,23 +2570,29 @@ const AppointmentReminders = {
         // Freshness gate (codex #3495): a delayed 30006 whose send predates
         // a newer clearance (START) is stale evidence — same rule as the
         // suppression store. Undatable bounces defer to any standing
-        // clearance; only a fresh verdict may cache the landline.
-        let staleVerdict = false;
+        // clearance; only a provably fresh verdict may cache the landline.
+        // Unreadable freshness FAILS CLOSED: a newer START has already run,
+        // so a landline cached after it has no clearing event left — the
+        // customer would stay email-only indefinitely on a guess.
+        let cacheVerdict = 'fresh';
         try {
           const bounceLog = sid ? await db('sms_log').where({ twilio_sid: sid }).first('created_at') : null;
           const supPhone = String(to || '').replace(/[^\d+]/g, '');
           const supRow = supPhone
             ? await db('messaging_suppression').where({ phone: supPhone }).first('active', 'cleared_at')
             : null;
-          staleVerdict = !!(supRow && supRow.active === false && supRow.cleared_at
+          const stale = !!(supRow && supRow.active === false && supRow.cleared_at
             && (!bounceLog?.created_at || new Date(supRow.cleared_at) > new Date(bounceLog.created_at)));
-        } catch { /* unreadable → treat as fresh (cache write is reversible via START) */ }
-        if (staleVerdict) {
-          logger.info(`[appt-remind] 30006 for customer ${customerId} predates a newer opt-in clearance — line_type cache untouched`);
-          return;
+          if (stale) cacheVerdict = 'stale';
+        } catch { cacheVerdict = 'unknown'; }
+        if (cacheVerdict === 'fresh') {
+          await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
+          logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
+        } else {
+          logger.info(`[appt-remind] 30006 for customer ${customerId} ${cacheVerdict === 'stale' ? 'predates a newer opt-in clearance' : 'has unreadable callback freshness'} — line_type cache untouched`);
         }
-        await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
-        logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
+        // Either way fall through: the SMS itself was still undelivered, so
+        // the covered kinds below still owe the customer the email version.
       }
 
       if (kind === 'en_route') {
