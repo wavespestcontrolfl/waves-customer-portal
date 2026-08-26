@@ -959,10 +959,18 @@ class AutonomousRunner {
     // publishing guards + daily/weekly caps downstream still apply.
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    // A named-competitor comparison is never auto-publish-eligible: even with
-    // trust built / AUTO_PUBLISH on, it must clear human review first (legal/
-    // brand surface). It still uses the approvable trust-build review path.
-    const forceNamedCompetitorReview = run.comparison_requires_review === true;
+    // A named-competitor comparison routes to human review (legal/brand
+    // surface) UNLESS namedCompetitorAutopublish is on (owner directive
+    // 2026-08-26: intercept lane is fully autonomous — a CLEAN draft
+    // publishes; gate failures still block/park exactly as before). With the
+    // gate off it still uses the approvable trust-build review path. Gate
+    // read fails CLOSED: an unreadable flag keeps the review park.
+    let namedCompetitorAutopublish = false;
+    try {
+      namedCompetitorAutopublish = require('../../config/feature-gates').isEnabled('namedCompetitorAutopublish') === true;
+    } catch (_) { namedCompetitorAutopublish = false; }
+    const forceNamedCompetitorReview = run.comparison_requires_review === true
+      && !namedCompetitorAutopublish;
     const trustBuildSatisfied = !forceNamedCompetitorReview
       && (autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);

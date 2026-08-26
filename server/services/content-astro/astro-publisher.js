@@ -1091,6 +1091,12 @@ async function publishAstro(postId) {
     // withholds the merge for an admin instead.
     let namedCompetitorEnabled = false;
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+    // Owner directive 2026-08-26: with namedCompetitorAutopublish on, a CLEAN
+    // named-competitor post needs no human merge — the stamp below stays
+    // false and pages-poll auto-merges it like any other post. Fails CLOSED
+    // (unreadable gate → stamp still set → human merge required).
+    let namedCompetitorAutopublish = false;
+    try { namedCompetitorAutopublish = require('../../config/feature-gates').isEnabled('namedCompetitorAutopublish') === true; } catch (_) { namedCompetitorAutopublish = false; }
     const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
     if (!comparison.pass) {
       // UNCLASSIFIED_OPTION is fail-closed classification AMBIGUITY (a
@@ -1195,7 +1201,10 @@ async function publishAstro(postId) {
       // auto-merge when true, so competitor-naming posts always get a
       // human merge. Explicit false otherwise — a republish of a post
       // whose competitor mentions were edited out clears an old stamp.
-      astro_requires_human_merge: comparison.requiresHumanReview === true,
+      // namedCompetitorAutopublish (owner directive 2026-08-26) suppresses
+      // the stamp entirely: a clean named-competitor post rides the normal
+      // Codex-gated auto-merge.
+      astro_requires_human_merge: comparison.requiresHumanReview === true && !namedCompetitorAutopublish,
       updated_at: new Date(),
     });
 

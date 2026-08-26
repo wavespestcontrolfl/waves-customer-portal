@@ -1885,6 +1885,29 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       astro_requires_human_merge: true,
     }));
   });
+
+  test('namedCompetitorAutopublish ON suppresses the stamp — a clean named-competitor post auto-merges like any other', async () => {
+    // Owner directive 2026-08-26: with GATE_NAMED_COMPETITOR_AUTOPUBLISH the
+    // requiresHumanReview pass no longer requires a human merge; pages-poll
+    // sees FALSE and the post rides the normal Codex-gated auto-merge.
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    const featureGates = require('../config/feature-gates');
+    const realIsEnabled = featureGates.isEnabled;
+    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => (
+      g === 'namedCompetitorAutopublish' ? true : realIsEnabled(g)));
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: false,
+    }));
+  });
 });
 
 describe('Astro publisher idempotency guard', () => {
