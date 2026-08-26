@@ -10824,8 +10824,30 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           //    invoice to 'prepaid' — the post-commit block must run the
           //    credit-coverage settlement instead of a charge call that
           //    would refuse the settled status as a decline.
-          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status');
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied');
           prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
+          // 4) Verify the applied result still matches the ACKNOWLEDGED
+          //    quote BEFORE commit (hook P1 r20): applyAccountCreditToInvoice
+          //    reports an unavailable balance as a successful
+          //    { applied: 0, skipped } — committing on that would book the
+          //    plan and have the exact-total charge deterministically
+          //    decline into a gross pay link. Recompute the charge from the
+          //    invoice's actual due; drift refuses retryably (the client
+          //    re-quotes with the live credit state).
+          if (!prepayCoveredInTrxResult) {
+            const { invoiceAmountDue } = require('../services/invoice-helpers');
+            const { computeChargeAmount: verifyChargeAmount } = require('../services/stripe-pricing');
+            const verifiedCharge = verifyChargeAmount(
+              invoiceAmountDue(appliedInvoiceRow),
+              prepayChargePlan.method.methodType || 'card',
+              { funding: prepayChargePlan.method.funding },
+            );
+            if (verifiedCharge.totalCents !== prepayChargePlan.quote.totalCents) {
+              const staleErr = estimateAcceptError('Your total changed while confirming — please review the updated amount and confirm again.', 409);
+              staleErr.code = 'PREPAY_QUOTE_STALE';
+              throw staleErr;
+            }
+          }
         }
       }
 
