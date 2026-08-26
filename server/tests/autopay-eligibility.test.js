@@ -197,16 +197,16 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
     // deterministically (codex #3495 r1 P1).
     const { sql, binding } = autopayActivePredicate(new Date('2026-07-16T16:00:00Z'));
     const result = await database.raw(`
-      WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
+      WITH c(id, autopay_enabled, autopay_paused_until, ach_status, autopay_payment_method_id) AS (
         VALUES
-          ('blank-month', true, NULL::date, NULL::text),
-          ('blank-year', true, NULL::date, NULL::text),
-          ('invalid-month', true, NULL::date, NULL::text),
-          ('invalid-year', true, NULL::date, NULL::text),
-          ('valid-card', true, NULL::date, NULL::text),
-          ('legacy-two-digit', true, NULL::date, NULL::text),
-          ('pending-bank', true, NULL::date, NULL::text),
-          ('pending-bank-card-exp', true, NULL::date, NULL::text)
+          ('blank-month', true, NULL::date, NULL::text, NULL::uuid),
+          ('blank-year', true, NULL::date, NULL::text, NULL::uuid),
+          ('invalid-month', true, NULL::date, NULL::text, NULL::uuid),
+          ('invalid-year', true, NULL::date, NULL::text, NULL::uuid),
+          ('valid-card', true, NULL::date, NULL::text, NULL::uuid),
+          ('legacy-two-digit', true, NULL::date, NULL::text, NULL::uuid),
+          ('pending-bank', true, NULL::date, NULL::text, NULL::uuid),
+          ('pending-bank-card-exp', true, NULL::date, NULL::text, NULL::uuid)
       ), payment_methods(
         customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
@@ -246,10 +246,10 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
     const utcMarchButEtFebruary = new Date('2026-03-01T02:30:00Z');
     const { sql, binding } = autopayActivePredicate(utcMarchButEtFebruary);
     const result = await database.raw(`
-      WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
+      WITH c(id, autopay_enabled, autopay_paused_until, ach_status, autopay_payment_method_id) AS (
         VALUES
-          ('february-card', true, NULL::date, NULL::text),
-          ('january-card', true, NULL::date, NULL::text)
+          ('february-card', true, NULL::date, NULL::text, NULL::uuid),
+          ('january-card', true, NULL::date, NULL::text, NULL::uuid)
       ), payment_methods(
         customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status

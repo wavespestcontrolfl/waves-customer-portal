@@ -193,7 +193,22 @@ async function recordNonMobileSuppression({ phone, source }) {
         created_at: db.fn.now(),
       })
       .onConflict('phone')
-      .ignore();
+      // insert-if-absent, with ONE carve-out: a pure clearance TOMBSTONE
+      // (reason='cleared' — written by clearSuppression when a START
+      // arrived for a phone with no standing row) is supersedable by a
+      // genuine landline verdict, or generic SMS keeps burning sends at a
+      // known non-mobile number forever (codex #3495). Every other
+      // existing row — active anything, or an inactive row that kept its
+      // original reason (admin-cleared opt_out etc.) — stays untouched,
+      // preserving the never-clobber contract above.
+      .merge({
+        reason: 'non_mobile',
+        source: source || 'twilio_status_callback',
+        active: true,
+        cleared_at: null,
+      })
+      .where('messaging_suppression.reason', 'cleared')
+      .where('messaging_suppression.active', false);
     // Knex returns the inserted rows ([] when the conflict was ignored). Treat a
     // non-empty result as "newly recorded"; fall back to length-agnostic ok.
     const recorded = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;

@@ -166,7 +166,10 @@ function autopayActivePredicate(now = new Date()) {
         SELECT 1 FROM payment_methods pm
         WHERE pm.customer_id = c.id
         AND pm.processor = 'stripe'
-        AND pm.is_default = true
+        -- default row OR the enrollment pointer — the JS walk and charge()
+        -- both accept a chargeable non-default pointer; the aggregate must
+        -- agree or dashboards report an enrolled customer inactive.
+        AND (pm.is_default = true OR pm.id = c.autopay_payment_method_id)
         AND pm.autopay_enabled = true
         AND pm.stripe_payment_method_id IS NOT NULL
         AND (

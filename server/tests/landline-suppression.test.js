@@ -18,11 +18,15 @@ let lastCustomersChain = null;
 let insertResult = ['+18777175476']; // non-empty => a new row was recorded
 
 function makeSuppressionChain() {
-  const c = { _rows: [] };
+  const c = { _rows: [], _wheres: [] };
   c.insert = jest.fn((row) => { c._rows.push(row); return c; });
   c.onConflict = jest.fn(() => c);
   c.ignore = jest.fn(() => Promise.resolve(insertResult));
-  c.merge = jest.fn(() => Promise.resolve(insertResult));
+  // guarded-merge contract: merge({...}).where(reason cleared).where(active
+  // false) — chain stays awaitable at every step.
+  c.merge = jest.fn(() => c);
+  c.where = jest.fn((...a) => { c._wheres.push(a); return c; });
+  c.then = (resolve, reject) => Promise.resolve(insertResult).then(resolve, reject);
   lastSuppressionChain = c;
   return c;
 }
@@ -74,12 +78,21 @@ describe('landline suppression on delivery bounce', () => {
     expect(lastCustomersChain._updates[0]).toEqual({ line_type: 'landline' });
   });
 
-  test('never clobbers an existing record — uses onConflict().ignore(), not merge()', async () => {
+  test('never clobbers a real existing record — the merge is guarded to clearance tombstones only', async () => {
     await suppressNonMobileOnBounce({ errorCode: '30006', to: '+18777175476' });
 
     expect(lastSuppressionChain.onConflict).toHaveBeenCalledWith('phone');
-    expect(lastSuppressionChain.ignore).toHaveBeenCalled();
-    expect(lastSuppressionChain.merge).not.toHaveBeenCalled();
+    // A pure clearance tombstone (reason='cleared', inactive — written when
+    // a START arrived for a never-suppressed phone) is supersedable by a
+    // genuine landline verdict; every other existing row keeps the
+    // never-clobber contract via the two guards below.
+    expect(lastSuppressionChain.merge).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'non_mobile', active: true, cleared_at: null }),
+    );
+    expect(lastSuppressionChain._wheres).toEqual(expect.arrayContaining([
+      ['messaging_suppression.reason', 'cleared'],
+      ['messaging_suppression.active', false],
+    ]));
   });
 
   test('ignores non-landline delivery codes (e.g. 30003 unreachable handset)', async () => {
@@ -107,7 +120,7 @@ describe('landline suppression on delivery bounce', () => {
     const res = await recordNonMobileSuppression({ phone: '+18777175476', source: 'twilio_status_30006' });
     expect(res.ok).toBe(true);
     expect(res.recorded).toBe(true);
-    expect(lastSuppressionChain.ignore).toHaveBeenCalled();
+    expect(lastSuppressionChain.merge).toHaveBeenCalled(); // guarded tombstone-only merge
   });
 });
 
