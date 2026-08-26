@@ -4655,8 +4655,14 @@ const InvoiceService = {
       // active row would dun the restored draft before any resend. Apply the
       // missed stop atomically with the restore (idempotent; the resend
       // re-arm owns the revival) (Codex #3493 r4).
+      // 'autopay_hold' repairs too (Codex #3493 r10): a held row on the
+      // restored draft can be ACTIVATED later by an autopay failure
+      // (releaseFromAutopayHold treats draft as nonterminal) — the
+      // is_autopay_held flag is left in place so the resend re-arm can
+      // restore the hold for a still-enrolled customer.
       await trx("invoice_followup_sequences")
-        .where({ invoice_id: id, status: "active" })
+        .where({ invoice_id: id })
+        .whereIn("status", ["active", "autopay_hold"])
         .update({
           status: "stopped",
           stopped_reason: "invoice_voided",

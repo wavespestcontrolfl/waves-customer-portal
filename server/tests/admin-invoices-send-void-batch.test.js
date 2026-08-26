@@ -157,6 +157,7 @@ describe('POST /:id/void refusal mapping', () => {
     ['unverifiable payment session', 'Open payment session pi_abc could not be verified (boom); resolve it before voiding'],
     ['PI money in flight', 'A payment is already in flight (requires_capture); wait for it to settle or refund it before voiding'],
     ['PI cancel failed', "Couldn't cancel the open payment session pi_abc (boom); resolve it before voiding"],
+    ['live send claim', 'Cannot void this invoice — a send is already in progress; wait a moment and retry'],
     ['status changed mid-void', 'Invoice status changed while voiding — re-check and retry'],
     ['new payment session mid-void', 'A new payment session started for this invoice — re-check and retry the void'],
     ['payment applied mid-void', 'A payment was applied to this invoice while voiding — issue a refund instead'],

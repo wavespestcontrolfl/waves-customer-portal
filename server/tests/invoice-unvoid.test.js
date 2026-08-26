@@ -128,7 +128,8 @@ describe('InvoiceService.unvoidInvoice', () => {
 
     await InvoiceService.unvoidInvoice('inv-1');
 
-    expect(seqStopChain.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
+    expect(seqStopChain.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
+    expect(seqStopChain.whereIn).toHaveBeenCalledWith('status', ['active', 'autopay_hold']);
     expect(seqStopChain.update).toHaveBeenCalledWith(
       expect.objectContaining({
         status: 'stopped',

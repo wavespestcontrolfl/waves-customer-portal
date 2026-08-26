@@ -328,6 +328,25 @@ describe('stopSequence — admin-stop attribution preservation', () => {
     expect(payload.stopped_by_admin_id).toBe('admin-2');
   });
 
+  test('a PLAN-owned stop is REPLACED by the void stamp — the void cancels that plan, so its stamp would be an orphan (Codex #3493 r10)', async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_reason: 'payment_plan_created:pp-1', stopped_by_admin_id: null } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.stopped_reason).toBe('invoice_voided');
+    expect(payload.stopped_by_admin_id).toBeNull();
+  });
+
+  test("a plan stamp carrying ':prev=paused' hands the pause through to the void stamp (Codex #3493 r10)", async () => {
+    const { seqUpdate } = setupStopDb({ seq: { status: 'stopped', stopped_reason: 'payment_plan_created:pp-1:prev=paused', stopped_by_admin_id: null } });
+
+    await stopSequence('inv-1', { reason: 'invoice_voided' });
+
+    const payload = seqUpdate.mock.calls[0][0];
+    expect(payload.stopped_reason).toBe('invoice_voided:prev=paused');
+  });
+
   test('a SYSTEM stop on a non-stopped row writes its own reason as before', async () => {
     const { seqUpdate } = setupStopDb({ seq: { status: 'active', stopped_by_admin_id: null } });
 

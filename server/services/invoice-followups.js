@@ -1472,17 +1472,31 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .forUpdate()
-      .first('status', 'stopped_by_admin_id');
+      .first('status', 'stopped_reason', 'stopped_by_admin_id');
+    // A PLAN-owned stop is NOT preserved under a system stop (Codex #3493
+    // r10): voidInvoice cancels the active plan in the same transaction, so
+    // the plan-owned reason would be an orphan nothing can lift — the
+    // resend re-arm recognizes only the void stamp, and isDunningStopped
+    // suppresses the legacy path too. Genuine admin/system stops keep
+    // their reason as before.
+    const priorStopReason = String(priorSeq?.stopped_reason || '');
+    const priorStopIsPlanOwned = priorStopReason.startsWith('payment_plan_created:');
     const preservePriorStop = !adminId
       && priorSeq
-      && priorSeq.status === 'stopped';
+      && priorSeq.status === 'stopped'
+      && !priorStopIsPlanOwned;
     // A PAUSED row's meaning must survive a SYSTEM stop even when the pause
     // carries NO metadata (Codex #3493 r8 P0: the old pause route recorded a
     // null admin id and the UI permits a blank reason, so legacy pauses can
     // have every paused_* field null). Encode the prior status into the
     // stop stamp with the same `:prev=<status>` convention the payment-plan
     // stop uses; the resend re-arm restores 'paused' from it.
-    const encodePausedPrev = !adminId && priorSeq && priorSeq.status === 'paused';
+    // Carry a pause through the round trip: a paused row, OR a replaced
+    // plan stamp that itself recorded prev=paused, keeps the pause
+    // encoded on the new stamp so the resend re-arm restores 'paused'.
+    const encodePausedPrev = !adminId && priorSeq
+      && (priorSeq.status === 'paused'
+        || (priorStopIsPlanOwned && priorStopReason.endsWith(':prev=paused')));
     await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
       updated_at: trx.fn.now(),
       status: 'stopped',
