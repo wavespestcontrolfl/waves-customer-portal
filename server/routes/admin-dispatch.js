@@ -11031,8 +11031,46 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const sharedFee = Number(require('../services/estimate-converter').WAVEGUARD_SETUP_FEE);
         if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
       } catch (e) { /* keep the conservative literal */ }
+      // The frozen quote-time fee outranks the live constant: an invoice
+      // minted from a quote that froze a different amount is VALID at that
+      // amount, and capping it at a since-lowered constant would misroute a
+      // correct Auto Pay charge to manual review (Codex #3489). The frozen
+      // resolver validates shape; require a linked source estimate.
+      let wizardFrozenFeeLinked = false;
+      try {
+        if (svc.source_estimate_id) {
+          const srcEst = await db('estimates').where({ id: svc.source_estimate_id }).first('estimate_data');
+          if (srcEst) {
+            const srcData = typeof srcEst.estimate_data === 'string'
+              ? JSON.parse(srcEst.estimate_data)
+              : (srcEst.estimate_data || {});
+            const frozenObligation = Number(srcData?.acceptedSetupFeeAmount ?? srcData?.setupFeeQuote?.amount);
+            if (Number.isFinite(frozenObligation) && frozenObligation > 0) {
+              // Amount CAP only — never the allowance PREDICATE: every
+              // seeded child keeps source_estimate_id, so estimate-derived
+              // authorization would outlive the one-time obligation and let
+              // a later duplicated/office-added setup line auto-charge.
+              // The predicate comes solely from the ACTIVE claim below.
+              WAVEGUARD_SETUP_FEE_ALLOWANCE = frozenObligation;
+            }
+          }
+        }
+      } catch (e) { /* keep the shared/live cap (fail toward review) */ }
+      // SINGLE-USE wizard allowance: authorized only by the durable claim
+      // THIS completion consumed (secureSetupFee — nulled when the fee did
+      // not ride this invoice), at exactly its amount. The durable stamp
+      // outranks the estimate JSON (a post-booking /calculate re-run
+      // rewrites the draft to a zero-waiver while the visit keeps its
+      // positive pending_setup_fee), and once the obligation is billed the
+      // claim is retired — a later invoice with a duplicated or
+      // office-added setup line earns NO wizard allowance and routes to
+      // manual review (Codex #3489).
+      if (secureSetupFee && Number(secureSetupFee.amount) > 0) {
+        WAVEGUARD_SETUP_FEE_ALLOWANCE = Number(secureSetupFee.amount);
+        wizardFrozenFeeLinked = true;
+      }
       let setupFeeAllowance = 0;
-      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected)) {
+      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)) {
         try {
           const rawLines = invoice.line_items;
           const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);

@@ -70,7 +70,7 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // The allowance is a per-application concept — the appointment-card
     // one-time completion lane (2026-08-01) shares the rail but must never
     // widen its cap with a setup-fee allowance.
-    expect(dispatchSource).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\)\) \{/);
+    expect(dispatchSource).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\) \{/);
     // The bound itself is untouched: min(line, 99), line detected by text.
     expect(dispatchSource).toMatch(/setupFeeAllowance = Math\.min\(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE\);/);
   });
