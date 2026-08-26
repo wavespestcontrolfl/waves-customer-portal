@@ -1332,40 +1332,48 @@ describe('scheduled service reservation hold migration', () => {
 });
 
 describe('releaseExpiredReservations', () => {
-  test('never deletes a committed row — stale expiry on a customer visit is cleared, not swept', async () => {
-    const chains = [];
-    // Rescued rows carry no scheduled_date, so the collision probe skips
-    // them (probe behavior is occupancy.js's contract, not this sweep's).
-    const rescuedRows = [{ id: 'visit-a' }, { id: 'visit-b' }];
-    const mkChain = (result) => {
-      const chain = {};
-      chain.where = jest.fn(() => chain);
-      chain.whereNull = jest.fn(() => chain);
-      chain.whereNotNull = jest.fn(() => chain);
-      chain.update = jest.fn(() => chain);
-      chain.returning = jest.fn(async () => rescuedRows);
-      chain.del = jest.fn(async () => result);
-      chains.push(chain);
-      return chain;
+  test('never deletes a committed row — stale expiry is cleared under the date occupancy lock, not swept', async () => {
+    // Committed rows carry no scheduled_date here, so the per-date lock and
+    // collision probe short-circuit (their contracts live in occupancy.js).
+    const committed = [{ id: 'visit-a', scheduled_date: null }, { id: 'visit-b', scheduled_date: null }];
+
+    const selectChain = {
+      where: jest.fn(() => selectChain),
+      whereNotNull: jest.fn(() => selectChain),
+      select: jest.fn(async () => committed),
     };
-    db.mockImplementationOnce(() => mkChain(2))
-      .mockImplementationOnce(() => mkChain(3));
+    const trxChain = {
+      whereIn: jest.fn(() => trxChain),
+      where: jest.fn(() => trxChain),
+      whereNotNull: jest.fn(() => trxChain),
+      update: jest.fn(() => trxChain),
+      returning: jest.fn(async () => committed),
+    };
+    const trx = jest.fn(() => trxChain);
+    trx.raw = jest.fn(async () => {});
+    const delChain = {
+      where: jest.fn(() => delChain),
+      whereNull: jest.fn(() => delChain),
+      del: jest.fn(async () => 3),
+    };
+    db.mockImplementationOnce(() => selectChain) // expired-committed SELECT
+      .mockImplementationOnce(() => delChain);   // uncommitted-hold DELETE
+    db.transaction = jest.fn(async (fn) => fn(trx));
 
     const out = await slotReservation.releaseExpiredReservations();
     expect(out).toEqual({ rescued: 2, released: 3 });
 
     // Pass 1: committed rows (customer_id NOT NULL) get the stray timestamp
-    // CLEARED via UPDATE — a committed booking must never be deletable here.
-    expect(chains[0].whereNotNull).toHaveBeenCalledWith('customer_id');
-    expect(chains[0].update).toHaveBeenCalledWith(
+    // CLEARED via UPDATE inside a transaction — never deleted.
+    expect(selectChain.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(trxChain.update).toHaveBeenCalledWith(
       expect.objectContaining({ reservation_expires_at: null }),
     );
-    expect(chains[0].returning).toHaveBeenCalled();
-    expect(chains[0].del).not.toHaveBeenCalled();
+    expect(trxChain.returning).toHaveBeenCalled();
 
     // Pass 2: the DELETE is scoped to uncommitted holds only.
-    expect(chains[1].whereNull).toHaveBeenCalledWith('customer_id');
-    expect(chains[1].del).toHaveBeenCalled();
-    expect(chains[1].update).not.toHaveBeenCalled();
+    expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');
+    expect(delChain.del).toHaveBeenCalled();
   });
 });
