@@ -39,6 +39,9 @@ function setDbQueues(queues) {
   });
   // db.raw is used for the "now() - interval" reconstruction branch.
   db.raw = jest.fn((sql) => sql);
+  // The 30006 cache gate runs its check + write in a transaction under the
+  // shared per-phone advisory lock; the mock trx is the db mock itself.
+  db.transaction = jest.fn(async (fn) => fn(db));
 }
 
 beforeEach(() => {
