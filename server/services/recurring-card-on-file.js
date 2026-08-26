@@ -434,6 +434,12 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
     if (verification?.ok && verification.paymentMethodId) {
       const pm = await StripeService.retrievePaymentMethod(verification.paymentMethodId);
       if (pm) {
+        // CARD funding is load-bearing for the quote (Codex r19): with
+        // funding unknown, computeChargeAmount quotes NO surcharge, and
+        // the charge-time lookup can then classify credit — the exact-total
+        // check would refuse only AFTER acceptance committed. No resolvable
+        // funding = no quote (retryable), same fail-closed direction.
+        if ((pm.type || 'card') === 'card' && !pm.card?.funding) return null;
         return {
           stripePaymentMethodId: pm.id,
           paymentMethodRowId: null, // saved at enrollment, post-commit
@@ -467,6 +473,10 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
       const pm = await StripeService.retrievePaymentMethod(row.stripe_payment_method_id).catch(() => null);
       funding = pm?.card?.funding || null;
     }
+    // Same funding guard as the fresh-capture branch (Codex r19): a legacy
+    // card row whose funding cannot be resolved must not quote surcharge-free
+    // and then mismatch at charge time — refuse the quote retryably instead.
+    if (row.method_type === 'card' && !funding) return null;
     return {
       stripePaymentMethodId: row.stripe_payment_method_id,
       paymentMethodRowId: row.id,
@@ -761,7 +771,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         // defer exactly like a thrown error; a redeemed>0 or conclusive
         // no-offer result lets the frozen-total charge (and its equality
         // guard) proceed honestly.
-        const INCONCLUSIVE_REDEMPTION = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'error'];
+        const INCONCLUSIVE_REDEMPTION = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'redemption_incomplete', 'error'];
         let redemption = null;
         try {
           redemption = await require('./inspection-credit').redeemInspectionCreditForBooking({

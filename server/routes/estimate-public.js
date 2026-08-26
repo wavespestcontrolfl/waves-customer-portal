@@ -11671,7 +11671,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // durable job — over-collection with no recovery (Codex r9 P0).
       // Defer instead: no charge, no pay link, stamp stays for the sweep
       // (which re-runs this same redemption from the stamped booking).
-      const INSPECTION_CREDIT_INCONCLUSIVE = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'error'];
+      const INSPECTION_CREDIT_INCONCLUSIVE = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'redemption_incomplete', 'error'];
       let prepayCreditUnresolved = false;
       if (Number(prepayChargePlan.projectedOfferAmount) > 0 && txResult.prepayOfferRedeemedInTx !== true) {
         const prepayBookingId = txResult.annualPrepayConversion?.firstScheduledServiceId || null;

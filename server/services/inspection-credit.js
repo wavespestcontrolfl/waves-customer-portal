@@ -595,18 +595,21 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
         .update({ credit_ledger_id: entry.id, updated_at: trx.fn.now() });
     });
     logger.info(`[inspection-credit] offer ${offerId} redeemed on booking ${bookingId}`);
-    return true;
+    return 'minted';
   } catch (err) {
-    if (err?.inspectionCreditSkip === 'claim_lost') return false;
+    // CONCLUSIVE skips ('skipped') vs genuine FAILURES ('failed') — money
+    // callers defer-and-retry only on failures (Codex #3492 r19): a lost
+    // claim race or a non-live booking is a settled outcome, not an error.
+    if (err?.inspectionCreditSkip === 'claim_lost') return 'skipped';
     if (err?.inspectionCreditSkip === 'booking_not_live') {
       // Not an error: the cancel won the race and the claim rolled back
       // untouched — the offer stays open for a real booking.
       logger.info(`[inspection-credit] offer ${offerId} not minted — booking ${bookingId} went non-live first`);
-      return false;
+      return 'skipped';
     }
     // Left 'offered' on purpose — the sweep retries it.
     logger.error(`[inspection-credit] redemption FAILED for offer ${offerId}: ${err.message}`);
-    return false;
+    return 'failed';
   }
 }
 
@@ -702,8 +705,9 @@ async function redeemInspectionCreditForBooking({
 
     let redeemed = 0;
     let total = 0;
+    let failures = 0;
     for (const offer of open) {
-      const ok = await redeemSpecificOffer({
+      const outcome = await redeemSpecificOffer({
         offerId: offer.id,
         customerId,
         amount: offer.amount,
@@ -713,10 +717,21 @@ async function redeemInspectionCreditForBooking({
         now,
         dbh,
       });
-      if (ok) {
+      if (outcome === 'minted') {
         redeemed += 1;
         total = round2(total + round2(offer.amount));
+      } else if (outcome === 'failed') {
+        failures += 1;
       }
+    }
+    if (failures > 0 && redeemed === 0) {
+      // A genuine db/ledger FAILURE left the promise open and unminted —
+      // NOT the same as "no offer" or a settled skip (Codex #3492 r19):
+      // money callers treat a conclusive absence as safe-to-proceed, and a
+      // swallowed failure here would let a frozen prepay charge decline
+      // into a gross pay link while the promise is still open. Name it so
+      // they defer and retry instead.
+      return { redeemed: 0, reason: 'redemption_incomplete' };
     }
     return { redeemed, amount: total };
   } catch (err) {
@@ -1089,7 +1104,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           createdBy: 'system:inspection_credit_sweep',
           now,
         });
-        if (ok) redeemed += 1;
+        if (ok === 'minted') redeemed += 1;
       }
     } catch (redeemErr) {
       logger.error(`[inspection-credit] evidence-first redemption failed: ${redeemErr.message}`);
