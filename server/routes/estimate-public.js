@@ -15898,10 +15898,22 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       }
     } catch { /* keep suppression */ }
   }
+  // UNRESOLVED durable auto-charge job (hook P0 r13): after the accept
+  // committed but before the post-commit charge (or the sweep) resolved
+  // the stamp, the sweep is still AUTHORIZED to charge the frozen total —
+  // a retry that handed out a /pay link beside that authorization would
+  // let the customer pay concurrently with the recovery charge (double
+  // collection). Suppress the pay rail and render the tender-neutral
+  // "we're confirming your payment" copy until the job resolves
+  // (pending/claimed = unresolved; paid/processing/skipped/
+  // delivered_fallback are terminal outcomes with their own posture).
+  const prepayJobStamp = rawEstData && typeof rawEstData === 'object' ? rawEstData.prepayAutoChargeJob : null;
+  const prepaySweepPending = !!prepayTerm && !!invoice
+    && !!prepayJobStamp && ['pending', 'claimed'].includes(String(prepayJobStamp.status || ''));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && invoice.token
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -15959,7 +15971,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -15973,8 +15985,11 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
-      invoiceSettled,
-      prepayChargeStatus: retryPrepayChargeStatus,
+      // An unresolved auto-charge job renders like an ambiguous settle:
+      // confirmed outcome, no pay step, tender-neutral "we're confirming
+      // your payment" copy — the sweep owns the resolution (hook P0 r13).
+      invoiceSettled: invoiceSettled || prepaySweepPending,
+      prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending ? 'ambiguous' : null),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     alreadyAccepted: true,
