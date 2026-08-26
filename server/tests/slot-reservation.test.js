@@ -1346,6 +1346,9 @@ describe('releaseExpiredReservations', () => {
       whereIn: jest.fn(() => trxChain),
       where: jest.fn(() => trxChain),
       whereNotNull: jest.fn(() => trxChain),
+      whereNull: jest.fn(() => trxChain),
+      whereRaw: jest.fn(() => trxChain),
+      modify: jest.fn((fn) => { fn(trxChain); return trxChain; }),
       update: jest.fn(() => trxChain),
       returning: jest.fn(async () => committed),
     };

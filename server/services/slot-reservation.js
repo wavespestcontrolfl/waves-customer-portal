@@ -1468,15 +1468,26 @@ async function releaseExpiredReservations() {
   const collisions = [];
   for (const dateStr of [...byDate.keys()].sort()) {
     try {
-      await db.transaction(async (trx) => {
+      // Results accumulate LOCALLY and merge only after commit (hook r3
+      // P1): a later probe throwing rolls the rescue back, and the outer
+      // state must not report rows Postgres never kept.
+      const { txRescued, txCollisions } = await db.transaction(async (trx) => {
         if (dateStr) await acquireOccupancyLock(trx, dateStr);
         const rows = await trx('scheduled_services')
           .whereIn('id', byDate.get(dateStr))
           .where('reservation_expires_at', '<', now)
           .whereNotNull('customer_id')
+          // Re-verify the date UNDER the lock (hook r3 P1): a concurrent
+          // reschedule can move the row after the unlocked snapshot; the
+          // rescue must never reactivate occupancy on a date whose lock it
+          // does not hold — a moved row is left for the next 15-min tick.
+          .modify((qb) => {
+            if (dateStr) qb.whereRaw('scheduled_date::date = ?', [dateStr]);
+            else qb.whereNull('scheduled_date');
+          })
           .update({ reservation_expires_at: null, updated_at: now })
           .returning(['id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']);
-        rescued += rows.length;
+        const localCollisions = [];
         for (const row of rows) {
           if (!row.scheduled_date || !row.window_start) continue;
           // findConflictingVisits requires windowEnd — derive it from the
@@ -1497,10 +1508,13 @@ async function releaseExpiredReservations() {
             includeHolds: false,
           });
           if (Array.isArray(clash) && clash.length) {
-            collisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
+            localCollisions.push({ id: row.id, conflicts: clash.map((v) => v.id).slice(0, 5) });
           }
         }
+        return { txRescued: rows.length, txCollisions: localCollisions };
       });
+      rescued += txRescued;
+      collisions.push(...txCollisions);
     } catch (rescueErr) {
       logger.error(`[slot-reservation] rescue transaction failed for ${dateStr}: ${rescueErr.message}`);
     }
