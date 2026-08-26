@@ -31,6 +31,7 @@ import {
   ADMIN_DESKTOP_NAV_SECTIONS,
   ADMIN_MOBILE_TABS,
   isAdminNavItemActive,
+  isPathAdminOnly,
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
@@ -147,6 +148,18 @@ export default function AdminLayoutV2() {
         setAuthStatus("error");
       });
   }, [navigate]);
+
+  // Role scoping on deep links: the sidebar/More page hide adminOnly
+  // destinations from non-admin roles, but a typed URL bypasses nav.
+  // Redirect off owner-only paths using the SERVER-returned role (`user`
+  // comes from /admin/auth/me — never the spoofable localStorage copy).
+  // UX scoping only: the API's requireAdmin middleware is the boundary.
+  useEffect(() => {
+    if (!user || user.role === "admin") return;
+    if (isPathAdminOnly(location.pathname)) {
+      navigate("/admin/dashboard", { replace: true });
+    }
+  }, [user, location.pathname, navigate]);
 
   // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
   useEffect(() => {
@@ -405,6 +418,12 @@ export default function AdminLayoutV2() {
           style={{ flex: 1, padding: "4px 8px 12px" }}
         >
           {ADMIN_DESKTOP_NAV_SECTIONS.map(({ section, items }) => {
+            const visibleItems = items
+              .filter((item) => !item.adminOnly || user?.role === "admin")
+              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
+            // Role/flag filtering can empty a whole section (e.g. Marketing
+            // for a technician) — an orphaned heading reads as a bug.
+            if (visibleItems.length === 0) return null;
             const headingId = `admin-nav-${section
               .toLowerCase()
               .replace(/[^a-z0-9]+/g, "-")}`;
@@ -431,10 +450,7 @@ export default function AdminLayoutV2() {
               >
                 {section}
               </h2>
-              {items
-                .filter((item) => !item.adminOnly || user?.role === "admin")
-                .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
-                .map((item) => {
+              {visibleItems.map((item) => {
                 const { path, icon: Icon, label } = item;
                 const isActive = isAdminNavItemActive(
                   item,

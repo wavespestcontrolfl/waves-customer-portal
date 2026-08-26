@@ -37,6 +37,15 @@ import {
 // Canonical metadata for every destination currently rendered by the admin
 // shell. The desktop sidebar and mobile More page are derived from the same
 // taxonomy so a destination cannot silently disappear from one surface.
+//
+// `adminOnly: true` scopes a destination to role === 'admin' (the owner).
+// A technician-role login keeps only the day-to-day service surfaces:
+// dashboard, schedule, reports, customers, communications, assessments,
+// staff time-tracking, equipment, inventory, knowledge, settings. Sales,
+// marketing, finance, and system destinations are owner-only. The sidebar,
+// More page, and the shell's deep-link guard (isPathAdminOnly) all read
+// this flag — UI scoping only; the API's requireAdmin/requireTechOrAdmin
+// middleware stays the enforcement boundary.
 export const ADMIN_NAV_ITEMS = {
   dashboard: {
     id: "dashboard",
@@ -56,6 +65,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/pipeline",
     label: "Pipeline",
     icon: ClipboardList,
+    adminOnly: true,
   },
   schedule: {
     id: "schedule",
@@ -102,48 +112,56 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/reviews",
     label: "Reviews",
     icon: Star,
+    adminOnly: true,
   },
   referrals: {
     id: "referrals",
     path: "/admin/referrals",
     label: "Referrals",
     icon: Gift,
+    adminOnly: true,
   },
   email: {
     id: "email",
     path: "/admin/email",
     label: "Email",
     icon: Mail,
+    adminOnly: true,
   },
   ppc: {
     id: "ppc",
     path: "/admin/ppc",
     label: "PPC",
     icon: Megaphone,
+    adminOnly: true,
   },
   seo: {
     id: "seo",
     path: "/admin/seo",
     label: "SEO",
     icon: Search,
+    adminOnly: true,
   },
   social: {
     id: "social",
     path: "/admin/social-media",
     label: "Social Media",
     icon: Share2,
+    adminOnly: true,
   },
   blog: {
     id: "blog",
     path: "/admin/blog",
     label: "Blog",
     icon: Newspaper,
+    adminOnly: true,
   },
   newsletter: {
     id: "newsletter",
     path: "/admin/newsletter",
     label: "Newsletter",
     icon: Send,
+    adminOnly: true,
   },
   assessments: {
     id: "assessments",
@@ -157,6 +175,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/agents",
     label: "Agent Ops",
     icon: Bot,
+    adminOnly: true,
   },
   agentEstimate: {
     id: "agentEstimate",
@@ -164,6 +183,7 @@ export const ADMIN_NAV_ITEMS = {
     label: "Agent Estimate",
     icon: Sparkles,
     flag: "agent_estimate",
+    adminOnly: true,
   },
   equipment: {
     id: "equipment",
@@ -182,12 +202,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/price-match",
     label: "Price Match",
     icon: Tags,
+    adminOnly: true,
   },
   compliance: {
     id: "compliance",
     path: "/admin/compliance",
     label: "Compliance",
     icon: ShieldCheck,
+    adminOnly: true,
   },
   knowledge: {
     id: "knowledge",
@@ -200,12 +222,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/invoices",
     label: "Invoices",
     icon: FileText,
+    adminOnly: true,
   },
   recovery: {
     id: "recovery",
     path: "/admin/billing-recovery",
     label: "Recovery",
     icon: Banknote,
+    adminOnly: true,
   },
   payers: {
     id: "payers",
@@ -220,12 +244,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/banking",
     label: "Banking",
     icon: Landmark,
+    adminOnly: true,
   },
   taxes: {
     id: "taxes",
     path: "/admin/tax",
     label: "Taxes",
     icon: Receipt,
+    adminOnly: true,
   },
   pricing: {
     id: "pricing",
@@ -239,6 +265,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/tool-health",
     label: "Tool Health",
     icon: Activity,
+    adminOnly: true,
   },
   settings: {
     id: "settings",
@@ -361,6 +388,19 @@ export const ADMIN_MOBILE_TABS = MOBILE_TAB_IDS.map((itemId) =>
 
 function pathnameFor(path) {
   return String(path || "").split("?")[0];
+}
+
+// Deep-link guard: nav filtering alone is not a boundary — a non-admin can
+// still type /admin/banking. The shell redirects any pathname that belongs
+// to an adminOnly destination (exact or nested). Unknown paths return false
+// (the API's role middleware is the real enforcement).
+export function isPathAdminOnly(pathname) {
+  const p = String(pathname || "");
+  return Object.values(ADMIN_NAV_ITEMS).some((item) => {
+    if (!item.adminOnly) return false;
+    const itemPathname = pathnameFor(item.path);
+    return p === itemPathname || p.startsWith(`${itemPathname}/`);
+  });
 }
 
 export function isAdminNavItemActive(item, pathname, search = "") {

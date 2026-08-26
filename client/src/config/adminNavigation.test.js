@@ -6,6 +6,7 @@ import {
   ADMIN_MOBILE_TABS,
   ADMIN_NAV_ITEMS,
   isAdminNavItemActive,
+  isPathAdminOnly,
 } from "./adminNavigation";
 
 function compactSections(sections) {
@@ -219,5 +220,44 @@ describe("isAdminNavItemActive", () => {
     ]) {
       expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.more, pathname)).toBe(false);
     }
+  });
+});
+
+describe("role scoping (adminOnly)", () => {
+  // The technician-role day-to-day surface. Changing this set is a product
+  // decision — update deliberately, with the owner's sign-off.
+  const TECH_VISIBLE_IDS = [
+    "dashboard",
+    "schedule",
+    "staff",
+    "jobs",
+    "communications",
+    "customers",
+    "assessments",
+    "equipment",
+    "inventory",
+    "knowledge",
+    "settings",
+    "more",
+  ];
+
+  it("scopes every destination outside the day-to-day set to admin", () => {
+    const techVisible = Object.values(ADMIN_NAV_ITEMS)
+      .filter((item) => !item.adminOnly)
+      .map(({ id }) => id);
+    expect(new Set(techVisible)).toEqual(new Set(TECH_VISIBLE_IDS));
+  });
+
+  it("flags owner-only deep links, including nested paths", () => {
+    expect(isPathAdminOnly("/admin/banking")).toBe(true);
+    expect(isPathAdminOnly("/admin/invoices/123")).toBe(true);
+    expect(isPathAdminOnly("/admin/seo")).toBe(true);
+    expect(isPathAdminOnly("/admin/pricing-logic")).toBe(true);
+    expect(isPathAdminOnly("/admin/dashboard")).toBe(false);
+    expect(isPathAdminOnly("/admin/schedule")).toBe(false);
+    expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);
+    expect(isPathAdminOnly("/admin/knowledge")).toBe(false);
+    // Unknown paths fall through to the API's role middleware.
+    expect(isPathAdminOnly("/admin/not-a-page")).toBe(false);
   });
 });

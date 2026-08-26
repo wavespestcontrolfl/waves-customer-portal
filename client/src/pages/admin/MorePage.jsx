@@ -44,17 +44,21 @@ export default function MorePage() {
           Everything beyond the five tabs.
         </p>{" "}
       </div>
-      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => (
+      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
+        const visibleItems = items
+          .filter((item) => !item.adminOnly || currentRole === "admin")
+          .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
+        // Role/flag filtering can empty a whole section (e.g. Marketing for
+        // a technician) — skip the orphaned heading.
+        if (visibleItems.length === 0) return null;
+        return (
         <section key={section} className="mt-2">
           {" "}
           <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
             {section}
           </div>{" "}
           <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            {items
-              .filter((item) => !item.adminOnly || currentRole === "admin")
-              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
-              .map(({ path, icon: Icon, label }) => (
+            {visibleItems.map(({ path, icon: Icon, label }) => (
               <li key={path}>
                 {" "}
                 <Link
@@ -80,7 +84,8 @@ export default function MorePage() {
             ))}
           </ul>{" "}
         </section>
-      ))}
+        );
+      })}
       <section className="mt-6">
         {" "}
         <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
