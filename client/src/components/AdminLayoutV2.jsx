@@ -157,7 +157,9 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     if (!user || user.role === "admin") return;
     if (isPathAdminOnly(location.pathname)) {
-      navigate("/admin/dashboard", { replace: true });
+      // Schedule, not dashboard: admin-dashboard.js is requireAdmin, so the
+      // dashboard would land a technician on a page of 403s (codex P1).
+      navigate("/admin/schedule", { replace: true });
     }
   }, [user, location.pathname, navigate]);
 
@@ -645,7 +647,9 @@ export default function AdminLayoutV2() {
           }}
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
-            {ADMIN_MOBILE_TABS.map((item) => {
+            {ADMIN_MOBILE_TABS.filter(
+              (item) => !item.adminOnly || user?.role === "admin",
+            ).map((item) => {
               const { path, icon: Icon, label } = item;
               const active = isAdminNavItemActive(
                 item,

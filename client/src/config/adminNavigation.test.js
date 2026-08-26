@@ -227,7 +227,6 @@ describe("role scoping (adminOnly)", () => {
   // The technician-role day-to-day surface. Changing this set is a product
   // decision — update deliberately, with the owner's sign-off.
   const TECH_VISIBLE_IDS = [
-    "dashboard",
     "schedule",
     "staff",
     "jobs",
@@ -266,7 +265,8 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);
-    expect(isPathAdminOnly("/admin/dashboard")).toBe(false);
+    // Dashboard's API is requireAdmin — owner-only despite being a mobile tab.
+    expect(isPathAdminOnly("/admin/dashboard")).toBe(true);
     expect(isPathAdminOnly("/admin/schedule")).toBe(false);
     expect(isPathAdminOnly("/admin/dispatch")).toBe(false);
     expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);

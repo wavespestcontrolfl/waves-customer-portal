@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
-const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LICENSE_UPDATE_FIELDS = new Set([
@@ -46,7 +46,7 @@ function licenseResponse(tech) {
   };
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/compliance-v2/applications — paginated with filters
 router.get('/applications', async (req, res, next) => {

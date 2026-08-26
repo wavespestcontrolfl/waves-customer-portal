@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
 const { BED_BUG } = require('../services/pricing-engine/constants');
 
@@ -12,7 +12,7 @@ const { BED_BUG } = require('../services/pricing-engine/constants');
 // DB-authoritative (db-bridge syncs it OVER the in-code constants), so a
 // technician login must not be able to change the numbers every estimate
 // bills from.
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Best-effort audit insert: a failure must never block the pricing edit
 // itself, but it must be visible in logs (a bare catch here previously

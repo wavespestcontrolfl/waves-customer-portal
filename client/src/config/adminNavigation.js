@@ -53,6 +53,9 @@ export const ADMIN_NAV_ITEMS = {
     label: "Dashboard",
     icon: LayoutDashboard,
     mobileTabIcon: Home,
+    // server/routes/admin-dashboard.js is requireAdmin — the page is a wall
+    // of 403s for any other role. Technicians land on /admin/schedule.
+    adminOnly: true,
   },
   customers: {
     id: "customers",
@@ -398,7 +401,6 @@ function pathnameFor(path) {
 // EVERY other /admin path — current or future — as owner-only. The API's
 // role middleware stays the real enforcement.
 const TECH_ALLOWED_PATH_PREFIXES = [
-  "/admin/dashboard",
   "/admin/schedule",
   "/admin/dispatch",
   "/admin/timetracking",

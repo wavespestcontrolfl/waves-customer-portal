@@ -1,13 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { buildAgentEstimateContext } = require('../services/agent-estimate-context');
 
 const FEATURE_KEY = 'agent_estimate';
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 router.use(async (req, res, next) => {
   try {
     const enabled = await isUserFeatureEnabled(req.technicianId, FEATURE_KEY, false);

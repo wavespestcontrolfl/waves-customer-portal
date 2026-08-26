@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
@@ -22,7 +22,7 @@ function getGoogleCallBridge() {
 // All ads endpoints require a signed-in staff member; the individual
 // spend-mutating endpoints below additionally require `requireAdmin` (see each
 // route). Reads stay tech-or-admin.
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // --- Write-body sanitizers -------------------------------------------------
 // POST/PUT /campaigns and PUT /targets previously mass-assigned req.body

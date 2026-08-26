@@ -3,7 +3,8 @@
  * margin-check honesty (estimator audit P1 #4 and the /margin-check P2).
  *
  * - Writes (lawn-brackets, discount-rules, PUT /:key) are ADMIN-only;
- *   technician logins keep reads and the calculators.
+ *   pricing is owner-only end to end (2026-08-25 role lockdown): reads,
+ *   calculators, and writes all require the admin role.
  * - Every write validates the FULL payload before any row commits —
  *   pricing_config is DB-authoritative (db-bridge syncs it over the in-code
  *   constants), so a bad commit poisons live pricing immediately.
@@ -140,11 +141,15 @@ describe('write authorization — technician logins cannot change pricing', () =
     });
   });
 
-  test('technician keeps the margin calculator (read/calc surface unchanged)', async () => {
+  // 2026-08-25 role lockdown (first-hire prep): pricing is owner-only end
+  // to end — the router base is requireAdmin now, calculators included.
+  test('margin calculator is owner-only (403 for a technician, 200 for admin)', async () => {
     await withServer(async (baseUrl) => {
-      const res = await call(baseUrl, 'POST', '/margin-check', { role: 'technician', body: { waveguardTier: 'gold' } });
-      expect(res.status).toBe(200);
-      expect(Array.isArray(res.json.services)).toBe(true);
+      const techRes = await call(baseUrl, 'POST', '/margin-check', { role: 'technician', body: { waveguardTier: 'gold' } });
+      expect(techRes.status).toBe(403);
+      const adminRes = await call(baseUrl, 'POST', '/margin-check', { role: 'admin', body: { waveguardTier: 'gold' } });
+      expect(adminRes.status).toBe(200);
+      expect(Array.isArray(adminRes.json.services)).toBe(true);
     });
   });
 });

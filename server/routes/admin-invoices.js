@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const db = require('../models/db');
@@ -16,7 +16,7 @@ const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/cu
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 

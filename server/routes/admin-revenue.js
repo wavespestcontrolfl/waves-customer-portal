@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { VEHICLE_METHODS } = require('../services/pnl-report');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 function getPeriodDates(period, dateStr) {
   const d = dateStr ? parseETDateTime(dateStr + 'T12:00') : new Date();
