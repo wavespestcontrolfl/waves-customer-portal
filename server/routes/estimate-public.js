@@ -9401,13 +9401,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             retryable: true,
           });
         }
+        let prepayQuoteOfferContribution = 0;
         if (quoteCustomerId && require('../config/feature-gates').gates.autoApplyAccountCredit) {
           try {
             const { getBalance, computeApplication } = require('../services/customer-credit');
             const balance = await getBalance(quoteCustomerId);
             const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(quoteCustomerId);
             const projection = computeApplication({ total: prepayProjectedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
-            prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - (projection.newCreditApplied || 0)) * 100) / 100);
+            const appliedCredit = projection.newCreditApplied || 0;
+            // The slice of the projection the UNREDEEMED offer is carrying
+            // (beyond the live balance): when > 0, the acknowledged total is
+            // only correct if the post-commit redemption actually lands —
+            // the charge block defers to the sweep when it can't confirm
+            // that (Codex r9 P0).
+            prepayQuoteOfferContribution = Math.max(0, Math.round((appliedCredit - (balance || 0)) * 100) / 100);
+            prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - appliedCredit) * 100) / 100);
           } catch (creditErr) {
             logger.warn(`[estimate-accept] prepay quote credit projection failed — quoting without credit: ${creditErr.message}`);
           }
@@ -9440,7 +9448,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             },
           });
         }
-        prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo };
+        prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo, projectedOfferAmount: prepayQuoteOfferContribution };
       }
     }
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
@@ -11437,6 +11445,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // send-time auto-apply (sendViaSMSAndEmail →
     // autoApplyAccountCreditIfEnabled).
     // Best-effort per booking — the sweep remains the durable guarantee.
+    const inspectionCreditRedemptions = new Map(); // bookingId -> result|{reason:'error'}
     if (customerId) {
       const creditBookingIds = [...new Set([
         ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
@@ -11445,12 +11454,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ].filter(Boolean))];
       for (const bookingId of creditBookingIds) {
         try {
-          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+          const redemption = await require('../services/inspection-credit').redeemInspectionCreditForBooking({
             customerId,
             scheduledServiceId: bookingId,
             createdBy: 'system:inspection_credit_estimate_accept',
           });
+          inspectionCreditRedemptions.set(String(bookingId), redemption || null);
         } catch (creditErr) {
+          inspectionCreditRedemptions.set(String(bookingId), { redeemed: 0, reason: 'error', error: creditErr.message });
           logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
         }
       }
@@ -11488,8 +11499,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const payerRow = await db('invoices').where({ id: invoiceId }).first('payer_id');
         prepayInvoicePayerBilled = !!payerRow?.payer_id;
       } catch { prepayInvoicePayerBilled = true; }
+      // The acknowledged quote leaned on the promised inspection-credit
+      // offer — the charge may only run once that credit CONCLUSIVELY
+      // landed (redeemed) or conclusively doesn't exist (the equality
+      // guard then declines at the honest amount). An INCONCLUSIVE
+      // redemption (lookup/evidence/db failure) means the customer's
+      // balance may still gain the credit: charging would mismatch and the
+      // fallback would deliver the GROSS invoice while resolving the
+      // durable job — over-collection with no recovery (Codex r9 P0).
+      // Defer instead: no charge, no pay link, stamp stays for the sweep
+      // (which re-runs this same redemption from the stamped booking).
+      const INSPECTION_CREDIT_INCONCLUSIVE = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'error'];
+      let prepayCreditUnresolved = false;
+      if (Number(prepayChargePlan.projectedOfferAmount) > 0) {
+        const prepayBookingId = txResult.annualPrepayConversion?.firstScheduledServiceId || null;
+        const redemption = prepayBookingId ? inspectionCreditRedemptions.get(String(prepayBookingId)) : null;
+        const redeemedOk = !!redemption && Number(redemption.redeemed) > 0;
+        const conclusiveNoOffer = !!redemption && !redeemedOk && !INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
+        prepayCreditUnresolved = !(redeemedOk || conclusiveNoOffer);
+      }
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
         prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+      } else if (prepayCreditUnresolved) {
+        prepayAutoCharge = { status: 'ambiguous', reason: 'inspection_credit_unresolved' };
+        invoicePayUrl = null;
+        logger.warn(`[estimate-accept] prepay auto-charge deferred for invoice ${invoiceId} (estimate ${estimate.id}): projected inspection credit not conclusively redeemed`);
       } else if (!prepayChargePmRowId) {
         // Enrollment refused/errored (already office-alerted inside the
         // enrollment path) — the quoted method never landed as a row.
@@ -11572,7 +11606,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await require('../services/notification-service').notifyAdmin(
           'billing',
           'Annual prepay accepted — charge outcome needs reconciliation',
-          `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
+          prepayAutoCharge.reason === 'inspection_credit_unresolved'
+            ? 'The promised inspection credit could not be confirmed as redeemed, so the auto-charge was deferred to the recovery sweep. No charge was attempted and no pay link was sent.'
+            : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {

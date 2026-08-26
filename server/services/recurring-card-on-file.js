@@ -599,7 +599,31 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         );
         continue;
       }
-      if (invoice.payer_id) { await resolve('skipped', { reason: 'payer_billed' }); continue; }
+      if (invoice.payer_id) {
+        // Payer-billed recovery must still DELIVER the invoice (Codex r9
+        // P0): the in-request path reopens payer delivery when it skips the
+        // charge, but a crash before that leaves this sweep as the only
+        // collection path — retiring the job without a confirmed send
+        // would strand an accepted annual plan unpaid with no recovery.
+        // sendViaSMSAndEmail routes payer-billed invoices to the payer AP
+        // inbox; resolve only on a confirmed {ok} delivery, else the
+        // stale-claim lease retries.
+        let payerDelivered = false;
+        try {
+          const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
+          payerDelivered = !!delivery?.ok;
+        } catch (sendErr) {
+          logger.error(`[recurring-cof] prepay sweep payer delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
+        }
+        await alertUncollected(
+          'Annual prepay accepted — invoice routes to a third-party payer',
+          `The accepted prepay booking is payer-billed, so no card was charged. ${payerDelivered
+            ? 'The invoice was delivered to the payer — follow up if it goes unpaid.'
+            : 'Payer invoice delivery FAILED — the sweep will retry; the payer currently has no copy.'}`,
+        );
+        if (payerDelivered) await resolve('skipped', { reason: 'payer_billed', delivered: true });
+        continue;
+      }
       // Reproduce the promised inspection credit BEFORE any recovery path
       // (Codex r9 P0): the acknowledged quote projected the redeemable
       // offer, but in-flow redemption runs post-commit — a crash in the
@@ -611,14 +635,26 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // credit state unknown — defer (stamp stays claimed, stale-claim
       // lease retries) rather than recover at a possibly-wrong amount.
       if (job.scheduled_service_id) {
+        // The service reports most failures via { redeemed: 0, reason }
+        // rather than throwing (Codex r9 P0) — an INCONCLUSIVE reason
+        // (lookup/evidence/db failure) leaves the credit's fate unknown, so
+        // defer exactly like a thrown error; a redeemed>0 or conclusive
+        // no-offer result lets the frozen-total charge (and its equality
+        // guard) proceed honestly.
+        const INCONCLUSIVE_REDEMPTION = ['booking_lookup_failed', 'booking_event_lookup_failed', 'no_booking_evidence', 'error'];
+        let redemption = null;
         try {
-          await require('./inspection-credit').redeemInspectionCreditForBooking({
+          redemption = await require('./inspection-credit').redeemInspectionCreditForBooking({
             customerId: invoice.customer_id,
             scheduledServiceId: job.scheduled_service_id,
             createdBy: 'system:inspection_credit_prepay_recovery',
           });
         } catch (redeemErr) {
-          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: inspection-credit redemption failed (${redeemErr.message})`);
+          redemption = { redeemed: 0, reason: 'error', error: redeemErr.message };
+        }
+        const redeemedOk = !!redemption && Number(redemption.redeemed) > 0;
+        if (!redemption || (!redeemedOk && INCONCLUSIVE_REDEMPTION.includes(redemption.reason))) {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: inspection-credit redemption inconclusive (${redemption?.reason || 'no result'}${redemption?.error ? `: ${redemption.error}` : ''})`);
           continue;
         }
       }
