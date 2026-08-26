@@ -1333,13 +1333,30 @@ router.post('/status', async (req, res) => {
           }
           if (laterOptIn) {
             try {
-              // clearSuppression resolves { ok: false } on a swallowed DB
-              // error — it does not reject (hook r3 P1): check the result,
-              // or a recipient who opted back in stays blocked silently.
-              const cleared = await clearSuppression({ phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo' });
-              if (cleared?.ok === false) {
-                throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
-              }
+              // The undo runs under FOR UPDATE with a provenance check
+              // (hook r8 P1): a concurrent inbound STOP re-suppresses via
+              // recordSuppression, whose upsert serializes on this row lock.
+              // We clear ONLY a row this callback's own write authored
+              // (source twilio_status_21610) — a row a STOP overwrote keeps
+              // its newer verdict, and a STOP arriving after our commit
+              // re-suppresses last-write-wins. The direct trx update mirrors
+              // clearSuppression's fields because that helper cannot join a
+              // transaction; keep the two in sync.
+              await db.transaction(async (trx) => {
+                const supRow = await trx('messaging_suppression')
+                  .where({ phone: optOutPhone }).forUpdate().first('active', 'source');
+                if (!supRow || supRow.active !== true || supRow.source !== 'twilio_status_21610') return;
+                await trx('messaging_suppression')
+                  .where({ phone: optOutPhone })
+                  .update({
+                    active: false,
+                    cleared_at: trx.fn.now(),
+                    source: 'cleared_by:twilio_status_21610_late_callback_undo',
+                  });
+              });
+              // Line-type cache drop mirrors clearSuppression's follow-up;
+              // best-effort outside the transaction.
+              try { await db('phone_line_types').where({ phone: optOutPhone }).del(); } catch { /* cache miss harmless */ }
               logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression cleared`);
             } catch (undoErr) {
               logger.error(`[twilio-status] 21610 late-callback undo FAILED for ${maskPhone(optOutPhone)}: ${undoErr.code || undoErr.message} — recipient may be wrongly suppressed`);
