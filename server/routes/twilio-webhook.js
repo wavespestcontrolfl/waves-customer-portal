@@ -1272,10 +1272,14 @@ router.post('/status', async (req, res) => {
               // comparing against a START: a clearance inside it keeps
               // winning (don't re-suppress an opted-in recipient), and the
               // recheck below scans the same widened window so the raced
-              // START is seen. Self-healing if we defer wrongly: the next
-              // send bounces with a clearly-newer sentAt, and the d18 daily
-              // reconciler backstops prefs drift (hook P1).
-              const SEND_RACE_GRACE_MS = 60 * 1000;
+              // START is seen. Kept to seconds (codex r7 P1): the primary
+              // path needs no grace at all and straggler writers' insert
+              // latency is single-digit seconds — a wide backdate would
+              // instead discard the carrier's CURRENT verdict for a START
+              // sent shortly before a genuinely-later send. Self-healing
+              // either way: the next send bounces with a clearly-newer
+              // sentAt, and the d18 daily reconciler backstops prefs drift.
+              const SEND_RACE_GRACE_MS = 5 * 1000;
               const sentAtFloor = sentAt
                 ? new Date(new Date(sentAt).getTime() - SEND_RACE_GRACE_MS)
                 : null;
@@ -1317,10 +1321,18 @@ router.post('/status', async (req, res) => {
               // newest verdict, and failing toward not texting is the safe
               // side of that uncertainty.
               let laterOptIn = false;
-              if (sentAt) {
+              {
+                // Runs even when the callback raced the outbound log insert
+                // (no sms_log row yet ⇒ sentAt null): the send happened
+                // seconds ago, so scan the last few minutes — a concurrent
+                // START that logged-and-cleared before this upsert is seen
+                // and undone in this same transaction instead of being
+                // overwritten (codex r7 P1). An older START outside that
+                // window still cannot resurrect over the carrier's verdict.
+                const scanFloor = sentAtFloor || new Date(Date.now() - 10 * 60 * 1000);
                 const inbound = await trx('sms_log')
                   .where({ from_phone: optOutPhone })
-                  .where('created_at', '>', sentAtFloor)
+                  .where('created_at', '>', scanFloor)
                   .orderBy('created_at', 'desc')
                   .limit(200)
                   .select('message_body');

@@ -207,7 +207,14 @@ async function recordNonMobileSuppression({ phone, source, supersedeClearedBefor
         active: true,
         cleared_at: null,
       })
-      .where('messaging_suppression.reason', 'cleared')
+      // Supersedable rows (codex r7 P1): the pure clearance TOMBSTONE
+      // (reason='cleared') AND a previously-suppressed non_mobile row a
+      // START cleared — clearSuppression keeps the original reason, so
+      // without the second arm a known landline that once STARTed could
+      // never be re-suppressed by a genuinely newer bounce (every later
+      // send burns forever). Stronger inactive reasons (opt_out,
+      // wrong_number, manual_dnc — admin-cleared or not) stay untouchable.
+      .whereIn('messaging_suppression.reason', ['cleared', 'non_mobile'])
       .where('messaging_suppression.active', false);
     // A tombstone is only superseded when its clearance PREDATES the send
     // that bounced (codex #3495): a START received after that send proves

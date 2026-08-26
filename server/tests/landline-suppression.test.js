@@ -26,6 +26,7 @@ function makeSuppressionChain() {
   // false) — chain stays awaitable at every step.
   c.merge = jest.fn(() => c);
   c.where = jest.fn((...a) => { c._wheres.push(a); return c; });
+  c.whereIn = jest.fn((...a) => { c._wheres.push(['in', ...a]); return c; });
   c.whereRaw = jest.fn((...a) => { c._wheres.push(['raw', ...a]); return c; });
   c.returning = jest.fn(() => c);
   c.then = (resolve, reject) => Promise.resolve(insertResult).then(resolve, reject);
@@ -84,15 +85,16 @@ describe('landline suppression on delivery bounce', () => {
     await suppressNonMobileOnBounce({ errorCode: '30006', to: '+18777175476' });
 
     expect(lastSuppressionChain.onConflict).toHaveBeenCalledWith('phone');
-    // A pure clearance tombstone (reason='cleared', inactive — written when
-    // a START arrived for a never-suppressed phone) is supersedable by a
-    // genuine landline verdict; every other existing row keeps the
-    // never-clobber contract via the two guards below.
+    // A pure clearance tombstone (reason='cleared', inactive) AND a
+    // START-cleared non_mobile row (clearSuppression keeps the original
+    // reason) are supersedable by a genuine landline verdict (codex r7 P1);
+    // every other existing row keeps the never-clobber contract via the
+    // guards below.
     expect(lastSuppressionChain.merge).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'non_mobile', active: true, cleared_at: null }),
     );
     expect(lastSuppressionChain._wheres).toEqual(expect.arrayContaining([
-      ['messaging_suppression.reason', 'cleared'],
+      ['in', 'messaging_suppression.reason', ['cleared', 'non_mobile']],
       ['messaging_suppression.active', false],
     ]));
   });

@@ -78,8 +78,11 @@ async function suppressNonMobileOnBounce({ errorCode, to, sid = null } = {}) {
     // outbound writers still log after messages.create() returns — shave
     // that race window so a START whose clearance raced the log insert
     // keeps its clearance (hook P1); a genuine landline just bounces the
-    // next send with a clearly-newer sentAt and suppresses then.
-    const SEND_RACE_GRACE_MS = 60 * 1000;
+    // next send with a clearly-newer sentAt and suppresses then. Kept to
+    // seconds (codex r7 P1): a wide backdate would let a clearance from
+    // shortly BEFORE a genuinely-later send outrank the carrier's current
+    // verdict.
+    const SEND_RACE_GRACE_MS = 5 * 1000;
     let sentAt = null;
     if (sid) {
       try {
