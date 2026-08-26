@@ -438,9 +438,28 @@ function zipFromJobAddress(address) {
  * CODate. Keys absent from a report are OMITTED from the row so the upsert
  * merge never nulls a value the other report wrote.
  */
+// Column widths from migration 20260813000031 — the county controls these
+// CSV values, not us, and one oversized value 22001-fails the WHOLE upsert
+// transaction (job_health: permit-sync failing since 2026-08-24). Clamp
+// display strings to their column width; permit_no is the upsert KEY, so an
+// oversized one is dropped (a truncated key could silently merge two
+// distinct permits) rather than clamped.
+const CONSTRUCTION_COLUMN_WIDTHS = {
+  status: 60, permit_type: 40, type_of_work: 80, address_raw: 200, zip: 10,
+  parcel_pin: 20, parcel_raw: 40, address_loose_key: 80,
+  contractor_name: 160, contractor_license: 40, owner_name: 160,
+};
+function clampConstructionRow(out) {
+  for (const [col, max] of Object.entries(CONSTRUCTION_COLUMN_WIDTHS)) {
+    if (typeof out[col] === 'string' && out[col].length > max) out[col] = out[col].slice(0, max);
+  }
+  return out;
+}
+
 function normalizeConstructionRow(row, reportKey) {
   const permitNo = trimmed(row.Permit);
   if (!permitNo) return null;
+  if (permitNo.length > 40) return null; // key column — never clamp, never upsert
   const address = trimmed(reportKey === 'under_construction' ? row.JobAddress : (row.JobAddress ?? row['Job Address']));
   const jobValue = Number(String(row.JobValue ?? '').replace(/[^0-9.]/g, ''));
   const out = {
@@ -461,7 +480,7 @@ function normalizeConstructionRow(row, reportKey) {
   };
   if (reportKey === 'under_construction') out.type_of_work = trimmed(row.TypeofWork);
   if (reportKey === 'cos') out.co_date = reportDateToIso(row.CODate);
-  return out;
+  return clampConstructionRow(out);
 }
 
 function parseConstructionCsv(csvText, reportKey) {

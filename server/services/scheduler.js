@@ -4266,9 +4266,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // DAILY 8:23AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // 8:23 not 8:00: it shared the 8:00:00 minute with the monthly-billing
+  // sweep and pool exhaustion failed it 4 runs straight (job_health:
+  // "Timeout acquiring a connection"). One minute per job — #3208 rule.
   // =========================================================================
-  cron.schedule('0 8 * * *', async () => {
+  cron.schedule('23 8 * * *', async () => {
     logger.info('Running: tax deadline alert check');
     try {
       await runExclusive('tax-deadline-alerts', async () => {
@@ -5624,8 +5627,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Card-expiry warnings — Monday 9 AM, cards expiring within 60 days
-  cron.schedule('0 9 * * 1', async () => {
+  // Card-expiry warnings — Monday 9:17 AM, cards expiring within 60 days.
+  // 9:17 not 9:00: three jobs shared the 9:00:00 minute (autopay pre-charge,
+  // payment-expiry, this) and pool exhaustion failed this one silently every
+  // Monday since 2026-08-03 (job_health: "Timeout acquiring a connection").
+  // Same one-minute-per-job rule as the #3208 watcher outage.
+  cron.schedule('17 9 * * 1', async () => {
     try {
       await runExclusive('card-expiry-warnings', async () => {
         const { sendCardExpiryWarnings } = require('./autopay-notifications');
