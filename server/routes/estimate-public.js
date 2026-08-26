@@ -9417,7 +9417,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayQuoteOfferContribution = Math.max(0, Math.round((appliedCredit - (balance || 0)) * 100) / 100);
             prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - appliedCredit) * 100) / 100);
           } catch (creditErr) {
-            logger.warn(`[estimate-accept] prepay quote credit projection failed — quoting without credit: ${creditErr.message}`);
+            // FAIL CLOSED (Codex r10 P0): "quote without credit" would price
+            // the gross amount while a promised credit may exist — if the
+            // post-commit redemption then also fails inconclusively, the
+            // charge collects gross over an outstanding promise. Unknown
+            // credit state = no quote, retryable refusal.
+            logger.warn(`[estimate-accept] prepay quote credit projection failed for estimate ${estimate.id} — refusing accept (retryable): ${creditErr.message}`);
+            return res.status(503).json({
+              error: 'We couldn’t confirm your payment details just now — please try again in a moment.',
+              code: 'PREPAY_QUOTE_UNAVAILABLE',
+              retryable: true,
+            });
           }
         }
         const { computeChargeAmount } = require('../services/stripe-pricing');
@@ -11608,6 +11618,46 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'ambiguous', reason: chargeErr.code || chargeErr.message };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay auto-charge outcome ambiguous for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
+          } else if (chargeErr.code === 'PAYER_BILLED_GUARD') {
+            // The in-lock guard found a payer assigned AFTER the mint while
+            // the invoice's frozen payer_id is still null (Codex r10 P0) —
+            // classifying this as a decline would let the fallback delivery
+            // below hand the HOMEOWNER a pay link for a payer's bill.
+            // Re-resolve and STAMP the live payer onto the invoice so
+            // delivery routes to the payer AP inbox (the normal
+            // payer-billed skip); if the payer can't be confirmed, defer
+            // with NO pay link and leave the durable job for the sweep.
+            let payerStamped = false;
+            try {
+              const PayerService = require('../services/payer');
+              const invoiceRow = await db('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_service_id');
+              if (invoiceRow?.payer_id) {
+                payerStamped = true; // another writer already stamped it
+              } else {
+                const resolved = await PayerService.resolveForInvoice({
+                  customerId,
+                  scheduledServiceId: invoiceRow?.scheduled_service_id || null,
+                  throwOnError: true,
+                });
+                if (resolved?.payerId) {
+                  await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
+                    payer_id: resolved.payerId,
+                    ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
+                    ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
+                  });
+                  payerStamped = true;
+                }
+              }
+            } catch (payerErr) {
+              logger.warn(`[estimate-accept] payer re-stamp failed for invoice ${invoiceId} (estimate ${estimate.id}): ${payerErr.message}`);
+            }
+            if (payerStamped) {
+              prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+            } else {
+              prepayAutoCharge = { status: 'ambiguous', reason: 'payer_unresolved' };
+              invoicePayUrl = null;
+            }
+            logger.warn(`[estimate-accept] prepay auto-charge refused by payer guard for invoice ${invoiceId} (estimate ${estimate.id}): ${payerStamped ? 'payer stamped, invoice routes to payer' : 'payer unresolved — deferred to sweep'}`);
           } else {
             prepayAutoCharge = { status: 'declined', reason: chargeErr.message };
             logger.warn(`[estimate-accept] prepay auto-charge declined/failed for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
@@ -11620,7 +11670,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           'Annual prepay accepted — charge outcome needs reconciliation',
           prepayAutoCharge.reason === 'inspection_credit_unresolved'
             ? 'The promised inspection credit could not be confirmed as redeemed, so the auto-charge was deferred to the recovery sweep. No charge was attempted and no pay link was sent.'
-            : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
+            : prepayAutoCharge.reason === 'payer_unresolved'
+              ? 'The charge was refused because this bill appears to route to a third-party payer that could not be confirmed. No charge ran and no pay link was sent — the recovery sweep will retry once the payer state resolves.'
+              : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {

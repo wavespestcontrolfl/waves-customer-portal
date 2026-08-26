@@ -559,8 +559,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       'billing', title, body,
       { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
     ).catch(() => {});
+    // Hoisted above the try so the catch's payer-guard handler (Codex r10
+    // P0) can reach the invoice row and the shared payer-delivery helper.
+    let invoice = null;
+    let deliverToPayerAndResolve = async () => {};
     try {
-      const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
+      invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payer_id', 'payment_method');
       if (!invoice) { await resolve('skipped', { reason: 'invoice_missing' }); continue; }
       const invStatus = String(invoice.status || '').toLowerCase();
       // Terminal classification (pre-push Codex P1 r4): only paid/prepaid
@@ -616,15 +620,16 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         );
         continue;
       }
-      if (invoice.payer_id) {
-        // Payer-billed recovery must still DELIVER the invoice (Codex r9
-        // P0): the in-request path reopens payer delivery when it skips the
-        // charge, but a crash before that leaves this sweep as the only
-        // collection path — retiring the job without a confirmed send
-        // would strand an accepted annual plan unpaid with no recovery.
-        // sendViaSMSAndEmail routes payer-billed invoices to the payer AP
-        // inbox; resolve only on a confirmed {ok} delivery, else the
-        // stale-claim lease retries.
+      // Payer-billed recovery must still DELIVER the invoice (Codex r9
+      // P0): the in-request path reopens payer delivery when it skips the
+      // charge, but a crash before that leaves this sweep as the only
+      // collection path — retiring the job without a confirmed send
+      // would strand an accepted annual plan unpaid with no recovery.
+      // sendViaSMSAndEmail routes payer-billed invoices to the payer AP
+      // inbox; resolve only on a confirmed {ok} delivery, else the
+      // stale-claim lease retries. Shared with the in-charge payer-guard
+      // refusal below (Codex r10 P0).
+      deliverToPayerAndResolve = async () => {
         let payerDelivered = false;
         try {
           const delivery = await require('./invoice').sendViaSMSAndEmail(job.invoice_id);
@@ -639,6 +644,9 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             : 'Payer invoice delivery FAILED — the sweep will retry; the payer currently has no copy.'}`,
         );
         if (payerDelivered) await resolve('skipped', { reason: 'payer_billed', delivered: true });
+      };
+      if (invoice.payer_id) {
+        await deliverToPayerAndResolve();
         continue;
       }
       // Reproduce the promised inspection credit BEFORE any recovery path
@@ -741,6 +749,44 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // invoice after the attempt/reconciliation resolves.
       if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code) || err.reconciliationRequired) {
         logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${err.code || 'reconciliation pending'}`);
+        continue;
+      }
+      // In-lock payer-guard refusal (Codex r10 P0): a payer was assigned
+      // AFTER the mint while the invoice's frozen payer_id is still null.
+      // Falling through to the generic fallback would hand the HOMEOWNER a
+      // pay link for the payer's bill — instead re-resolve, STAMP the live
+      // payer onto the invoice, and route through confirmed payer
+      // delivery; if the payer can't be confirmed, defer (claimed, lease
+      // retries) with no delivery at all.
+      if (err.code === 'PAYER_BILLED_GUARD') {
+        let payerStamped = false;
+        try {
+          const invoiceRow = await db('invoices').where({ id: job.invoice_id }).first('payer_id', 'scheduled_service_id');
+          if (invoiceRow?.payer_id) {
+            payerStamped = true; // another writer already stamped it
+          } else {
+            const resolved = await require('./payer').resolveForInvoice({
+              customerId: invoice?.customer_id,
+              scheduledServiceId: invoiceRow?.scheduled_service_id || null,
+              throwOnError: true,
+            });
+            if (resolved?.payerId) {
+              await db('invoices').where({ id: job.invoice_id }).whereNull('payer_id').update({
+                payer_id: resolved.payerId,
+                ...(resolved.poNumber ? { po_number: resolved.poNumber } : {}),
+                ...(resolved.snapshot ? { payer_snapshot: JSON.stringify(resolved.snapshot) } : {}),
+              });
+              payerStamped = true;
+            }
+          }
+        } catch (payerErr) {
+          logger.warn(`[recurring-cof] prepay sweep payer re-stamp failed for invoice ${job.invoice_id}: ${payerErr.message}`);
+        }
+        if (payerStamped) {
+          await deliverToPayerAndResolve();
+        } else {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: payer guard refused the charge but the payer could not be confirmed`);
+        }
         continue;
       }
       // A DETERMINISTIC failure (decline, guard refusal, missing method) —

@@ -2068,7 +2068,12 @@ const StripeService = {
             throwOnError: true,
           });
           if (resolvedPayer?.payerId) {
-            throw new Error('This appointment is payer-billed. The saved card must not be charged.');
+            const payerErr = new Error('This appointment is payer-billed. The saved card must not be charged.');
+            // Detectable refusal (Codex #3492 r10): callers that snapshot
+            // payer state pre-charge must re-route the bill to the payer
+            // instead of treating this as an ordinary decline.
+            payerErr.code = 'PAYER_BILLED_GUARD';
+            throw payerErr;
           }
         }
         // Customer-DEFAULT payer serialized with the charge (balance-sweep
@@ -2086,7 +2091,11 @@ const StripeService = {
             throwOnError: true,
           });
           if (resolvedDefaultPayer?.payerId) {
-            throw new Error('This bill routes to a third-party payer. The saved card must not be charged.');
+            const payerErr = new Error('This bill routes to a third-party payer. The saved card must not be charged.');
+            // Detectable refusal (Codex #3492 r10): see the visit-keyed
+            // guard above — same re-route contract for callers.
+            payerErr.code = 'PAYER_BILLED_GUARD';
+            throw payerErr;
           }
         }
         // The pre-lock invoice read is only an early eligibility snapshot. Use

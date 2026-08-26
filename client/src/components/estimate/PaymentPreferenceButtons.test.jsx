@@ -49,10 +49,31 @@ describe('PaymentPreferenceButtons', () => {
         setupFee={null}
         annualPrepayEligible
         prepayInLane
+        prepayCardCapture
       />,
     );
 
     expect(screen.getByText('Save your card at checkout; the 12-month total is charged when you confirm.')).toBeInTheDocument();
+    expect(screen.queryByText('12-month invoice opens after confirmation.')).not.toBeInTheDocument();
+  });
+
+  // Codex #3492 r10: auto-satisfy accepts (saved card / Auto Pay already
+  // active) charge the SAVED method — which may be a bank account — with no
+  // card-save step, so the copy must stay tender-neutral there.
+  it('in-lane prepay without a capture step says the saved payment method is charged', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        prepayInLane
+      />,
+    );
+
+    expect(screen.getByText('Your saved payment method on file is charged the 12-month total when you confirm.')).toBeInTheDocument();
+    expect(screen.queryByText(/Save your card at checkout/)).not.toBeInTheDocument();
     expect(screen.queryByText('12-month invoice opens after confirmation.')).not.toBeInTheDocument();
   });
 
@@ -65,6 +86,7 @@ describe('PaymentPreferenceButtons', () => {
         setupFee={{ amount: 99, waivedWithPrepay: true }}
         annualPrepayEligible
         prepayInLane
+        prepayCardCapture
       />,
     );
 

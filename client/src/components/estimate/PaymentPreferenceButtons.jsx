@@ -113,6 +113,12 @@ export default function PaymentPreferenceButtons({
   // the 12-month total is charged on confirmation, so the copy must not
   // promise an invoice pay link that never comes.
   prepayInLane = false,
+  // Whether an in-lane prepay accept actually CAPTURES a card at checkout
+  // (server recurringCardPolicy.required). False for auto-satisfy accepts
+  // (saved card / Auto Pay already active) — the saved method, which may be
+  // a BANK account, is charged directly with no save step, so the copy must
+  // stay tender-neutral and not instruct a card save (Codex #3492 r10).
+  prepayCardCapture = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -331,11 +337,19 @@ export default function PaymentPreferenceButtons({
               Pay the 12-month plan in full
             </button>
             <div style={optionNote}>
-              {waivableSetupFee
-                ? `Approve annual prepay and the setup is included at no charge.${prepayInLane ? ' Save your card at checkout; the 12-month total is charged when you confirm.' : ''}`
-                : prepayInLane
+              {(() => {
+                // Tender-accurate in-lane copy (Codex #3492 r10): a card
+                // capture instructs the save step; an auto-satisfy accept
+                // charges the SAVED method (card or bank) with no save step.
+                const inLaneNote = prepayCardCapture
                   ? 'Save your card at checkout; the 12-month total is charged when you confirm.'
-                  : '12-month invoice opens after confirmation.'}
+                  : 'Your saved payment method on file is charged the 12-month total when you confirm.';
+                return waivableSetupFee
+                  ? `Approve annual prepay and the setup is included at no charge.${prepayInLane ? ` ${inLaneNote}` : ''}`
+                  : prepayInLane
+                    ? inLaneNote
+                    : '12-month invoice opens after confirmation.';
+              })()}
             </div>
           </div>
         )}

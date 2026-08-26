@@ -1728,20 +1728,20 @@ async function inspectionCreditReportNote(service) {
 // throws.
 async function projectRedeemableOfferAmount(customerId, { now = new Date() } = {}) {
   if (!customerId) return 0;
-  try {
-    const q = db('inspection_credit_offers')
-      .where({ customer_id: customerId })
-      .whereIn('status', ['offered', 'expired'])
-      .where('created_at', '<=', now)
-      .where('expires_at', '>=', now);
-    // Dark = STANDING-PROMISE offers only, matching redemption (r34 P0).
-    if (!gateOn()) q.where({ source_service_key: 'rodent_inspection' });
-    const open = await q.select('amount');
-    return round2(open.reduce((sum, offer) => sum + (Number(offer.amount) || 0), 0));
-  } catch (err) {
-    logger.warn(`[inspection-credit] offer projection failed for customer ${customerId}: ${err.message}`);
-    return 0;
-  }
+  // THROWS on a query failure (Codex #3492 r10 P0) — a swallowed error
+  // returning 0 is indistinguishable from "no offer", and the prepay quote
+  // (the only caller) uses that distinction as a money guard: an unknown
+  // offer state must reject the quote, never silently price the gross
+  // amount over an outstanding promised credit.
+  const q = db('inspection_credit_offers')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['offered', 'expired'])
+    .where('created_at', '<=', now)
+    .where('expires_at', '>=', now);
+  // Dark = STANDING-PROMISE offers only, matching redemption (r34 P0).
+  if (!gateOn()) q.where({ source_service_key: 'rodent_inspection' });
+  const open = await q.select('amount');
+  return round2(open.reduce((sum, offer) => sum + (Number(offer.amount) || 0), 0));
 }
 
 module.exports = {
