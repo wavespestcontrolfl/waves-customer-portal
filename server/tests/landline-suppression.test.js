@@ -26,6 +26,7 @@ function makeSuppressionChain() {
   // false) — chain stays awaitable at every step.
   c.merge = jest.fn(() => c);
   c.where = jest.fn((...a) => { c._wheres.push(a); return c; });
+  c.whereRaw = jest.fn((...a) => { c._wheres.push(['raw', ...a]); return c; });
   c.then = (resolve, reject) => Promise.resolve(insertResult).then(resolve, reject);
   lastSuppressionChain = c;
   return c;

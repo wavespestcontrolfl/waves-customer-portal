@@ -1348,11 +1348,20 @@ router.post('/status', async (req, res) => {
               }
               // Prefs flip — the suppression row is the enforcement;
               // sms_enabled keeps the admin UI honest (same split as STOP).
+              // Guarded to the ACCOUNT HOLDER's own phone (codex #3495): an
+              // appointment SMS to a spouse/tenant/service contact carries
+              // the property's customer_id in sms_log, and that contact's
+              // carrier opt-out must not flip the account holder's prefs —
+              // the phone-keyed suppression row already blocks the contact.
               if (optOutCustomerId) {
-                await trx('notification_prefs')
-                  .insert({ customer_id: optOutCustomerId, sms_enabled: false })
-                  .onConflict('customer_id')
-                  .merge({ sms_enabled: false });
+                const owner = await trx('customers').where({ id: optOutCustomerId }).first('phone');
+                const ownerPhone = normalizeE164(owner?.phone || '');
+                if (ownerPhone && ownerPhone === optOutPhone) {
+                  await trx('notification_prefs')
+                    .insert({ customer_id: optOutCustomerId, sms_enabled: false })
+                    .onConflict('customer_id')
+                    .merge({ sms_enabled: false });
+                }
               }
               outcome.applied = true;
             });

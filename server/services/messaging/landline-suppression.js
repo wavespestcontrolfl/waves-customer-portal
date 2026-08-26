@@ -60,7 +60,7 @@ function lastTen(phone) {
  * @param {{ sid?: string, status?: string, errorCode?: string|number, to?: string }} args
  * @returns {Promise<{ acted: boolean, reason?: string, recorded?: boolean, phone?: string }>}
  */
-async function suppressNonMobileOnBounce({ errorCode, to } = {}) {
+async function suppressNonMobileOnBounce({ errorCode, to, sid = null } = {}) {
   try {
     if (!NON_MOBILE_DELIVERY_CODES.has(String(errorCode || ''))) {
       return { acted: false, reason: 'not_a_landline_code' };
@@ -70,9 +70,21 @@ async function suppressNonMobileOnBounce({ errorCode, to } = {}) {
       return { acted: false, reason: 'no_recipient' };
     }
 
+    // Date the bounced send so a clearance tombstone NEWER than it (a
+    // START received after this message went out) survives — a delayed
+    // 30006 for an older send is stale evidence against a number that
+    // provably texted us since. Unknown send time ⇒ never supersede.
+    let sentAt = null;
+    if (sid) {
+      try {
+        sentAt = (await db('sms_log').where({ twilio_sid: sid }).first('created_at'))?.created_at || null;
+      } catch { /* undatable ⇒ conservative */ }
+    }
+
     const { recorded } = await recordNonMobileSuppression({
       phone,
       source: `twilio_status_${errorCode}`,
+      supersedeClearedBefore: sentAt,
     });
 
     // Best-effort: keep the customers.line_type cache (read by the appointment

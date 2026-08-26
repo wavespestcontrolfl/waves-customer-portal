@@ -181,10 +181,10 @@ async function recordSuppression({ phone, reason, source, capturedBody, dbh = db
  *
  * Returns { ok, recorded } — recorded=true only when a brand-new row was written.
  */
-async function recordNonMobileSuppression({ phone, source }) {
+async function recordNonMobileSuppression({ phone, source, supersedeClearedBefore = null }) {
   if (!phone) throw new Error('recordNonMobileSuppression: phone is required');
   try {
-    const inserted = await db('messaging_suppression')
+    const q = db('messaging_suppression')
       .insert({
         phone,
         reason: 'non_mobile',
@@ -209,6 +209,14 @@ async function recordNonMobileSuppression({ phone, source }) {
       })
       .where('messaging_suppression.reason', 'cleared')
       .where('messaging_suppression.active', false);
+    // A tombstone is only superseded when its clearance PREDATES the send
+    // that bounced (codex #3495): a START received after that send proves
+    // the number takes SMS — a delayed 30006 for an older message is stale
+    // evidence and must not resurrect suppression. Callers that cannot
+    // date the send never supersede (whereRaw false ⇒ insert-if-absent).
+    if (supersedeClearedBefore) q.where('messaging_suppression.cleared_at', '<', supersedeClearedBefore);
+    else q.whereRaw('false');
+    const inserted = await q;
     // Knex returns the inserted rows ([] when the conflict was ignored). Treat a
     // non-empty result as "newly recorded"; fall back to length-agnostic ok.
     const recorded = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;

@@ -72,8 +72,27 @@ class PaymentExpiry {
              WHERE pp.id = c.autopay_payment_method_id
                AND pp.customer_id = c.id
                AND pp.processor = 'stripe' AND pp.autopay_enabled = true
+               AND pp.stripe_payment_method_id IS NOT NULL
                AND (pp.method_type IS NULL
                     OR pp.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
+               -- the pointer only suppresses the fallback when charge()
+               -- would actually accept it: an EXPIRED or shell pointer row
+               -- falls back to the default card, whose warning must fire
+               -- (hook P1). Same guarded-cast + 2-digit rule as the window.
+               AND CASE
+                     WHEN NULLIF(BTRIM(pp.exp_month), '') ~ '^[0-9]{1,2}$'
+                       AND NULLIF(BTRIM(pp.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+                     THEN (
+                       (CASE WHEN NULLIF(BTRIM(pp.exp_year), '')::integer < 100
+                             THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
+                             ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) > ?
+                       OR ((CASE WHEN NULLIF(BTRIM(pp.exp_year), '')::integer < 100
+                                 THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
+                                 ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) = ?
+                           AND NULLIF(BTRIM(pp.exp_month), '')::integer >= ?)
+                     )
+                     ELSE FALSE
+                   END
           )
           AND NOT EXISTS (
             SELECT 1 FROM payment_methods pm2
@@ -87,7 +106,7 @@ class PaymentExpiry {
                     OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
           )
         )
-      )`)
+      )`, [thisYear, thisYear, thisMonth])
       .whereRaw(
         `CASE
            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
