@@ -120,7 +120,12 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
       }
     }
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
-    return updated > 0;
+    // Returns the UPDATED COUNT (0 = no recipient rows — the normal case
+    // for most phones), reserving FALSE for the swallowed-error path below
+    // so transactional callers can distinguish "nothing to decline" from
+    // "the write failed and aborted my transaction" (codex #3495). Both are
+    // falsy, so fire-and-forget callers behave exactly as before.
+    return updated;
   } catch (err) {
     logger.warn(`[recipient-optin] mark ${status} failed: ${err.message}`);
     return false;
