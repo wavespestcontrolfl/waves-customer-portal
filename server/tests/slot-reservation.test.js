@@ -1330,3 +1330,37 @@ describe('scheduled service reservation hold migration', () => {
     );
   });
 });
+
+describe('releaseExpiredReservations', () => {
+  test('never deletes a committed row — stale expiry on a customer visit is cleared, not swept', async () => {
+    const chains = [];
+    const mkChain = (result) => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.whereNull = jest.fn(() => chain);
+      chain.whereNotNull = jest.fn(() => chain);
+      chain.update = jest.fn(async () => result);
+      chain.del = jest.fn(async () => result);
+      chains.push(chain);
+      return chain;
+    };
+    db.mockImplementationOnce(() => mkChain(2))
+      .mockImplementationOnce(() => mkChain(3));
+
+    const out = await slotReservation.releaseExpiredReservations();
+    expect(out).toEqual({ rescued: 2, released: 3 });
+
+    // Pass 1: committed rows (customer_id NOT NULL) get the stray timestamp
+    // CLEARED via UPDATE — a committed booking must never be deletable here.
+    expect(chains[0].whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(chains[0].update).toHaveBeenCalledWith(
+      expect.objectContaining({ reservation_expires_at: null }),
+    );
+    expect(chains[0].del).not.toHaveBeenCalled();
+
+    // Pass 2: the DELETE is scoped to uncommitted holds only.
+    expect(chains[1].whereNull).toHaveBeenCalledWith('customer_id');
+    expect(chains[1].del).toHaveBeenCalled();
+    expect(chains[1].update).not.toHaveBeenCalled();
+  });
+});

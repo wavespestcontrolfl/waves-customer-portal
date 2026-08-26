@@ -1437,13 +1437,28 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
  */
 async function releaseExpiredReservations() {
   const now = new Date();
+  // Only uncommitted holds (customer_id NULL — the module's own hold
+  // discriminator) are deletable. A row that carries a customer with a stale
+  // reservation_expires_at is a COMMITTED booking whose commit didn't clear
+  // the timestamp (commitReservation clears it in the same UPDATE, but any
+  // other writer — or a partial legacy row — can leave it behind): deleting
+  // it here would silently destroy a real visit. Rescue it instead by
+  // clearing the stray timestamp, and say so loudly.
+  const rescued = await db('scheduled_services')
+    .where('reservation_expires_at', '<', now)
+    .whereNotNull('customer_id')
+    .update({ reservation_expires_at: null, updated_at: now });
+  if (rescued > 0) {
+    logger.warn(`[slot-reservation] cleared stale reservation_expires_at on ${rescued} COMMITTED visit(s) — a committed row is never deleted by this sweep`);
+  }
   const released = await db('scheduled_services')
     .where('reservation_expires_at', '<', now)
+    .whereNull('customer_id')
     .del();
   if (released > 0) {
     logger.info(`[slot-reservation] released ${released} expired reservation(s)`);
   }
-  return { released };
+  return { released, rescued };
 }
 
 module.exports = {
