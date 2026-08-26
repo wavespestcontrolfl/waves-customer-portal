@@ -11827,32 +11827,44 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               throwOnError: true,
             });
             if (resolvedRouting?.payerId) {
-              const payerAppliedCredit = Number(payerInvRow?.credit_applied) || 0;
-              if (payerAppliedCredit > 0) {
-                // The reversal REFUSES settled/in-flight invoices (e.g. the
-                // in-trx apply already covered the year → status 'prepaid')
-                // by returning { reversed: 0, skipped } instead of throwing
-                // (Codex r26 P1). Stamping the payer over an un-returned
-                // homeowner credit would hand AP a bill funded from the
-                // homeowner's ledger — require the FULL reversal before the
-                // re-route; anything less throws into the routing catch
-                // (→ 'unresolved': defer, no stamp, no delivery).
-                const reversal = await require('../services/customer-credit').reverseAppliedCredit({
-                  invoiceId,
-                  amount: payerAppliedCredit,
-                  createdBy: 'system:prepay_payer_reroute',
-                  note: 'Account credit returned — invoice re-routed to third-party payer',
-                });
-                if ((Number(reversal?.reversed) || 0) + 0.005 < payerAppliedCredit) {
-                  const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
-                  stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
-                  throw stuck;
+              // Under the ownership fence (Codex r27 P1): the credit
+              // reversal + payer stamp are invoice mutations — a request
+              // stalled past the 60-minute lease could otherwise resume
+              // here AFTER the sweep replaced the claim and began
+              // collection, reclassifying an invoice the successor already
+              // charged. The fence's CAS verifies our claim token still
+              // stands (and stamps executing_at so the sweep's stale-lease
+              // takeover holds off); a superseded claim throws
+              // PREPAY_JOB_NOT_OWNED into the routing catch → cede
+              // (no stamp, no delivery, the owner resolves).
+              await chargeUnderJobFence(async () => {
+                const payerAppliedCredit = Number(payerInvRow?.credit_applied) || 0;
+                if (payerAppliedCredit > 0) {
+                  // The reversal REFUSES settled/in-flight invoices (e.g. the
+                  // in-trx apply already covered the year → status 'prepaid')
+                  // by returning { reversed: 0, skipped } instead of throwing
+                  // (Codex r26 P1). Stamping the payer over an un-returned
+                  // homeowner credit would hand AP a bill funded from the
+                  // homeowner's ledger — require the FULL reversal before the
+                  // re-route; anything less throws into the routing catch
+                  // (→ 'unresolved': defer, no stamp, no delivery).
+                  const reversal = await require('../services/customer-credit').reverseAppliedCredit({
+                    invoiceId,
+                    amount: payerAppliedCredit,
+                    createdBy: 'system:prepay_payer_reroute',
+                    note: 'Account credit returned — invoice re-routed to third-party payer',
+                  });
+                  if ((Number(reversal?.reversed) || 0) + 0.005 < payerAppliedCredit) {
+                    const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+                    stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+                    throw stuck;
+                  }
                 }
-              }
-              await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
-                payer_id: resolvedRouting.payerId,
-                ...(resolvedRouting.poNumber ? { po_number: resolvedRouting.poNumber } : {}),
-                ...(resolvedRouting.snapshot ? { payer_snapshot: JSON.stringify(resolvedRouting.snapshot) } : {}),
+                await db('invoices').where({ id: invoiceId }).whereNull('payer_id').update({
+                  payer_id: resolvedRouting.payerId,
+                  ...(resolvedRouting.poNumber ? { po_number: resolvedRouting.poNumber } : {}),
+                  ...(resolvedRouting.snapshot ? { payer_snapshot: JSON.stringify(resolvedRouting.snapshot) } : {}),
+                });
               });
               prepayPayerRouting = 'payer_billed';
             } else {
@@ -11860,11 +11872,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             }
           }
         } catch (routingErr) {
-          prepayPayerRouting = 'unresolved';
-          logger.warn(`[estimate-accept] payer routing unresolved for invoice ${invoiceId} — deferring (no delivery): ${routingErr.message}`);
+          // A superseded claim CEDES (Codex r27 P1) — the sweep owns the
+          // job and may be mid-collection, so this is job_not_owned
+          // 'ambiguous' (attempted-elsewhere/unknown), not a 'deferred'
+          // nothing-attempted wait. Everything else stays 'unresolved'.
+          prepayPayerRouting = routingErr.code === 'PREPAY_JOB_NOT_OWNED' ? 'ceded' : 'unresolved';
+          logger.warn(`[estimate-accept] payer routing ${prepayPayerRouting} for invoice ${invoiceId} — deferring (no delivery): ${routingErr.message}`);
         }
       }
-      if (prepayPayerRouting === 'payer_billed') {
+      if (prepayPayerRouting === 'ceded') {
+        prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
+        invoicePayUrl = null;
+      } else if (prepayPayerRouting === 'payer_billed') {
         prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
       } else if (prepayPayerRouting === 'unresolved') {
         // 'deferred', not 'ambiguous' (Codex r26 P2): no charge was
@@ -12545,7 +12564,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // contradicts a year already collected/collecting — the charge
           // path's receipt is the customer's confirmation. Declined/skipped
           // charges keep the invoice-coming copy, which is then accurate.
-          const amountText = annualPrepayQuotedAmount != null ? ` for ${fmtMoney(annualPrepayQuotedAmount)}` : '';
+          // Quote the invoice's live amount DUE (Codex r27 P2):
+          // annualPrepayQuotedAmount is invoice.total, but account credit
+          // applied in the accept trx sits in credit_applied — the pay
+          // link this SMS promises collects total - credit_applied, so the
+          // gross figure would contradict the lower amount the customer
+          // just acknowledged. (Live read also picks up a payer-reroute
+          // reversal, where gross is once again the true due.)
+          let prepayFallbackAmount = annualPrepayQuotedAmount;
+          try {
+            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied') : null;
+            if (dueRow) prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
+          } catch { /* keep the minted figure */ }
+          const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
