@@ -259,7 +259,8 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
   // as Customers quick-add / leads convert). Lazy-required to avoid a
   // service↔route load cycle.
   const adminCustomers = require('../routes/admin-customers');
-  const { ensureCustomerAccount, createDefaultCustomerRows } = adminCustomers;
+  const { ensureCustomerAccount } = adminCustomers;
+  const { createDefaultCustomerRows } = require('./customer-default-rows');
 
   const firstName = contact.name || 'Commercial Account';
   const account = await ensureCustomerAccount(trx, {

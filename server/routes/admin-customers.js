@@ -5178,7 +5178,6 @@ router._private = {
 
 router.ensureCustomerAccount = ensureCustomerAccount;
 router.findAccountByContact = findAccountByContact;
-router.createDefaultCustomerRows = createDefaultCustomerRows;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file
 // does rather than re-deriving from raw tier truthiness.
