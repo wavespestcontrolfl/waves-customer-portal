@@ -414,6 +414,25 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     })).rejects.toMatchObject({ status: 409 });
     expect(updates).toHaveLength(0);
   });
+
+  it("the EDITED visit's own live invoice refuses too — excluded from the update loop, never from the billing guards (r8)", async () => {
+    const siblings = [
+      { id: 's1', scheduled_date: '2098-02-15', primary_line_price: '25.00', estimated_price: '25.00' },
+    ];
+    const { conn, updates } = propagationScenario({
+      siblings,
+      invoicesByVisit: { edited: { id: 'inv-edited', status: 'sent', payer_statement_id: null } },
+    });
+    conn.schema.hasColumn = async (table, col) => table === 'invoices' && col === 'scheduled_service_id';
+    await expect(propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited',
+      editedRow: { id: 'edited', scheduled_date: '2098-01-15', primary_line_price: '25.00', estimated_price: '25.00' },
+      parentId: 'p1', fromDateStr: '2098-01-15',
+      fields: { primary_line_price: 50, estimated_price: 50 },
+      serviceChanged: false, priceChanged: true, cols: COLS,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(updates).toHaveLength(0);
+  });
 });
 
 describe('applyStoredVisitFinancials — scoped explicit-$0 carries to spawned rows', () => {
@@ -552,5 +571,14 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
     // The propagation helper carries no void call at all — the conversion
     // path's own voiding (pre-existing, `trx`-named) is out of this lane.
     expect(src).not.toMatch(/voidConversionInvoicesRestoringCredits\(\{ trx: conn/);
+  });
+
+  it('the edited visit joins the billing guards while staying out of the sibling update loop (r8)', () => {
+    expect(src).toMatch(/const guardRows = editedRow \? \[editedRow, \.\.\.targets\] : targets;/);
+    expect(src).toMatch(/editedRow: priceServiceBeforeRow,/);
+  });
+
+  it('the list payload carries recurring_parent_id so a list-opened modal can tell a child from the template (r8)', () => {
+    expect(src).toMatch(/recurringParentId: s\.recurring_parent_id \|\| null,/);
   });
 });

@@ -2359,7 +2359,7 @@ function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow) {
 // the new price instead of collecting a stale amount (completion reuses a
 // non-void invoice by scheduled_service_id).
 async function propagatePriceServiceToFollowingSiblings(conn, {
-  editedId, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
 }) {
   const targetQuery = conn('scheduled_services')
     .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
@@ -2383,18 +2383,54 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   // reconciliation and the per-sibling financial re-derive both run for
   // either changed group.
   const billingRelevant = priceChanged || serviceChanged;
+  // The edited visit is excluded from the sibling UPDATE loop (the main save
+  // path writes its row), but NOT from the billing guards (Codex #3505 r8
+  // P1): a 'following' save that repriced every sibling while the edited
+  // visit's own live invoice kept the old amount is the same stale-collect
+  // bug the refusal exists for — completion/Charge Now reuse that invoice by
+  // scheduled_service_id before the new price is considered.
+  const guardRows = editedRow ? [editedRow, ...targets] : targets;
   let invoiceLinkColumn = false;
-  if (billingRelevant && targets.length > 0) {
+  if (billingRelevant && guardRows.length > 0) {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
     // rationale): a partially applied reprice would leave the office
     // believing a series was repriced while paid visits kept old numbers.
-    const covered = await findBillingCoveredVisits(conn, targets);
+    const covered = await findBillingCoveredVisits(conn, guardRows);
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
-      const when = targets.find((visit) => visit.id === firstId);
-      throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
+      const when = guardRows.find((visit) => visit.id === firstId);
+      const label = firstId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
+      throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
     }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+    if (invoiceLinkColumn) {
+      for (const visit of guardRows) {
+        // NO voiding here, ever (Codex #3505 r7, owner decision): the earlier
+        // rounds voided still-collectable drafts and grew three layers of race
+        // hardening (mint visit-row locks, send-claim re-checks under invoice
+        // row locks, void-completeness) while the dunning touch-claim window
+        // stayed open — a claimed follow-up touch releases its row lock before
+        // sending, so no in-transaction status check can see it. Refusing the
+        // series change while ANY live invoice exists on a target visit removes
+        // the entire race family: the operator settles or voids that invoice
+        // through the normal billing flow first, then re-applies the change.
+        // The visit-row locks taken up front keep this sound — a concurrent
+        // mint serializes on the visit row, so it either mints before this
+        // probe (probe refuses) or after commit (mints at the new price).
+        const live = await conn('invoices')
+          .where({ scheduled_service_id: visit.id })
+          .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
+          .first('id', 'status', 'payer_statement_id');
+        if (!live) continue;
+        const label = visit.id === editedId ? 'this appointment' : `the ${dateOnly(visit.scheduled_date) || 'later'} visit`;
+        if (live.payer_statement_id) {
+          // Statement-accrued lines belong to a third-party payer's monthly
+          // statement — the remedy is the payer flow, so name it.
+          throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
+        }
+        throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} already has an invoice. Settle or void that invoice first, or set the change to this appointment only.`);
+      }
+    }
   }
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
   // bare so an operational failure aborts the save (see below).
@@ -2403,33 +2439,6 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     : false;
   const updatedIds = [];
   for (const sibling of targets) {
-    if (billingRelevant && invoiceLinkColumn) {
-      // NO voiding here, ever (Codex #3505 r7, owner decision): the earlier
-      // rounds voided still-collectable drafts and grew three layers of race
-      // hardening (mint visit-row locks, send-claim re-checks under invoice
-      // row locks, void-completeness) while the dunning touch-claim window
-      // stayed open — a claimed follow-up touch releases its row lock before
-      // sending, so no in-transaction status check can see it. Refusing the
-      // series change while ANY live invoice exists on a target visit removes
-      // the entire race family: the operator settles or voids that invoice
-      // through the normal billing flow first, then re-applies the change.
-      // The visit-row locks taken up front keep this sound — a concurrent
-      // mint serializes on the visit row, so it either mints before this
-      // probe (probe refuses) or after commit (mints at the new price).
-      const live = await conn('invoices')
-        .where({ scheduled_service_id: sibling.id })
-        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
-        .first('id', 'status', 'payer_statement_id');
-      if (live) {
-        const when = dateOnly(sibling.scheduled_date) || 'later';
-        if (live.payer_statement_id) {
-          // Statement-accrued lines belong to a third-party payer's monthly
-          // statement — the remedy is the payer flow, so name it.
-          throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${when} visit is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
-        }
-        throw httpError(409, `Can't apply this price/service change to the rest of the series: the ${when} visit already has an invoice. Settle or void that invoice first, or set the change to this appointment only.`);
-      }
-    }
     const siblingUpdates = { updated_at: new Date() };
     for (const [key, value] of Object.entries(fields)) {
       if (!cols[key]) continue;
@@ -5328,6 +5337,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
+        'scheduled_services.recurring_parent_id',
         'scheduled_services.source_estimate_id',
         // Per-job Bill-To: the Edit-appointment modal opened from the list echoes
         // these on save, so they must come back here — otherwise a save posts
@@ -5383,6 +5393,11 @@ router.get('/list', async (req, res, next) => {
       city: s.city || null,
       isRecurring: s.is_recurring,
       recurringPattern: s.recurring_pattern || null,
+      // Without this the Edit modal can't tell a series CHILD from the
+      // template when opened from the list view (Codex #3505 r8 P2) —
+      // template-only behaviors (plan-length seeding, the add-on inheritance
+      // disclosure) would silently mis-apply to children.
+      recurringParentId: s.recurring_parent_id || null,
       sourceEstimateId: s.source_estimate_id || null,
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
@@ -7577,6 +7592,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (groups.changed && normalizePriceServiceScope(priceServiceScope) === 'following') {
           const propagatedIds = await propagatePriceServiceToFollowingSiblings(trx, {
             editedId: req.params.id,
+            // The LOCKED pre-edit row joins the billing guards (never the
+            // sibling update loop): the edited visit's own live invoice
+            // refuses a 'following' save exactly like a sibling's would
+            // (Codex #3505 r8 P1).
+            editedRow: priceServiceBeforeRow,
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates
