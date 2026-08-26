@@ -11774,7 +11774,33 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         prepayCreditUnresolved = !redemption || INSPECTION_CREDIT_INCONCLUSIVE.includes(redemption.reason);
       }
       if (recurringCardPayerFallback || prepayInvoicePayerBilled) {
-        prepayAutoCharge = { status: 'skipped', reason: 'payer_billed' };
+        // Return the HOMEOWNER's in-trx-applied account credit before the
+        // bill goes to the payer (Codex r22 — same rule as the
+        // PAYER_BILLED_GUARD catch): an unlinked accept can turn
+        // payer-billed only at the post-commit re-check, AFTER the
+        // transaction applied the homeowner's credit. A failed reversal
+        // defers (no delivery, sweep retries) rather than sending AP a
+        // bill discounted from the homeowner's ledger.
+        let payerCreditsReturned = true;
+        try {
+          const payerCreditRow = await db('invoices').where({ id: invoiceId }).first('credit_applied');
+          const payerAppliedCredit = Number(payerCreditRow?.credit_applied) || 0;
+          if (payerAppliedCredit > 0) {
+            await require('../services/customer-credit').reverseAppliedCredit({
+              invoiceId,
+              amount: payerAppliedCredit,
+              createdBy: 'system:prepay_payer_reroute',
+              note: 'Account credit returned — invoice re-routed to third-party payer',
+            });
+          }
+        } catch (payerCreditErr) {
+          payerCreditsReturned = false;
+          logger.warn(`[estimate-accept] payer-fallback credit reversal failed for invoice ${invoiceId} — deferring delivery: ${payerCreditErr.message}`);
+        }
+        prepayAutoCharge = payerCreditsReturned
+          ? { status: 'skipped', reason: 'payer_billed' }
+          : { status: 'ambiguous', reason: 'payer_unresolved' };
+        if (!payerCreditsReturned) invoicePayUrl = null;
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing
         // to charge, and chargeInvoiceWithSavedCard would refuse the
@@ -11857,7 +11883,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const already = await ConsentService.hasConsentSnapshotForVariant(
             customerId,
             prepayChargePlan.method.stripePaymentMethodId,
-            { methodType: consentMethodType, variant: 'prepay_card' },
+            // Scoped to THIS acceptance's authorization (Codex r22) — a
+            // prior plan's snapshot must not suppress this plan's row.
+            { methodType: consentMethodType, variant: 'prepay_card', since: acceptAuthorizedAt },
           );
           if (!already) {
             await ConsentService.recordConsent({

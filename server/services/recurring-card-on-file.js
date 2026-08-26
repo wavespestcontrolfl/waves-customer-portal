@@ -355,7 +355,7 @@ async function completeRecurringCardEnrollment({
     // (Codex r5 P1): an older future-invoice consent must not suppress the
     // immediate-charge authorization the prepay checkbox rendered.
     const consentAlreadyRecorded = consentVariant
-      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant })
+      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant, ...(authorizedAt ? { since: authorizedAt } : {}) })
       : await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId);
     if (!consentAlreadyRecorded) {
       // The capture modal rendered the locked v8 card consent verbatim
@@ -876,10 +876,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         try {
           const ConsentService = require('./payment-method-consents');
           const consentMethodType = pmRow.method_type || 'card';
+          const jobAuthorizedAt = (job.authorized_at || job.created_at)
+            ? new Date(job.authorized_at || job.created_at) : null;
           const already = await ConsentService.hasConsentSnapshotForVariant(
             invoice.customer_id,
             pmRow.stripe_payment_method_id,
-            { methodType: consentMethodType, variant: 'prepay_card' },
+            // Scoped to THIS acceptance's authorization (Codex r22) — a
+            // prior plan's snapshot must not suppress this plan's row.
+            { methodType: consentMethodType, variant: 'prepay_card', ...(jobAuthorizedAt ? { since: jobAuthorizedAt } : {}) },
           );
           if (!already) {
             await ConsentService.recordConsent({
