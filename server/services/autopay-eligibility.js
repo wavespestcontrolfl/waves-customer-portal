@@ -133,7 +133,11 @@ function autopayActivePredicate(now = new Date()) {
           -- The casts live inside CASE THEN, which Postgres evaluates only
           -- after the WHEN regexes pass (unlike AND, whose conjuncts may
           -- reorder), so a non-numeric value can never reach ::integer.
-          OR CASE
+          -- Restricted to NON-bank rows (hook r4 P1): a blocked bank row
+          -- with populated expiry fields must not slip through this branch.
+          OR (
+          pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+          AND CASE
             WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
               AND NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
             THEN (
@@ -154,6 +158,7 @@ function autopayActivePredicate(now = new Date()) {
             )
             ELSE FALSE
           END
+          )
         )
         AND (
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'

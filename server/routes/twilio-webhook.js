@@ -1336,28 +1336,39 @@ router.post('/status', async (req, res) => {
               }
             }
           } else {
-          // Recipient double opt-in (codex #3495 r1 P1): when the failed
-          // message was the opt-in ask itself, the generic ask_failed
-          // handler below leaves the recipient row in a state
-          // markRecipientOptin('confirmed') deliberately ignores — so a
-          // later START would clear the global suppression while
-          // appointment fanout stayed blocked forever. A 21610 is the
-          // recipient's VERDICT: record declined, same as inbound STOP.
+          // The downstream verdicts run under FOR UPDATE on the suppression
+          // row (hook r4 P1): clearSuppression is an UPDATE on that same
+          // row, so a concurrent START either commits its clear first (we
+          // observe active=false and skip) or blocks until we commit (and
+          // then clears + re-confirms, winning as the newer verdict). The
+          // recipient-declined write shares the transaction's ordering
+          // guarantee; a lock/read failure fails toward NOT texting.
           try {
-            await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
-          } catch { /* no recipient row is the common case — never block */ }
-          // Prefs flip is best-effort and separate — the suppression row is
-          // the enforcement; sms_enabled keeps the admin UI honest (same
-          // split as the STOP handler).
-          try {
-            if (optOutCustomerId) {
-              await db('notification_prefs')
-                .insert({ customer_id: optOutCustomerId, sms_enabled: false })
-                .onConflict('customer_id')
-                .merge({ sms_enabled: false });
-            }
-          } catch (prefsErr) {
-            logger.error(`[twilio-status] 21610 prefs flip failed: ${prefsErr.message}`);
+            await db.transaction(async (trx) => {
+              const supRow = await trx('messaging_suppression')
+                .where({ phone: optOutPhone }).forUpdate().first('active');
+              if (!supRow || supRow.active !== true) return; // START won — respect it
+              // Recipient double opt-in (codex #3495 r1 P1): when the failed
+              // message was the opt-in ask itself, the generic ask_failed
+              // handler below leaves the recipient row in a state
+              // markRecipientOptin('confirmed') deliberately ignores — so a
+              // later START would clear the global suppression while
+              // appointment fanout stayed blocked forever. A 21610 is the
+              // recipient's VERDICT: record declined, same as inbound STOP.
+              try {
+                await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined');
+              } catch { /* no recipient row is the common case — never block */ }
+              // Prefs flip — the suppression row is the enforcement;
+              // sms_enabled keeps the admin UI honest (same split as STOP).
+              if (optOutCustomerId) {
+                await trx('notification_prefs')
+                  .insert({ customer_id: optOutCustomerId, sms_enabled: false })
+                  .onConflict('customer_id')
+                  .merge({ sms_enabled: false });
+              }
+            });
+          } catch (verdictErr) {
+            logger.error(`[twilio-status] 21610 verdict writes failed: ${verdictErr.message}`);
           }
           } // end !laterOptIn
           } // end !clearedAfterSend

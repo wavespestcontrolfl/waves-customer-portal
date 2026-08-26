@@ -103,6 +103,11 @@ describe('autopay eligibility', () => {
     expect(normalizedSql).toContain(
       "pm.ach_status NOT IN ('pending_verification', 'verification_failed')",
     );
+    // The card-expiry branch is restricted to NON-bank rows (hook r4 P1) —
+    // a blocked bank row with populated expiry fields must not pass it.
+    expect(normalizedSql).toContain(
+      "OR ( pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account') AND CASE",
+    );
     expect(normalizedSql).toContain('ELSE FALSE END');
     expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
     expect(normalizedSql.indexOf(yearGuard)).toBeLessThan(normalizedSql.indexOf(yearCast));
@@ -186,7 +191,8 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('invalid-year', true, NULL::date, NULL::text),
           ('valid-card', true, NULL::date, NULL::text),
           ('legacy-two-digit', true, NULL::date, NULL::text),
-          ('pending-bank', true, NULL::date, NULL::text)
+          ('pending-bank', true, NULL::date, NULL::text),
+          ('pending-bank-card-exp', true, NULL::date, NULL::text)
       ), payment_methods(
         customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
@@ -198,7 +204,8 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope', NULL::text),
           ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099', NULL::text),
           ('legacy-two-digit', 'stripe', true, true, 'pm_legacy', 'card', '12', '32', NULL::text),
-          ('pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification')
+          ('pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification'),
+          ('pending-bank-card-exp', 'stripe', true, true, 'pm_pending_exp', 'ach', '12', '2099', 'pending_verification')
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -215,6 +222,9 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
       'legacy-two-digit': true,
       // The method's own verification state blocks a bank row.
       'pending-bank': false,
+      // ...even when the bank row carries populated expiry fields — the
+      // card-expiry branch is non-bank only (hook r4 P1).
+      'pending-bank-card-exp': false,
     });
   });
 
