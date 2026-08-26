@@ -7905,11 +7905,11 @@ const CallRecordingProcessor = {
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
 
-          await db('notification_prefs')
-            .insert({ customer_id: customerId })
-            .onConflict('customer_id')
-            .ignore()
-            .catch((e) => logger.warn(`[call-proc] notification_prefs create failed for ${customerId}: ${e.message}`));
+          // Both default rows (notification_prefs + property_preferences),
+          // onConflict-ignore inside the helper.
+          const { createDefaultCustomerRows } = require('./customer-default-rows');
+          await createDefaultCustomerRows(db, customerId)
+            .catch((e) => logger.warn(`[call-proc] default rows create failed for ${customerId}: ${e.message}`));
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently

@@ -56,13 +56,22 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // sms_enabled gate below, never by row absence. Customers created through
   // paths that don't seed notification_prefs were previously stranded here
   // (NO_CONSENT_RECORD on manual replies from Communications/tech Messages).
-  // Reply evidence is required for non-lead audiences (hasInboundHistory —
-  // a prior inbound sms_log row from this phone, loaded by loadContactState):
-  // purpose 'conversational' is reused by flows that can START a thread, and
-  // a cold outbound to a no-row recipient must not bypass consent (Codex P1
-  // on PR #3057). Anything beyond conversational still needs a prefs row +
-  // sms_enabled=true.
-  if (!contactState || !contactState.prefs) {
+  // For a KNOWN customer the missing row now resolves to the table defaults
+  // (owner ruling 2026-08-25, guarded on positively loaded suppression
+  // state). For recipients with NO customer record, reply evidence is still
+  // required (hasInboundHistory — a prior inbound sms_log row from this
+  // phone, loaded by loadContactState): purpose 'conversational' is reused
+  // by flows that can START a thread, and a cold outbound to an unknown
+  // no-row recipient must not bypass consent (Codex P1 on PR #3057).
+  // Resolved below: the real row, or {} — the table defaults, everything
+  // enabled — for a KNOWN customer whose row is missing (owner ruling
+  // 2026-08-25: a missing prefs row must never strand a reachable customer;
+  // rows are seeded at every intake path, so absence means a path skipped
+  // the insert, never an opt-out — STOP handling upserts a row with
+  // sms_enabled=false).
+  let prefs = contactState ? contactState.prefs : null;
+
+  if (!prefs) {
     if (
       input.audience === 'lead' &&
       policy.requireConsent === 'transactional' &&
@@ -78,7 +87,24 @@ async function checkConsentForPurpose(input, policy, contactState) {
     ) {
       return { ok: true };
     }
-    if (
+    if (contactState && contactState.customer) {
+      // Known customer, no row → table defaults. Same fail-closed guard as
+      // the customer-less conversational exception below: a pre-customer
+      // STOP lives ONLY in messaging_suppression, so the defaults apply
+      // only on POSITIVELY loaded suppression state (Codex P1 on 92cb96ae4
+      // + P2 on 2396f5557). Every downstream gate — channel routing,
+      // per-purpose toggles, the marketing consentBasis requirement —
+      // still runs against the defaults, exactly as it would against a
+      // freshly seeded row.
+      if (contactState.suppressionLoaded !== true) {
+        return {
+          ok: false,
+          code: 'CONSENT_LOOKUP_FAILED',
+          reason: 'messaging_suppression state not positively loaded (lookup error or table missing) — required before missing-prefs-row default consent; retry advised',
+        };
+      }
+      prefs = {};
+    } else if (
       policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational' &&
       contactState
@@ -104,14 +130,14 @@ async function checkConsentForPurpose(input, policy, contactState) {
         return { ok: true };
       }
     }
-    return {
-      ok: false,
-      code: 'NO_CONSENT_RECORD',
-      reason: `No notification_prefs record found for recipient — required for purpose "${input.purpose}"`,
-    };
+    if (!prefs) {
+      return {
+        ok: false,
+        code: 'NO_CONSENT_RECORD',
+        reason: `No notification_prefs record found for recipient — required for purpose "${input.purpose}"`,
+      };
+    }
   }
-
-  const prefs = contactState.prefs;
 
   // Per-purpose delivery-channel column (sms | email | both). 'email' means
   // the customer chose email-only delivery for this notification type, so the
@@ -199,6 +225,26 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // shaped like { status: 'opted_in', source, capturedAt }. Customer-level
   // flag wiring lands in a follow-up.
   if (policy.requireConsent === 'marketing') {
+    // Marketing-grade purposes additionally require EXPLICIT stored opt-in:
+    // the policy's prefsColumn must be exactly true on the row. NULL
+    // (system-seeded default — the customer was never asked) or a missing
+    // row is not consent regardless of the caller's consentBasis — several
+    // senders manufacture an opted_in basis from row/customer timestamps
+    // (renewal reminders, retention approvals), and this is the one choke
+    // point they all pass through.
+    // consentColumns (ANY-of) lets a purpose accept stored opt-in from more
+    // than one toggle (purpose 'marketing' spans seasonal campaigns AND
+    // promotions); absent, the policy's prefsColumn is the consent column.
+    const consentColumns = [].concat(policy.consentColumns || policy.prefsColumn || []);
+    const storedOptIn = consentColumns.length > 0
+      && consentColumns.some((prefsColumn) => prefs[prefsColumn] === true);
+    if (!storedOptIn) {
+      return {
+        ok: false,
+        code: 'NO_MARKETING_CONSENT',
+        reason: `Purpose "${input.purpose}" requires explicit stored opt-in (${consentColumns.join(' or ')} === true on notification_prefs) — a system-seeded default row is not captured consent.`,
+      };
+    }
     const cb = input.consentBasis;
     if (!cb || cb.status !== 'opted_in') {
       return {

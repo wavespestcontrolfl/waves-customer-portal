@@ -338,12 +338,17 @@ function isMarketingCustomerGuide(contract = {}) {
 async function marketingSmsConsentBasisForContract(contract = {}) {
   const prefs = await db('notification_prefs')
     .where({ customer_id: contract.customer_id })
-    .first('sms_enabled', 'seasonal_tips', 'created_at', 'updated_at')
+    .first('sms_enabled', 'seasonal_tips', 'marketing_offers', 'created_at', 'updated_at')
     .catch(() => null);
-  if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips !== true) return null;
+  // Any-of, mirroring the central 'marketing' policy: promotions-only
+  // opt-in counts; seasonal_tips === false stays the master kill.
+  if (!prefs || prefs.sms_enabled === false || prefs.seasonal_tips === false) return null;
+  if (prefs.seasonal_tips !== true && prefs.marketing_offers !== true) return null;
   return {
     status: 'opted_in',
-    source: 'notification_prefs.seasonal_tips',
+    source: prefs.seasonal_tips === true
+      ? 'notification_prefs.seasonal_tips'
+      : 'notification_prefs.marketing_offers',
     capturedAt: prefs.updated_at || prefs.created_at || undefined,
   };
 }

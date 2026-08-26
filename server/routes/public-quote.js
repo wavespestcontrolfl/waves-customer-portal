@@ -1340,6 +1340,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
     }
 
+    // Every quote-wizard customer must be born reachable AND complete: the
+    // consent validator reads notification_prefs (a missing row hard-failed
+    // every send as NO_CONSENT_RECORD until backfilled by hand), and the
+    // portal/irrigation surfaces read property_preferences. This route
+    // historically skipped both default-row inserts the lead-webhook intake
+    // path does. onConflict-ignore inside the helper means pre-existing
+    // customers missing a row are covered without ever overwriting one
+    // (a real opt-out's row always exists).
+    if (customerId) {
+      try {
+        const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+        await createDefaultCustomerRows(db, customerId);
+      } catch (e) {
+        logger.error(`[public-quote] default-rows ensure failed: ${e.message}`);
+      }
+    }
+
     // Ad service attribution — the quote wizard is a lead entry point just like
     // the lead webhook, so it must stamp its own funnel row (nothing downstream
     // does): without this a wizard lead never appears in the ad-dollar funnel,

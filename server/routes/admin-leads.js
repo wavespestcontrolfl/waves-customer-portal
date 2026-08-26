@@ -90,7 +90,8 @@ function parseInclusiveStart(startDate) {
 // rejection) lives in the shared module, which the dashboard Action Inbox
 // also uses so the two "still waiting" definitions can't drift.
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
-const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
+const { ensureCustomerAccount } = require('./admin-customers');
+const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
 // Median of an array of numbers (minutes), or null when empty. Robust to the

@@ -1885,6 +1885,7 @@ async function createSelfBooking(payload = {}) {
       // above means this almost always mints a fresh account. Lazy require:
       // admin-customers is a route module (load-cycle risk).
       const { ensureCustomerAccount } = require('./admin-customers');
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
       const account = await ensureCustomerAccount(db, {
         firstName: new_customer.first_name,
         lastName: new_customer.last_name || '',
@@ -1909,10 +1910,7 @@ async function createSelfBooking(payload = {}) {
       })).returning('id');
       custId = created.id || created;
       createdCustomerId = custId;
-      await db('notification_prefs')
-        .insert({ customer_id: custId })
-        .onConflict('customer_id')
-        .ignore();
+      await createDefaultCustomerRows(db, custId);
     }
 
     const customer = await db('customers').where('id', custId).first();
@@ -1986,10 +1984,16 @@ async function createSelfBooking(payload = {}) {
         }
       }
     }
-    await db('notification_prefs')
-      .insert({ customer_id: custId })
-      .onConflict('customer_id')
-      .ignore();
+    // Canonical seeding for EVERY resolved customer — a returning booker
+    // whose record predates the prefs rows must get the same NULL marketing
+    // flags + property_preferences as a fresh create; a bare insert here
+    // would take the legacy true column defaults (fabricated marketing
+    // consent) and skip property_preferences. Idempotent for the
+    // just-created path above (onConflict-ignore).
+    {
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(db, custId);
+    }
 
     // A unit submitted on a no-backfill path must not vanish: the customer row
     // stays untouched, but the visit's notes and the confirmation still carry
@@ -2535,6 +2539,7 @@ async function createSelfBooking(payload = {}) {
         // there; the rollback is harmlessly idle.)
         if (createdCustomerId) {
           await db('notification_prefs').where({ customer_id: createdCustomerId }).del().catch(() => {});
+          await db('property_preferences').where({ customer_id: createdCustomerId }).del().catch(() => {});
           await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });

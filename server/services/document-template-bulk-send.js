@@ -336,6 +336,7 @@ function audienceSelect(query, todayEt = etDateString()) {
     'np.email_enabled',
     'np.sms_enabled',
     'np.seasonal_tips',
+    'np.marketing_offers',
     'np.created_at as notification_prefs_created_at',
     'np.updated_at as notification_prefs_updated_at',
     db.raw("(SELECT string_agg(DISTINCT service_type, ', ') FROM service_records WHERE service_records.customer_id = c.id) as service_types"),
@@ -372,6 +373,7 @@ async function loadAudience(options, templateKey = null) {
       'np.email_enabled',
       'np.sms_enabled',
       'np.seasonal_tips',
+      'np.marketing_offers',
       'np.created_at',
       'np.updated_at',
     )
@@ -390,16 +392,23 @@ async function loadAudience(options, templateKey = null) {
 }
 
 function hasMarketingSmsConsent(row = {}) {
+  // Any-of, mirroring the central 'marketing' policy (policy.js
+  // consentColumns): a promotions-only opt-in (marketing_offers=true,
+  // seasonal_tips=NULL) counts; seasonal_tips === false stays the master
+  // marketing kill.
   return Boolean(clean(row.phone))
     && row.sms_enabled !== false
-    && row.seasonal_tips === true;
+    && row.seasonal_tips !== false
+    && (row.seasonal_tips === true || row.marketing_offers === true);
 }
 
 function marketingSmsConsentBasis(row = {}) {
   if (!hasMarketingSmsConsent(row)) return null;
   return {
     status: 'opted_in',
-    source: 'notification_prefs.seasonal_tips',
+    source: row.seasonal_tips === true
+      ? 'notification_prefs.seasonal_tips'
+      : 'notification_prefs.marketing_offers',
     capturedAt: row.notification_prefs_updated_at || row.notification_prefs_created_at || undefined,
   };
 }
