@@ -205,6 +205,36 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     };
   } catch (err) {
     const failure = classifyProviderFailure(err);
+    // A SYNCHRONOUS 21610 — Twilio rejecting messages.create() before any
+    // SID exists — never reaches the delivery-status callback, so the
+    // callback-side opt-out recording can't see it (codex #3495 P1). It is
+    // the recipient's CURRENT carrier verdict (no delayed-callback ordering
+    // to reconcile): feed the canonical suppression store here, fail-LOUD
+    // like the callback and dropped-call paths — a swallowed write means
+    // every other lane keeps texting an opted-out number.
+    if (failure.twilioCode === '21610') {
+      const optOutPhone = String(input.to || '').replace(/[^\d+]/g, '');
+      try {
+        const { recordSuppression } = require('../validators/suppression');
+        const res = await recordSuppression({
+          phone: optOutPhone,
+          reason: 'opt_out',
+          source: 'twilio_send_21610',
+        });
+        if (res?.ok === false) {
+          throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
+        }
+      } catch (suppressErr) {
+        try {
+          await require('../../notification-service').notifyAdmin(
+            'system',
+            'Opt-out suppression write failed',
+            `A synchronous Twilio 21610 rejection for ${optOutPhone.replace(/(\d{3})\d{4}(\d{2})$/, '$1••••$2')} could not be saved to the suppression list (send-time rejection). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
+            { bell: true, metadata: { source: 'twilio_send_21610', error: suppressErr.code || suppressErr.name || 'db_error' } },
+          );
+        } catch { /* notify best-effort — the failure result below still surfaces */ }
+      }
+    }
     return {
       sent: false,
       provider: 'twilio',
