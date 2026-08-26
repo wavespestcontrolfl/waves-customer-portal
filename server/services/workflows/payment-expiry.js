@@ -50,14 +50,24 @@ class PaymentExpiry {
               .where('p.status', 'paid');
           });
       })
-      // Only the customer's CURRENT method — the enrollment pointer or the
-      // default row. Replaced cards linger in payment_methods with
-      // is_default=false; without this, a customer gets texted about a card
-      // they already replaced, once per stale row (hook merge-round P1).
-      .where(function () {
-        this.where('pm.is_default', true)
-          .orWhereRaw('pm.id = c.autopay_payment_method_id');
-      })
+      // Only the customer's ONE current method, charge-path semantics: the
+      // enrollment pointer when set; otherwise the single newest default
+      // row (legacy data permits multiple defaults — without the NOT EXISTS
+      // dedupe a customer gets one notice per stale default). Replaced
+      // cards linger with is_default=false and never match (hook P1 ×2).
+      .whereRaw(`(
+        (c.autopay_payment_method_id IS NOT NULL AND pm.id = c.autopay_payment_method_id)
+        OR (
+          c.autopay_payment_method_id IS NULL AND pm.is_default = true
+          AND NOT EXISTS (
+            SELECT 1 FROM payment_methods pm2
+             WHERE pm2.customer_id = pm.customer_id
+               AND pm2.processor = 'stripe' AND pm2.is_default = true
+               AND (pm2.updated_at > pm.updated_at
+                    OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
+          )
+        )
+      )`)
       .whereRaw(
         `CASE
            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'

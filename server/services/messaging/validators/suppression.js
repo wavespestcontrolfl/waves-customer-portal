@@ -210,9 +210,23 @@ async function recordNonMobileSuppression({ phone, source }) {
 async function clearSuppression({ phone, source, dbh = db }) {
   if (!phone) throw new Error('clearSuppression: phone is required');
   try {
+    // UPSERT, not update: a clearance against a phone with NO standing row
+    // must still persist an inactive tombstone (codex #3495) — otherwise a
+    // late provider opt-out callback arriving after this clear finds
+    // neither a clearance to defer to nor a row to overwrite, and
+    // re-suppresses a recipient who explicitly opted in. Inactive rows are
+    // inert to every send-path read (they filter active = true).
     await dbh('messaging_suppression')
-      .where({ phone })
-      .update({
+      .insert({
+        phone,
+        reason: 'cleared',
+        source: source ? `cleared_by:${source}` : null,
+        active: false,
+        created_at: dbh.fn.now(),
+        cleared_at: dbh.fn.now(),
+      })
+      .onConflict('phone')
+      .merge({
         active: false,
         cleared_at: dbh.fn.now(),
         source: source ? `cleared_by:${source}` : null,

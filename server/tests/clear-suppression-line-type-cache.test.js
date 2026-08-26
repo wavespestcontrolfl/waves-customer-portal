@@ -9,7 +9,15 @@ const db = require('../models/db');
 const { clearSuppression } = require('../services/messaging/validators/suppression');
 
 function wire({ delThrows = null } = {}) {
-  const sup = { where: jest.fn(() => sup), update: jest.fn(async () => 1) };
+  // clearSuppression upserts (tombstone semantics — a clear against a
+  // phone with no row still persists an inactive marker).
+  const sup = {
+    where: jest.fn(() => sup),
+    update: jest.fn(async () => 1),
+    insert: jest.fn(() => sup),
+    onConflict: jest.fn(() => sup),
+    merge: jest.fn(async () => 1),
+  };
   const cache = {
     where: jest.fn(() => cache),
     del: jest.fn(async () => { if (delThrows) throw delThrows; return 1; }),
@@ -29,7 +37,8 @@ describe('clearSuppression also clears the line-type cache', () => {
     const { sup, cache } = wire();
     const res = await clearSuppression({ phone: '+18777175476', source: 'twilio_webhook_START' });
     expect(res.ok).toBe(true);
-    expect(sup.update).toHaveBeenCalled();
+    expect(sup.insert).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
+    expect(sup.merge).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
     expect(cache.where).toHaveBeenCalledWith({ phone: '+18777175476' });
     expect(cache.del).toHaveBeenCalled();
   });
