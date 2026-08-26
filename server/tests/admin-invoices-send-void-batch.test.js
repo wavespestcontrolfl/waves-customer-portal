@@ -199,6 +199,7 @@ describe('POST /:id/unvoid refusal mapping', () => {
     ['cancelled linked service', 'Cannot unvoid — the linked service visit is cancelled; restore or re-book the visit before restoring its invoice'],
     ['annual-stamped linked visit', 'Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead'],
     ['free re-service conversion', 'Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge'],
+    ['orphaned annual prepay charge', 'Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment'],
     ['unverifiable linked service', 'Could not verify the linked service visit — refusing to unvoid (boom)'],
     ['deferred send mid-dispatch', 'Cannot unvoid — a deferred message for this invoice is dispatching right now; retry in a minute'],
     ['deposit credit returned', "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly"],

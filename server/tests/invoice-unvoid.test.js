@@ -56,10 +56,12 @@ function voidInvoice(overrides = {}) {
 // Happy-path db() slot order inside unvoidInvoice:
 //   load → annual_prepay_terms canonical-link pre-guard → (trx) conditional
 //   restore → annual_prepay_terms TOCTOU re-check → payments money guard →
-//   sms_log deferred-send cancel → sms_log in-flight 'sending' fence.
+//   active-sequence stop repair → sms_log deferred-send cancel → sms_log
+//   in-flight 'sending' fence.
 // (No sequence re-arm here: that lives in scheduleForInvoice at resend.)
 function mockHappyPath({ restored } = {}) {
   const updateChain = chain({ returning: [restored] });
+  const seqStopChain = chain();
   const smsChain = chain();
   const sendingChain = noRow();
   db
@@ -68,9 +70,10 @@ function mockHappyPath({ restored } = {}) {
     .mockReturnValueOnce(updateChain)
     .mockReturnValueOnce(noRow()) // TOCTOU: still no owning term
     .mockReturnValueOnce(noRow()) // fresh-row money guard
+    .mockReturnValueOnce(seqStopChain)
     .mockReturnValueOnce(smsChain)
     .mockReturnValueOnce(sendingChain);
-  return { updateChain, smsChain, sendingChain };
+  return { updateChain, seqStopChain, smsChain, sendingChain };
 }
 
 describe('InvoiceService.unvoidInvoice', () => {
@@ -118,6 +121,33 @@ describe('InvoiceService.unvoidInvoice', () => {
     );
   });
 
+  test('applies the missed void-time lifecycle stop to a still-ACTIVE sequence atomically with the restore (Codex #3493 r4)', async () => {
+    const restored = voidInvoice({ status: 'draft' });
+    const { seqStopChain } = mockHappyPath({ restored });
+
+    await InvoiceService.unvoidInvoice('inv-1');
+
+    expect(seqStopChain.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
+    expect(seqStopChain.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'stopped',
+        stopped_reason: 'invoice_voided',
+        stopped_by_admin_id: null,
+        next_touch_at: null,
+      }),
+    );
+  });
+
+  test('refuses a conversion-minted annual prepay charge by title — a failed term creation leaves no term row to detect (Codex #3493 r4)', async () => {
+    db.mockReturnValueOnce(
+      chain({ first: voidInvoice({ title: 'WaveGuard Silver — Annual Prepay (12 months)' }) }),
+    ).mockReturnValueOnce(noRow());
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
+      /this is an annual prepay charge/,
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('refuses while a claimed deferred send is mid-dispatch — the cancel cannot reach a claimed row (Codex #3493 r2)', async () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
@@ -125,6 +155,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain()) // active-sequence stop repair
       .mockReturnValueOnce(chain())
       .mockReturnValueOnce(chain({ first: { id: 'sms-9' } })); // 'sending' claim present → rollback
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
@@ -335,6 +366,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ returning: [restored] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain()) // active-sequence stop repair
       .mockReturnValueOnce(chain())
       .mockReturnValueOnce(noRow());
     mockRetrievePI.mockResolvedValueOnce({ status: 'canceled' });

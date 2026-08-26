@@ -98,6 +98,26 @@ const sentInvoice = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', create
 describe('scheduleForInvoice — unvoid re-arm of the system void stop', () => {
   beforeEach(() => jest.clearAllMocks());
 
+  test('anchors the re-armed cadence to the SEND time, not the due date (Codex #3493 r4)', async () => {
+    const now = Date.now();
+    const seq = voidStoppedSeq({ anchor_at: null });
+    const invoice = {
+      ...sentInvoice,
+      sent_at: new Date(now).toISOString(),
+      due_date: new Date(now + 60 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    const { seqUpdate } = setupDb({ seq, invoice, rearmed: seq });
+    customerOnAutopay.mockResolvedValue(false);
+
+    await scheduleForInvoice('inv-1');
+
+    const payload = seqUpdate.mock.calls[0][0];
+    // Send-anchored: the next touch lands days out, never the ~60+ days a
+    // due-date anchor would produce.
+    expect(payload.next_touch_at).toBeTruthy();
+    expect(new Date(payload.next_touch_at).getTime()).toBeLessThan(now + 30 * 24 * 60 * 60 * 1000);
+  });
+
   test('lifts the invoice_voided system stop to active with a computed next touch', async () => {
     const rearmed = voidStoppedSeq({ status: 'active', stopped_reason: null });
     const { seqUpdate } = setupDb({ seq: voidStoppedSeq(), invoice: sentInvoice, rearmed });

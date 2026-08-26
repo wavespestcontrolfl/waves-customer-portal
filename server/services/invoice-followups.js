@@ -375,9 +375,18 @@ async function scheduleForInvoice(invoiceId) {
         const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
         const holdForAutopay = existing.is_autopay_held
           || await customerOnAutopay(customerNow, { db: trx });
+        // Anchor like the ordinary scheduling path: the cadence is measured
+        // from when the invoice went out (sent_at → sms_sent_at →
+        // created_at), NOT the due date — a due date weeks past delivery
+        // would delay every remaining reminder by those weeks (Codex #3493
+        // r4). A shifted anchor_at (delivered-invoice due-date edit) still
+        // wins.
         const nextTouchAt = holdForAutopay
           ? null
-          : computeNextTouchAt(existing.anchor_at || invoice.due_date || invoice.created_at, existing.step_index);
+          : computeNextTouchAt(
+            existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at,
+            existing.step_index,
+          );
         const [rearmed] = await trx('invoice_followup_sequences')
           .where({ id: existing.id, status: 'stopped', stopped_reason: 'invoice_voided' })
           .whereNull('stopped_by_admin_id')

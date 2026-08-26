@@ -4452,6 +4452,17 @@ const InvoiceService = {
         "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
       );
     }
+    // A conversion-minted annual prepay invoice whose TERM creation failed
+    // was voided with NO term row and NO invoice stamp (estimate-converter's
+    // fail-closed catch) — the guards above can't see it, but restoring it
+    // would collect an annual charge that activates no coverage. The
+    // converter titles these invoices distinctively; refuse on the title and
+    // route the rebuild through the annual-prepay flow (Codex #3493 r4).
+    if (/annual prepay/i.test(String(current.title || ""))) {
+      throw new Error(
+        "Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment",
+      );
+    }
     // A void carrying the prepay-switch marker was deliberately superseded
     // by an annual prepay: its guarded restore path
     // (restoreSwitchSupersededInvoicesForPrepay) re-checks coverage and
@@ -4591,6 +4602,21 @@ const InvoiceService = {
       // invoice sweep skips 'void' rows, so it cannot repair a restore that
       // commits on the stale verdict.
       await assertUnvoidableLinkedVisit(trx, updated);
+      // The void-time lifecycle stop is BEST-EFFORT (stopInvoiceFollowupSequence
+      // swallows failures, so voidInvoice can succeed with the sequence still
+      // ACTIVE), and runPending excludes only terminal invoice statuses — an
+      // active row would dun the restored draft before any resend. Apply the
+      // missed stop atomically with the restore (idempotent; the resend
+      // re-arm owns the revival) (Codex #3493 r4).
+      await trx("invoice_followup_sequences")
+        .where({ invoice_id: id, status: "active" })
+        .update({
+          status: "stopped",
+          stopped_reason: "invoice_voided",
+          stopped_by_admin_id: null,
+          next_touch_at: null,
+          updated_at: new Date(),
+        });
       // Quiet-hours rails queued BEFORE the void survive it as
       // status='scheduled' sms_log rows (while void, the executor's
       // staleness recheck suppresses them as terminal — but a restored
