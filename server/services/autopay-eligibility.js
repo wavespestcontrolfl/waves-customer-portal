@@ -141,7 +141,13 @@ async function customerOnAutopay(customer, options = {}) {
   if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {
-    return paymentMethod.method_type === 'card';
+    // NON-BANK classification, not the literal 'card' (codex #3495 r13):
+    // legacy pointers keep method_type NULL (payment-expiry.js retains that
+    // representation), the walk's eligible() already admitted this method
+    // as non-bank, and charge() classifies NULL as non-bank and charges it
+    // — a literal 'card' check here reports an actually-chargeable
+    // customer as off autopay and completion skips a valid collection.
+    return !isBankMethodType(paymentMethod.method_type);
   }
 
   return true;
@@ -217,7 +223,10 @@ function autopayActivePredicate(now = new Date()) {
         )
         AND (
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
-          OR pm.method_type = 'card'
+          -- non-bank, mirroring the JS branch above: legacy rows keep
+          -- method_type NULL and still charge as cards
+          OR pm.method_type IS NULL
+          OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')
         )
       )
   )`;

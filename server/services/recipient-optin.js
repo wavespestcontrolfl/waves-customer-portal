@@ -82,8 +82,19 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
     // A YES can only confirm rows whose ask actually went out: ask_failed
     // (delivery failed) and undispatched pending rows (claim committed,
     // dispatch not yet run/crashed) are excluded — the recovery sweep or
-    // next save re-asks them. STOP still declines everything.
-    if (status === 'confirmed') q.whereNot({ status: 'ask_failed' }).whereNotNull('dispatched_at');
+    // next save re-asks them. STOP still declines everything. DECLINED
+    // rows confirm regardless of dispatched_at (codex #3495 r13): a
+    // synchronous 21610 declines the row BEFORE dispatch stamps
+    // dispatched_at, and no sweep re-asks a declined row — without this
+    // carve-out the person's later explicit START+YES clears suppression
+    // but can never unblock their appointment texts. An explicit inbound
+    // YES from an already-declined person supersedes the carrier verdict,
+    // exactly as it does for the callback path's dispatched declines.
+    if (status === 'confirmed') {
+      q.whereNot({ status: 'ask_failed' }).where(function confirmable() {
+        this.whereNotNull('dispatched_at').orWhere({ status: 'declined' });
+      });
+    }
     let updated = await q.update(stamp);
     // Marker-recovery window: Twilio accepted the ask but the dispatched_at
     // write crashed, and the person replied YES before the sweep

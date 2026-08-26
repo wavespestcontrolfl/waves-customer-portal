@@ -123,6 +123,12 @@ describe('autopay eligibility', () => {
       "OR ( (pm.method_type IS NULL OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')) AND CASE",
     );
     expect(normalizedSql).toContain('ELSE FALSE END');
+    // ACH-suspension fallback is NON-BANK, not the literal 'card' (codex
+    // #3495 r13) — legacy rows keep method_type NULL and still charge.
+    expect(normalizedSql).toContain(
+      "OR pm.method_type IS NULL OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account')",
+    );
+    expect(normalizedSql).not.toContain("OR pm.method_type = 'card'");
     expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
     expect(normalizedSql.indexOf(yearGuard)).toBeLessThan(normalizedSql.indexOf(yearCast));
     expect(normalizedSql).not.toContain('pm.exp_month BETWEEN');
@@ -159,7 +165,7 @@ describe('autopay eligibility', () => {
     }, { db: knexReturning(chargeableCard), now: lateOnPausedDayEt })).resolves.toBe(false);
   });
 
-  test('requires the chargeable method to be card when ACH is not active', async () => {
+  test('requires the chargeable method to be non-bank when ACH is not active', async () => {
     await expect(customerOnAutopay({
       id: 'customer-1',
       autopay_enabled: true,
@@ -173,6 +179,24 @@ describe('autopay eligibility', () => {
       autopay_payment_method_id: 'pm-1',
       ach_status: 'suspended',
     }, { db: knexReturning(chargeableCard) })).resolves.toBe(true);
+
+    // Legacy card pointer with method_type NULL (codex #3495 r13): the
+    // charge path classifies NULL as non-bank and charges it — the
+    // customer-level check must agree, not require the literal 'card'.
+    await expect(customerOnAutopay({
+      id: 'customer-1',
+      autopay_enabled: true,
+      autopay_payment_method_id: 'pm-1',
+      ach_status: 'suspended',
+    }, { db: knexReturning({ ...chargeableCard, method_type: null }) })).resolves.toBe(true);
+
+    // Bank alias rows stay blocked under suspension.
+    await expect(customerOnAutopay({
+      id: 'customer-1',
+      autopay_enabled: true,
+      autopay_payment_method_id: 'pm-1',
+      ach_status: 'suspended',
+    }, { db: knexReturning({ ...chargeableAch, method_type: 'us_bank_account' }) })).resolves.toBe(false);
   });
 });
 
@@ -206,7 +230,9 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('valid-card', true, NULL::date, NULL::text, NULL::uuid),
           ('legacy-two-digit', true, NULL::date, NULL::text, NULL::uuid),
           ('pending-bank', true, NULL::date, NULL::text, NULL::uuid),
-          ('pending-bank-card-exp', true, NULL::date, NULL::text, NULL::uuid)
+          ('pending-bank-card-exp', true, NULL::date, NULL::text, NULL::uuid),
+          ('ach-susp-legacy-card', true, NULL::date, 'suspended', NULL::uuid),
+          ('ach-susp-bank', true, NULL::date, 'suspended', NULL::uuid)
       ), payment_methods(
         id, customer_id, processor, is_default, autopay_enabled,
         stripe_payment_method_id, method_type, exp_month, exp_year, ach_status
@@ -219,7 +245,9 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('00000000-0000-0000-0000-000000000005'::uuid, 'valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099', NULL::text),
           ('00000000-0000-0000-0000-000000000006'::uuid, 'legacy-two-digit', 'stripe', true, true, 'pm_legacy', 'card', '12', '32', NULL::text),
           ('00000000-0000-0000-0000-000000000007'::uuid, 'pending-bank', 'stripe', true, true, 'pm_pending', 'ach', NULL::text, NULL::text, 'pending_verification'),
-          ('00000000-0000-0000-0000-000000000008'::uuid, 'pending-bank-card-exp', 'stripe', true, true, 'pm_pending_exp', 'ach', '12', '2099', 'pending_verification')
+          ('00000000-0000-0000-0000-000000000008'::uuid, 'pending-bank-card-exp', 'stripe', true, true, 'pm_pending_exp', 'ach', '12', '2099', 'pending_verification'),
+          ('00000000-0000-0000-0000-000000000011'::uuid, 'ach-susp-legacy-card', 'stripe', true, true, 'pm_legacy_null_type', NULL::text, '12', '2099', NULL::text),
+          ('00000000-0000-0000-0000-000000000012'::uuid, 'ach-susp-bank', 'stripe', true, true, 'pm_susp_bank', 'ach', NULL::text, NULL::text, 'verified')
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -239,6 +267,12 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
       // ...even when the bank row carries populated expiry fields — the
       // card-expiry branch is non-bank only (hook r4 P1).
       'pending-bank-card-exp': false,
+      // ACH suspension: a legacy NULL-method_type card row stays chargeable
+      // (non-bank classification, codex #3495 r13)...
+      'ach-susp-legacy-card': true,
+      // ...while an otherwise-healthy bank row is blocked by the
+      // customer-level suspension.
+      'ach-susp-bank': false,
     });
   });
 
