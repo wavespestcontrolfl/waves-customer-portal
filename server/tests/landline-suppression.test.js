@@ -25,7 +25,18 @@ function makeSuppressionChain() {
   // guarded-merge contract: merge({...}).where(reason cleared).where(active
   // false) — chain stays awaitable at every step.
   c.merge = jest.fn(() => c);
-  c.where = jest.fn((...a) => { c._wheres.push(a); return c; });
+  // where/orWhere invoke function args against the chain itself so nested
+  // guard groups (the supersedable-reason block) still record their clauses.
+  c.where = jest.fn((...a) => {
+    if (typeof a[0] === 'function') a[0].call(c);
+    else c._wheres.push(a);
+    return c;
+  });
+  c.orWhere = jest.fn((...a) => {
+    if (typeof a[0] === 'function') a[0].call(c);
+    else c._wheres.push(['or', ...a]);
+    return c;
+  });
   c.whereIn = jest.fn((...a) => { c._wheres.push(['in', ...a]); return c; });
   c.whereRaw = jest.fn((...a) => { c._wheres.push(['raw', ...a]); return c; });
   c.returning = jest.fn(() => c);
@@ -100,6 +111,19 @@ describe('landline suppression on delivery bounce', () => {
     expect(lastSuppressionChain._wheres).toEqual(expect.arrayContaining([
       ['in', 'messaging_suppression.reason', ['cleared', 'non_mobile']],
       ['messaging_suppression.active', false],
+    ]));
+  });
+
+  test('opt_out cleared by an explicit START is supersedable by a genuinely newer 30006 (hook r17)', async () => {
+    // clearSuppression keeps reason='opt_out' on a START clear but stamps
+    // source='cleared_by:twilio_*' — the merge guard must accept that row
+    // (a NEWER bounce is fresh carrier evidence the line cannot take SMS)
+    // while ADMIN-cleared opt_out (any other source) and wrong_number/
+    // manual_dnc stay untouchable.
+    await suppressNonMobileOnBounce({ errorCode: '30006', to: '+18777175476' });
+    expect(lastSuppressionChain._wheres).toEqual(expect.arrayContaining([
+      ['messaging_suppression.reason', 'opt_out'],
+      ['raw', "messaging_suppression.source LIKE 'cleared_by:twilio\\_%' ESCAPE '\\'"],
     ]));
   });
 

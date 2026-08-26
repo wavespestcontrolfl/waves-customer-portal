@@ -212,10 +212,22 @@ async function recordNonMobileSuppression({ phone, source, supersedeClearedBefor
       // START cleared — clearSuppression keeps the original reason, so
       // without the second arm a known landline that once STARTed could
       // never be re-suppressed by a genuinely newer bounce (every later
-      // send burns forever). Stronger inactive reasons (opt_out,
-      // wrong_number, manual_dnc — admin-cleared or not) stay untouchable.
-      .whereIn('messaging_suppression.reason', ['cleared', 'non_mobile'])
-      .where('messaging_suppression.active', false);
+      // send burns forever). A RECIPIENT-cleared opt_out is supersedable
+      // too (hook #3495 r17): after opt_out → explicit START, a genuinely
+      // NEWER 30006 is fresh carrier evidence the line cannot take SMS,
+      // and without this arm every later send burns forever — the
+      // recipient clear is identified by its cleared_by:twilio_* source
+      // (webhook START / late-callback undo / sync undo are the only
+      // writers of it). ADMIN-cleared opt_out (any other source) and
+      // wrong_number/manual_dnc stay untouchable.
+      .where('messaging_suppression.active', false)
+      .where(function supersedableReason() {
+        this.whereIn('messaging_suppression.reason', ['cleared', 'non_mobile'])
+          .orWhere(function recipientClearedOptOut() {
+            this.where('messaging_suppression.reason', 'opt_out')
+              .whereRaw("messaging_suppression.source LIKE 'cleared_by:twilio\\_%' ESCAPE '\\'");
+          });
+      });
     // A tombstone is only superseded when its clearance PREDATES the send
     // that bounced (codex #3495): a START received after that send proves
     // the number takes SMS — a delayed 30006 for an older message is stale
