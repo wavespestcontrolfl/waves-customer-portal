@@ -627,9 +627,34 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         // Bank tender only (Codex r9 P0): the charge service stamps every
         // non-succeeded PaymentIntent as 'processing' — a CARD intent
         // parked mid-flight is NOT an initiated collection and must stay
-        // unresolved (the lease retries after the intent settles or dies),
-        // never retired as if the money were moving.
+        // unresolved, never retired as if the money were moving. A card
+        // intent parked in requires_action (3DS) can NEVER complete
+        // off-session (Codex r13): cancel that definitive state — the
+        // canceled-PI webhook reopens the invoice and releases the attempt
+        // fence — and stamp authentication_required so the next pass skips
+        // the off-session re-charge (it would 3DS-park again) and routes
+        // straight to the pay-link fallback: paying on-session IS the
+        // customer's authentication.
         if (String(invoice.payment_method || '') !== 'us_bank_account') {
+          try {
+            const invPi = await db('invoices').where({ id: invoice.id }).first('stripe_payment_intent_id');
+            const stuckPiId = invPi?.stripe_payment_intent_id;
+            const stuckPi = stuckPiId ? await StripeService.retrievePaymentIntent(stuckPiId) : null;
+            if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
+              await StripeService.cancelPaymentIntent(stuckPiId);
+              await db('estimates').where({ id: row.id })
+                .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                .update({
+                  estimate_data: db.raw(
+                    "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                    [JSON.stringify({ authentication_required: true })],
+                  ),
+                });
+              logger.info(`[recurring-cof] prepay sweep canceled 3DS-parked intent ${stuckPiId} for invoice ${invoice.id} — pay-link fallback after the webhook reopens it`);
+            }
+          } catch (stuckErr) {
+            logger.warn(`[recurring-cof] prepay sweep stuck-card-intent triage failed for invoice ${invoice.id}: ${stuckErr.message}`);
+          }
           logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: invoice ${invoice.id} processing on a non-bank tender (incomplete card intent)`);
           continue;
         }
@@ -764,11 +789,39 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           continue;
         }
       }
+      // A payment_methods row alone is NOT enrollment (Codex r13): a crash
+      // between the row insert and enableAutopay — or a saved-consented
+      // accept that died before its post-commit enrollment — leaves the
+      // bound, authorized method un-enrolled, and the charge's
+      // requireAutopayForCustomerId guard would deterministically refuse
+      // and retire the job to a pay link. Idempotently ensure enrollment:
+      // enrollConsentedMethod defers to a healthy incumbent /
+      // already_enrolled, so the common recovered case is a no-op. Errors
+      // propagate to the catch (pay-link fallback + office alert), exactly
+      // like a fresh-capture enrollment failure.
+      if (pmRow) {
+        const { enrollConsentedMethod } = require('./autopay-enrollment');
+        await enrollConsentedMethod({
+          customerId: invoice.customer_id,
+          paymentMethodId: pmRow.id,
+          source: 'estimate_accept',
+          details: { via: 'prepay_recovery_sweep', estimate_id: row.id, invoice_id: invoice.id },
+          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+        });
+      }
       // ZERO acknowledged cents is a legitimate authorization (Codex r9
       // P0): projected credit fully covered the quote — the charge call
       // with expectedTotal 0 applies the credit in-lock and settles the
       // invoice 'prepaid' with no card charge; rejecting it here would
       // route a fully-covered accept to a pay link instead.
+      // A stamped authentication_required means an earlier off-session
+      // attempt 3DS-parked and was canceled (above) — re-charging the same
+      // method off-session would park again, so route straight to the
+      // deterministic pay-link fallback (the customer authenticates by
+      // paying on-session).
+      if (job.authentication_required === true) {
+        throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
+      }
       if (pmRow && Number.isInteger(job.authorized_total_cents) && job.authorized_total_cents >= 0) {
         await StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
           expectedTotal: Number(job.authorized_total_cents) / 100,
@@ -780,7 +833,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // payer while the invoice's payer_id stayed null — re-resolve
           // under the lock and refuse rather than charge the homeowner's
           // card for a bill that now routes to a third-party payer.
-          requireSelfPayCustomerId: invoice.customer_id,
+          // VISIT-SCOPED with the stamped accept scope (Codex r13) so a
+          // self_pay_override visit on a payer-billed account keeps its
+          // customer-paid decision through recovery.
+          ...(job.payer_scope_scheduled_service_id
+            ? { requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id }
+            : { requireSelfPayCustomerId: invoice.customer_id }),
         });
         const freshInvoice = await db('invoices').where({ id: invoice.id }).first('status', 'payment_method');
         const freshStatus = String(freshInvoice?.status || '').toLowerCase();
@@ -821,7 +879,8 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           } else {
             const resolved = await require('./payer').resolveForInvoice({
               customerId: invoice?.customer_id,
-              scheduledServiceId: invoiceRow?.scheduled_service_id || null,
+              // Same scope basis the lane was admitted with (Codex r13).
+              scheduledServiceId: job.payer_scope_scheduled_service_id || invoiceRow?.scheduled_service_id || null,
               throwOnError: true,
             });
             if (resolved?.payerId) {

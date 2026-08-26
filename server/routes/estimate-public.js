@@ -9292,8 +9292,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // amount matches the invoice the converter creates. A linked customer
     // resolves their real rate; a brand-new one (no row yet) defaults to the FL
     // rate, which is also what the converter's new-customer invoice resolves.
+    // The customer this accept will actually LINK (Codex r13): an unlinked
+    // estimate phone-matches an existing profile INSIDE the accept
+    // transaction, so a commercial tax rate resolved with estimate.customer_id
+    // alone can diverge from the invoice the converter mints for the matched
+    // customer (county/exemption) — the acknowledged total then fails the
+    // expectedTotal equality and the whole cohort degrades to pay-link.
+    // Same unambiguous match the policy resolver and converter run.
+    let acceptResolvedCustomerId = estimate.customer_id || null;
+    if (!acceptResolvedCustomerId && annualPrepaySelected && estimate.customer_phone) {
+      try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
+    }
     const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, {})
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, {})
       : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
@@ -9329,12 +9340,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // (maxAuthorizedTotalCents — the charge refuses anything above it).
     let prepayChargePlan = null; // { method, quote } once acknowledged
     if (annualPrepaySelected && recurringCardLaneActive && RecurringCards.isPrepayCardAndChargeEnabled()) {
-      let quoteCustomerId = estimate.customer_id || null;
-      if (!quoteCustomerId && estimate.customer_phone) {
-        // Same unambiguous match the policy resolver ran — needed for the
-        // autopay_already_active method fallback on phone-only estimates.
-        try { quoteCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* fresh-capture path needs no id */ }
-      }
+      // Resolved once above (with the tax-rate hoist) — the quote's method
+      // fallback and credit projections use the SAME customer the accept
+      // transaction will link.
+      const quoteCustomerId = acceptResolvedCustomerId;
       const prepayChargeMethod = await RecurringCards.resolvePrepayChargeMethod({
         policy: recurringCardPolicy,
         verification: recurringCardVerification,
@@ -10930,6 +10939,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // a crash in the gap would otherwise recover at the gross
               // amount the customer never acknowledged).
               scheduled_service_id: annualPrepayConversionResult?.firstScheduledServiceId || null,
+              // Payer scope the policy admitted the lane with (Codex r13):
+              // recovery's in-lock self-pay guard must judge with the SAME
+              // visit so a self_pay_override on a payer-billed account
+              // stays customer-paid.
+              payer_scope_scheduled_service_id: recurringCardScopeSsId || null,
               status: 'pending',
               created_at: new Date().toISOString(),
             })],
@@ -11615,7 +11629,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // the invoice's payer_id stays null. This re-resolves the
             // default payer under the lock and refuses rather than charging
             // the homeowner's card for a bill that now routes to a payer.
-            requireSelfPayCustomerId: customerId,
+            // VISIT-SCOPED when the accept had a scope (Codex r13): the
+            // policy admitted this lane with recurringCardScopeSsId — a
+            // self_pay_override visit on a payer-billed account is
+            // customer-paid, and a customer-only recheck would inherit the
+            // account default payer and wrongly refuse + re-route the
+            // acknowledged homeowner charge to AP. The visit-keyed check
+            // folds the default payer in and honors the override.
+            ...(recurringCardScopeSsId
+              ? { requireSelfPayScheduledServiceId: recurringCardScopeSsId }
+              : { requireSelfPayCustomerId: customerId }),
           });
           const freshInvoice = await db('invoices').where({ id: invoiceId }).first('status', 'token', 'payment_method');
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
@@ -11646,13 +11669,39 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             invoicePayUrl = null;
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
           } else if (freshStatus === 'processing') {
-            // A non-bank 'processing' is an incomplete CARD intent — the
-            // intent may yet succeed via webhook, so never a pay link
-            // beside it and never a resolved job: ambiguous, the sweep
-            // re-reads the invoice after the intent settles or dies.
-            prepayAutoCharge = { status: 'ambiguous', reason: 'card_intent_incomplete' };
+            // A non-bank 'processing' is an incomplete CARD intent — never
+            // a pay link beside it and never a resolved job. A 3DS
+            // requires_action park can NEVER complete off-session (Codex
+            // r13): cancel that definitive state now — the canceled-PI
+            // webhook reopens the invoice and releases the fence — and
+            // stamp authentication_required so the sweep routes straight
+            // to the pay-link fallback instead of deferring forever (the
+            // customer authenticates by paying on-session). Any other
+            // in-flight state stays ambiguous for the sweep to re-read.
+            let prepayCardIntentReason = 'card_intent_incomplete';
+            try {
+              const StripeSvc = require('../services/stripe');
+              const invPiRow = await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id');
+              const stuckPiId = invPiRow?.stripe_payment_intent_id;
+              const stuckPi = stuckPiId ? await StripeSvc.retrievePaymentIntent(stuckPiId) : null;
+              if (stuckPi && ['requires_action', 'requires_confirmation'].includes(stuckPi.status)) {
+                await StripeSvc.cancelPaymentIntent(stuckPiId);
+                await db('estimates').where({ id: estimate.id })
+                  .whereRaw("estimate_data -> 'prepayAutoChargeJob' IS NOT NULL")
+                  .update({
+                    estimate_data: db.raw(
+                      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+                      [JSON.stringify({ authentication_required: true })],
+                    ),
+                  });
+                prepayCardIntentReason = 'authentication_required';
+              }
+            } catch (stuckErr) {
+              logger.warn(`[estimate-accept] stuck-card-intent triage failed for invoice ${invoiceId}: ${stuckErr.message}`);
+            }
+            prepayAutoCharge = { status: 'ambiguous', reason: prepayCardIntentReason };
             invoicePayUrl = null;
-            logger.warn(`[estimate-accept] prepay invoice ${invoiceId} card intent incomplete (status processing, non-bank tender) — deferring to sweep (estimate ${estimate.id})`);
+            logger.warn(`[estimate-accept] prepay invoice ${invoiceId} card intent incomplete (${prepayCardIntentReason}) — deferring to sweep (estimate ${estimate.id})`);
           } else {
             // Charge call returned without throwing but the invoice is in
             // an unexpected state (e.g. parked for reconciliation) — treat
@@ -11687,7 +11736,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               } else {
                 const resolved = await PayerService.resolveForInvoice({
                   customerId,
-                  scheduledServiceId: invoiceRow?.scheduled_service_id || null,
+                  // Same scope basis the lane was admitted with (Codex r13)
+                  // — the invoice's own linkage as fallback.
+                  scheduledServiceId: recurringCardScopeSsId || invoiceRow?.scheduled_service_id || null,
                   throwOnError: true,
                 });
                 if (resolved?.payerId) {
@@ -11725,7 +11776,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               ? 'The charge was refused because this bill appears to route to a third-party payer that could not be confirmed. No charge ran and no pay link was sent — the recovery sweep will retry once the payer state resolves.'
               : prepayAutoCharge.reason === 'consent_snapshot_failed'
                 ? 'The prepay authorization snapshot could not be recorded, so no charge ran and no pay link was sent — the recovery sweep will retry the record and the charge.'
-                : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
+                : prepayAutoCharge.reason === 'authentication_required'
+                  ? 'The card requires customer authentication (3DS), which an off-session charge cannot complete — the intent was canceled and the recovery sweep will deliver the pay link so the customer can authenticate by paying online.'
+                  : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
           { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
