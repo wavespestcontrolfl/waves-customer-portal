@@ -267,6 +267,17 @@ export default function SettingsPage() {
       .catch(() => setLoading(false));
   }, []);
 
+  // A ?tab= deep link into an owner-only group resolves to General once the
+  // server-verified profile arrives. Declared ABOVE the early returns —
+  // hooks must run on every render path or React throws "Rendered more
+  // hooks than during the previous render" (codex P1).
+  useEffect(() => {
+    if (user && user.role !== "admin" && ["service-reports", "blackout-days"].includes(tab)) {
+      selectTab("general");
+    }
+    // selectTab is stable; errors-only lint config has no exhaustive-deps.
+  }, [user, tab]);
+
   // On mobile — and when NOT deep-linked into a specific tab — render the
   // Square-style section index instead of the desktop tab panel.
   if (isMobile && !searchParams.get("tab")) return <MobileSettingsPage />;
@@ -288,14 +299,6 @@ export default function SettingsPage() {
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
     (g) => isAdminRole || !["service-reports", "scheduling"].includes(g.key),
   );
-  // A ?tab= deep link into a hidden group resolves to General once the
-  // server-verified profile arrives.
-  useEffect(() => {
-    if (user && !isAdminRole && ["service-reports", "blackout-days"].includes(tab)) {
-      selectTab("general");
-    }
-    // selectTab is stable per render contract above; errors-only lint config.
-  }, [user, isAdminRole, tab]);
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 

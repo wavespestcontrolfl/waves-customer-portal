@@ -1974,7 +1974,10 @@ function ProductsTab({
       adminFetch(
         `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
       ),
-      adminFetch("/admin/inventory/vendors"),
+      // Vendors are owner-only under the role lockdown — a technician's
+      // Products load must not hang on that 403 (codex P1). Empty vendor
+      // list just hides per-vendor pricing affordances they can't use.
+      adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
     ]);
     setProducts(pData.products || []);
     setCategories(pData.categories || []);
