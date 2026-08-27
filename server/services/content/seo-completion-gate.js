@@ -435,10 +435,14 @@ function badCtaAnchor(body, brief = {}) {
 // Deterministic backstop to the writer prompt's CTA-wording rule (owner
 // 2026-08-27): a markdown link whose ANCHOR TEXT is inspection-request
 // wording is the forbidden CTA shape, wherever it points.
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get)\b.{0,40}?\binspection\b/i;
+// Inspection-REQUEST phrasing only ("Request an Inspection", "Book a Termite
+// Inspection", "Schedule your inspection") — editorial anchors like "Get
+// ready for your termite inspection" are not CTAs and must not be flagged.
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule)\b.{0,30}?\binspection\b/i;
 function forbiddenCtaAnchor(body) {
-  // Any link (markdown or HTML, any destination) whose decoration-stripped
-  // anchor is inspection-request wording.
+  // Any link (markdown or HTML, any destination — the legacy pattern points
+  // at service pages, not conversion paths) whose decoration-stripped anchor
+  // is inspection-request wording.
   for (const link of extractLinks(body)) {
     const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;

@@ -354,6 +354,17 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
+  test('editorial inspection links are not CTAs', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\nRead [Get ready for your termite inspection](/termite/termite-inspection-checklist/) first.`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('raw HTML anchors are validated like markdown links', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
