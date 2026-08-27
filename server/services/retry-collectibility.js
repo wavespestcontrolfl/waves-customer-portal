@@ -82,7 +82,7 @@ function parseMeta(payment) {
     return payment.metadata
       ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
       : {};
-  } catch (e) {
+  } catch {
     return {}; // unparseable legacy metadata — treat as unstamped/unclassified
   }
 }
