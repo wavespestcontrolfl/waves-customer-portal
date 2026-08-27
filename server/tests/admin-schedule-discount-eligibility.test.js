@@ -382,6 +382,22 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(computePriceServiceGroupChanges(before, { ...updates, discount_id: 'preset-unscoped', discount_service_category_filter: null }).priceChanged).toBe(false);
   });
 
+  test('honors a preset max_discount_dollars cap on edit like creation does', () => {
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 200,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'percentage',
+        discountAmount: 10,
+        maxDiscountDollars: 5,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, []);
+    expect(financials).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+  });
+
   test('still spreads a fixed-dollar appointment discount across every line', () => {
     const financials = calculateVisitFinancialsForAddons({
       primaryNet: 100,

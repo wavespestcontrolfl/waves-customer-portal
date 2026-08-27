@@ -2380,12 +2380,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     );
   // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
   // never more than the lines the discount can reach.
+  // A catalog preset's max_discount_dollars caps a percentage the same way
+  // calculateDiscountDollars / calculateAppointmentDiscountDollars do.
+  const presetMaxDiscountDollars =
+    selectedDiscountPreset?.max_discount_dollars != null &&
+    Number(selectedDiscountPreset.max_discount_dollars) > 0
+      ? Number(selectedDiscountPreset.max_discount_dollars)
+      : null;
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
         ? Math.min(
             percentDiscountBase,
-            percentDiscountBase * (Number(discountAmount) / 100),
+            presetMaxDiscountDollars != null
+              ? Math.min(
+                  presetMaxDiscountDollars,
+                  percentDiscountBase * (Number(discountAmount) / 100),
+                )
+              : percentDiscountBase * (Number(discountAmount) / 100),
           )
         : Math.min(percentDiscountBase, Number(discountAmount))
       : 0;
@@ -2621,22 +2633,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                     svc.duration || svc.default_duration_minutes,
                                   );
                                 }
-                                if (svc.id !== undefined) {
-                                  onField("serviceId", svc.id || null);
-                                }
-                                if (svc.excludedFromPercentDiscount !== undefined) {
-                                  onField(
-                                    "excludedFromPercentDiscount",
-                                    svc.excludedFromPercentDiscount === true,
-                                  );
-                                }
-                                if (svc.serviceKey !== undefined) {
-                                  onField("serviceKey", svc.serviceKey || null);
-                                  onField(
-                                    "serviceCategory",
-                                    svc.serviceCategory || null,
-                                  );
-                                }
+                                // A catalog item carries its identity; a
+                                // static-fallback item (dropdown unavailable)
+                                // carries none — post serviceId null so the
+                                // server recovers the identity by name and the
+                                // replaced line's key/exclusion never linger.
+                                onField("serviceId", svc.id || null);
+                                onField(
+                                  "excludedFromPercentDiscount",
+                                  svc.excludedFromPercentDiscount === true,
+                                );
+                                onField("serviceKey", svc.serviceKey || null);
+                                onField(
+                                  "serviceCategory",
+                                  svc.serviceCategory || null,
+                                );
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
