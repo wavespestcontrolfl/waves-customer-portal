@@ -1,8 +1,7 @@
 /**
  * Per-platform engagement for our OWN published social posts (likes /
- * comments / shares), pulled daily by the engagement-ingest cron
- * from the Facebook Graph, Instagram Graph, and LinkedIn socialActions
- * APIs. Until now the only engagement numbers in the portal were
+ * comments / shares), pulled daily by the engagement-ingest cron from the
+ * Facebook Graph and Instagram Graph APIs. Until now the only engagement numbers in the portal were
  * hand-entered competitor rows (competitor_social_posts) and the analytics
  * "top posts" were just the most recent — the count column names mirror
  * that table so own vs competitor posts compare side by side.
