@@ -440,6 +440,7 @@ function conversionCtaLinks(body) {
       .map(([svc]) => svc);
     let subject = anchor;
     let named;
+    const contextNamed = [];
     if (kw) {
       const end = kw.index + kw[0].length;
       subject = anchor.slice(0, end);
@@ -453,15 +454,22 @@ function conversionCtaLinks(body) {
       if (after) {
         const phrase = after[1];
         const environmental = /^(?:your|my|our|the|a|an|this|that)\b/i.test(phrase);
-        const suffixNamed = termsIn(phrase).filter((svc) => !(environmental && (svc === 'lawn' || svc === 'tree-shrub')));
-        named = [...new Set([...named, ...suffixNamed])];
+        for (const svc of termsIn(phrase)) {
+          // "…for your lawn" names a PLACE unless lawn is this post's own
+          // service — recorded separately; the brief-aware checks below
+          // count it only when allowed.
+          if (environmental && (svc === 'lawn' || svc === 'tree-shrub')) contextNamed.push(svc);
+          else if (!named.includes(svc)) named.push(svc);
+        }
       }
       // Coordinated subjects ("Termite and Pool Cleaning Quote") must be
       // service-bearing in EVERY part — a part naming no known service is an
       // unrecognized service, not harmless filler.
       const parts = subject.split(/\s+(?:and|&|or|\/|,)\s+/i);
       if (parts.length > 1) {
-        const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price)\s*)+$/i;
+        // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
+        // not separate services; an unlisted noun ("Pool Cleaning") is.
+        const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price|control|prevention|treatment|treatments|removal|protection|management|service|services|plan|plans|program|programs|care|maintenance|exclusion|monitoring)\s*)+$/i;
         const unknownPart = parts.some((part) => termsIn(part).length === 0 && !filler.test(part.trim()));
         if (unknownPart) named = [...named, 'unknown'];
       }
@@ -475,6 +483,7 @@ function conversionCtaLinks(body) {
       anchor,
       hasEstimateWording: /(estimat|quot)/i.test(anchor),
       named,
+      contextNamed,
     });
   }
   return out;
@@ -484,7 +493,10 @@ function conversionCtaLinks(body) {
 // anchor ALSO positively names the brief's own service (or family), the
 // umbrella term is dropped from the named set. A pest-only anchor on a
 // non-pest-family brief still does not qualify.
-function effectiveNamed(named, allowed) {
+function effectiveNamed(link, allowed) {
+  // Place-shaped nouns ("…for your lawn") count as the service only when
+  // they ARE this post's allowed service.
+  const named = [...link.named, ...(allowed ? link.contextNamed.filter((svc) => allowed.has(svc)) : [])];
   if (!allowed || !named.includes('pest')) return named;
   const own = named.some((svc) => svc !== 'pest' && allowed.has(svc));
   return own ? named.filter((svc) => svc !== 'pest') : named;
@@ -508,7 +520,7 @@ function hasConversionCta(body, brief = {}) {
   return conversionCtaLinks(body).some((link) => {
     if (!link.hasEstimateWording) return false;
     if (!allowed) return true;
-    const named = effectiveNamed(link.named, allowed);
+    const named = effectiveNamed(link, allowed);
     return named.length > 0 && named.every((svc) => allowed.has(svc));
   });
 }
@@ -528,7 +540,7 @@ function badCtaAnchor(body, brief = {}) {
       // With a known brief service, EVERY estimate/quote anchor must name it
       // (or its family) — a generic "Request a Quote" is not tied to the post.
       if (!allowed) return false;
-      const named = effectiveNamed(link.named, allowed);
+      const named = effectiveNamed(link, allowed);
       return named.length === 0 || !named.every((svc) => allowed.has(svc));
     }
     return !isProseReferenceAnchor(link.anchor);
@@ -546,7 +558,7 @@ function badCtaAnchor(body, brief = {}) {
 // "Request an Inspection", "Get a Termite Inspection", "Schedule your free
 // inspection", "Arrange an inspection" — but NOT "Get ready for your termite
 // inspection" (four words between verb and noun).
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b/i;
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor
