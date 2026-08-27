@@ -850,7 +850,11 @@ describe('closeout route wiring — source contracts (the completion route is to
     // (r32 P2) — three predicate sites total, zero bare-category gates.
     const preLock = source.match(/isCreditableInspectionProfile\(completionProfile\)/g) || [];
     const locked = source.match(/isCreditableInspectionProfile\(effectiveCompletionProfile\)/g) || [];
-    expect(preLock.length).toBe(1); // marker freeze in the literal
+    // Pre-lock: the marker freeze in the literal + the gate that decides
+    // whether to resolve the sold inspection amount at all (#3521 r8 P2 —
+    // non-inspection completions skip those round trips).
+    expect(preLock.length).toBe(2);
+    expect(source).toContain(".isCreditableInspectionProfile(completionProfile)\n      ? await require('../services/inspection-credit').soldInspectionAmountForVisit(db, svc)");
     expect(locked.length).toBe(2); // locked adjustment + offer creation
     expect(source).not.toMatch(/completionProfile\?\.category \|\| ''\) === 'inspection'/);
     // The client renders the opt-out for rodent inspections too.
@@ -1508,6 +1512,23 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
       { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, priceBeforeDiscount: 125 },
     ] } } } };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: member }), { ...svc, source_estimate_id: 'est-4' })).toBe(125);
+    // ALREADY-SENT member row: only the net was stored (pre-change mapper).
+    // The estimate's recurring-customer input + the configured perk rate
+    // recover the face: 106.25 / (1 − 0.15) = 125 (codex #3521 r8 P0).
+    const legacyMember = { id: 'est-5', estimate_data: {
+      inputs: { recurringCustomer: true },
+      result: { oneTime: { total: 106.25, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25 }] } },
+    } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: legacyMember }), { ...svc, source_estimate_id: 'est-5' })).toBe(125);
+    // A row that carries its own perk rate is self-describing.
+    const rated = { id: 'est-6', estimate_data: { result: { oneTime: { total: 106.25, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, recurringCustomerDiscountRate: 0.15 },
+    ] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: rated }), { ...svc, source_estimate_id: 'est-6' })).toBe(125);
+    // A non-member's net IS the face.
+    const nonMember = { id: 'est-7', estimate_data: { inputs: { recurringCustomer: false },
+      result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: nonMember }), { ...svc, source_estimate_id: 'est-7' })).toBe(75);
   });
 
   test('a legacy grouped row with no primary line credits the parent price minus its add-ons — unless the group was discounted', async () => {

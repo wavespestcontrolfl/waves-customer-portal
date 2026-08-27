@@ -958,6 +958,9 @@ function mapV1ToLegacyShape(v1Result) {
       // promise is the quoted face, not what a member paid (codex #3521 r5
       // P0). Persisted so closeout can read it off the stored row.
       if (Number.isFinite(Number(li.priceBeforeDiscount))) item.priceBeforeDiscount = Number(li.priceBeforeDiscount);
+      // The perk rate itself, so a stored row is self-describing even where a
+      // reader only has the net price (codex #3521 r8 P0).
+      if (Number(li.recurringCustomerDiscountRate) > 0) item.recurringCustomerDiscountRate = Number(li.recurringCustomerDiscountRate);
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
@@ -973,6 +976,8 @@ function mapV1ToLegacyShape(v1Result) {
         // SERVICES branch) — rodent_inspection lands here.
         ...(Number.isFinite(Number(li.priceBeforeDiscount))
           ? { priceBeforeDiscount: Number(li.priceBeforeDiscount) } : {}),
+        ...(Number(li.recurringCustomerDiscountRate) > 0
+          ? { recurringCustomerDiscountRate: Number(li.recurringCustomerDiscountRate) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,

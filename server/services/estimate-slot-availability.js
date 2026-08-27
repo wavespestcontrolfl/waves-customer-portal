@@ -486,11 +486,22 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // adoption stamp reject the profile as multi-service (codex #3521 r1
     // P1). Collapse onto the first row and drop its section suffix so the
     // visit is named for the job, not one of its parts.
+    // Only COMPONENT rows of one itemized job collapse — same engine key
+    // AND the same "<Job> — <Section>" label prefix. Two distinct paid
+    // products can deliberately share a key (oneTimeLawn + lawnPestControl
+    // both emit one_time_lawn) and must both stay in the profile, or the
+    // appointment's accepted-service mix drops paid work (codex #3521 r8
+    // P1).
     if (engineKey && seenEngineKeys.has(engineKey)) {
       const existing = seenEngineKeys.get(engineKey);
-      const sep = existing.label.indexOf(' — ');
-      if (sep > 0) existing.label = existing.label.slice(0, sep).trim();
-      return;
+      const prefixOf = (text) => { const i = text.indexOf(' — '); return i > 0 ? text.slice(0, i).trim().toLowerCase() : null; };
+      const existingPrefix = prefixOf(existing.rawLabel || existing.label);
+      const incomingPrefix = prefixOf(clean);
+      if (existingPrefix && incomingPrefix && existingPrefix === incomingPrefix) {
+        existing.rawLabel = existing.rawLabel || existing.label;
+        existing.label = existing.rawLabel.slice(0, existing.rawLabel.indexOf(' — ')).trim();
+        return;
+      }
     }
     seen.add(key);
     // `service` is the CATEGORY (pest specialties all collapse to
@@ -501,7 +512,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // query engine_key='pest_control' and stay unstamped (codex #3328 r1 P1).
     const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null };
     rows.push(row);
-    if (engineKey) seenEngineKeys.set(engineKey, row);
+    if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)

@@ -631,3 +631,51 @@ describe('itemized V2 exclusion collapses to ONE profile service (codex #3521 r1
     expect(keys).toEqual(['rodent_trapping', 'rodent_exclusion']);
   });
 });
+
+describe('distinct paid products sharing an engine key are NOT collapsed (codex #3521 r8 P1)', () => {
+  const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+
+  test('one-time lawn treatment + lawn pest control both stay in the profile', () => {
+    const estimate = {
+      id: 'est-lawn-two',
+      service_interest: 'Lawn',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'one_time_lawn', name: 'One-Time Lawn Treatment', price: 174 },
+              { service: 'one_time_lawn', name: 'Lawn Pest Control', price: 160 },
+            ],
+            total: 334,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const labels = (profile?.services || []).filter(Boolean).map((s) => s.label);
+    expect(labels).toEqual(['One-Time Lawn Treatment', 'Lawn Pest Control']);
+  });
+
+  test('rodent exclusion sections still collapse to one row', () => {
+    const estimate = {
+      id: 'est-excl-again',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 150 },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Linear Mesh', price: 280 },
+            ],
+            total: 430,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = (profile?.services || []).filter(Boolean);
+    expect(services).toHaveLength(1);
+    expect(services[0].label).toBe('Rodent Exclusion');
+    expect(services[0].rawLabel).toBeDefined();
+  });
+});

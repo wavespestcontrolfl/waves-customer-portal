@@ -15,7 +15,15 @@
  */
 const MIGRATION_TAG = 'migration:20260826000001';
 const UP_REASON = 'Rodent trapping Standard-only — $350 flat, unlimited callbacks (owner directive 2026-08-26)';
-const RETIRED_KEYS = ['unlimited_price', 'upgrade_to_unlimited_price', 'unlimited_floor', 'additional_followup_rate'];
+// Plan/callback keys the Standard-only pricer no longer reads, PLUS the
+// footprint/lot/pressure adjustment tables 20260526000009 stored — the
+// flat $350 ignores them, and leaving them on existing rows kept the
+// generic pricing editor offering knobs that move nothing (codex #3521
+// r8 P2). All restored from the audit row on rollback.
+const RETIRED_KEYS = [
+  'unlimited_price', 'upgrade_to_unlimited_price', 'unlimited_floor', 'additional_followup_rate',
+  'home_size_adjustments', 'lot_adjustments', 'pressure_adjustments',
+];
 const STANDARD_ROW_NAME = 'Rodent Trapping (Standard — flat $350, unlimited callbacks)';
 const STANDARD_SERVICE_DESCRIPTION = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
 // Rollback restores the description the row ACTUALLY carried before up()
@@ -97,10 +105,7 @@ exports.up = async function (knex) {
         ...CHANGELOG_IDENTITY,
         affected_services: JSON.stringify(['rodent_trapping']),
         before_value: JSON.stringify({
-          unlimited_price: data.unlimited_price ?? null,
-          upgrade_to_unlimited_price: data.upgrade_to_unlimited_price ?? null,
-          unlimited_floor: data.unlimited_floor ?? null,
-          additional_followup_rate: data.additional_followup_rate ?? null,
+          ...Object.fromEntries(RETIRED_KEYS.map((key) => [key, data[key] ?? null])),
           included_followups: data.included_followups ?? null,
         }),
         after_value: JSON.stringify({ plans: ['standard'], included_followups: 'unlimited' }),

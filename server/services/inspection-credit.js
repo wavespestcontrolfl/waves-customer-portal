@@ -106,6 +106,25 @@ function configuredCreditAmountForServiceKey(serviceKey) {
  * Read-only and fail-soft: a lookup error is a null, never a thrown
  * closeout.
  */
+// The recurring-customer one-time perk rate that netted a stored row: the
+// rate the mapper persisted on the row (new rows), else the estimate's
+// recurring-customer input flag with the configured perk rate. 0 when the
+// estimate was not for a recurring customer.
+function perkRateForStoredRow(row, estData) {
+  const own = Number(row?.recurringCustomerDiscountRate);
+  if (Number.isFinite(own) && own > 0 && own < 1) return own;
+  const inputs = estData?.inputs || estData?.engineInputs || estData?.engineRequest || {};
+  const flagged = inputs.recurringCustomer !== undefined
+    ? !!inputs.recurringCustomer
+    : (inputs.isRecurringCustomer !== undefined ? !!inputs.isRecurringCustomer : false);
+  if (!flagged) return 0;
+  try {
+    const { WAVEGUARD } = require('./pricing-engine/constants');
+    const configured = Number(WAVEGUARD?.recurringCustomerOneTimePerk);
+    return Number.isFinite(configured) && configured > 0 && configured < 1 ? configured : 0;
+  } catch { return 0; }
+}
+
 async function soldInspectionAmountForVisit(db, svc) {
   if (!svc || typeof svc !== 'object') return null;
   // FACE value, never net: a comped or line-discounted inspection still
@@ -146,16 +165,26 @@ async function soldInspectionAmountForVisit(db, svc) {
         // price is the discounted $106.25; the promise was $125 (codex
         // #3521 r5 P0).
         const row = rawRows.find((r) => r && String(r.service || '') === 'rodent_inspection' && r.quoteRequired !== true);
-        const face = row
-          ? Math.max(...[
+        if (row) {
+          const positive = (values) => values.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+          const gross = positive([
             row.priceBeforeDiscount,
             row.subtotalBeforeRecurringCustomerDiscount,
             row.priceBeforeServiceSpecificDiscount,
-            row.price,
-            row.amount,
-          ].map(Number).filter((n) => Number.isFinite(n) && n > 0), 0)
-          : 0;
-        if (face > 0) return round2(face);
+          ]);
+          if (gross.length) return round2(Math.max(...gross));
+          // Already-sent rows predate the mapper's gross fields and store
+          // only the NET: a WaveGuard member's $125 inspection sits at
+          // $106.25. Undo the one-time perk — the row's own persisted rate
+          // first, else the estimate's recurring-customer flag with the
+          // configured perk rate (codex #3521 r8 P0).
+          const net = positive([row.price, row.amount]);
+          if (net.length) {
+            const netFace = Math.max(...net);
+            const perk = perkRateForStoredRow(row, estData);
+            return round2(perk > 0 && perk < 1 ? netFace / (1 - perk) : netFace);
+          }
+        }
       }
     }
     // Legacy grouped row with no primary line recorded: the parent price

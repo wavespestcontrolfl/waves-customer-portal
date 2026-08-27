@@ -5434,9 +5434,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // grouped appointment's estimated_price is the whole group (primary +
     // add-ons), so freezing invoiceAmount as the inspection credit would
     // credit the add-ons too (codex #3521 r3 P1). Read-only, fail-soft
-    // (null → the closeout falls back to the configured fee).
-    const soldInspectionAmount = await require('../services/inspection-credit')
-      .soldInspectionAmountForVisit(db, svc);
+    // (null → the closeout falls back to the configured fee). Only
+    // resolved for creditable inspections — every other completion skips
+    // the estimate/add-on round trips it costs (codex #3521 r8 P2).
+    const soldInspectionAmount = require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)
+      ? await require('../services/inspection-credit').soldInspectionAmountForVisit(db, svc)
+      : null;
     // Third-party Bill-To resolution — moved ABOVE the tax freeze (codex
     // pre-push P0): the frozen completion rate must be derived for the
     // entity that OWES it. Resolving the payer after freezing let a service
