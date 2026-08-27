@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { formatETDate } from "../../lib/timezone";
+import { Ruler, RefreshCw } from "lucide-react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -65,10 +67,11 @@ export default function TurfHeightReviewPage() {
 
   return (
     <div style={{ background: M.bg, minHeight: "100%", padding: 24, fontFamily: "'Roboto', Arial, sans-serif", color: M.ink }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Turf height — review</h1>
-        <button type="button" onClick={load} style={{ border: `1px solid ${M.line}`, background: M.card, borderRadius: 8, padding: "6px 12px", fontSize: 13, cursor: "pointer" }}>Refresh</button>
-      </div>
+      <AdminCommandHeader
+        title="Turf Height Review"
+        icon={Ruler}
+        actions={[{ key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: load }]}
+      />
       <p style={{ color: M.muted, fontSize: 13, marginTop: 0, marginBottom: 18 }}>
         Readings where the gauge-photo OCR diverged from the tech's entry, or couldn't be read. The manual reading is the record — confirming just clears the flag.
       </p>

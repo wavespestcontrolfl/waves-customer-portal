@@ -21,6 +21,7 @@
  */
 import React, { useCallback, useEffect, useState } from "react";
 import { Banknote } from "lucide-react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button, Badge, Card, CardHeader, CardTitle, CardBody,
   Table, THead, TBody, TR, TH, TD, Select, Textarea,
@@ -245,12 +246,10 @@ export default function BillingRecoveryPage() {
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
+      <AdminCommandHeader title="Billing Recovery" icon={Banknote} />
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>
-          <h1 className="text-22 font-medium text-zinc-900 flex items-center gap-2">
-            <Banknote className="w-5 h-5 text-zinc-500" /> Billing Recovery
-          </h1>
-          <p className="text-13 text-zinc-500 mt-1">
+          <p className="text-13 text-zinc-500">
             Completed visits that were never invoiced, plus aging receivables. Monthly-autopay visits are excluded — they bill separately; per-application visits surface under Needs review.
           </p>
         </div>

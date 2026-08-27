@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
 import { adminFetch } from "../../utils/admin-fetch";
 import { cn, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
@@ -858,32 +859,34 @@ export default function AgentEstimatePage() {
 
   return (
     <div className="mx-auto min-w-0 max-w-[1500px] font-sans text-zinc-950">
-      <header className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="mb-1 flex items-center gap-2 text-[14px] font-medium text-zinc-500">
-            <Bot size={18} aria-hidden="true" /> Manual · gated
-          </div>
-          <h1 className="text-[28px] font-normal tracking-tight">Agent Estimate</h1>
-          <p className="mt-1 max-w-3xl text-[14px] leading-6 text-zinc-600">
-            Pull a lead’s calls, texts, quote form, and recognized customer account into one evidence-backed estimate. Current services stay intact; the pricing engine prices additions; you preview and send.
-          </p>
-        </div>
-        {selectedLeadId && (
-          <button
-            type="button"
-            onClick={() => {
-              // A refresh means the operator wants decisions made on CURRENT
-              // evidence — drop any response/pending card computed before it.
-              intelligence.clear();
-              loadContext();
-            }}
-            disabled={contextLoading}
-            className="flex h-11 items-center gap-2 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-50"
-          >
-            <RefreshCw size={17} className={contextLoading ? "animate-spin" : ""} aria-hidden="true" /> Refresh evidence
-          </button>
-        )}
-      </header>
+      <AdminCommandHeader
+        title="Agent Estimate"
+        icon={Bot}
+        actions={
+          selectedLeadId
+            ? [
+                {
+                  key: "refresh",
+                  label: contextLoading ? "Refreshing…" : "Refresh evidence",
+                  size: "sm",
+                  variant: "ghost",
+                  icon: RefreshCw,
+                  disabled: contextLoading,
+                  onClick: () => {
+                    // A refresh means the operator wants decisions made on CURRENT
+                    // evidence — drop any response/pending card computed before it.
+                    intelligence.clear();
+                    loadContext();
+                  },
+                },
+              ]
+            : []
+        }
+      />
+      <p className="mb-5 max-w-3xl text-[14px] leading-6 text-zinc-600">
+        <span className="font-medium text-zinc-500">Manual · gated.</span>{" "}
+        Pull a lead’s calls, texts, quote form, and recognized customer account into one evidence-backed estimate. Current services stay intact; the pricing engine prices additions; you preview and send.
+      </p>
 
       <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.55fr)]">
         <main className="min-w-0 space-y-4">

@@ -10,6 +10,8 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { Building2 } from "lucide-react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button,
   Input,
@@ -158,22 +160,19 @@ export default function PayersPage() {
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <div>
-          <h1 className="text-20 font-medium text-zinc-900">Payers</h1>
-          <p className="text-13 text-zinc-500 mt-0.5">
-            Third-party Bill-To accounts — builders, property managers,
-            realtors, HOAs. Assign one to a customer or a single job to route
-            that invoice to them.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" onClick={() => setArOpen(true)}>
-            AR aging
-          </Button>
-          <Button onClick={openNew}>New payer</Button>
-        </div>
-      </div>
+      <AdminCommandHeader
+        title="Payers"
+        icon={Building2}
+        actions={[
+          { key: "ar", label: "AR aging", size: "sm", variant: "ghost", onClick: () => setArOpen(true) },
+          { key: "new", label: "New payer", size: "sm", onClick: openNew },
+        ]}
+      />
+      <p className="text-13 text-zinc-500 mb-4">
+        Third-party Bill-To accounts — builders, property managers,
+        realtors, HOAs. Assign one to a customer or a single job to route
+        that invoice to them.
+      </p>
 
       <div className="flex items-center gap-3 mb-3 flex-wrap">
         <Input

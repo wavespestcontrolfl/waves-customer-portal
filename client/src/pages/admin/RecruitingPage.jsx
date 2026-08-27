@@ -13,6 +13,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button, Badge, Card, CardBody,
   Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter,
@@ -183,10 +184,7 @@ export default function RecruitingPage() {
 
   return (
     <div className="max-w-[1000px]">
-      <div className="flex items-center gap-2 mb-4">
-        <UserPlus className="w-5 h-5 text-zinc-500" />
-        <h1 className="text-20 font-medium text-zinc-900">Recruiting</h1>
-      </div>
+      <AdminCommandHeader title="Recruiting" icon={UserPlus} />
 
       <div className="flex flex-wrap gap-1.5 mb-4" role="tablist" aria-label="Application status">
         {STATUS_TABS.map(({ key, label }) => (
