@@ -1849,7 +1849,9 @@ function blankNonRenderedMarkdown(text) {
       return '';
     }
     const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
+    // A backtick fence's info string may not contain a backtick (CommonMark)
+    // — such a line is inline code, not a fence opener.
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
     const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);

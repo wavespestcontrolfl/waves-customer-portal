@@ -394,20 +394,23 @@ function extractLinks(body) {
   };
   while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[2]) });
   // Reference-style links: [text][ref] / [text][] with a [ref]: /url definition.
+  // CommonMark label matching is case-insensitive with internal whitespace
+  // collapsed — normalize both the definition and the reference the same way.
+  const label = (l) => String(l || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const defs = new Map();
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
-  while ((m = def.exec(s)) !== null) defs.set(m[1].toLowerCase(), dest(m[2]));
+  while ((m = def.exec(s)) !== null) defs.set(label(m[1]), dest(m[2]));
   if (defs.size) {
     const ref = /(?<!!)\[([^\]]+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
-      const href = defs.get((m[2] || m[1]).toLowerCase());
+      const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });
     }
     // Shortcut references: a bare `[Label]` whose label has a definition and
     // that is not itself an inline/full reference or the definition line.
     const shortcut = /(?<!!)\[([^\]]+)\](?![\[(:])/g;
     while ((m = shortcut.exec(s)) !== null) {
-      const href = defs.get(m[1].toLowerCase());
+      const href = defs.get(label(m[1]));
       if (href) links.push({ anchor: m[1], href });
     }
   }

@@ -430,6 +430,15 @@ describe('seo-completion-gate', () => {
     expect(unquoted.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
+  test('reference labels match with collapsed whitespace', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service][contact   link]\n\n[contact link]: /contact/` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+  });
+
   test('shortcut reference CTAs are classified', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service]\n\n[Schedule Service]: /contact/` }),
