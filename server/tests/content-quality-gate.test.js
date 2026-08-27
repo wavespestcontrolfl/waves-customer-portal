@@ -401,6 +401,8 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkNoRawMarkdownTables({ body: rawTable }).reason).toMatch(/ComparisonTable/);
     // Aligned/colon variants of the delimiter row still match.
     expect(checkNoRawMarkdownTables({ body: '| A | B |\n|:---|---:|\n| 1 | 2 |' }).ok).toBe(false);
+    // GFM tables WITHOUT outer pipes are still tables.
+    expect(checkNoRawMarkdownTables({ body: 'Method | Cost\n--- | ---\nDIY | $10' }).ok).toBe(false);
     // <ComparisonTable> JSX, prose pipes, and plain dashed dividers pass.
     expect(checkNoRawMarkdownTables({ body: '<ComparisonTable columns={["a","b"]} rows={[{ label: "x", values: ["y"] }]} />' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: 'Choose either|or — both work.\n\n---\n\nNext section.' }).ok).toBe(true);
