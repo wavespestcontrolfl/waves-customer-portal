@@ -235,7 +235,15 @@ function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = 
     // itemized V2 exclusion quote carries one row per section (wire mesh /
     // bird boxes / linear mesh), and a credit for the SERVICE must cover
     // the service's whole price, allocated across its rows in order.
-    const targets = lineItems.filter((item) => serviceCreditTargetsLine(credit, item));
+    // Aggregate ONLY the component rows of one itemized job (V2 exclusion
+    // sections all carry `component`); distinct paid products can share a
+    // key on purpose (one-time lawn treatment + lawn pest knockdown both
+    // emit one_time_lawn), and there a free credit must stay a single-line
+    // credit, not zero both (uncapped audit P0 on #3521).
+    const matches = lineItems.filter((item) => serviceCreditTargetsLine(credit, item));
+    const targets = matches.length > 1 && matches.every((item) => item && item.component)
+      ? matches
+      : matches.slice(0, 1);
     const target = targets[0];
     const targetService = target?.service || credit.service || credit.serviceKey || credit.service_key || null;
 

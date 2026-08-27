@@ -341,3 +341,27 @@ describe('exclusion V2 rows never exceed the price above the job minimum (pre-pu
     expect(rowsTotal).toBe(581);
   });
 });
+
+describe('service credits never zero distinct products that share a key (uncapped audit P0 on #3521)', () => {
+  test('a free one_time_lawn credit leaves the second lawn product paid', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { oneTimeLawn: {}, lawnPestControl: {} },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset',
+        presetKey: 'free_one_time_lawn',
+        catalogName: 'Free One-Time Lawn',
+        catalogCategory: 'service_specific_credit',
+        discountType: 'free_service',
+        service: 'one_time_lawn',
+        label: 'Free One-Time Lawn',
+      }],
+    }));
+    const lawnRows = estimate.lineItems.filter((li) => li.service === 'one_time_lawn');
+    expect(lawnRows.length).toBeGreaterThanOrEqual(2);
+    const zeroed = lawnRows.filter((li) => li.serviceSpecificDiscountApplied === true);
+    expect(zeroed).toHaveLength(1);
+    const stillPaid = lawnRows.filter((li) => li.serviceSpecificDiscountApplied !== true);
+    expect(stillPaid.every((li) => (li.priceAfterDiscount ?? li.price) > 0)).toBe(true);
+    expect(estimate.summary.oneTimeTotal).toBeGreaterThan(0);
+  });
+});
