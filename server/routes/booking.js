@@ -684,7 +684,12 @@ const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
 const BOOKING_FUNNEL_SERVICE_DURATIONS = {
   pest_control: 60,
   lawn_care: 60,
-  mosquito: 45,
+  // 60 (owner ruling 2026-08-27): the funnel's 45 under-reserved the visit
+  // against the 60-minute catalog authority (mosquito_monthly /
+  // mosquito_seasonal default_duration_minutes) — the wizard-series
+  // activation had to extend every first visit and seed follow-ups at 60.
+  // Fewer 45-minute offers on the public site is the accepted trade.
+  mosquito: 60,
   tree_shrub: 60,
   termite: 90,
   rodent: 60,
@@ -3251,11 +3256,12 @@ async function createSelfBooking(payload = {}) {
           }
           const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
           // Children seed at the CATALOG row's duration when it resolves
-          // (codex #3504 r10): the coarse funnel duration (mosquito books
-          // 45min) undershoots the cadence catalog's owner-directed
-          // default (60min), releasing each follow-up's slot early and
-          // overlapping the next job. The parent's signed slot is not
-          // rewritten — only the seeded follow-ups.
+          // (codex #3504 r10): a coarse funnel duration that undershoots
+          // the cadence catalog's owner-directed default would release
+          // each follow-up's slot early and overlap the next job (mosquito
+          // booked 45 vs catalog 60 until the 2026-08-27 ruling aligned
+          // the funnel at 60; the guard stays for any future drift). The
+          // parent's signed slot is not rewritten — only the follow-ups.
           // The converter's duration AUTHORITY comes first (codex #3504
           // r12): lawn/palm/tree book flat 60-minute slots and their
           // catalog identity links are deliberately duration-silent — the
@@ -3372,10 +3378,12 @@ async function createSelfBooking(payload = {}) {
             }
           }
           // The PARENT is reserved at the program duration too (codex
-          // #3504 r13): the funnel booked/signed the first visit at its
-          // coarse duration (mosquito 45) while the program's authority is
-          // longer (60), so stamping the recurring identity alone left the
-          // first treatment under-reserved. Extend only when the extended
+          // #3504 r13): if the funnel booked/signed the first visit at a
+          // coarse duration shorter than the program's authority (mosquito
+          // 45 vs 60 before the 2026-08-27 funnel alignment), stamping the
+          // recurring identity alone left the first treatment
+          // under-reserved. Now a no-op for mosquito (funnel = 60) and a
+          // guard against future drift. Extend only when the extended
           // window is CLEAR — we hold the parent's date occupancy lock at
           // rung 1 and the SHARED tech-blind guard decides — mirroring the
           // booking row's own end/duration; a clash keeps the signed slot
