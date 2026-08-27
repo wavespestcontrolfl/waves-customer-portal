@@ -129,6 +129,19 @@ describe('fetchEngagement', () => {
     });
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: denied }))
       .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'permission' });
+
+    // A TRANSIENT insights failure (5xx / timeout / malformed body) is NOT
+    // "unsupported" — the whole target fails so last_error and job health see it.
+    for (const bad of [
+      { ok: false, status: 503, json: async () => ({ error: { message: 'Service temporarily unavailable' } }) },
+      { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } },
+    ]) {
+      const flaky = jest.fn(async (url) => (url.includes('/insights') ? bad : { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) }));
+      await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: flaky })).rejects.toThrow(/Graph (503|200)/);
+    }
+    expect(Engagement.classifyInsightError(new Error('Graph 400: (#100) Unsupported metric shares'))).toBe('unsupported');
+    expect(Engagement.classifyInsightError(new Error('Graph 400: Invalid parameter'))).toBeNull();
+    expect(Engagement.classifyInsightError(new Error('The operation was aborted due to timeout'))).toBeNull();
   });
 
   test('facebook/instagram without a token fails that target only', async () => {

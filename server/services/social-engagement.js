@@ -113,6 +113,17 @@ async function fetchGraph(url, fetchFn) {
   return body;
 }
 
+// Graph errors that mean the shares insight will NEVER be available for
+// this token/media (soft): a missing scope, or Meta rejecting the metric /
+// media type. Everything else (timeouts, 5xx, malformed body, unknown 4xx)
+// is transient or unknown → null → caller fails the target.
+function classifyInsightError(err) {
+  const msg = String(err?.message || '');
+  if (/permission|#10\b|#200\b|OAuthException/i.test(msg)) return 'permission';
+  if (/^Graph 400:/.test(msg) && /unsupported|invalid metric|not support|does not support|#100\b/i.test(msg)) return 'unsupported';
+  return null;
+}
+
 async function fetchEngagement(target, { fetchFn = fetch } = {}) {
   if (target.platform === 'facebook' || target.platform === 'instagram') {
     const token = process.env.FACEBOOK_ACCESS_TOKEN;
@@ -139,10 +150,15 @@ async function fetchEngagement(target, { fetchFn = fetch } = {}) {
     try {
       counts.shares = parseInstagramShares(await fetchGraph(`${GRAPH_BASE}/${id}/insights?metric=shares&${auth}`, fetchFn));
     } catch (err) {
-      const permission = /permission|#10\b|#200\b|OAuthException/i.test(err.message);
-      logger.warn(`[social-engagement] instagram shares insight unavailable for ${target.platformPostId}: ${err.message}${permission ? ' — FACEBOOK_ACCESS_TOKEN lacks instagram_manage_insights; regenerate it with that scope' : ''}`);
+      const kind = classifyInsightError(err);
+      // Only a DEFINITIVE "can't have it" is soft (shares stays not-measured,
+      // target still syncs). A transient failure — timeout, 5xx, malformed
+      // body, network — throws through the normal target-failure path so the
+      // row keeps last_error and job health sees it.
+      if (!kind) throw err;
+      logger.warn(`[social-engagement] instagram shares insight unavailable for ${target.platformPostId}: ${err.message}${kind === 'permission' ? ' — FACEBOOK_ACCESS_TOKEN lacks instagram_manage_insights; regenerate it with that scope' : ''}`);
       counts.shares = null;
-      counts.sharesUnavailable = permission ? 'permission' : 'unsupported';
+      counts.sharesUnavailable = kind;
     }
     return counts;
   }
@@ -295,6 +311,7 @@ module.exports = {
   parseFacebookEngagement,
   parseInstagramEngagement,
   parseInstagramShares,
+  classifyInsightError,
   scoreCounts,
   syncRecentEngagement,
 };
