@@ -1183,10 +1183,14 @@ async function clearMilestoneStamp(threshold, runId) {
   await db('system_settings').where({ key: milestoneStampKey(threshold) }).del();
 }
 
-// A threshold is claimed by the durable stamp above (any state), or by any
-// non-skipped run that carried it — including in-flight 'started' rows and
-// approval-queue drafts — so a crash or a pending draft can't let the next
-// tick mint a duplicate celebration.
+// A threshold is claimed by the durable stamp above (any state — it is the
+// authority for "a post is or may be live"), by a published run, by an
+// approval-queue draft, or by a RECENT in-flight 'started' row. 'started'
+// is bounded: the stamp is written before any provider call, so a stale
+// unstamped 'started' row (process crash between insert and stamp) cannot
+// represent a live post and must not park the threshold until the next rung.
+const MILESTONE_INFLIGHT_MS = 2 * 60 * 60 * 1000;
+
 async function milestoneAlreadyClaimed(threshold) {
   if (!(await hasTable('social_content_studio_runs'))) return true;
   const stamped = await db('system_settings')
@@ -1194,10 +1198,13 @@ async function milestoneAlreadyClaimed(threshold) {
     .first('key')
     .catch(() => null);
   if (stamped) return true;
+  const inflightSince = new Date(Date.now() - MILESTONE_INFLIGHT_MS);
   const row = await db('social_content_studio_runs')
     .where({ run_type: 'autonomous', angle: MILESTONE_ANGLE })
-    .whereIn('status', ['started', 'published', 'draft_created'])
     .whereRaw("input->>'milestone' = ?", [String(threshold)])
+    .where((qb) => qb
+      .whereIn('status', ['published', 'draft_created'])
+      .orWhere((q) => q.where('status', 'started').andWhere('started_at', '>', inflightSince)))
     .first('id');
   return !!row;
 }
