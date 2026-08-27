@@ -194,12 +194,21 @@ describe('seo-completion-gate', () => {
     // Estimate/quote wording IN the anchor satisfies it.
     const anchored = SeoCompletionGate.evaluate({
       draft: baseDraft({
-        body: `${baseDraft().body}\n\n[Request a Quote](/pest-control-quote/) today.`,
+        body: `${baseDraft().body}\n\n[Request a Pest Control Quote](/pest-control-quote/) today.`,
       }),
       brief: baseBrief(),
       shadowMode: true,
     });
     expect(anchored.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // With a known brief service, a GENERIC quote anchor alone does not
+    // satisfy "tied to the post's service" (it may ride along as an extra).
+    const genericOnly = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants again. [Request a Quote](/pest-control-quote/) today.' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(genericOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
   });
 
   test('a wrong-service estimate anchor does not satisfy the CTA check', () => {
@@ -268,6 +277,17 @@ describe('seo-completion-gate', () => {
     expect(commercial.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(commercial.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // termite-inspection aliases to termite WITHOUT mangling the word.
+    const termiteInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Swarmers mean a colony. [Get My Free Termite Estimate](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'termite-inspection' }),
+      shadowMode: true,
+    });
+    expect(termiteInspection.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(termiteInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // "-control" service ids land on their own specialty key.
     const rodent = SeoCompletionGate.evaluate({
       draft: baseDraft({
@@ -330,7 +350,7 @@ describe('seo-completion-gate', () => {
   test('a wrong-service CTA anchor is a violation even when a valid CTA also exists', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
-        body: `${baseDraft().body}\n\n[Request a Quote](/pest-control-quote/) today.\n\n[Get a Lawn Care Quote](/pest-control-quote/) too.`,
+        body: 'Termites swarm in spring. [Request a Termite Quote](/pest-control-quote/) today.\n\n[Get a Lawn Care Quote](/pest-control-quote/) too.',
       }),
       brief: baseBrief({ service: 'termite-control' }),
       shadowMode: true,

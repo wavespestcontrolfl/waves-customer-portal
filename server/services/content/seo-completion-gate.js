@@ -331,18 +331,22 @@ const PROSE_REFERENCE_ANCHOR_RE = /^(?:our|the|this|these|that|a|an|its|their|wa
 function ctaBriefService(rawService) {
   if (!rawService) return null;
   const base = String(rawService).toLowerCase().trim().replace(/\s+/g, '-');
-  // Try the id itself, its singular, and its "-control"/"-care"/"-treatment"
-  // stripped forms against the anchor vocabulary first, so every supported
-  // service id (rodent-control, bed-bug-control, bed-bugs, …) lands on its
-  // own key before any broad-service aliasing.
+  // Try the id itself, then plural-stripped and "-control"/"-care"/
+  // "-treatment"-stripped forms against the anchor vocabulary first, so
+  // every supported service id (rodent-control, bed-bug-control, bed-bugs,
+  // cockroaches, …) lands on its own key before any broad-service aliasing.
+  // Plural stripping is tried as CANDIDATES only — never applied blindly
+  // (that turned "termite" into "termit").
   const stripped = base.replace(/-(?:control|care|treatment)s?$/, '');
-  const candidates = [base, base.replace(/e?s$/, ''), stripped, stripped.replace(/e?s$/, '')];
+  const candidates = [base, stripped]
+    .flatMap((v) => [v, v.replace(/es$/, ''), v.replace(/s$/, '')]);
   for (const c of candidates) {
     if (CTA_ANCHOR_SERVICE_TERMS[c] || CTA_SERVICE_FAMILY[c]) return c;
   }
   const { SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
   const aliased = SERVICE_ID_ALIASES[base] || SERVICE_ID_ALIASES[stripped] || rawService;
-  return normalizeService(aliased).replace(/\s+/g, '-').replace(/e?s$/, '');
+  // normalizeService output is already canonical (pest/lawn/termite/…).
+  return normalizeService(aliased).replace(/\s+/g, '-');
 }
 
 // All conversion-path links in the body, with anchor + estimate/quote flag
@@ -383,9 +387,13 @@ function hasConversionCta(body, brief = {}) {
   // and a lawn-care quote anchor on a termite post all fail to qualify.
   const briefService = ctaBriefService(brief.service);
   const allowed = briefService ? allowedAnchorServices(briefService) : null;
+  // With a known brief service the qualifying CTA must POSITIVELY name it
+  // (or its family) — a generic "Request a Quote" or an unrecognized phrase
+  // can ride along as an extra CTA but does not satisfy "tied to the
+  // post's service" on its own.
   return conversionCtaLinks(body).some((link) =>
     link.hasEstimateWording
-    && (!allowed || link.named.every((svc) => allowed.has(svc))));
+    && (!allowed || (link.named.length > 0 && link.named.every((svc) => allowed.has(svc)))));
 }
 
 // EVERY conversion CTA anchor must comply — violations are flagged even
