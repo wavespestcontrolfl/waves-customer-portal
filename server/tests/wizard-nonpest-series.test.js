@@ -1068,7 +1068,12 @@ describe('booking route wiring (source contracts)', () => {
     // Auto-extend templates off the per-visit amount for anchored splits.
     const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(schedule).toMatch(/async function resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\)/);
-    expect(schedule).toMatch(/const extensionPriceParent = await resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\);\s*\n\s*applyStoredVisitFinancials\(nextData, cols, extensionPriceParent,/);
+    // The template is resolved BEFORE the line-field copy so a structured
+    // first-visit price never reaches the new row (top-up writer shown; the
+    // count below covers all four).
+    expect(schedule).toMatch(/const extensionPriceParent = await resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\);\s*\n\s*copyLineDiscountFields\(nextData, extensionPriceParent, cols\);/);
+    expect((schedule.match(/copyLineDiscountFields\((?:data|nextData), extensionPriceParent, cols\);/g) || []).length).toBe(4);
+    expect(schedule).not.toMatch(/copyLineDiscountFields\((?:data|nextData), parent, cols\);/);
     // Every extension writer (auto-extend, top-up, plan-ending extend and
     // convert) templates off the resolver — never the raw parent.
     expect((schedule.match(/applyStoredVisitFinancials\((?:data|nextData), cols, extensionPriceParent,/g) || []).length).toBe(4);
@@ -1182,5 +1187,82 @@ describe('booking route wiring (source contracts)', () => {
   test('fee-exempt seeded bookings still correlate the parent and retire the draft', () => {
     expect(booking).toMatch(/whereNull\('source_estimate_id'\)\s*\n\s*\.update\(\{ source_estimate_id: pricing_estimate_id/);
     expect(booking).toMatch(/source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)/);
+  });
+});
+
+describe('resolveSeriesExtensionPriceTemplate — anchored marker over a structured first-visit price', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+  const start = src.indexOf('async function resolveSeriesExtensionPriceTemplate(');
+  const end = src.indexOf('function applyStoredVisitFinancials(');
+  const resolve = new Function(`${src.slice(start, end)}; return resolveSeriesExtensionPriceTemplate;`)();
+  const marker = { anchored_split_per_visit: 88 };
+  const conn = () => ({ where: () => ({ first: async () => ({ recurring_template_overrides: marker }) }) });
+
+  test('structured first-visit price + marker → estimated_price templates at the per-visit amount, primary_line_price and the first-visit line discount cleared', async () => {
+    const parent = {
+      id: 'p1', estimated_price: '88.00', primary_line_price: '187.00',
+      line_discount_id: 'ld', line_discount_name: 'Initial', line_discount_type: 'fixed_amount', line_discount_amount: 10, line_discount_dollars: 10,
+      recurring_template_overrides: marker, service_key_snapshot: 'pest_control_quarterly',
+    };
+    const t = await resolve(null, 'p1', parent);
+    expect(t.estimated_price).toBe(88);
+    expect(t.primary_line_price).toBeNull();
+    expect(t.line_discount_id).toBeNull();
+    expect(t.line_discount_name).toBeNull();
+    expect(t.line_discount_type).toBeNull();
+    expect(t.line_discount_amount).toBeNull();
+    expect(t.line_discount_dollars).toBeNull();
+    expect(t.service_key_snapshot).toBe('pest_control_quarterly');
+    // The parent row itself is never mutated.
+    expect(parent.primary_line_price).toBe('187.00');
+    expect(parent.line_discount_dollars).toBe(10);
+  });
+
+  test('no structured price + marker → only estimated_price is templated (unchanged behaviour)', async () => {
+    const parent = { id: 'p1', estimated_price: '88.33', primary_line_price: null, line_discount_dollars: 5, recurring_template_overrides: JSON.stringify(marker) };
+    const t = await resolve(null, 'p1', parent);
+    expect(t.estimated_price).toBe(88);
+    expect(t.primary_line_price).toBeNull();
+    expect(t.line_discount_dollars).toBe(5);
+  });
+
+  test('an explicit edit-lane price override (estimated_price OR primary_line_price) wins over the marker', async () => {
+    for (const overrides of [{ ...marker, estimated_price: 95 }, { ...marker, primary_line_price: 95 }]) {
+      const parent = { id: 'p1', estimated_price: '95.00', primary_line_price: '95.00', recurring_template_overrides: overrides };
+      expect(await resolve(null, 'p1', parent)).toBe(parent);
+    }
+  });
+
+  test('no marker → the parent verbatim, structured price or not', async () => {
+    const parent = { id: 'p1', estimated_price: '88.00', primary_line_price: '187.00', recurring_template_overrides: null };
+    expect(await resolve(null, 'p1', parent)).toBe(parent);
+    const noOverrides = { id: 'p1', estimated_price: '88.00', primary_line_price: '187.00' };
+    expect(await resolve(() => ({ where: () => ({ first: async () => ({ recurring_template_overrides: null }) }) }), 'p1', noOverrides)).toBe(noOverrides);
+  });
+
+  test('marker read from the row when the parent object lacks the column', async () => {
+    const parent = { id: 'p1', estimated_price: '88.00', primary_line_price: '187.00' };
+    const t = await resolve(conn, 'p1', parent);
+    expect(t.estimated_price).toBe(88);
+    expect(t.primary_line_price).toBeNull();
+  });
+
+  test('follow-up migration SURFACES structured-price parents for manual review — never stamps them (pre-push P0: a structured price does not prove first-visit scope)', () => {
+    const mig = require('../models/migrations/20260828000001_pest_anchored_split_structured_price_backfill');
+    expect(typeof mig.up).toBe('function');
+    expect(typeof mig.down).toBe('function');
+    const m = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260828000001_pest_anchored_split_structured_price_backfill.js'), 'utf8');
+    expect(m).toMatch(/whereRaw\('p\.primary_line_price > 0'\)/);
+    expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'anchored_split_per_visit'\)/);
+    expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'estimated_price'\)/);
+    expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'primary_line_price'\)/);
+    expect(m).toMatch(/dedupeKey: 'pest-renewal-price-unverified-20260828'/);
+    expect(m).not.toMatch(/anchored_split_per_visit', /);
+    expect(m).not.toMatch(/UPDATE scheduled_services t/);
+    expect(m).not.toMatch(/jsonb_build_object/);
+    // Re-runnable: rows already noted are not re-noted.
+    expect(m).toMatch(/NOT LIKE \?", \[`%\$\{NOTE\}%`\]/);
   });
 });

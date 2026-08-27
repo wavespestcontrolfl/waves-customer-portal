@@ -2299,11 +2299,24 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
 // an operator override is never mistaken for it and it is never inferred
 // from child prices). When present, the extension templates off that
 // amount so renewals bill the quoted per-application price, not the
-// remainder; no primary_line_price (the stored-financials path prefers that
-// column) and no marker → the parent as before.
+// remainder — INCLUDING when the parent carries a structured
+// primary_line_price. A this-visit-only reprice of the first visit (an
+// initial fee folded into visit 1, say) writes primary_line_price on that
+// row without touching the series template, so the marker survives it and
+// still names the renewal price; only an "apply to following" price edit
+// drops the marker (stampRecurringTemplateOverrides), and an explicit
+// price override always wins. The marker is the visit TOTAL (the quoted
+// per-application amount, add-ons included), so the template never puts
+// it in primary_line_price — that column is cleared (with the first
+// visit's line discount, which was part of the reprice) so
+// calculateStoredVisitFinancials takes the same estimated_price fallback
+// an unstructured anchored parent takes: marker minus the parent's add-on
+// lines, plus the add-ons due on the new visit (pre-push P0: a $100
+// marker with a $20 recurring add-on must extend at $100, not $120).
+// Every extension writer copies its line fields from this template, never
+// from the raw parent. No marker → the parent as before.
 async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
   try {
-    if (Number(parent?.primary_line_price) > 0) return parent;
     let raw = parent?.recurring_template_overrides;
     if (raw === undefined && conn) {
       const row = await conn('scheduled_services').where({ id: parentId }).first('recurring_template_overrides');
@@ -2317,9 +2330,20 @@ async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
     // (the overlay applies it when its gate is on; either way the split
     // is no longer the authority).
     if (raw.estimated_price !== undefined && raw.estimated_price !== null) return parent;
+    if (raw.primary_line_price !== undefined && raw.primary_line_price !== null) return parent;
     const perVisit = Number(raw.anchored_split_per_visit);
     if (!(perVisit > 0)) return parent;
-    return { ...parent, estimated_price: Math.round(perVisit * 100) / 100 };
+    const amount = Math.round(perVisit * 100) / 100;
+    const template = { ...parent, estimated_price: amount };
+    if (Number(parent?.primary_line_price) > 0) {
+      template.primary_line_price = null;
+      template.line_discount_id = null;
+      template.line_discount_name = null;
+      template.line_discount_type = null;
+      template.line_discount_amount = null;
+      template.line_discount_dollars = null;
+    }
+    return template;
   } catch {
     return parent;
   }
@@ -2575,14 +2599,23 @@ async function stampRecurringTemplateOverrides(conn, parentId, fields, cols) {
 // would manufacture a hybrid template nobody chose (Codex #3505 r1 P1:
 // the pin decision is per group, never for the JSON object as a whole —
 // a price-only stamp must not stop a later service pin, and vice versa).
-function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow) {
+// The seeder's anchored-split marker counts as an existing PRICE pin
+// (pre-push P0 on the marker-over-structured-price fix): it already names
+// the renewal amount, so a this_only price edit on the parent must not pin
+// the parent's pre-edit price on top of it — for a remainder-anchored plan
+// that pin is the remainder, and stampRecurringTemplateOverrides would
+// then drop the marker as if the operator had chosen a series price.
+// Leaving the price group unpinned keeps the marker intact and the
+// extension writers keep templating off the quoted per-visit amount.
+function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow, provenance = null) {
   const existing = existingOverrides || {};
   const pinned = {};
   const groupsToPin = [];
   if (groups.serviceChanged && !PRICE_SERVICE_SERVICE_KEYS.some((key) => key in existing)) {
     groupsToPin.push(PRICE_SERVICE_SERVICE_KEYS);
   }
-  if (groups.priceChanged && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
+  const anchoredPin = Number(provenance?.anchored_split_per_visit) > 0;
+  if (groups.priceChanged && !anchoredPin && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
     groupsToPin.push(PRICE_SERVICE_PRICE_KEYS);
   }
   for (const keys of groupsToPin) {
@@ -8078,6 +8111,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
             conversionGroups,
             priceServiceBeforeRow,
+            readProvenanceOverrides(priceServiceBeforeRow.recurring_template_overrides),
           );
           if (Object.keys(conversionPin).length > 0) {
             await stampRecurringTemplateOverrides(trx, req.params.id, conversionPin, seriesCols);
@@ -8254,6 +8288,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
             groups,
             priceServiceBeforeRow,
+            readProvenanceOverrides(priceServiceBeforeRow.recurring_template_overrides),
           );
           if (Object.keys(pinned).length > 0) {
             await stampRecurringTemplateOverrides(trx, req.params.id, pinned, scopeCols);
@@ -10538,7 +10573,8 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
     if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-    copyLineDiscountFields(data, parent, cols);
+    const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
+    copyLineDiscountFields(data, extensionPriceParent, cols);
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
@@ -10546,7 +10582,6 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
     // plans renew through these office paths, not the auto-extend.
-    const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
     applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
@@ -10829,7 +10864,8 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
           if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
           if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
-          copyLineDiscountFields(nextData, parent, cols);
+          const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
+          copyLineDiscountFields(nextData, extensionPriceParent, cols);
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
@@ -10851,7 +10887,6 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // renewal visit (owner ruling 2026-08-27). Use the series'
           // per-visit amount instead when the parent is a remainder-bearing
           // anchor — an existing follow-up priced within $1 below it.
-          const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
           applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
@@ -15469,7 +15504,8 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           recurring_parent_id: parentId,
         };
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
-        copyLineDiscountFields(data, parent, cols);
+        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+        copyLineDiscountFields(data, extensionPriceParent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -15477,7 +15513,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
-        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -15546,7 +15581,8 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         };
         if (cols.recurring_ongoing) data.recurring_ongoing = true;
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
-        copyLineDiscountFields(data, parent, cols);
+        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+        copyLineDiscountFields(data, extensionPriceParent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -15554,7 +15590,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
-        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -15936,6 +15971,8 @@ router._test = {
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,
+  readProvenanceOverrides,
+  resolveSeriesExtensionPriceTemplate,
   parseTemplateOverrides,
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
