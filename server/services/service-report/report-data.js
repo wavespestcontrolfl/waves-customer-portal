@@ -3,7 +3,7 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -3780,19 +3780,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // but an EPA-registered / pesticide-class product on such a row is a real
   // application — an EXPLICIT station_check (methodInferred === false) is a
   // deliberate device inspection and never counts.
-  // Bait/station product FAMILIES never count, even with an EPA number:
-  // a legacy Trelona/Advance cartridge row (null method, "termite bait"
-  // category) is station work, not a spray (codex inline r7).
-  const isBaitFamilyProduct = (app) => /bait|station|cartridge|monitor/i.test(
-    `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`,
-  );
+  // Product identity rule is shared with the completion path
+  // (isNonBaitPesticideProduct): bait/station families never count, even
+  // with an EPA number — a legacy Trelona/Advance cartridge row is station
+  // work, not a spray (codex inline r7/r9).
   const isInferredPesticideApplication = (app) => app.method === 'station_check'
     && app.methodInferred !== false
-    && !isBaitFamilyProduct(app)
-    && (
-      !!String(app.product?.epa_reg || '').trim()
-      || /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${app.product?.product_type || ''} ${app.product?.category || ''}`)
-    );
+    && isNonBaitPesticideProduct({
+      name: app.product?.name,
+      category: app.product?.category,
+      productType: app.product?.product_type,
+      epaReg: app.product?.epa_reg,
+    });
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
       .some((s) => s && s.treatmentApplied === true);

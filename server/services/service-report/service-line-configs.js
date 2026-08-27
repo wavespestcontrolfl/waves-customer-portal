@@ -271,6 +271,21 @@ function isSprayApplicationMethod(method) {
   return !!key && key !== 'null' && !NON_SPRAY_APPLICATION_METHODS.has(key);
 }
 
+// Product-identity evidence, shared by the completion path and the
+// report-time check (codex inline r9): a NON-bait pesticide product —
+// EPA-registered or pesticide-class by type/category — is treatment
+// evidence even when its recorded method is the client's defaulted
+// station_check (methodless termite products default that way and
+// catalog rows such as Termidor Foam carry no method or REI). Bait /
+// station / cartridge / monitor families never count.
+const BAIT_FAMILY_RE = /bait|station|cartridge|monitor/i;
+const PESTICIDE_CLASS_RE = /pestic|termitic|insectic|herbic|fungic|rodentic/i;
+function isNonBaitPesticideProduct({ name = '', category = '', productType = '', epaReg = '' } = {}) {
+  const identity = `${productType || ''} ${category || ''} ${name || ''}`;
+  if (BAIT_FAMILY_RE.test(identity)) return false;
+  return !!String(epaReg || '').trim() || PESTICIDE_CLASS_RE.test(`${productType || ''} ${category || ''}`);
+}
+
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
 // line id) so the cockroach and termite-station overrides can fire. Other
 // types return their line's defaults unchanged. `applicationsRecorded`
@@ -320,6 +335,7 @@ module.exports = {
   isRodentAdjacentServiceType,
   isCockroachServiceType,
   isSprayApplicationMethod,
+  isNonBaitPesticideProduct,
   isTermiteNoReentryServiceType,
   getAdvisoryDefaults,
   detectServiceLine,

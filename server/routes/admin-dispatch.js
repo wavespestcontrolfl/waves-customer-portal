@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -1401,6 +1401,32 @@ async function productReentryFloor(knex, submittedProducts = []) {
     }
   }
   return { minutes: maxMinutes, verified };
+}
+
+// Product-identity evidence for the re-entry rules (codex inline r9 on
+// #3516): TRUE when any submitted product resolves to a non-bait pesticide
+// (see isNonBaitPesticideProduct) — the client defaults methodless termite
+// products to station_check and catalog rows such as Termidor Foam carry no
+// REI, so method and REI alone would miss a real liquid/foam application.
+// Fail closed to FALSE on a lookup error (the identity is then unknown).
+async function productIdentityEvidence(knex, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return false;
+  let rows = null;
+  try {
+    rows = await knex('products_catalog')
+      .whereIn('id', productIds)
+      .select('id', 'name', 'category', 'product_type', 'epa_reg_number');
+  } catch {
+    rows = null;
+  }
+  if (!Array.isArray(rows)) return false;
+  return rows.some((row) => isNonBaitPesticideProduct({
+    name: row.name,
+    category: row.category,
+    productType: row.product_type,
+    epaReg: row.epa_reg_number,
+  }));
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -7026,7 +7052,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
                 p?.applicationMethod || p?.method || p?.application_method,
               )))
-              || reportProtocolActionScopes.some((s) => s.treatmentApplied);
+              || reportProtocolActionScopes.some((s) => s.treatmentApplied)
+              // Catalog identity: a non-bait pesticide product is evidence even
+              // under the client's defaulted station_check (codex inline r9).
+              || await productIdentityEvidence(trx, products || []);
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
               applicationsRecorded: reentryApplicationsRecorded,
             });
