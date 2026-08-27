@@ -3778,7 +3778,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Zero each side that was NOT explicitly adjusted by a person (per-side
   // reentry_adjusted marker) when the identity is no-spray and nothing
   // proves treatment (codex inline r4).
-  if (config.id === 'termite' && !readTimeSprayEvidence && isTermiteNoReentryServiceType(service.service_type)) {
+  // Fail closed: a failed product load means treatment evidence is UNKNOWN,
+  // so the stored guidance stands (uncapped codex P1 r5).
+  if (config.id === 'termite' && !productsLoadFailed && !readTimeSprayEvidence && isTermiteNoReentryServiceType(service.service_type)) {
     const adjusted = storedAdvisory.reentry_adjusted && typeof storedAdvisory.reentry_adjusted === 'object'
       ? storedAdvisory.reentry_adjusted
       : {};
