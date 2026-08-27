@@ -49,8 +49,8 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     await migration.up(fakeKnex(db));
     const data = JSON.parse(trapCfg(db).data);
     expect(data.included_followups).toBe('unlimited');
-    // An admin-changed standard_price is pinned back to the $350 directive.
-    expect(data.standard_price).toBe(350);
+    // standard_price is retired: the $350 plan is fixed in code (one dollar authority).
+    expect(data.standard_price).toBeUndefined();
     expect(data.unlimited_price).toBeUndefined();
     // The ignored adjustment tables are retired too (codex #3521 r8 P2).
     expect(data.home_size_adjustments).toBeUndefined();
@@ -82,13 +82,11 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     const edited = JSON.parse(trapCfg(db).data);
-    edited.standard_price = 399;          // admin moved the price after the migration
-    edited.included_followups = 3;        // and re-limited callbacks
+    edited.included_followups = 3;        // admin re-limited callbacks after the migration
     edited.unlimited_price = 500;         // and re-added a retired key on purpose
     trapCfg(db).data = edited;
     await migration.down(fakeKnex(db));
     const after = JSON.parse(trapCfg(db).data);
-    expect(after.standard_price).toBe(399);
     expect(after.included_followups).toBe(3);
     expect(after.unlimited_price).toBe(500);
     // Untouched retired keys still come back from the audit row.
@@ -105,9 +103,9 @@ describe('20260826000001 rodent trapping Standard-only', () => {
 
   test('a pricing row already at target STILL aligns the catalog copy, and down() restores it', async () => {
     const db = seedDb();
-    trapCfg(db).data = { standard_price: 350, included_followups: 'unlimited' };
+    trapCfg(db).data = { included_followups: 'unlimited', emergency_multiplier: 1.2 };
     await migration.up(fakeKnex(db));
-    expect(JSON.parse(trapCfg(db).data)).toEqual({ standard_price: 350, included_followups: 'unlimited' });
+    expect(JSON.parse(trapCfg(db).data)).toEqual({ included_followups: 'unlimited', emergency_multiplier: 1.2 });
     expect(trapSvc(db).description).toMatch(/unlimited callbacks\/checks for the same active trapping job/);
     expect(db.pricing_config_audit).toHaveLength(1);
     // Description-only up() never renamed the pricing row …
@@ -120,7 +118,7 @@ describe('20260826000001 rodent trapping Standard-only', () => {
 
   test('everything already at target is a true no-op', async () => {
     const db = seedDb();
-    trapCfg(db).data = { standard_price: 350, included_followups: 'unlimited' };
+    trapCfg(db).data = { included_followups: 'unlimited', emergency_multiplier: 1.2 };
     trapSvc(db).description = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
     await migration.up(fakeKnex(db));
     expect(db.pricing_config_audit).toHaveLength(0);

@@ -53,11 +53,15 @@ describe('20260826000005 rodent_trapping catalog $350', () => {
     expect(trap(db)).toMatchObject({ base_price: 375, price_range_min: 300, price_range_max: 500 });
   });
 
-  test('NULL price fields are left alone', async () => {
+  test('NULL (variable-priced) fields are pinned to $350 too; down() restores the NULLs', async () => {
     const db = seedDb({ base_price: null, price_range_min: null, price_range_max: null });
     await migration.up(fakeKnex(db));
+    expect(trap(db)).toMatchObject(TARGET);
+    expect(JSON.parse(stateRow(db).value).prior).toEqual({ base_price: null, price_range_min: null, price_range_max: null });
+    await migration.down(fakeKnex(db));
     expect(trap(db).base_price).toBeNull();
-    expect(stateRow(db)).toBeUndefined();
+    expect(trap(db).price_range_min).toBeNull();
+    expect(trap(db).price_range_max).toBeNull();
   });
 
   test('down() ignores a value that drifted after up()', async () => {

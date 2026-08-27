@@ -14,7 +14,6 @@ import {
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
-  applyServerRodentTrappingPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1343,13 +1342,12 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, trappingRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
-        fetchConfigRow("rodent_trapping"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
@@ -1366,10 +1364,6 @@ function EstimateToolView() {
       // Station-check brackets: same live-rates posture as the rental horizon
       // above, and same not-part-of-readiness reasoning (new row shape).
       if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
-      // Rodent trapping Standard price: same live-rates posture and same
-      // not-part-of-readiness reasoning — a missing row keeps the in-code
-      // $350 (codex #3521 uncapped P1).
-      if (trappingRow.ok) applyServerRodentTrappingPricingConfig(trappingRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;

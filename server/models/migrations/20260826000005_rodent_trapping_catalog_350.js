@@ -44,11 +44,16 @@ exports.up = async function up(knex) {
   // scheduling must not expose or bill anything else. NULLs are left
   // alone; prior values ride the state for rollback.
   for (const field of Object.keys(TARGET)) {
+    const isNull = row[field] == null;
     const current = Number(row[field]);
-    if (row[field] != null && Number.isFinite(current) && current !== TARGET[field]) {
+    // A NULL (variable-priced) field is pinned too: the plan is a fixed
+    // $350 and staff scheduling must never create trapping work without
+    // its amount (uncapped audit P1 on #3521). The prior NULL is recorded
+    // so rollback restores it.
+    if (isNull || (Number.isFinite(current) && current !== TARGET[field])) {
       patch[field] = TARGET[field];
       changed.push(field);
-      prior[field] = current;
+      prior[field] = isNull ? null : current;
     }
   }
   if (!changed.length) return;
@@ -65,8 +70,11 @@ exports.down = async function down(knex) {
     const patch = {};
     for (const field of (Array.isArray(state.changed) ? state.changed : [])) {
       if (field in TARGET && Number(row[field]) === TARGET[field]) {
-        const recorded = Number(state.prior?.[field]);
-        patch[field] = Number.isFinite(recorded) ? recorded : LEGACY[field];
+        const hasPrior = state.prior && Object.prototype.hasOwnProperty.call(state.prior, field);
+        const recorded = hasPrior ? state.prior[field] : undefined;
+        patch[field] = hasPrior
+          ? (recorded === null ? null : (Number.isFinite(Number(recorded)) ? Number(recorded) : LEGACY[field]))
+          : LEGACY[field];
       }
     }
     if (Object.keys(patch).length) {

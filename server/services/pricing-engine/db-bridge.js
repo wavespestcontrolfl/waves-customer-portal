@@ -1247,7 +1247,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // Trapping (new structure)
     if (config.rodent_trapping) {
       const t = config.rodent_trapping;
-      if (t.standard_price != null) constants.RODENT.trapping.standardPrice = r(t.standard_price);
+      // standard_price is NOT overlaid: the flat $350 Standard plan is fixed
+      // by directive (owner 2026-08-26) and is the single dollar authority for
+      // the engine, the catalog row (20260826000005), and the client mirror —
+      // a DB-editable copy left three prices to drift (codex #3521).
       // unlimited_price / upgrade_to_unlimited_price / unlimited_floor are
       // retired (Standard is the only plan, owner 2026-08-26) — stale rows
       // may still carry them; they are deliberately not mapped.

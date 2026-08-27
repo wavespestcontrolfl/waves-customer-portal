@@ -560,24 +560,6 @@ export function applyServerTermiteRentalPricingConfig(config) {
   return TERMITE_RENTAL_QUARTERS;
 }
 
-// Rodent trapping Standard plan (owner 2026-08-26) — flat price, DB-tunable
-// via pricing_config.rodent_trapping.standard_price (db-bridge overlays it
-// onto the server pricer), same live-rates posture as the termite appliers:
-// the fallback engine must preview what the server will quote, or an admin
-// price change silently diverges fallback-created token estimates from
-// server quotes (codex #3521 uncapped P1). Absent/invalid resets the
-// in-code default (kill-value pattern). Whole dollars, like the bridge.
-const RODENT_TRAPPING_DEFAULT_PRICE = 350;
-let RODENT_TRAPPING_STANDARD_PRICE = RODENT_TRAPPING_DEFAULT_PRICE;
-
-export function applyServerRodentTrappingPricingConfig(config) {
-  const n = Number(config?.standard_price ?? config?.standardPrice);
-  RODENT_TRAPPING_STANDARD_PRICE = Number.isFinite(n) && n > 0
-    ? Math.round(n)
-    : RODENT_TRAPPING_DEFAULT_PRICE;
-  return RODENT_TRAPPING_STANDARD_PRICE;
-}
-
 // Station-check brackets (owner 2026-07-28) — DB-tunable via
 // pricing_config.termite_monitoring, same live-rates posture as the bond and
 // rental appliers above. monthly = base + step × max(0, ceil(sta/bracket)−2):
@@ -3099,10 +3081,10 @@ export function calculateEstimate(inputs) {
   if (svcRodentTrap && !isCommercial) {
     hasOT = true;
     // Mirror of the server's standard-only trapping plan (owner
-    // 2026-08-26): flat price (live from pricing_config via
-    // applyServerRodentTrappingPricingConfig), unlimited callbacks, no
-    // footprint/lot adjustments.
-    const fp = otP(RODENT_TRAPPING_STANDARD_PRICE);
+    // 2026-08-26): a FIXED $350 (not DB-configurable — one dollar authority
+    // shared with the engine constant and the catalog row), unlimited
+    // callbacks, no footprint/lot adjustments.
+    const fp = otP(350);
     otItems.push({ name: 'Trapping', price: fp, detail: 'Unlimited trap checks for the same active trapping job' });
   }
 

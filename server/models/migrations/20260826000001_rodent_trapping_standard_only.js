@@ -23,9 +23,11 @@ const UP_REASON = 'Rodent trapping Standard-only — $350 flat, unlimited callba
 const RETIRED_KEYS = [
   'unlimited_price', 'upgrade_to_unlimited_price', 'unlimited_floor', 'additional_followup_rate',
   'home_size_adjustments', 'lot_adjustments', 'pressure_adjustments',
-  // priceRodentTrapping reads only standard_price + the emergency surcharge
-  // settings — these were the bracketed-pricing scaffolding (codex #3521 r17).
-  'base', 'floor', 'ceiling_before_custom', 'active_window_days',
+  // priceRodentTrapping reads only the emergency surcharge settings; the
+  // $350 Standard price is FIXED in code (owner 2026-08-26) — a DB copy of
+  // it was a second dollar authority that could drift from the catalog and
+  // client mirror (codex #3521). The bracketed-pricing scaffolding goes too.
+  'standard_price', 'base', 'floor', 'ceiling_before_custom', 'active_window_days',
 ];
 const STANDARD_ROW_NAME = 'Rodent Trapping (Standard — flat $350, unlimited callbacks)';
 const STANDARD_SERVICE_DESCRIPTION = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
@@ -75,14 +77,8 @@ exports.up = async function (knex) {
   const loaded = await loadTrappingRow(knex);
   if (!loaded) return;
   const { data } = loaded;
-  // The flat $350 is the directive, and db-bridge overlays standard_price
-  // onto the pricer — an admin-changed value would keep quoting while the
-  // catalog and client mirror say $350 (uncapped audit P1 on #3521). Pin
-  // it; the prior value rides the audit row for rollback.
-  const STANDARD_PRICE = 350;
   const pricingNeedsChange = RETIRED_KEYS.some((key) => data[key] != null)
-    || data.included_followups !== 'unlimited'
-    || Number(data.standard_price) !== STANDARD_PRICE;
+    || data.included_followups !== 'unlimited';
 
   // Catalog copy is judged INDEPENDENTLY of the pricing row (uncapped audit
   // P1 on #3521): a config already at target must not leave the Service
@@ -103,7 +99,7 @@ exports.up = async function (knex) {
   if (!pricingNeedsChange && !descriptionChanged) return;
 
   const newData = pricingNeedsChange
-    ? { ...data, included_followups: 'unlimited', standard_price: STANDARD_PRICE }
+    ? { ...data, included_followups: 'unlimited' }
     : { ...data };
   if (pricingNeedsChange) for (const key of RETIRED_KEYS) delete newData[key];
   // One audit row per up(), even for a description-only change — down()
@@ -157,9 +153,6 @@ exports.down = async function (knex) {
     }
     if (oldValue && oldValue.included_followups != null && restored.included_followups === 'unlimited') {
       restored.included_followups = oldValue.included_followups;
-    }
-    if (oldValue && oldValue.standard_price != null && Number(restored.standard_price) === 350) {
-      restored.standard_price = oldValue.standard_price;
     }
     // Restore the pricing-row name only if up() renamed it (the row still
     // carries STANDARD_ROW_NAME) and only to the captured predecessor — a
