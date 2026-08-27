@@ -2175,6 +2175,29 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
+  // Foreign-parent guard (PR #3508 r15 P1): remediation fixes ONE file and
+  // re-pins the resulting commit as trusted — so it may only build on a
+  // head that is ALREADY publisher-pinned or human-approved. Remediating on
+  // top of a foreign push would bless every unrelated change that push
+  // carried (JS, config, assets, other content). Missing/unparseable
+  // payload or a mismatched head skips remediation (fail closed: the PR
+  // waits for a human; the universal merge pin withholds it anyway).
+  if (run && run.id && (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page')) {
+    let parentOk = false;
+    try {
+      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+      let dp = fresh ? fresh.draft_payload : undefined;
+      if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+      const headSha = String(pr?.head?.sha || '').toLowerCase();
+      const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
+      const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+      parentOk = Boolean(headSha) && ((pinned && pinned === headSha)
+        || (fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha));
+    } catch (_) { parentOk = false; }
+    if (!parentOk) {
+      return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };
+    }
+  }
   // Derive the publish path's narrow operator-FAQ exception from the run's
   // opportunity + brief via the SAME runner derivation the run-context gate
   // uses — an intercept post on a FAQ-blocked service carries its FAQ by
@@ -2295,7 +2318,20 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
             const next = (dp && typeof dp === 'object') ? dp : {};
             next.autopublish_head_sha = newHead;
             const update = { draft_payload: JSON.stringify(next), updated_at: new Date() };
-            if (lastComparisonVerdict) update.comparison_table_result = JSON.stringify(lastComparisonVerdict);
+            if (lastComparisonVerdict) {
+              // The competitor-bypass marker is STICKY (PR r15 P1): a run
+              // that ever carried named-competitor content stays governed —
+              // a fix that removes the mentions must not erase the flag,
+              // or the run would skip the kill-switch recheck despite never
+              // having satisfied the ordinary trust ramp.
+              let prior = fresh.comparison_table_result;
+              if (typeof prior === 'string') { try { prior = JSON.parse(prior); } catch (_) { prior = null; } }
+              const priorFlagged = Boolean(prior && prior.requiresHumanReview === true);
+              update.comparison_table_result = JSON.stringify({
+                ...lastComparisonVerdict,
+                requiresHumanReview: priorFlagged || lastComparisonVerdict.requiresHumanReview === true,
+              });
+            }
             const stamped = await db('autonomous_runs').where({ id: run.id }).update(update);
             if (!stamped) throw new Error('update matched no row');
           } catch (e) {

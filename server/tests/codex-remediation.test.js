@@ -509,7 +509,7 @@ describe('lane entry points', () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     // onRemediated re-pins draft_payload.autopublish_head_sha (r12) — the
     // run row must exist for the post-push stamp.
-    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: '{}' }] });
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };
@@ -528,7 +528,7 @@ describe('lane entry points', () => {
 
   test('autonomous lane with a failing gate re-run -> park, nothing committed', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb();
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
@@ -543,7 +543,7 @@ describe('lane entry points', () => {
 
   test('autonomous lane park annotates the run reviewer_notes with the reason', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note' }] });
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
@@ -693,7 +693,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
       (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
     try {
       const HEAD_SHA = 'abc1234def5678';
-      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1' };
+      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) };
       const harness = (intercept) => {
         const db = makeDb({
           autonomous_runs: [runRow],
@@ -754,7 +754,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
         autonomous_runs: [{
           id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1',
           comparison_table_result: JSON.stringify({ pass: true, findings: [], requiresHumanReview: false }),
-          draft_payload: '{}',
+          draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }),
         }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
         content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
@@ -1008,7 +1008,10 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let checked = false;
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
-      db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      db: makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] }),
+      gh,
+      callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
       prePushCheck: async () => { checked = true; return false; },
     });
@@ -1149,7 +1152,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     try {
       const db = makeDb({
-        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
       const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
@@ -1177,7 +1180,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     try {
       const db = makeDb({
-        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
       const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
@@ -1629,7 +1632,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
     const db = makeDb({
-      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678', type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
     });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
@@ -1644,11 +1647,10 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(payload.frontmatter.canonical).toBe('https://x/a/');
   });
 
-  test('autonomous lane draft_payload mirror failure is fail-SOFT — the pushed fix still counts', async () => {
+  test('an UNPARSEABLE draft_payload withholds remediation entirely — the parent pin cannot be verified (PR r15 P1)', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
-    // Unparseable payload → JSON.parse throws inside the mirror → warn only.
     const db = makeDb({
       autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: 'not json {' }],
     });
@@ -1659,9 +1661,50 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
       db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
     });
-    expect(r.remediated).toBe(true);
-    expect(gh._calls.putFile).toHaveLength(1);
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
     expect(db._tables.autonomous_runs[0].draft_payload).toBe('not json {'); // untouched
+  });
+
+  test('a FOREIGN parent head (pin mismatch) withholds remediation — a one-file fix must not bless unrelated changes (PR r15 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'publisherpin111' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a competitor-REMOVING fix keeps the bypass marker STICKY — the persisted verdict stays flagged (PR r15 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{
+        id: 'run-1', action_type: 'new_supporting_blog',
+        comparison_table_result: JSON.stringify({ pass: true, findings: [], requiresHumanReview: true }),
+        draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }),
+      }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      // The fix REMOVES every competitor mention — fresh verdict is clean.
+      validateAutonomousRunGates: async () => ({ ok: true, comparisonResult: { pass: true, findings: [], requiresHumanReview: false } }),
+    });
+    expect(r.remediated).toBe(true);
+    const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+    // Sticky: the run stays governed even though the fix is competitor-free.
+    expect(JSON.parse(row.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+    expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('newcommit999aaa');
   });
 
   test('an out-of-bound meta_description rewrite still parks end-to-end', async () => {
