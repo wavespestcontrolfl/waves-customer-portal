@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -308,7 +308,10 @@ function normalizeProtocolTab(value) {
   return PROTOCOL_TAB_KEYS.has(value) ? value : "overview";
 }
 
-export default function LawnProtocolCommandCenterPage({ embedded = false }) {
+// `onSecondaryNav` (from ServiceLibraryPage): the Services header owns the
+// card, so the protocol sections + actions are handed up to its second row
+// instead of rendering a second header underneath.
+export default function LawnProtocolCommandCenterPage({ embedded = false, onSecondaryNav }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryKey = embedded ? "protocolTab" : "tab";
   const activeTab = normalizeProtocolTab(searchParams.get(queryKey));
@@ -707,11 +710,63 @@ export default function LawnProtocolCommandCenterPage({ embedded = false }) {
     }
   }
 
+  const headerActions = [
+    {
+      key: "create-draft",
+      label: "Create Draft",
+      icon: ClipboardCheck,
+      variant: "secondary",
+      onClick: createDraft,
+      disabled: loading || creatingDraft,
+    },
+    ...(protocol.status === "draft"
+      ? [{
+          key: "publish",
+          label: "Publish",
+          icon: CheckCircle2,
+          variant: "primary",
+          onClick: publishDraft,
+          disabled: loading || publishing || !publishValidation.canPublish,
+        }]
+      : []),
+    {
+      key: "refresh",
+      label: "Refresh",
+      icon: RefreshCw,
+      variant: "secondary",
+      onClick: () => load(),
+      disabled: loading,
+    },
+  ];
+  const hubOwnsHeader = embedded && Boolean(onSecondaryNav);
+  const hubNavRef = useRef({});
+  hubNavRef.current = { setActiveTab, headerActions };
+  const actionsSignature = headerActions.map((a) => `${a.key}:${a.disabled ? 1 : 0}`).join("|");
+  useEffect(() => {
+    if (!hubOwnsHeader) return undefined;
+    onSecondaryNav({
+      sections: PROTOCOL_SECTIONS,
+      activeKey: activeTab,
+      onChange: (key) => hubNavRef.current.setActiveTab(key),
+      ariaLabel: "Protocol section",
+      navGridClassName: "grid-cols-2 lg:grid-cols-7",
+      actions: hubNavRef.current.headerActions.map((a) => ({
+        ...a,
+        onClick: (...args) => {
+          const live = hubNavRef.current.headerActions.find((x) => x.key === a.key);
+          return live?.onClick(...args);
+        },
+      })),
+    });
+    return () => onSecondaryNav(null);
+  }, [hubOwnsHeader, onSecondaryNav, activeTab, actionsSignature]);
+
   return (
     <div className={embedded
       ? "px-4 pb-4 md:px-6"
       : "mx-auto max-w-7xl px-4 py-4 md:px-6"}
     >
+      {!hubOwnsHeader && (
       <AdminCommandHeader
         title={embedded ? "Protocol & Readiness" : "Lawn Protocol"}
         icon={Sprout}
@@ -721,35 +776,9 @@ export default function LawnProtocolCommandCenterPage({ embedded = false }) {
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
         navGridClassName="grid-cols-2 lg:grid-cols-7"
-        actions={[
-          {
-            key: "create-draft",
-            label: "Create Draft",
-            icon: ClipboardCheck,
-            variant: "secondary",
-            onClick: createDraft,
-            disabled: loading || creatingDraft,
-          },
-          ...(protocol.status === "draft"
-            ? [{
-                key: "publish",
-                label: "Publish",
-                icon: CheckCircle2,
-                variant: "primary",
-                onClick: publishDraft,
-                disabled: loading || publishing || !publishValidation.canPublish,
-              }]
-            : []),
-          {
-            key: "refresh",
-            label: "Refresh",
-            icon: RefreshCw,
-            variant: "secondary",
-            onClick: () => load(),
-            disabled: loading,
-          },
-        ]}
+        actions={headerActions}
       />
+      )}
 
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-13 text-red-700">

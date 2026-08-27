@@ -1493,6 +1493,10 @@ export default function ServiceLibraryPage() {
   const [services, setServices] = useState([]);
   const [selectedView, setSelectedView] = useState("all");
   const [selectedId, setSelectedId] = useState(null);
+  // Sub-tabs + actions registered by the embedded Protocol & Readiness page
+  // (null on the other tabs). Declared before the mobile early return below
+  // so the hook order is stable.
+  const [secondary, setSecondary] = useState(null);
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState("");
@@ -1693,6 +1697,12 @@ export default function ServiceLibraryPage() {
         onSectionChange={setTab}
         ariaLabel="Services section"
         navGridClassName="grid-cols-1 sm:grid-cols-3"
+        actions={secondary?.actions}
+        secondarySections={secondary?.sections || []}
+        secondaryActiveKey={secondary?.activeKey}
+        onSecondaryChange={secondary?.onChange}
+        secondaryAriaLabel={secondary?.ariaLabel}
+        secondaryNavGridClassName={secondary?.navGridClassName}
         action={
           tab === "catalog"
             ? {
@@ -2032,7 +2042,7 @@ export default function ServiceLibraryPage() {
             </div>
           )}
         >
-          <LawnProtocolCommandCenterPage embedded />
+          <LawnProtocolCommandCenterPage embedded onSecondaryNav={setSecondary} />
         </Suspense>
       )}
       {/* === DISCOUNTS TAB === */}
