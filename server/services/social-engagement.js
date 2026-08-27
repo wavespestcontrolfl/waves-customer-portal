@@ -167,22 +167,22 @@ async function upsertEngagement(postId, target, counts, error = null) {
     return;
   }
   // A metric the provider did not expose in this fetch (shares === null)
-  // keeps the row's previously measured value rather than resetting to 0.
+  // keeps the row's previously measured value; with no prior measurement it
+  // is stored as NULL — "not measured" never becomes a zero.
   let shares = counts.shares;
   if (shares == null) {
     const prior = await db('social_post_engagement')
       .where({ post_id: postId, platform: target.platform })
       .first('shares_count');
-    shares = prior?.shares_count ?? 0;
+    shares = prior?.shares_count ?? null;
   }
-  const merged = { likes: counts.likes, comments: counts.comments, shares };
   await db('social_post_engagement')
     .insert({
       ...base,
-      likes_count: toCount(merged.likes),
-      comments_count: toCount(merged.comments),
-      shares_count: toCount(merged.shares),
-      engagement_score: scoreCounts(merged),
+      likes_count: toCount(counts.likes),
+      comments_count: toCount(counts.comments),
+      shares_count: shares == null ? null : toCount(shares),
+      engagement_score: scoreCounts({ likes: counts.likes, comments: counts.comments, shares: shares ?? 0 }),
       last_success_at: now,
     })
     .onConflict(['post_id', 'platform'])
@@ -253,16 +253,18 @@ async function sweepBatch(posts, { fetchFn, summary }) {
 }
 
 // Per-post rollup for the analytics endpoint: { [post_id]: { likes, comments,
-// shares, score, platforms: { fb: {...} } } } for the given post ids.
+// shares (null = not measured), score, platforms: { fb: {...} } } }.
 async function engagementByPost(postIds = []) {
   const out = {};
   if (!postIds.length || !(await db.schema.hasTable('social_post_engagement'))) return out;
   // Only rows that have EVER fetched successfully count as data.
   const rows = await db('social_post_engagement').whereIn('post_id', postIds).whereNotNull('last_success_at');
   for (const r of rows) {
-    const agg = out[r.post_id] || (out[r.post_id] = { likes: 0, comments: 0, shares: 0, score: 0, platforms: {}, fetchedAt: null });
+    // shares stays null until some platform row carries a measured value.
+    const agg = out[r.post_id] || (out[r.post_id] = { likes: 0, comments: 0, shares: null, score: 0, platforms: {}, fetchedAt: null });
     const counts = { likes: r.likes_count, comments: r.comments_count, shares: r.shares_count };
-    agg.likes += counts.likes; agg.comments += counts.comments; agg.shares += counts.shares;
+    agg.likes += counts.likes; agg.comments += counts.comments;
+    if (counts.shares != null) agg.shares = (agg.shares ?? 0) + counts.shares;
     agg.score += r.engagement_score;
     agg.platforms[r.platform] = { ...counts, score: r.engagement_score, error: r.last_error || null, lastSuccessAt: r.last_success_at };
     // Age of the DATA (last successful fetch), not of the last attempt —

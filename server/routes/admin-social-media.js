@@ -458,7 +458,9 @@ router.get('/analytics', async (req, res, next) => {
         id: p.id,
         title: p.title,
         platforms: p.platforms_posted,
-        publishedAt: p.published_at,
+        // Same fallback the ingest sweep uses: tech-authored audit rows
+        // publish without a published_at stamp.
+        publishedAt: p.published_at || p.created_at,
         sourceUrl: p.source_url,
         engagement: engagement[p.id] || null,
       }));

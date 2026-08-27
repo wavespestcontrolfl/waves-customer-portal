@@ -18,7 +18,10 @@ exports.up = async function up(knex) {
     t.string('platform_post_id', 300).notNullable();
     t.integer('likes_count').notNullable().defaultTo(0);
     t.integer('comments_count').notNullable().defaultTo(0);
-    t.integer('shares_count').notNullable().defaultTo(0);
+    // Nullable: NULL = the provider did not expose a share count for this
+    // media (Facebook Video nodes, Instagram media without the insight) —
+    // distinct from a measured zero.
+    t.integer('shares_count');
     t.integer('engagement_score').notNullable().defaultTo(0);
     t.timestamp('fetched_at').notNullable().defaultTo(knex.fn.now());
     // NULL until the first successful fetch — a row created by a failed

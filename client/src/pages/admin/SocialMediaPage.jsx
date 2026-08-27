@@ -2664,7 +2664,7 @@ function AnalyticsTab() {
                     </td>
                     <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.likes)}</td>
                     <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.comments)}</td>
-                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.shares)}</td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{e && e.shares != null ? e.shares : "—"}</td>
                     <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: D.heading, fontWeight: 600 }}>{num(e?.score)}</td>
                   </tr>
                 );
