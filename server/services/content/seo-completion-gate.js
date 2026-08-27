@@ -378,7 +378,9 @@ function extractLinks(body) {
   const s = renderedText(body);
   const links = [];
   // `(?<!!)` — a Markdown image `![alt](src)` is not a link.
-  const md = /(?<!!)\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
+  // (?<!(?<!\\)!) — an UNESCAPED "!" means image syntax; "\\![link]" is a
+  // literal "!" followed by a real link.
+  const md = /(?<!(?<!\\)!)\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -401,7 +403,7 @@ function extractLinks(body) {
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
   while ((m = def.exec(s)) !== null) defs.set(label(m[1]), dest(m[2]));
   if (defs.size) {
-    const ref = /(?<!!)\[([^\]]+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!(?<!\\)!)\[([^\]]+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -410,7 +412,7 @@ function extractLinks(body) {
     // that is not itself an inline/full reference or the definition line.
     // (?<![\]!]) — skip the label half of a full reference (`[text][label]`)
     // and image syntax; (?![\[(:]) — skip inline/full references and definitions.
-    const shortcut = /(?<![\]!])\[([^\]]+)\](?![\[(:])/g;
+    const shortcut = /(?<!\])(?<!(?<!\\)!)\[([^\]]+)\](?![\[(:])/g;
     while ((m = shortcut.exec(s)) !== null) {
       const href = defs.get(label(m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -430,6 +432,7 @@ function plainAnchor(raw) {
   const { decodeEntitiesForScan } = require('./content-guardrails');
   return decodeEntitiesForScan(String(raw || ''))
     .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (m, n) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[n.toLowerCase()])
+    .replace(/<[^>]+>/g, '')
     .replace(/[*_~`]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -477,13 +480,19 @@ function conversionCtaLinks(body) {
       // Coordinated subjects ("Termite and Pool Cleaning Quote") must be
       // service-bearing in EVERY part — a part naming no known service is an
       // unrecognized service, not harmless filler.
-      const parts = subject.split(/\s*,\s*|\s+(?:and|&|or|\/)\s+/i);
+      // Coordination is judged across the FULL anchor ("Get a Termite Quote
+      // and Pool Cleaning Estimate"), not just the text before the first
+      // keyword.
+      const parts = anchor.split(/\s*,\s*|\s+(?:and|&|or|\/)\s+/i);
       if (parts.length > 1) {
         // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
         // not separate services; an unlisted noun ("Pool Cleaning") is.
         const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price|control|prevention|treatment|treatments|removal|protection|management|service|services|plan|plans|program|programs|care|maintenance|exclusion|monitoring)\s*)+$/i;
-        const unknownPart = parts.some((part) => termsIn(part).length === 0 && !filler.test(part.trim()));
+        // A trailing "for/on …" context clause is not a coordinated part.
+        const coordinated = parts.map((part) => part.replace(/\s+(?:for|on)\s+.*$/i, '').trim()).filter(Boolean);
+        const unknownPart = coordinated.some((part) => termsIn(part).length === 0 && !filler.test(part));
         if (unknownPart) named = [...named, 'unknown'];
+        for (const part of coordinated) for (const svc of termsIn(part)) if (!named.includes(svc)) named.push(svc);
       }
     } else {
       named = termsIn(subject);

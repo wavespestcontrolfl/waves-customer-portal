@@ -1845,7 +1845,10 @@ function blankNonRenderedMarkdown(text) {
     // before ">" is an indented code block (CommonMark), handled below.
     // Only the marker plus ONE optional space is prefix — remaining spaces
     // are content ("> " + 4 spaces = indented code inside the quote).
-    const stripped = l.replace(/^ {0,3}(?:> ?)+/, '');
+    // Nested markers may carry up to three spaces before the inner ">"
+    // ("> " + "  > "); the LAST marker keeps only one optional space so
+    // remaining indentation stays content.
+    const stripped = l.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/, '');
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;

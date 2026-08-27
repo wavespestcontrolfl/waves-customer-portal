@@ -2225,6 +2225,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('>     | A | B |\n>     | --- | --- |\n')).toBe(false);
     // Raw <pre> blocks are preformatted text, not tables.
     expect(guardrails.hasRawMarkdownTable('<pre>\nA | B\n- | -\n</pre>')).toBe(false);
+    // Nested blockquote markers with spaces between them still expose the table.
+    expect(guardrails.hasRawMarkdownTable('>   > | A | B |\n>   > | - | - |\n')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
