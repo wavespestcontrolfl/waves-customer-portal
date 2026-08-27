@@ -435,15 +435,16 @@ function extractLinks(body) {
       try { parsed = new URL(raw); } catch (err) { parsed = null; }
       if (parsed && firstParty.has(parsed.hostname.toLowerCase())) raw = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
     }
-    if (raw.startsWith('/') && /(?:^|\/)\.\.?(?:\/|$)/.test(raw)) {
-      const trailing = /\/$/.test(raw);
-      const segs = [];
-      for (const seg of raw.split('/')) {
-        if (seg === '' || seg === '.') continue;
-        if (seg === '..') segs.pop();
-        else segs.push(seg);
-      }
-      raw = `/${segs.join('/')}${trailing && segs.length ? '/' : ''}`;
+    // Site-relative paths resolve dot segments through WHATWG URL — the
+    // same normalization the internal-route scanner uses — so ENCODED
+    // segments resolve exactly as the browser does ("/x/%2e%2e/contact/"
+    // is /contact/), not just literal "." and "..". Protocol-relative
+    // destinations ("//host/x") are a different authority, not a path.
+    if (raw.startsWith('/') && !raw.startsWith('//')) {
+      try {
+        const u = new URL(raw, 'https://resolve.invalid');
+        raw = `${u.pathname || '/'}${u.search}${u.hash}`;
+      } catch (err) { /* malformed — judged as written */ }
     }
     return raw;
   };
@@ -751,20 +752,32 @@ function forbiddenCtaAnchor(body) {
 // SERVICE-TYING half runs whenever the caller knows the post's service —
 // refresh and legacy lanes hold it on the post row, not a brief, so a
 // termite refresh adding "[Request a Lawn Care Quote]" parks there too.
-// Legacy rows may carry the topic on several fields (category + tag), so
-// every resolvable candidate WIDENS the allowed set (the union) — a
-// coarse category must not constrain away the row's more specific topic.
+// Legacy rows may carry the topic on several fields (category + tag). The
+// MOST SPECIFIC resolvable candidates win: a specialty (it rides a
+// family's conversion path) over a broad service, and any of those over
+// the "pest" umbrella — the family target of every pest specialty — so a
+// coarse legacy category ("pest-control") never authorizes sibling
+// specialties when a more specific tag resolves too ("Termites" must not
+// admit a cockroach quote). Equally specific candidates still union.
 function collectForbiddenCtaAnchors(body, { service = null } = {}) {
   const out = [];
   let allowed = null;
+  const resolvedCandidates = [];
   for (const candidate of [].concat(service ?? []).filter(Boolean)) {
     let resolved = null;
     try { resolved = ctaBriefService(candidate); } catch (err) { resolved = null; }
     // Unresolvable candidates (a non-service category like "seasonal")
-    // carry no CTA vocabulary — they widen nothing.
+    // carry no CTA vocabulary — they contribute nothing.
     if (!resolved || !(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
-    allowed = allowed || new Set();
-    for (const svc of allowedAnchorServices(resolved)) allowed.add(svc);
+    resolvedCandidates.push({ resolved, rank: CTA_SERVICE_FAMILY[resolved] ? 2 : (resolved === 'pest' ? 0 : 1) });
+  }
+  if (resolvedCandidates.length) {
+    const top = Math.max(...resolvedCandidates.map((c) => c.rank));
+    allowed = new Set();
+    for (const c of resolvedCandidates) {
+      if (c.rank !== top) continue;
+      for (const svc of allowedAnchorServices(c.resolved)) allowed.add(svc);
+    }
   }
   for (const link of extractLinks(body)) {
     const anchor = plainAnchor(link.anchor);

@@ -2216,11 +2216,17 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
     expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: termite })).toBe(false);
     expect(ev('S. [Get My Free Termite Estimate](/contact/) now.', { service: 'termite-control' })).toBe(false);
-    // Multi-candidate services (legacy rows: category + tag) UNION their
-    // vocabularies — a rodent tag is not constrained by the coarse pest
-    // category.
+    // Multi-candidate services (legacy rows: category + tag): the MOST
+    // SPECIFIC resolvable candidates win — a rodent tag is not constrained
+    // by the coarse pest category…
     expect(ev('R. [Get a Rodent Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(false);
     expect(ev('R. [Get a Lawn Care Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(true);
+    // …and the coarse category must not authorize SIBLING specialties when
+    // the tag names the real topic; the topic's own wording stays clean.
+    expect(ev('T. [Request a Cockroach Quote](/contact/) now.', { service: ['pest-control', 'Termites'] })).toBe(true);
+    expect(ev('T. [Get My Free Termite Estimate](/contact/) now.', { service: ['pest-control', 'Termites'] })).toBe(false);
+    // A category-ONLY post keeps its family vocabulary.
+    expect(ev('P. [Get an Ant Control Quote](/contact/) now.', { service: 'pest-control' })).toBe(false);
     // An unresolvable service value (a non-service category) arms nothing —
     // brief-independent behavior only.
     expect(ev('S. [Get a Lawn Care Quote](/contact/) now.', { service: 'seasonal' })).toBe(false);
@@ -2358,6 +2364,12 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A quote-scoped fence ends with its QUOTE in the comment pre-scan too —
     // a top-level comment after the quote is stripped, not treated as fenced.
     expect(guardrails.hasRawMarkdownTable('> ~~~\n> x\n<!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // A fence nested in BOTH containers ("> - ~~~") scopes to the item's
+    // quote-relative column: quoted content dedenting out of the item ends
+    // the fence, exposing the quoted table…
+    expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   x\n> | A | B |\n> | - | - |')).toBe(true);
+    // …while content still AT the item's column stays fenced.
+    expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   | A | B |\n>   | - | - |\n>   ~~~')).toBe(false);
     // An ESCAPED pipe inside a code span is cell CONTENT even at block
     // level — "| `a \| b` | c |" is a 2-cell header, no match for a 3-cell
     // delimiter.

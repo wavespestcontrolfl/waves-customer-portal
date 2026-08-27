@@ -1142,6 +1142,24 @@ describe('seo-completion-gate', () => {
     });
     expect(wdi.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(wdi.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // PERCENT-ENCODED dot segments resolve exactly as the browser does —
+    // "/x/%2e%2e/contact/" is /contact/, so the wording-free CTA is caught.
+    const encodedDots = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Schedule Service](/x/%2e%2e/contact/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(encodedDots.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A fence nested in a QUOTED list item ("> - ~~~") ends when the quoted
+    // content dedents out of the item — the quoted CTA after it is live.
+    const quotedListFenceDedent = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '> - ~~~\n>   <!--\n>\n> [Schedule Service](/contact/)\n> -->' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quotedListFenceDedent.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

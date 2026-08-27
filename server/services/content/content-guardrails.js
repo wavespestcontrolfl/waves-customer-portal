@@ -1911,7 +1911,11 @@ function blankNonRenderedMarkdown(text) {
         if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
           openCh = opener[1][0]; openLen = opener[1].length; start = pos;
           openDepth = depth;
-          openListIndent = marker && depth === 0 ? marker[0].length : 0;
+          // The list column is QUOTE-RELATIVE (indent above is computed on
+          // the quote-stripped line), so a fence opened as list-item
+          // content INSIDE a blockquote ("> - ~~~") still ends when the
+          // quoted content dedents out of the item.
+          openListIndent = marker ? marker[0].length : 0;
         }
       }
       pos += line.length + 1;
@@ -2017,7 +2021,9 @@ function blankNonRenderedMarkdown(text) {
     // fence's list item (code has no lazy continuation) — is outside the
     // block and renders normally.
     if (fence && !blank && (depth < fence.depth || indent < fence.listIndent)) {
-      if (indent < fence.listIndent) { fenceListIndent = 0; listEndAt.add(i); }
+      // Only a TOP-LEVEL fence's list end touches the ambient (unquoted)
+      // list state — a quote-scoped fence's item lives inside its quote.
+      if (indent < fence.listIndent && fence.depth === 0) { fenceListIndent = 0; listEndAt.add(i); }
       fence = null;
     }
     if (fence) {
@@ -2056,7 +2062,11 @@ function blankNonRenderedMarkdown(text) {
       const srcOpen = srcTail.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
         if (!markerAccepted && depth === 0 && indent < fenceListIndent) { fenceListIndent = 0; listEndAt.add(i); } // a dedented fence ends the list
-        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? 0 : fenceListIndent };
+        // A fence opened at quote depth > 0 scopes to its QUOTE, and — when
+        // its own line carries a list marker ("> - ~~~") — to that item's
+        // QUOTE-RELATIVE content column too: quoted content dedenting out
+        // of the item ends the fence (CommonMark), exposing what follows.
+        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? markerLen : fenceListIndent };
         return '';
       }
     }
