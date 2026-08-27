@@ -2291,6 +2291,35 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   };
 }
 
+// The row whose price an auto-extend visit should be templated from. For an
+// anchored-split series the parent is the remainder-bearing first visit; the
+// follow-ups carry the series' even per-visit quotient. When such a follow-up
+// exists (priced BELOW the parent by less than a dollar — remainder cents,
+// never an office reprice), the extension templates off the follow-up's
+// amount so renewals bill the quoted per-application price, not the
+// remainder. No primary_line_price (the stored-financials path prefers that
+// column and never reads estimated_price when it is set), no follow-ups, or
+// any larger difference → the parent as before.
+async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
+  try {
+    const parentPrice = Number(parent?.estimated_price);
+    if (!(parentPrice > 0) || Number(parent?.primary_line_price) > 0) return parent;
+    const followUp = await conn('scheduled_services')
+      .where({ recurring_parent_id: parentId })
+      .whereNot('status', 'cancelled')
+      .whereNotNull('estimated_price')
+      .orderBy('scheduled_date', 'desc')
+      .first('estimated_price');
+    const followUpPrice = Number(followUp?.estimated_price);
+    if (!(followUpPrice > 0) || followUpPrice >= parentPrice) return parent;
+    const diff = Math.round((parentPrice - followUpPrice) * 100) / 100;
+    if (diff >= 1) return parent;
+    return { ...parent, estimated_price: followUpPrice };
+  } catch {
+    return parent;
+  }
+}
+
 function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows, discountScope = null) {
   if (!target || !cols) return;
   const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
@@ -10782,7 +10811,15 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           } catch { parentAddons = []; }
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
           const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
-          applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+          // Anchored-split series (self-booked funnels, wizard plans): the
+          // PARENT's estimated_price carries the annual's remainder cents
+          // and every seeded follow-up bills the even quotient. Templating
+          // the extension off the parent re-billed those cents on every
+          // renewal visit (owner ruling 2026-08-27). Use the series'
+          // per-visit amount instead when the parent is a remainder-bearing
+          // anchor — an existing follow-up priced within $1 below it.
+          const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
+          applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
           // resolveSeriesCreateInvoiceOnComplete). Without it a

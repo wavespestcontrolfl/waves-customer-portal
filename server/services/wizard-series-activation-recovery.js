@@ -55,14 +55,12 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // live draft. Disposition below is by status class; nothing drops out
     // of recovery silently.
     .whereNotIn('ss.status', ['cancelled', 'canceled'])
-    // PEST rows leave the predicate IN SQL, before the LIMIT (codex #3504
-    // r17): the pest funnel's duplicate-kept disposition presents this
-    // exact stranded shape BY DESIGN and stays eligible forever, so a
-    // JS-side skip after an oldest-first bounded fetch would pin the
-    // page on the same pest rows and starve every newer stranded
-    // lawn/mosquito/tree/palm activation. The family check in the sweep
-    // loop stays as belt-and-braces for labels this pattern misses.
-    .whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'")
+    // PEST is IN scope (owner ruling 2026-08-27, Option A): the pest
+    // funnel's deliberate duplicate-kept one-off now stamps
+    // wizard_recovery_reconciled_at at kept-time (booking.js), so it leaves
+    // the claim by the same durable marker as every reconciled row and a
+    // genuinely stranded pest activation (worker died between the booking
+    // commit and the seeding) is recovered like any other family.
     // The stranded claim is PARENT-scoped (codex #3504 r21): the wizard
     // draft row is shared and reusable, so its archive state belongs to
     // whichever booking last consumed it — a customer who re-runs the
@@ -166,15 +164,6 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
   let stripped = 0;
   for (const parent of stranded) {
-    // The PEST funnel is OUT OF SCOPE (codex #3504 r12): its duplicate-kept
-    // disposition deliberately leaves the newly booked visit billable and
-    // returns before seeding or archiving the draft, so a legitimate kept
-    // pest visit matches this exact stranded shape and would be stripped
-    // as if a worker had died. (A genuinely stranded pest activation is a
-    // pre-existing exposure of that path, not this lane's.) Wizard-series
-    // families strip on kept, so they never present this shape.
-    const familyKey = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: parent.service_type });
-    if (familyKey === 'pest_control' || /\bpest\b/i.test(String(parent.service_type || ''))) continue;
     try {
       const didStrip = await database.transaction(async (trx) => {
         // Re-validate the ENTIRE stranded predicate under the comms lock
@@ -261,10 +250,13 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           try {
             const { wizardPlanServiceKey, resolveWizardSeriesPlan, resolveBookingVisitPrice } = require('./booking-pay-at-visit');
             const family = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: fresh.service_type });
-            const planKey = wizardPlanServiceKey(freshDraft, family);
-            const plan = resolveWizardSeriesPlan(freshDraft, planKey);
-            if (!plan) return false;
-            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: plan.visits });
+            // The pest funnel's plan is the fixed quarterly-4 (booking.js
+            // shouldSeedQuarterlyPestFollowUps), not a wizard-resolved
+            // cadence — price it the way the booking did.
+            const planKey = family === 'pest_control' ? 'pest_control' : wizardPlanServiceKey(freshDraft, family);
+            const planVisits = family === 'pest_control' ? 4 : resolveWizardSeriesPlan(freshDraft, planKey)?.visits;
+            if (!(planVisits > 0)) return false;
+            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: planVisits });
             return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
           } catch { return false; }
         })();

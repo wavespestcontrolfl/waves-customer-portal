@@ -3976,7 +3976,25 @@ async function createSelfBooking(payload = {}) {
             excludeParentId: serviceRow.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
-          if (matches.length > 0) return { kept: matches[0] };
+          if (matches.length > 0) {
+            // Duplicate-kept ON PURPOSE (owner ruling 2026-08-27): the new
+            // visit stays billable as a one-off beside the existing plan.
+            // Stamp the durable reconciled marker so the stranded-
+            // activation sweep — which now covers pest — can tell this
+            // deliberate lone billable visit from a crash between the
+            // booking commit and the seeding (migration 20260827000001;
+            // column-guarded for pre-migration schemas).
+            if (await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at')) {
+              await trx('scheduled_services')
+                .where({ id: serviceRow.id })
+                .update({
+                  wizard_recovery_reconciled_at: trx.fn.now(),
+                  notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'"),
+                  updated_at: trx.fn.now(),
+                });
+            }
+            return { kept: matches[0] };
+          }
           const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
           const pestEndMin = timeToMin(slot_start) + pestDuration;
           const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
@@ -3996,6 +4014,13 @@ async function createSelfBooking(payload = {}) {
             // the remainder cents — instead of inheriting the parent's price
             // (which would re-introduce the ±cents/year drift on the series).
             ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
+            // FIXED-length 4-visit plan, never Ongoing (owner ruling
+            // 2026-08-27, Option A): the auto-extend maintenance templated
+            // every renewal visit off the PARENT's remainder-bearing price,
+            // overbilling each renewal cycle by the remainder cents. A fixed
+            // plan files the plan_ending alert and the office renews — the
+            // same shape the non-pest wizard series already use.
+            recurringOngoing: false,
           });
           // WaveGuard setup fee (frozen wizard disclosure): stamped ONLY
           // here, atomically with the series that justifies it — a failed

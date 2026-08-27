@@ -974,13 +974,22 @@ describe('booking route wiring (source contracts)', () => {
     expect(wizardDraftSelfServeBookable(base({ recurringAnnual: 900, oneTimeTotal: 0, installationTotal: 500 }))).toBe(false);
   });
 
-  test('the recovery sweep never touches the PEST funnel (duplicate-kept pest visits stay billable by design)', () => {
+  test('the recovery sweep covers the PEST funnel; a duplicate-kept pest one-off is marked reconciled at kept-time (owner ruling 2026-08-27)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control' \|\| \/\\bpest\\b\/i\.test\(String\(parent\.service_type \|\| ''\)\)\) continue;/);
-    // r17: the exclusion ALSO lives in the bounded query, before the LIMIT —
-    // permanently-eligible pest rows must never pin the oldest-first page.
-    const findBody = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
-    expect(findBody).toMatch(/whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\)/);
+    expect(recoverySrc).not.toMatch(/ypest/);
+    expect(recoverySrc).not.toMatch(/familyKey === 'pest_control'/);
+    // Pest prices as the fixed quarterly-4 plan for the minted-amount proof.
+    expect(recoverySrc).toMatch(/const planVisits = family === 'pest_control' \? 4 : resolveWizardSeriesPlan\(freshDraft, planKey\)\?\.visits;/);
+    // The kept branch stamps the durable marker so the sweep can tell a
+    // deliberate one-off from a crash.
+    expect(booking).toMatch(/if \(matches\.length > 0\) \{\s*\n[\s\S]{0,900}wizard_recovery_reconciled_at: trx\.fn\.now\(\),[\s\S]{0,400}return \{ kept: matches\[0\] \};/);
+    // Pest seeds a FIXED 4-visit plan, never Ongoing.
+    expect(booking).toMatch(/pattern: 'quarterly',\s*\n\s*plannedCount: 4,[\s\S]{0,2200}recurringOngoing: false,\s*\n\s*\}\);/);
+    // Auto-extend templates off the per-visit amount for anchored splits.
+    const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(schedule).toMatch(/async function resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\)/);
+    expect(schedule).toMatch(/const extensionPriceParent = await resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\);\s*\n\s*applyStoredVisitFinancials\(nextData, cols, extensionPriceParent,/);
+    expect(schedule).toMatch(/if \(diff >= 1\) return parent;/);
   });
 
   test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
