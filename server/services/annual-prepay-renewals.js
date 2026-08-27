@@ -3741,6 +3741,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
     const { resolveForInvoice } = require('./payer');
     const { customerOnAutopay } = require('./autopay-eligibility');
+    const { isCardHoldEnabled } = require('./estimate-card-holds');
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
@@ -3851,12 +3852,35 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // hold nothing to charge, and a payer-billed invoice refuses the
       // hold's self-pay binding.
       let liveHold = null;
-      if (['auto_charge', 'invoice'].includes(prediction.kind)) {
+      if (['auto_charge', 'invoice'].includes(prediction.kind) && isCardHoldEnabled()) {
+        // The charge rail's own admission: feature gate on, newest 'held'
+        // row, and NOT parked (a parked hold is untouchable by every
+        // charge path — chargeCardHoldOnCompletion returns 'parked'
+        // without charging).
         liveHold = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id, status: 'held' })
+          .whereNull('parked_at')
           .first('id');
       }
-      if (prediction.kind !== 'auto_charge' && !liveHold) continue;
+      // The appointment-card completion lane (GATE_APPT_CARD_COMPLETION_
+      // CHARGE) auto-charges a consented one-time visit's card even while
+      // the generic completion gate is off: a completed/satisfied consent
+      // row belonging to the visit's CURRENT customer, no estimate-card
+      // hold row (the hold rail owns that visit instead), Auto Pay active.
+      // Its frozen accepted amount already rides the cap anchors below.
+      let apptCardCharge = false;
+      if (!liveHold && prediction.kind === 'invoice' && autopayActive && v.is_recurring !== true
+        && require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
+        const laneRow = await conn('appointment_card_requests')
+          .where({ scheduled_service_id: v.id })
+          .whereIn('status', ['completed', 'satisfied'])
+          .first('id', 'customer_id');
+        const holdRow = laneRow ? await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id })
+          .first('id') : null;
+        apptCardCharge = !!laneRow && !holdRow && String(laneRow.customer_id) === String(v.customer_id);
+      }
+      if (prediction.kind !== 'auto_charge' && !liveHold && !apptCardCharge) continue;
       // Completion's invoice state machine (admin-dispatch; route-module
       // helpers, mirrored here with the same status sets):
       //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
@@ -3866,7 +3890,15 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       //     settled — no second card charge.
       // Either way the expiring card is not what breaks: no warning.
       const visitInvoices = await conn('invoices')
-        .where({ scheduled_service_id: v.id })
+        // Both identifiers, like the completion lookups: a resumed
+        // completed visit's invoice may be linked only through its
+        // service record.
+        .where(function ownedByVisit() {
+          this.where({ scheduled_service_id: v.id })
+            .orWhereIn('service_record_id', conn('service_records')
+              .where({ scheduled_service_id: v.id })
+              .select('id'));
+        })
         .orderBy('created_at', 'desc')
         .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();

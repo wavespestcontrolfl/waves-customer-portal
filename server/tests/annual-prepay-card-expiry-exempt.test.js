@@ -7,8 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true } }));
+jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false) }));
 jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeObligation: jest.fn(async () => ({ owed: false })) }));
+jest.mock('../services/estimate-card-holds', () => ({ isCardHoldEnabled: jest.fn(() => true) }));
 
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
@@ -49,7 +50,7 @@ const CHARGEABLE_CARD = {
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
 function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], throwOn = null }) {
-  const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
+  const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
   // own rows so coverage terms never read as pending commitments
@@ -68,7 +69,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     if (table === 'notifications') return chain(notifications, []);
-    if (table === 'estimate_card_holds') return chain(cardHolds, []);
+    if (table === 'estimate_card_holds') return chain(cardHolds, calls.cardHolds);
+    if (table === 'service_records') return chain([], []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -376,6 +378,51 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       cardHolds: [{ id: 'hold-1', status: 'held' }],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('a PARKED or gate-off hold is untouchable by the charge rail → stays exempt', async () => {
+    const { isCardHoldEnabled } = require('../services/estimate-card-holds');
+    // feature gate off → chargeCardHoldOnCompletion refuses before
+    // touching the hold
+    isCardHoldEnabled.mockReturnValueOnce(false);
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held' }] });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // the live-hold lookup mirrors the authority's admission: status
+    // 'held' AND not parked
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held' }] });
+    await getCardExpiryExemptCustomerIds(HORIZON);
+    expect(calls.cardHolds).toEqual(expect.arrayContaining([['whereNull', 'parked_at']]));
+  });
+
+  test('the appointment-card completion lane charges a consented one-time visit even with the generic gate off → keeps the warning', async () => {
+    const gatesMod = require('../config/feature-gates');
+    gatesMod.gates.completionAutopayCharge = false;
+    gatesMod.isEnabled.mockReturnValue(true);
+    try {
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ is_recurring: false, billing_mode: null, waveguard_tier: null, monthly_rate: null })],
+        apptCardRequests: [{ id: 'acr-1', customer_id: 'c-prepaid', status: 'completed', accepted_amount: '120.00' }],
+      });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      // no consent row → the completion goes out as a pay-link → exempt
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ is_recurring: false, billing_mode: null, waveguard_tier: null, monthly_rate: null })],
+      });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    } finally {
+      gatesMod.gates.completionAutopayCharge = true;
+      gatesMod.isEnabled.mockReturnValue(false);
+    }
+  });
+
+  test('the visit invoice lookup resolves BOTH identifiers (scheduled_service_id and the service-record link)', async () => {
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})] });
+    await getCardExpiryExemptCustomerIds(HORIZON);
+    expect(calls.invoices).toEqual(expect.arrayContaining([
+      ['orWhereIn', 'service_record_id', expect.anything()],
+    ]));
   });
 
   test("an open reused invoice OVER completion's charge cap routes to office review, not the card → stays exempt", async () => {
