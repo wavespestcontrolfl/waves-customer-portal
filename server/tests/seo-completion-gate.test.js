@@ -306,6 +306,15 @@ describe('seo-completion-gate', () => {
     expect(specialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(specialty.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // "Roaches" (an established brief value) is the cockroach service.
+    const roaches = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Palmetto bugs. [Get a Cockroach Pest Control Quote](/pest-control-calculator/) today.' }),
+      brief: baseBrief({ service: 'Roaches' }),
+      shadowMode: true,
+    });
+    expect(roaches.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(roaches.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // "-control" service ids land on their own specialty key.
     const rodent = SeoCompletionGate.evaluate({
       draft: baseDraft({

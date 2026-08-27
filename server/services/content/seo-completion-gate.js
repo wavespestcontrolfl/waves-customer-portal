@@ -348,6 +348,8 @@ function ctaBriefService(rawService) {
     .flatMap((v) => [v, v.replace(/es$/, ''), v.replace(/s$/, '')]);
   for (const c of candidates) {
     if (CTA_ANCHOR_SERVICE_TERMS[c] || CTA_SERVICE_FAMILY[c]) return c;
+    // Brief values spell cockroaches as "roach"/"roaches" too.
+    if (c === 'roach') return 'cockroach';
   }
   const { SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
   const aliased = SERVICE_ID_ALIASES[base] || SERVICE_ID_ALIASES[stripped] || rawService;
