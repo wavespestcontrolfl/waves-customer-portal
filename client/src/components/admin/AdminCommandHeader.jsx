@@ -11,6 +11,14 @@ export default function AdminCommandHeader({
   onSectionChange,
   ariaLabel,
   navGridClassName = "grid-cols-2 lg:grid-cols-4",
+  // Optional second tab row, for hub pages whose active area has its own
+  // sub-sections (Pricing → Logic & Margins, Contracts → Templates). Rendered
+  // inside the same card so a page never stacks two headers.
+  secondarySections = [],
+  secondaryActiveKey,
+  onSecondaryChange,
+  secondaryAriaLabel,
+  secondaryNavGridClassName = "grid-cols-2 lg:grid-cols-4",
   className,
   headingLevel = 1,
   sticky = true,
@@ -18,6 +26,31 @@ export default function AdminCommandHeader({
   const resolvedActions = actions?.length ? actions : action ? [action] : [];
   const Heading = headingLevel === 2 ? "h2" : "h1";
   const hasSections = sections.length > 0;
+  const hasSecondary = secondarySections.length > 0;
+
+  const renderSections = (list, active, onChange) =>
+    list.map(({ key, label, Icon: SectionIcon, className: sectionClassName }) => {
+      const isActive = active === key;
+      return (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onChange?.(key)}
+          aria-current={isActive ? "page" : undefined}
+          className={cn(
+            "inline-flex h-11 min-w-0 items-center justify-center gap-2 rounded-sm border-hairline px-3 sm:h-9",
+            "text-center text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors",
+            isActive
+              ? "bg-zinc-900 text-white border-zinc-900"
+              : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
+            sectionClassName,
+          )}
+        >
+          {SectionIcon && <SectionIcon size={15} strokeWidth={1.8} aria-hidden />}
+          {label}
+        </button>
+      );
+    });
 
   return (
     <div
@@ -79,37 +112,18 @@ export default function AdminCommandHeader({
             aria-label={ariaLabel || `${title} section`}
             className={cn("grid gap-1 p-2", navGridClassName)}
           >
-            {sections.map(
-              ({
-                key,
-                label,
-                Icon: SectionIcon,
-                className: sectionClassName,
-              }) => {
-                const active = activeKey === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => onSectionChange?.(key)}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "inline-flex h-11 min-w-0 items-center justify-center gap-2 rounded-sm border-hairline px-3 sm:h-9",
-                      "text-center text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors",
-                      active
-                        ? "bg-zinc-900 text-white border-zinc-900"
-                        : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-                      sectionClassName,
-                    )}
-                  >
-                    {SectionIcon && (
-                      <SectionIcon size={15} strokeWidth={1.8} aria-hidden />
-                    )}
-                    {label}
-                  </button>
-                );
-              },
+            {renderSections(sections, activeKey, onSectionChange)}
+          </nav>
+        )}
+        {hasSecondary && (
+          <nav
+            aria-label={secondaryAriaLabel || `${title} sub-section`}
+            className={cn(
+              "grid gap-1 p-2 border-t border-hairline border-zinc-200",
+              secondaryNavGridClassName,
             )}
+          >
+            {renderSections(secondarySections, secondaryActiveKey, onSecondaryChange)}
           </nav>
         )}
       </div>

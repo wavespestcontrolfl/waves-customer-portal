@@ -82,7 +82,7 @@ const fmt = (n) =>
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
-export default function PricingStrategyPage() {
+export default function PricingStrategyPage({ embedded = false } = {}) {
   const [tab, setTab] = useState("money-model");
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -113,11 +113,13 @@ export default function PricingStrategyPage() {
       {" "}
       <div style={{ marginBottom: 20 }}>
         {" "}
-        <h1
-          style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}
-        >
-          Pricing Strategy
-        </h1>{" "}
+        {!embedded && (
+          <h1
+            style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}
+          >
+            Pricing Strategy
+          </h1>
+        )}{" "}
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
           Hormozi-style value engineering, offer architecture, and money model
         </div>{" "}

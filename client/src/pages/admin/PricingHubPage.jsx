@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { BarChart3, Calculator, Megaphone } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import PricingLogicPage from "./PricingLogicPage";
@@ -6,6 +6,7 @@ import PricingStrategyPage from "./PricingStrategyPage";
 import AdminPriceChangePage from "./AdminPriceChangePage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
@@ -47,38 +48,38 @@ export default function PricingHubPage() {
     setSearchParams(nextParams);
   };
 
+  // Sub-tabs/actions registered by the embedded area page (null when the
+  // active area has none).
+  const [secondary, setSecondary] = useState(null);
+
   return (
     <div>
-      <nav
-        aria-label="Pricing areas"
-        className="max-w-[1300px] mx-auto mb-4 grid grid-cols-1 sm:grid-cols-3 gap-1 rounded-md border-hairline border-zinc-200 bg-white p-2"
-      >
-        {visibleAreas.map(({ key, label, Icon }) => {
-          const active = activeArea === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => selectArea(key)}
-              aria-current={active ? "page" : undefined}
-              className={[
-                "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
-                "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
-                active
-                  ? "bg-zinc-900 text-white border-zinc-900"
-                  : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-              ].join(" ")}
-            >
-              <Icon size={15} strokeWidth={1.8} aria-hidden />
-              {label}
-            </button>
-          );
-        })}
-      </nav>
+      {/* One header card for the whole hub: area tabs on the first row; the
+          active area (Logic & Margins) hands its own section tabs up for the
+          second row instead of stacking a second header. */}
+      <div className="max-w-[1300px] mx-auto">
+        <AdminCommandHeader
+          title="Pricing"
+          icon={Calculator}
+          sections={visibleAreas}
+          activeKey={activeArea}
+          onSectionChange={selectArea}
+          ariaLabel="Pricing areas"
+          navGridClassName="grid-cols-1 sm:grid-cols-3"
+          actions={secondary?.actions}
+          secondarySections={secondary?.sections || []}
+          secondaryActiveKey={secondary?.activeKey}
+          onSecondaryChange={secondary?.onChange}
+          secondaryAriaLabel={secondary?.ariaLabel}
+          secondaryNavGridClassName={secondary?.navGridClassName}
+        />
+      </div>
 
-      {activeArea === "logic" && <PricingLogicPage />}
-      {activeArea === "strategy" && <PricingStrategyPage />}
-      {activeArea === "notices" && <AdminPriceChangePage />}
+      {activeArea === "logic" && (
+        <PricingLogicPage embedded onSecondaryNav={setSecondary} />
+      )}
+      {activeArea === "strategy" && <PricingStrategyPage embedded />}
+      {activeArea === "notices" && <AdminPriceChangePage embedded />}
     </div>
   );
 }
