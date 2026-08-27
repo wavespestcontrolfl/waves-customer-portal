@@ -2724,7 +2724,7 @@ const ZONE_COORDS = {
 // existingCompletionInvoice) — so when one exists, the sheet's prediction
 // must mirror it, not recompute from the visit price/fee, or the card
 // quotes an amount (or a paying party) completion will ignore (Codex r7).
-function predictionFromAttachedInvoice(invoice) {
+function predictionFromAttachedInvoice(invoice, { autopayActive = false } = {}) {
   if (!invoice || invoice.status === 'void') return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
@@ -2733,7 +2733,18 @@ function predictionFromAttachedInvoice(invoice) {
     return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
   }
   if (invoice.payer_id) return { kind: 'payer', amount, conflictStampedPrice: false, source: 'attached_invoice' };
-  return { kind: 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  // GATE_COMPLETION_AUTOPAY_CHARGE (pre-push P1): the completion route now
+  // auto-charges exactly these attached collectible self-pay invoices for
+  // autopay-active customers, so the sheet must say auto_charge, not
+  // invoice. COLLECTIBLE only (pre-push P1 round 3, shared helper): a
+  // 'processing' ACH invoice is money in flight — completion excludes it
+  // and must not be promised a second charge; it keeps the historical
+  // label. The cap can still route an over-anchor invoice to review at
+  // completion — the closest honest label is still the charge attempt.
+  const autoCharge = autopayActive
+    && require('../config/feature-gates').gates.completionAutopayCharge === true
+    && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status);
+  return { kind: autoCharge ? 'auto_charge' : 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
 }
 
 // Compact, client-safe summary of an attached invoice's line items for the
@@ -3049,7 +3060,7 @@ router.get('/', async (req, res, next) => {
         hasOverdue: openInvoices.overdue,
         duesPaidThisMonth,
         servicePausedAt: s.service_paused_at || null,
-        prediction: predictionFromAttachedInvoice(checkoutInvoice) || predictCompletionBilling({
+        prediction: predictionFromAttachedInvoice(checkoutInvoice, { autopayActive }) || predictCompletionBilling({
           lane: lane.mode,
           billingMode: s.billing_mode || null,
           autopayActive,
@@ -3064,6 +3075,7 @@ router.get('/', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           annualCoverageValidated,
           duesCollectedThisMonth: visitMonthDuesCollected,
+          completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
         }),
       };
       // Payment-capture flag — the tech needs to know at the doorstep that
@@ -3566,7 +3578,7 @@ router.get('/week', async (req, res, next) => {
           hasOverdue: openInvoices.overdue,
           duesPaidThisMonth,
           servicePausedAt: s.service_paused_at || null,
-          prediction: predictionFromAttachedInvoice(attachedInvoice) || predictCompletionBilling({
+          prediction: predictionFromAttachedInvoice(attachedInvoice, { autopayActive }) || predictCompletionBilling({
             lane: lane.mode,
             billingMode: s.billing_mode || null,
             autopayActive,
@@ -3581,6 +3593,7 @@ router.get('/week', async (req, res, next) => {
             prepaidMethod: s.prepaid_method || null,
             annualCoverageValidated,
             duesCollectedThisMonth: visitMonthDuesCollected,
+            completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
           }),
         };
         return {

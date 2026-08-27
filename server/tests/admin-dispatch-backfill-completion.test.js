@@ -2352,7 +2352,7 @@ describe('completion route wiring (source contracts)', () => {
     // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge \|\| extendedAutopayCharge\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
@@ -2372,9 +2372,50 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
     expect(source).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
     expect(source).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
-    // Autopay-ledger entries name the actual lane.
-    expect(source).toMatch(/const completionChargeSource = perApplicationBilling \? 'per_application_completion' : 'appointment_card_completion';/);
+    // Autopay-ledger entries name the actual lane (three-way since the
+    // GATE_COMPLETION_AUTOPAY_CHARGE extension).
+    expect(source).toMatch(/const completionChargeSource = perApplicationBilling\s*\n\s*\? 'per_application_completion'\s*\n\s*: \(apptCardOneTimeCharge \? 'appointment_card_completion' : 'autopay_completion'\);/);
     expect(source).not.toMatch(/details: \{ source: 'per_application_completion'/);
+  });
+
+  test('extended autopay lane (GATE_COMPLETION_AUTOPAY_CHARGE): gated fail-closed, pre-credit mint-anchored cap, in-lock re-assertion', () => {
+    // Lane admission: gate read fail-closed (==='true' via feature-gates)
+    // and mutually exclusive with the per-application / appointment-card
+    // lanes — never a second classification for the same visit.
+    expect(source).toMatch(/const extendedAutopayCharge = !perApplicationBilling && !apptCardOneTimeCharge\n\s*&& require\('\.\.\/config\/feature-gates'\)\.gates\.completionAutopayCharge === true;/);
+    // PRE-CREDIT anchor = the SAME completionInvoiceAmount resolution the
+    // mint prices from, derived BEFORE the account-credit apply; over-cap
+    // or anchor-less invoices keep their credit untouched for review.
+    expect(source).toMatch(/const duesAnchor = completionInvoiceAmount\(\{\s*\n\s*estimatedPrice: null,/);
+    expect(source).toMatch(/&& !\(extendedChargeCandidate && extendedLaneOverCap\)/);
+    // The anchor rides INTO the credit apply and is re-checked against the
+    // LOCKED invoice (mirrors the appointment lane's frozen cap).
+    expect(source).toMatch(/\.\.\.\(extendedChargeCandidate && !apptCardOneTimeCharge \? \{\s*\n\s*maxAuthorizedSubtotal: extendedLaneAnchor != null \? extendedLaneAnchor : 0,/);
+    // Cap AUTHORITY re-asserted under the charge's own locks; the
+    // one-time-lane revalidation stays appointment-card-only.
+    expect(source).toMatch(/requireExtendedCompletionAnchor: extendedAutopayCharge,/);
+    expect(source).toMatch(/requireOneTimeLane: apptCardOneTimeCharge,/);
+    // The charge service implements the in-lock re-derivation: lane flip,
+    // coverage stamp, dues coverage, and fresh-anchor cap all refuse.
+    const stripeSource = fs.readFileSync(path.join(__dirname, '../services/stripe.js'), 'utf8');
+    expect(stripeSource).toMatch(/if \(requireExtendedCompletionAnchor\) \{/);
+    expect(stripeSource).toMatch(/The visit is now under annual-prepay coverage/);
+    expect(stripeSource).toMatch(/Membership dues cover this visit/);
+    expect(stripeSource).toMatch(/The completion charge anchor changed before the charge/);
+    // The credit apply mirrors the SAME in-lock verdict (one shared
+    // authority in billing-lane), fails closed without a visit to lock,
+    // and the route passes the opt-in beside the anchor cap.
+    const creditSource = fs.readFileSync(path.join(__dirname, '../services/customer-credit.js'), 'utf8');
+    expect(creditSource).toMatch(/verifyExtendedCompletionAnchor\(\{/);
+    expect(creditSource).toMatch(/skipped: 'anchor_unverifiable'/);
+    expect(source).toMatch(/requireSelfPayScheduledServiceId: svc\.id,\n[\s\S]{0,400}?requireExtendedCompletionAnchor: true,/);
+    // Round 3: existing invoices honor stopped-dunning + a post-credit
+    // due-cents ceiling rides beside the subtotal cap; the annual stamp is
+    // validated against the LIVE term, never taken at face value.
+    expect(source).toMatch(/refuseWhenDunningStopped: true,/);
+    expect(source).toMatch(/maxAuthorizedChargeCents: Math\.max\(0, Math\.round\(\(Number\(invoice\.total \|\| 0\) - Number\(invoice\.credit_applied \|\| 0\)\) \* 100\)\),/);
+    const laneSource = fs.readFileSync(path.join(__dirname, '../services/billing-lane.js'), 'utf8');
+    expect(laneSource).toMatch(/annualPrepayCoversVisit\(fullSvc, dbConn, \{ throwOnError: true \}\)/);
   });
 
   test('backfill mints the digital card quietly — card.issued email suppressed', () => {
@@ -2743,7 +2784,7 @@ describe('completion route wiring (source contracts)', () => {
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
       // completion saved-card / ACH auto-charge (per-application OR the
       // appointment-card one-time lane — one shared rail, one backfill gate)
-      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed',
+      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge || extendedAutopayCharge) && visitPerformed',
       // appointment-card one-time lane derivation (read-only, but its
       // backfill-skip log reads isBackfillCompletion so it must sit after
       // the re-derivation too)

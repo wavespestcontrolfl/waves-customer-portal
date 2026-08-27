@@ -39,6 +39,7 @@
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
+ *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
@@ -155,6 +156,22 @@ const gates = {
   // off: cancels release exactly as today. Kill switch: unset or any
   // non-'true' value.
   cardHoldParkOnCancel: process.env.GATE_CARD_HOLD_PARK_ON_CANCEL === 'true',
+
+  // Completion auto-charge for EVERY autopay customer (owner ruling
+  // 2026-08-26/27, membership completion-invoice case): completing a visit that carries a
+  // collectible SELF-PAY invoice auto-charges the customer's saved Auto
+  // Pay method — not just the per-application and appointment-card lanes.
+  // The charge is HARD-CAPPED at the same anchor the completion mint
+  // prices from (the visit's stamped accepted price, else the membership
+  // dues rate for membership-mode customers — completionInvoiceAmount
+  // precedence; owner cap ruling 2026-08-27: those ARE the agreed price).
+  // An invoice above the anchor, or with no anchor at all, is NEVER
+  // charged — it parks with an office bell and keeps the normal pay-link
+  // flow. Money-moving surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: completions bill exactly as today (invoice +
+  // pay link, per-application/appointment-card lanes unchanged). Kill
+  // switch: unset or any non-'true' value.
+  completionAutopayCharge: process.env.GATE_COMPLETION_AUTOPAY_CHARGE === 'true',
 
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
   // invoice EMAIL carries a "previous balance" note when the customer has

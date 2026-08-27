@@ -231,13 +231,18 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
     // skipping the revalidation.
     if (requireOneTimeLane && requireSelfPayScheduledServiceId == null) {
       return { applied: 0, skipped: 'lane_unverifiable' };
+    }
+    // Same fail-closed shape for the extended-completion anchor (pre-push
+    // P0 round 2): without a visit to lock, the anchor cannot be verified.
+    if (requireExtendedCompletionAnchor && requireSelfPayScheduledServiceId == null) {
+      return { applied: 0, skipped: 'anchor_unverifiable' };
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
@@ -262,7 +267,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
         const lockedSvc = await t('scheduled_services')
           .where({ id: requireSelfPayScheduledServiceId })
           .forUpdate()
-          .first('id', 'customer_id', 'is_recurring');
+          .first('id', 'customer_id', 'is_recurring', 'estimated_price', 'is_callback', 'prepaid_method', 'status');
         if (!lockedSvc) return { applied: 0, skipped: 'service_missing' };
         if (String(lockedSvc.customer_id) !== String(invoice.customer_id)) {
           return { applied: 0, skipped: 'customer_mismatch' };
@@ -281,6 +286,25 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
             || lane.mode === 'annual_prepay'
             || lockedSvc.is_recurring === true) {
             return { applied: 0, skipped: 'not_one_time_lane' };
+          }
+        }
+        // Extended-completion anchor revalidated UNDER these same locks
+        // (pre-push P0 round 2, GATE_COMPLETION_AUTOPAY_CHARGE): the
+        // route's pre-credit anchor is an unlocked snapshot — a price
+        // drop, billing-mode flip, or coverage stamp landing before this
+        // transaction locked the rows must not have credit consumed (or
+        // the invoice flipped prepaid) past a cap the later
+        // requireExtendedCompletionAnchor charge guard would refuse.
+        // Shared verdict with chargeInvoiceWithSavedCard — one authority.
+        if (requireExtendedCompletionAnchor) {
+          const anchorVerdict = await require('./billing-lane').verifyExtendedCompletionAnchor({
+            dbConn: t,
+            lockedCustomer,
+            lockedSvc,
+            lockedInvoice: invoice,
+          });
+          if (!anchorVerdict.ok) {
+            return { applied: 0, skipped: `extended_anchor_${anchorVerdict.reason}` };
           }
         }
         const resolved = await require('./payer').resolveForInvoice({

@@ -1856,7 +1856,7 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2035,7 +2035,7 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status');
+            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
           // Completed-one-time eligibility under the SAME lock (hold-rail
           // pre-push r9 P0): a completion charge is only authorized for a
@@ -2094,6 +2094,44 @@ const StripeService = {
               || lane.mode === 'annual_prepay'
               || lockedSvc.is_recurring === true) {
               throw new Error('The visit is no longer on the one-time completion lane. Review before charging.');
+            }
+          }
+          // Extended-completion cap AUTHORITY revalidated under the locks
+          // (GATE_COMPLETION_AUTOPAY_CHARGE pre-push P0): the caller's
+          // anchor came from a route-entry snapshot — a billing-mode flip
+          // (to per-application / membership / annual-prepay), a coverage
+          // stamp, or a visit-price edit landing between that snapshot and
+          // this transaction changes WHICH agreed price authorizes the
+          // charge, and a lane whose dues/prepay now cover the visit must
+          // not ALSO collect this invoice (double collection). Re-derive
+          // the anchor from the LOCKED customer + visit rows and re-assert
+          // the cap against the LOCKED invoice; any drift throws and rolls
+          // back with nothing consumed (the completion falls to its
+          // pay-link fallback). Opt-in; requires the customer lock above.
+          if (requireExtendedCompletionAnchor) {
+            if (!lockedCustomerRow) throw new Error('Completion-anchor verification requires the customer lock.');
+            // Shared verdict with the credit-side mirror in
+            // applyAccountCreditToInvoice (pre-push P0 round 2): one
+            // revalidation authority, consulted under each mover's own
+            // locks. Only the VALIDATED annual stamp refuses — the
+            // annual-prepay LANE's uncovered priced add-ons still charge
+            // (pre-push P1).
+            const anchorVerdict = await require('./billing-lane').verifyExtendedCompletionAnchor({
+              dbConn: trx,
+              lockedCustomer: lockedCustomerRow,
+              lockedSvc,
+              lockedInvoice,
+            });
+            if (!anchorVerdict.ok) {
+              const anchorRefusals = {
+                per_application_lane: 'The customer moved to per-application billing before the charge. Review before charging.',
+                annual_prepay_coverage: 'The visit is now under annual-prepay coverage. Review before charging.',
+                annual_prepay_coverage_unverifiable: 'Annual-prepay coverage could not be verified. Review before charging.',
+                visit_not_completed: 'The visit is no longer completed. Review before charging.',
+                dues_covered: 'Membership dues cover this visit. Review before charging.',
+              };
+              throw new Error(anchorRefusals[anchorVerdict.reason]
+                || 'The completion charge anchor changed before the charge. Review before charging.');
             }
           }
           // The locked visit must still belong to the invoice's customer

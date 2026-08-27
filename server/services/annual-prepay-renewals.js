@@ -2335,7 +2335,7 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 // paid-coverage checks, which is what the window was actually guarding.
 // Absence/ambiguity => false; the caller then falls back to the numeric
 // prepaid_amount >= amount comparison for other (cash/Zelle) methods.
-async function annualPrepayCoversVisit(scheduledService, conn = db) {
+async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   if (!(Number(scheduledService.prepaid_amount) > 0)) return false;
@@ -2365,6 +2365,11 @@ async function annualPrepayCoversVisit(scheduledService, conn = db) {
     return true;
   } catch (err) {
     // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
+    // Callers on the CHARGING side have the opposite fail-closed direction —
+    // an unverifiable coverage must refuse the charge, not read as "stale
+    // stamp, charge away" (extended completion lane pre-push P0) — so they
+    // opt into error propagation and refuse on throw.
+    if (throwOnError) throw err;
     logger.warn(`[annual-prepay] coverage validation failed for scheduled service ${scheduledService.id}: ${err.message}`);
     return false;
   }
