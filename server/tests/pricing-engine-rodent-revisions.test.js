@@ -320,3 +320,24 @@ describe('exclusion V2 rows reconcile to the price for fractional measurements (
     expect(result.lineItems.map((li) => li.price)).toEqual([150, 150, 280, 75]);
   });
 });
+
+describe('exclusion V2 rows never exceed the price above the job minimum (pre-push P0 on #3521)', () => {
+  test('fractional work above the minimum: rows sum to the whole-dollar price', () => {
+    // 4 standard points ($300) + 20.1 LF soft ($281.40) = $581.40 raw → $581 price.
+    const result = priceRodentExclusionV2({ standardWireMeshPoints: 4, meshSoftLF: 20.1, waiveInspection: true });
+    expect(result.price).toBe(581);
+    const rowsTotal = Math.round(result.lineItems.reduce((s, li) => s + li.price, 0) * 100) / 100;
+    expect(rowsTotal).toBe(581);
+    expect(result.lineItems.some((li) => li.component === 'job_minimum')).toBe(false);
+    // The $0.40 remainder folds into the last component row.
+    expect(result.lineItems.find((li) => li.component === 'linear_mesh').price).toBe(281);
+  });
+
+  test('fractional work that rounds UP: rows still sum to the price', () => {
+    // 4 points ($300) + 20.05 LF ($280.70) = $580.70 → $581; last row absorbs +$0.30.
+    const result = priceRodentExclusionV2({ standardWireMeshPoints: 4, meshSoftLF: 20.05, waiveInspection: true });
+    expect(result.price).toBe(581);
+    const rowsTotal = Math.round(result.lineItems.reduce((s, li) => s + li.price, 0) * 100) / 100;
+    expect(rowsTotal).toBe(581);
+  });
+});

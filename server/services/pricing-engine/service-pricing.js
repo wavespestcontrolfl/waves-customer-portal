@@ -8081,11 +8081,20 @@ function priceRodentExclusionV2(options = {}) {
   // summing $0.40 over the price the estimate persists (codex #3521 r2 P2).
   // Each component is rounded to cents and the minimum delta is taken
   // against that cent-rounded component sum.
+  // The pricer's install price is a WHOLE-dollar figure (max(floor,
+  // round(raw))), so the cent-rounded rows can land above OR below it by
+  // under a dollar. The remainder is one number: when the job minimum
+  // lifted the price it is the minimum row; otherwise (pre-push P0 on
+  // #3521 — fractional work above the minimum) it folds into the last
+  // component row, so the rows never exceed the price the engine charges.
   const cents = (value) => Math.round(value * 100) / 100;
   const componentSubtotal = cents(
     cents(wireMeshPointSubtotal) + cents(birdBoxSubtotal) + cents(linearMeshSubtotal)
   );
-  const floorDelta = Math.max(0, cents(installPrice - componentSubtotal));
+  const minimumApplied = floor > Math.round(rawInstall);
+  const reconcileDelta = cents(installPrice - componentSubtotal);
+  const floorDelta = minimumApplied ? Math.max(0, reconcileDelta) : 0;
+  const roundingDelta = minimumApplied ? 0 : reconcileDelta;
   const urgencyDelta = Math.max(0, cents(installWithUrgency - installPrice));
   const componentLineItems = [];
   const pushComponent = (component, label, price, componentDetail) => {
@@ -8127,6 +8136,9 @@ function priceRodentExclusionV2(options = {}) {
     if (floorDelta > 0) {
       pushComponent('job_minimum', 'Rodent Exclusion — Job Minimum', floorDelta,
         `Exclusion jobs carry a $${floor} minimum.`);
+    } else if (roundingDelta !== 0) {
+      const last = componentLineItems[componentLineItems.length - 1];
+      last.price = cents(last.price + roundingDelta);
     }
     if (urgencyDelta > 0) {
       pushComponent('urgency_surcharge', 'Rodent Exclusion — Urgency Surcharge', urgencyDelta,
