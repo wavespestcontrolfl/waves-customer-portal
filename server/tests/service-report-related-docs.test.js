@@ -185,6 +185,20 @@ describe('recommendations are screened at the payload boundary', () => {
       'Keep shrubs trimmed back from the exterior walls',
     ]);
   });
+
+  test('raw [Next]-tagged technician note lines never render as recommendations', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      technician_notes: '[Next] Office: bill the HOA, not the tenant\n[Next] Recheck the garage',
+      structured_notes: JSON.stringify({ recommendations: ['Keep mulch pulled back from the slab'] }),
+    }, 'token-recs', knex, { mode: 'live' });
+    expect(data.recommendations).toEqual(['Keep mulch pulled back from the slab']);
+    // The merged internal list (recap consumers) still carries the note lines.
+    expect(data.protocol.recommendations).toEqual(expect.arrayContaining(['Recheck the garage']));
+  });
 });
 
 describe('nextAppointment cross-line fallback', () => {

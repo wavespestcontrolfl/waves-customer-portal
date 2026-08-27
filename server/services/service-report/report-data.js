@@ -1486,6 +1486,16 @@ function buildProtocolPayload(record) {
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
     ]),
+    // Structured sources ONLY — the completion form's recommendation
+    // field (structured_notes / service_data.protocol), never lines
+    // extracted from raw technician_notes. This is the list the customer
+    // report renders verbatim; raw notes must never egress on a report
+    // (AGENTS.md; codex P1 r3). The merged list above stays for the
+    // internal/recap consumers that already read it.
+    structuredRecommendations: uniqueStrings([
+      ...parseJsonArray(protocol.recommendations),
+      ...parseJsonArray(structured.recommendations),
+    ]),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
 }
@@ -3607,12 +3617,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   });
   const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
   const treatedZoneIds = new Set(applications.flatMap((app) => app.zone_ids || []));
-  // Screened at the PAYLOAD boundary, not just at completion intake: this
-  // list also carries legacy structured_notes values and raw [Next] note
-  // lines from records that predate the completion-time validators, and it
-  // now renders verbatim on the customer report (codex P1 on this branch).
-  // A line with banned wording or an access code is dropped, never
-  // rewritten — the rest of the list still renders.
+  // Rendered verbatim on the customer report, so: structured sources only
+  // (never raw technician_notes lines — AGENTS.md report egress), AND
+  // screened at the PAYLOAD boundary, not just at completion intake —
+  // legacy structured_notes values predate the completion-time validators
+  // (codex P1 on this branch). A line with banned wording or an access
+  // code is dropped, never rewritten; the rest of the list still renders.
   const recommendationScreen = (() => {
     try {
       const { customerCopyViolations } = require('./technician-report-copy');
@@ -3620,7 +3630,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     } catch { return () => false; }
   })();
   const recommendations = uniqueStrings([
-    ...protocol.recommendations,
+    ...(protocol.structuredRecommendations || []),
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
   ]).filter(recommendationScreen);
   // The turf-height gauge image is the on-site lawn-length documentation photo.

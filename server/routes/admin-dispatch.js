@@ -9929,17 +9929,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const caption = String(m.customer_caption || m.ai_caption || '').trim();
             return caption && customerCopyViolations(caption).length === 0;
           });
-          if (publishable.length) {
-            await db('visual_service_moments')
-              .whereIn('id', publishable.map((m) => m.id))
+          let promoted = 0;
+          for (const m of publishable) {
+            // Conditional on the EXACT screened state (codex P1 r3): a
+            // concurrent admin rejection, deletion, or caption edit between
+            // the screen and this write leaves the row untouched — only a
+            // row still internal_only, undeleted, with the captions the
+            // screen approved is promoted.
+            promoted += await db('visual_service_moments')
+              .where({ id: m.id, job_id: svc.id, visibility_status: 'internal_only' })
+              .whereNull('deleted_at')
+              .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
+              .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
               .update({
                 visibility_status: 'approved_customer',
                 customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
                 updated_at: db.fn.now(),
               });
+          }
+          if (promoted) {
             const { invalidateVisualMomentReportPdfCache } = require('../services/visual-service-notes');
             await invalidateVisualMomentReportPdfCache(svc.id).catch(() => {});
-            logger.info(`[dispatch] auto-published ${publishable.length}/${candidates.length} visual moment(s) for ${svc.id}`);
+            logger.info(`[dispatch] auto-published ${promoted}/${candidates.length} visual moment(s) for ${svc.id}`);
           } else if (candidates.length) {
             logger.info(`[dispatch] visual moments held internal_only for ${svc.id}: ${candidates.length} failed the caption screen`);
           }
