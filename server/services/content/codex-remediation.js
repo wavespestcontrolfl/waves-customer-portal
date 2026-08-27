@@ -1180,8 +1180,23 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // Owner directive 2026-08-26: an opted-in TRUE-intercept run continues —
     // the same scoped eligibility the runner applies at its review-park
     // decision (fail-closed: no marker / gates off → park as before).
-    if (comparisonResult.requiresHumanReview === true && !namedCompetitorAutopublishEligible(brief)) {
-      return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+    if (comparisonResult.requiresHumanReview === true) {
+      if (!namedCompetitorAutopublishEligible(brief)) {
+        return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+      }
+      // Persist the FRESH verdict onto the run: the poller's merge-time
+      // revoke check reads autonomous_runs.comparison_table_result, and the
+      // stored verdict is from the ORIGINAL draft — a fix that INTRODUCES a
+      // named competitor would otherwise merge past a revoked gate on the
+      // stale false flag (hook r5 P1). Persist failure parks (fail closed):
+      // continuing would leave the revoke check blind to this fix.
+      try {
+        const stamped = await db('autonomous_runs').where({ id: run.id })
+          .update({ comparison_table_result: JSON.stringify(comparisonResult), updated_at: new Date() });
+        if (!stamped) return { ok: false, reason: 'named-competitor verdict persist failed (run row missing)' };
+      } catch (e) {
+        return { ok: false, reason: `named-competitor verdict persist failed: ${e.message}` };
+      }
     }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless

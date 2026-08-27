@@ -1243,6 +1243,11 @@ describe('validateAutonomousRunGates', () => {
       deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
+      // The FRESH verdict is persisted onto the run so the poller's
+      // merge-time revoke check sees the named-competitor flag even when
+      // the ORIGINAL draft's stored verdict was competitor-free (hook r5).
+      const stamped = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      expect(JSON.parse(stamped.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
     } finally {
       fg.isEnabled.mockRestore();
     }
