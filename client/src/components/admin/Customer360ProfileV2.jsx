@@ -86,6 +86,8 @@ import {
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
+import { CONTACT_ROLE_OPTIONS, contactRoleLabel } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import {
@@ -5263,6 +5265,7 @@ export default function Customer360ProfileV2({
       monthlyRate: c.monthlyRate ?? "",
       tier: c.tier || "",
       pipelineStage: c.pipelineStage || "new_lead",
+      contactRole: c.contactRole || "",
     });
     setEditErr("");
     setEditOpen(true);
@@ -5618,6 +5621,15 @@ export default function Customer360ProfileV2({
                     {c.profileLabel}
                   </Badge>
                 )}
+                {c.contactRole && c.contactRole !== "owner" && (
+                  <Badge
+                    tone="neutral"
+                    className="normal-case tracking-normal"
+                    title="Contact role — payer is not the occupant"
+                  >
+                    {contactRoleLabel(c.contactRole)}
+                  </Badge>
+                )}
                 <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
                 <StageBadgeV2 stage={c.pipelineStage} />{" "}
               </div>{" "}
@@ -5868,6 +5880,15 @@ export default function Customer360ProfileV2({
               {" "}
               <TierBadgeV2 tier={c.tier} />{" "}
               <StageBadgeV2 stage={c.pipelineStage} />{" "}
+              {c.contactRole && c.contactRole !== "owner" && (
+                <Badge
+                  tone="neutral"
+                  className="normal-case tracking-normal"
+                  title="Contact role — payer is not the occupant"
+                >
+                  {contactRoleLabel(c.contactRole)}
+                </Badge>
+              )}
             </div>{" "}
             <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
               {" "}
@@ -7240,6 +7261,11 @@ export default function Customer360ProfileV2({
           {/* PROPERTY */}
           {activeTab === "property" && (
             <div>
+              <CustomerPropertiesPanelV2
+                customerId={customerId}
+                contactRole={c.contactRole}
+                canEdit={isAdmin}
+              />
               {(c.satelliteUrl || c.address?.line1) && (
                 <div className="mb-5 rounded-md overflow-hidden border-hairline border-zinc-200 max-h-[200px]">
                   {c.satelliteUrl ? (
@@ -7859,6 +7885,29 @@ export default function Customer360ProfileV2({
               </div>{" "}
               <div>
                 {" "}
+                <label
+                  className="u-label text-ink-secondary block mb-1"
+                  htmlFor="c360-edit-contact-role"
+                >
+                  Contact role
+                </label>{" "}
+                <select
+                  id="c360-edit-contact-role"
+                  value={editForm.contactRole || ""}
+                  onChange={(e) =>
+                    setEditForm((p) => ({ ...p, contactRole: e.target.value }))
+                  }
+                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                >
+                  {CONTACT_ROLE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>{" "}
+              </div>{" "}
+              <div>
+                {" "}
                 <label className="u-label text-ink-secondary block mb-1">
                   Stage
                 </label>{" "}
@@ -7942,6 +7991,7 @@ export default function Customer360ProfileV2({
                             ? null
                             : parseFloat(editForm.monthlyRate),
                         tier: editForm.tier || null,
+                        contactRole: editForm.contactRole || null,
                       };
                       await adminFetch(`/admin/customers/${customerId}`, {
                         method: "PUT",

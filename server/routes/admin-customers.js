@@ -1,4 +1,5 @@
 const express = require('express');
+const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
 const { addETDays } = require('../utils/datetime-et');
@@ -1020,6 +1021,7 @@ function mapCustomerListRow(c) {
     id: c.id, firstName: c.first_name, lastName: c.last_name,
     accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
+    contactRole: c.contact_role || null,
     email: c.email, phone: c.phone, city: c.city,
     serviceContactName: c.service_contact_name,
     serviceContactPhone: c.service_contact_phone,
@@ -3059,6 +3061,7 @@ router.get('/:id', async (req, res, next) => {
         isPrimaryProfile: !!c.is_primary_profile,
         email: c.email, phone: c.phone, secondaryPhone: c.secondary_phone,
         secondaryContact: c.secondary_contact_name, companyName: c.company_name,
+        contactRole: c.contact_role || null,
         serviceContactName: c.service_contact_name,
         serviceContactPhone: c.service_contact_phone,
         serviceContactEmail: c.service_contact_email,
@@ -3213,7 +3216,7 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/admin/customers — create
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel, contactRole } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
@@ -3237,7 +3240,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       companyName: cleanOptionalText(companyName),
       propertyType: cleanOptionalText(propertyType),
       profileLabel: cleanOptionalText(profileLabel),
+      contactRole: normalizeContactRole(contactRole),
     };
+    if (!normalized.contactRole.ok) return res.status(400).json({ error: 'Invalid contact role' });
     if (!normalized.firstName || !normalized.phone) {
       return res.status(400).json({ error: 'First name and phone required' });
     }
@@ -3327,7 +3332,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         pipeline_stage: normalized.pipelineStage,
         pipeline_stage_changed_at: new Date(),
         assigned_to: req.technicianId,
-        company_name: normalized.companyName, property_type: normalized.propertyType, crm_notes: normalized.notes,
+        company_name: normalized.companyName, property_type: normalized.propertyType, contact_role: normalized.contactRole.value, crm_notes: normalized.notes,
       }).returning('*');
 
       if (Number(normalized.monthlyRate) > 0) {
@@ -3433,11 +3438,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
+    }
+    // contact_role: '' / null clears; anything else must be a known role.
+    const contactRole = req.body.contactRole !== undefined ? normalizeContactRole(req.body.contactRole) : null;
+    if (contactRole && !contactRole.ok) {
+      return res.status(400).json({ error: 'Invalid contact role' });
     }
     // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
     // path below: future pending/confirmed visits with no positive price,
@@ -3566,6 +3576,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
         else if (v === 'billing_mode') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : req.body[k]; }
+        else if (v === 'contact_role') { updates[v] = contactRole.value; }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
