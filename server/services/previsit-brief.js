@@ -2449,12 +2449,14 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     grounding_hash: groundingHash,
     generated_via: via,
     // Attempt bookkeeping for the deterministic-rejection cap above:
-    // same-hash template re-stores accumulate, anything else starts at 1.
+    // llm_attempts counts VALIDATOR rejections only, accumulating across
+    // same-hash template re-stores; a transient miss preserves the count
+    // without adding to it, so outages can never walk a visit into the cap.
     ...(via === 'template' ? {
       llm_miss_kind: missKind || 'transient',
       llm_attempts: (existing?.grounding_hash === groundingHash
         && existing?.generated_via === 'template'
-        ? (existing.llm_attempts || 0) : 0) + 1,
+        ? (existing.llm_attempts || 0) : 0) + (missKind === 'validator' ? 1 : 0),
     } : {}),
     // The ET calendar day and service identity this brief was generated
     // FOR. Any writer can reschedule the visit or rewrite its

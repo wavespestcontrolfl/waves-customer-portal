@@ -4427,7 +4427,33 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
       expect(out.generated).toBe(true);
       expect(global.__dispatch).toHaveBeenCalledTimes(1);
     }
-    expect(storedBrief(state).brief.llm_attempts).toBe(4);
+    // transient misses never add to the validator count
+    expect(storedBrief(state).brief.llm_attempts).toBe(0);
+  });
+
+  test('transient misses between validator rejections neither reset nor inflate the count', async () => {
+    const outage = () => ({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', model: 'a', reason: 'anthropic_529' }] });
+    global.__dispatch = jest.fn(async () => validatorMiss());
+    let state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_attempts).toBe(1);
+    global.__dispatch = jest.fn(async () => outage());
+    for (let i = 0; i < 3; i += 1) {
+      state = rerunWith(storedBrief(state).patch);
+      const out = await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(out.generated).toBe(true);
+      expect(storedBrief(state).brief.llm_attempts).toBe(1);
+      expect(storedBrief(state).brief.llm_miss_kind).toBe('transient');
+    }
+    global.__dispatch = jest.fn(async () => validatorMiss());
+    state = rerunWith(storedBrief(state).patch);
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_attempts).toBe(2);
+    state = rerunWith(storedBrief(state).patch);
+    global.__dispatch.mockClear();
+    const capped = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(capped.reason).toBe('validator_capped');
+    expect(global.__dispatch).not.toHaveBeenCalled();
   });
 
   test('defense-in-depth rejection of an accepted response counts as a validator miss', async () => {
