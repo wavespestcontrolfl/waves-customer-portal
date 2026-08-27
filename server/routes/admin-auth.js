@@ -22,6 +22,7 @@ const {
   isRetiredLegacyStaffPassword,
   validateStaffPassword,
 } = require('../utils/staff-password-policy');
+const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail } = require('../utils/staff-identity');
 
 const RESET_TOKEN_BYTES = 32;
@@ -442,9 +443,7 @@ async function register(req, res, next) {
     }
     let licenseExpiry = null;
     if (license_expiry !== undefined && license_expiry !== null && license_expiry !== '') {
-      const wellFormed = typeof license_expiry === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(license_expiry);
-      const parsed = wellFormed ? new Date(`${license_expiry}T00:00:00Z`) : null;
-      if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== license_expiry) {
+      if (!validDateOnly(license_expiry)) {
         return res.status(400).json({ error: 'license_expiry must be a valid YYYY-MM-DD date' });
       }
       licenseExpiry = license_expiry;
@@ -461,11 +460,14 @@ async function register(req, res, next) {
         password_hash: hash,
         role: staffRole,
         active: true,
-        password_changed_at: trx.fn.now(),
         // The register password is chosen by the owner and handed over
         // out-of-band — force the hire to set their own at first login
-        // (middleware 403s everything else until they do).
+        // (middleware 403s everything else until they do). The rotation
+        // pairing matches rotate-legacy-staff-passwords: flag armed,
+        // password_changed_at NULL until the hire actually rotates (the
+        // reset/change handlers stamp it).
         must_change_password: true,
+        password_changed_at: null,
         fl_applicator_license: applicatorLicense,
         license_expiry: licenseExpiry,
       }).returning('*');

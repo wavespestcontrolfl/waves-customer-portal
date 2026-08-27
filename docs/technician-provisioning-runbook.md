@@ -1,8 +1,17 @@
 # Technician Provisioning Runbook
 
 How to create, hand off, and (if needed) deactivate a field-technician
-account. There is no admin UI for staff creation — the Settings Team tab is
-view-only — so provisioning is one authenticated API call by the owner.
+account.
+
+**Two creation paths exist — order matters.** The Time Tracking Team tab's
+"+ Add Technician" creates a *profile only* (name/phone/email/payroll — no
+password, no login). Credential provisioning is the register API call
+below. **Register FIRST** for a login-capable hire: register creates the
+full account, and the Team tab then shows it for payroll fields. If a
+profile row was already created for the hire's email, register returns 409
+— don't fight it: have the hire use "Forgot password" on the login page
+with that email instead (it sets their first password via the emailed reset
+link), and add licensing via the compliance surface.
 
 ## Before you start
 

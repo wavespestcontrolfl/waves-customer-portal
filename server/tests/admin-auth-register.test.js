@@ -102,6 +102,9 @@ describe('register provisioning hardening', () => {
     expect(res.statusCode).toBe(201);
     expect(inserts).toHaveLength(1);
     expect(inserts[0].must_change_password).toBe(true);
+    // Rotation pairing (matches rotate-legacy-staff-passwords): the
+    // timestamp stays NULL until the hire actually rotates the credential.
+    expect(inserts[0].password_changed_at).toBeNull();
     expect(res.body.mustChangePassword).toBe(true);
   });
 
@@ -130,6 +133,7 @@ describe('register provisioning hardening', () => {
     ['2027-13-01'],
     ['2027-02-30'],
     ['06/30/2027'],
+    ['0000-01-01'],
     [20270630],
   ])('rejects malformed license_expiry %p with 400 and inserts nothing', async (bad) => {
     const inserts = installDb();
