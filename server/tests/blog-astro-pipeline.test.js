@@ -2487,6 +2487,24 @@ describe('compressToWebp (hero LCP optimization)', () => {
   });
 });
 
+describe('syncDraftPublishTarget mirrors publisher-normalized targeting', () => {
+  test('canonical, domains AND tracking are written back to the persisted draft (PR #3508 r8 P1)', () => {
+    const draft = { frontmatter: { canonical: 'https://hub/old/', tracking: { domains: ['stale.example'] } } };
+    const resolved = {
+      canonical: 'https://www.wavespestcontrol.com/blog/x/',
+      domains: ['wavespestcontrol.com'],
+      tracking: { domains: ['wavespestcontrol.com'] },
+    };
+    AstroPublisher._internals.syncDraftPublishTarget(draft, resolved);
+    // The poller's merge gate compares the head against this persisted
+    // draft — an unsynced tracking would flag the publisher's own
+    // normalized head as drift and deadlock a green PR.
+    expect(draft.frontmatter.canonical).toBe(resolved.canonical);
+    expect(draft.frontmatter.domains).toEqual(['wavespestcontrol.com']);
+    expect(draft.frontmatter.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
+  });
+});
+
 describe('blog posts target the hub only', () => {
   const base = {
     title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
