@@ -882,9 +882,8 @@ async function maybeAutoMerge(run, pr) {
     let verdictFlagged = true; // fail closed until a valid verdict is read
     let approvedShaOk = false;
     let pinnedShaOk = false;
-    let interceptClass = false;
     let approvedAt = null;
-    let rawBrief = null;
+    let briefId = null;
     try {
       const fresh = await db('autonomous_runs').where('id', run.id)
         .first('comparison_table_result', 'draft_payload', 'trust_build_approved_at', 'brief_id');
@@ -902,32 +901,41 @@ async function maybeAutoMerge(run, pr) {
         approvedAt = fresh.trust_build_approved_at || null;
         const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
         approvedShaOk = Boolean(approvedAt && approvedSha && headSha && approvedSha === headSha);
-        // Intercept-class from the brief row's RAW persisted marker only
-        // (PR r11 + r13 P1s): no _loadReviewedBrief — its
-        // latest-for-opportunity fallback and signal_metadata backfill
-        // could each let a later intercept payload authorize this PR.
-        if (fresh.brief_id) {
-          const row = await db('content_briefs').where('id', fresh.brief_id).first('gsc_signal', 'action_type');
-          if (row) {
-            let gs = row.gsc_signal;
-            if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
-            rawBrief = { action_type: row.action_type, gsc_signal: gs };
-            interceptClass = gs?.intercept === true;
-          }
-        }
+        briefId = fresh.brief_id || null;
       }
     } catch (_) {
       verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
     }
-    const governed = verdictFlagged || interceptClass || Boolean(approvedAt);
+    // Governance keys on the PERSISTED competitor-review/approval state of
+    // THIS run — never on intercept provenance alone (PR r13 P1: a
+    // competitor-free intercept refresh publishes through the ordinary
+    // trust-build path and must keep the ordinary auto-merge; requiring
+    // named-competitor eligibility there withheld every such PR forever,
+    // since eligibility rightly rejects the refresh action).
+    const governed = verdictFlagged || Boolean(approvedAt);
     if (governed) {
       if (!pinnedShaOk && !approvedShaOk) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: head ${pr.head?.sha || 'unknown'} is not a publisher-pinned or human-approved commit — PR left open for a human decision`);
         return { pending: true, reason: 'publisher_head_pin_failed' };
       }
-      if (!approvedShaOk) {
+      if (verdictFlagged && !approvedShaOk) {
+        // Kill-switch recheck for runs that actually carried
+        // named-competitor content: scoped eligibility from the brief row's
+        // RAW persisted marker only (PR r11 + r13 P1s — no
+        // _loadReviewedBrief: its latest-for-opportunity fallback and
+        // signal_metadata backfill could each let a later intercept payload
+        // authorize this PR).
         let eligible = false;
         try {
+          let rawBrief = null;
+          if (briefId) {
+            const row = await db('content_briefs').where('id', briefId).first('gsc_signal', 'action_type');
+            if (row) {
+              let gs = row.gsc_signal;
+              if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
+              rawBrief = { action_type: row.action_type, gsc_signal: gs };
+            }
+          }
           const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
           eligible = namedCompetitorAutopublishEligible(rawBrief) === true;
         } catch (_) { eligible = false; }

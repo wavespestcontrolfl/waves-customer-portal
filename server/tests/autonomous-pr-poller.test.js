@@ -848,6 +848,23 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a COMPETITOR-FREE intercept run (ordinary trust-build path) keeps the ordinary auto-merge — provenance alone never governs (PR r13 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
+      briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: null, trust_build_approved_at: null, brief_id: 'brief-1' },
+    });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
   test('an UNGOVERNED run (competitor-free verdict, no intercept brief, no approval) keeps the ordinary auto-merge', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
