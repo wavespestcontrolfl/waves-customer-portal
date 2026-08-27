@@ -33,6 +33,7 @@ import {
   Wrench,
   Bot,
 } from "lucide-react";
+import { MOBILE_SETTINGS_SECTIONS } from "./mobileSettingsSections";
 
 // Canonical metadata for every destination currently rendered by the admin
 // shell. The desktop sidebar and mobile More page are derived from the same
@@ -354,6 +355,9 @@ const MOBILE_TAB_IDS = [
 ];
 
 const MOBILE_TAB_ID_SET = new Set(MOBILE_TAB_IDS);
+const MOBILE_TAB_PATHS = new Set(
+  MOBILE_TAB_IDS.map((id) => ADMIN_NAV_ITEMS[id].path.split("?")[0]),
+);
 
 // Destinations the mobile index page renders ITSELF rather than as a nav
 // row: `settings` — the page is the mobile Settings surface, so it lists the
@@ -483,6 +487,13 @@ export function isAdminNavItemActive(item, pathname, search = "") {
     const owned = [
       ...ADMIN_MOBILE_MORE_SECTIONS.flatMap(({ items }) => items),
       ...[...MOBILE_INDEX_INLINE_IDS].map((id) => ADMIN_NAV_ITEMS[id]),
+      // every leaf of the inline Settings list, standalone routes included
+      // (e.g. /admin/_design-system/flags) — same data MorePage renders —
+      // except destinations that ARE another primary tab (Communications):
+      // MorePage doesn't render those and that tab owns them.
+      ...MOBILE_SETTINGS_SECTIONS
+        .filter(({ to }) => !MOBILE_TAB_PATHS.has(pathnameFor(to)))
+        .map(({ to }) => ({ path: to })),
     ];
     return owned.some((moreItem) => {
       const morePathname = pathnameFor(moreItem.path);

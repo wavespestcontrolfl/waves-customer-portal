@@ -192,6 +192,7 @@ describe("isAdminNavItemActive", () => {
     expect(isAdminNavItemActive(more, "/admin/more")).toBe(true);
     expect(isAdminNavItemActive(more, "/admin/settings", "?tab=team")).toBe(true);
     expect(isAdminNavItemActive(more, "/admin/settings/pest-pressure")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/_design-system/flags")).toBe(true); // standalone inline leaf
     expect(isAdminNavItemActive(more, "/admin/invoices")).toBe(true); // a nav row
     expect(isAdminNavItemActive(more, "/admin/customers")).toBe(false); // another tab
   });
