@@ -23,6 +23,10 @@ exports.up = async function up(knex) {
     t.integer('views_count').notNullable().defaultTo(0);
     t.integer('engagement_score').notNullable().defaultTo(0);
     t.timestamp('fetched_at').notNullable().defaultTo(knex.fn.now());
+    // NULL until the first successful fetch — a row created by a failed
+    // first attempt carries default-zero counts that are NOT data; the
+    // analytics rollup excludes rows with no success stamp.
+    t.timestamp('last_success_at');
     t.text('last_error');
     t.timestamps(true, true);
     t.unique(['post_id', 'platform']);

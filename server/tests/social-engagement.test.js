@@ -5,12 +5,12 @@ const Engagement = require('../services/social-engagement');
 const Studio = require('../services/social-content-studio');
 
 describe('engagementTargets (platforms_posted → fetch targets)', () => {
-  test('keeps successful FB/IG/LinkedIn entries with ids; drops GBP, failures, blanks, and dupes', () => {
+  test('keeps successful FB/IG entries with ids; drops LinkedIn/GBP, failures, blanks, and dupes', () => {
     const post = {
       platforms_posted: [
         { platform: 'facebook', postId: '123_456', success: true, content: 'x' },
         { platform: 'instagram', postId: '17912345678901234', success: true, mediaType: 'reel' },
-        { platform: 'linkedin', postId: null, success: true },            // LinkedIn can return no id
+        { platform: 'linkedin', postId: 'urn:li:share:1', success: true },  // LinkedIn: no metrics leg in v1
         { platform: 'gbp', postId: 'accounts/1/locations/2/localPosts/3', success: true, location: 'venice' },
         { platform: 'facebook', postId: '999', success: false, error: 'boom' },
         { platform: 'instagram', postId: 'dupe', success: true },          // second IG entry ignored
@@ -24,8 +24,8 @@ describe('engagementTargets (platforms_posted → fetch targets)', () => {
   });
 
   test('accepts the jsonb column as a JSON string and tolerates garbage', () => {
-    expect(Engagement.engagementTargets({ platforms_posted: JSON.stringify([{ platform: 'linkedin', postId: 'urn:li:share:1', success: true }]) }))
-      .toEqual([{ platform: 'linkedin', platformPostId: 'urn:li:share:1', mediaType: null }]);
+    expect(Engagement.engagementTargets({ platforms_posted: JSON.stringify([{ platform: 'facebook', postId: '1_2', success: true }]) }))
+      .toEqual([{ platform: 'facebook', platformPostId: '1_2', mediaType: null }]);
     expect(Engagement.engagementTargets({ platforms_posted: 'not json' })).toEqual([]);
     expect(Engagement.engagementTargets({})).toEqual([]);
   });
@@ -42,13 +42,6 @@ describe('platform response parsers', () => {
   test('instagram: like_count / comments_count', () => {
     expect(Engagement.parseInstagramEngagement({ like_count: 19, comments_count: 4 }))
       .toEqual({ likes: 19, comments: 4, shares: 0, views: 0 });
-  });
-
-  test('linkedin: likesSummary / commentsSummary (aggregated preferred, first-level fallback)', () => {
-    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: 5 }, commentsSummary: { aggregatedTotalComments: 2, totalFirstLevelComments: 1 } }))
-      .toEqual({ likes: 5, comments: 2, shares: 0, views: 0 });
-    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: '7' }, commentsSummary: { totalFirstLevelComments: 1 } }))
-      .toEqual({ likes: 7, comments: 1, shares: 0, views: 0 });
   });
 
   test('negative / non-numeric counts clamp to 0', () => {

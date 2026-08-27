@@ -8,15 +8,18 @@ const logger = require('./logger');
 // most-recent-first before this existed) so formats can be judged on what
 // actually gets engagement, not on delivery.
 //
-// Sources: Facebook Graph (page posts + videos), Instagram Graph (media),
-// LinkedIn socialActions (share/ugcPost URNs). GBP exposes no per-post
-// metrics. Fail-soft per target: a provider error records last_error on that
-// row and the sweep continues; nothing here can affect publishing.
+// Sources: Facebook Graph (page posts + videos) and Instagram Graph (media).
+// GBP exposes no per-post metrics. LinkedIn is deliberately out of v1: its
+// socialActions read needs the r_organization_social_feed scope the OAuth
+// flow does not request (an app-product decision for the owner) and stored
+// tokens have no refresh path — a leg that 403s forever is worse than none.
+// Fail-soft per target: a provider error records last_error on that row and
+// the sweep continues; nothing here can affect publishing.
 // =============================================================================
 
 const GRAPH_BASE = 'https://graph.facebook.com/v25.0';
 const FETCH_TIMEOUT_MS = 10_000;
-const ENGAGEMENT_PLATFORMS = new Set(['facebook', 'instagram', 'linkedin']);
+const ENGAGEMENT_PLATFORMS = new Set(['facebook', 'instagram']);
 
 function toCount(value) {
   const n = Number(value);
@@ -75,15 +78,6 @@ function parseInstagramEngagement(json = {}) {
   };
 }
 
-function parseLinkedInEngagement(json = {}) {
-  return {
-    likes: toCount(json?.likesSummary?.totalLikes),
-    comments: toCount(json?.commentsSummary?.aggregatedTotalComments ?? json?.commentsSummary?.totalFirstLevelComments),
-    shares: 0,
-    views: 0,
-  };
-}
-
 // ── fetchers ────────────────────────────────────────────────────────────────
 
 async function fetchGraph(url, fetchFn) {
@@ -107,37 +101,43 @@ async function fetchEngagement(target, { fetchFn = fetch } = {}) {
     const body = await fetchGraph(url, fetchFn);
     return target.platform === 'facebook' ? parseFacebookEngagement(body) : parseInstagramEngagement(body);
   }
-  if (target.platform === 'linkedin') {
-    const linkedin = require('./linkedin');
-    if (!linkedin.configured) throw new Error('LinkedIn not configured');
-    return parseLinkedInEngagement(await linkedin.fetchSocialActions(target.platformPostId));
-  }
   throw new Error(`no engagement source for ${target.platform}`);
 }
 
 // ── sweep ───────────────────────────────────────────────────────────────────
 
 async function upsertEngagement(postId, target, counts, error = null) {
-  const row = {
+  const now = new Date();
+  const base = {
     post_id: postId,
     platform: target.platform,
     platform_post_id: target.platformPostId,
-    fetched_at: new Date(),
-    updated_at: new Date(),
+    fetched_at: now,
+    updated_at: now,
     last_error: error ? String(error).slice(0, 500) : null,
   };
-  if (counts) {
-    Object.assign(row, {
+  if (!counts) {
+    // Failure: a brand-new row exists only to carry the error (its default
+    // zero counts are NOT data — last_success_at stays NULL and the rollup
+    // ignores it); an existing row keeps its last good counts and stamp.
+    await db('social_post_engagement')
+      .insert(base)
+      .onConflict(['post_id', 'platform'])
+      .merge(['fetched_at', 'updated_at', 'last_error']);
+    return;
+  }
+  await db('social_post_engagement')
+    .insert({
+      ...base,
       likes_count: toCount(counts.likes),
       comments_count: toCount(counts.comments),
       shares_count: toCount(counts.shares),
       views_count: toCount(counts.views),
       engagement_score: scoreCounts(counts),
-    });
-  }
-  // On a fetch error keep the last good counts (merge only touches the
-  // columns present in `row`), so one bad day doesn't zero a post's history.
-  await db('social_post_engagement').insert(row).onConflict(['post_id', 'platform']).merge();
+      last_success_at: now,
+    })
+    .onConflict(['post_id', 'platform'])
+    .merge();
 }
 
 // Sweep-style (safe under runExclusive's skip-on-contention): every
@@ -179,7 +179,8 @@ async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = 
 async function engagementByPost(postIds = []) {
   const out = {};
   if (!postIds.length || !(await db.schema.hasTable('social_post_engagement'))) return out;
-  const rows = await db('social_post_engagement').whereIn('post_id', postIds);
+  // Only rows that have EVER fetched successfully count as data.
+  const rows = await db('social_post_engagement').whereIn('post_id', postIds).whereNotNull('last_success_at');
   for (const r of rows) {
     const agg = out[r.post_id] || (out[r.post_id] = { likes: 0, comments: 0, shares: 0, views: 0, score: 0, platforms: {}, fetchedAt: null });
     const counts = { likes: r.likes_count, comments: r.comments_count, shares: r.shares_count, views: r.views_count };
@@ -198,7 +199,6 @@ module.exports = {
   fetchEngagement,
   parseFacebookEngagement,
   parseInstagramEngagement,
-  parseLinkedInEngagement,
   scoreCounts,
   syncRecentEngagement,
 };
