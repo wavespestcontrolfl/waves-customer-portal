@@ -398,6 +398,25 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(financials).toEqual({ price: 195, appointmentDiscountDollars: 5 });
   });
 
+  test('stored replays honor the snapshotted preset cap', () => {
+    const parent = {
+      service_id: 'pest-service',
+      service_key_snapshot: 'pest_general_quarterly',
+      primary_line_price: 200,
+      line_discount_dollars: 0,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_max_dollars: 5,
+    };
+    expect(calculateStoredVisitFinancials(parent, [], [], null)).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+    const groups = computePriceServiceGroupChanges(
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'uncapped' },
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 5 },
+    );
+    expect(groups.priceChanged).toBe(true);
+    expect(groups.fields.discount_max_dollars).toBe(5);
+  });
+
   test('still spreads a fixed-dollar appointment discount across every line', () => {
     const financials = calculateVisitFinancialsForAddons({
       primaryNet: 100,

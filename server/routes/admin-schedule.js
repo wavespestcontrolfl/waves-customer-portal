@@ -1331,6 +1331,7 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
   if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
   if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
+  if (cols.discount_max_dollars) target.discount_max_dollars = source.discount_max_dollars ?? null;
 }
 
 // Third-party Bill-To stamp (payer / PO / self-pay override): a spawned
@@ -1378,6 +1379,7 @@ function clearAppointmentDiscountCatalogFields(target, cols) {
   if (cols.discount_name) target.discount_name = null;
   if (cols.discount_service_key_filter) target.discount_service_key_filter = null;
   if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
+  if (cols.discount_max_dollars) target.discount_max_dollars = null;
 }
 
 // A posted discountId that differs from the stored one — including "no id"
@@ -1975,6 +1977,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountDollars: resolvedAppointmentDiscount.dollars,
         serviceKeyFilter: appointmentDiscount.service_key_filter || null,
         serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
+        maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
       } : null,
     };
   }
@@ -2243,6 +2246,7 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars({
     discountType: parent?.discount_type,
     discountAmount: parent?.discount_amount,
+    maxDiscountDollars: parent?.discount_max_dollars ?? null,
   }, discountBase);
   return {
     price: subtotal > 0 ? Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100) : null,
@@ -2360,7 +2364,7 @@ const PRICE_SERVICE_PRICE_KEYS = [
   'estimated_price', 'primary_line_price',
   'discount_type', 'discount_amount', 'discount_dollars',
   'discount_id', 'discount_name',
-  'discount_service_key_filter', 'discount_service_category_filter',
+  'discount_service_key_filter', 'discount_service_category_filter', 'discount_max_dollars',
   'line_discount_id', 'line_discount_name', 'line_discount_type',
   'line_discount_amount', 'line_discount_dollars',
 ];
@@ -4973,6 +4977,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
       if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
       if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+      if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -5056,6 +5061,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
         if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
         if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+        if (pricing.appointmentDiscount && cols.discount_max_dollars) childData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -5130,6 +5136,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
           if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
           if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+          if (pricing.appointmentDiscount && cols.discount_max_dollars) boosterData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -6977,6 +6984,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
         if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
+        if (cols.discount_max_dollars) existingFields.push('discount_max_dollars');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
           .first(...existingFields)
@@ -7012,7 +7020,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           appointmentDiscount: effDiscountType ? {
             discountType: effDiscountType,
             discountAmount: effDiscountAmount,
-            maxDiscountDollars: appointmentDiscountPreset?.max_discount_dollars ?? null,
+            maxDiscountDollars: appointmentDiscountPreset
+              ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+              : (appointmentDiscountChanged ? null : (existing?.discount_max_dollars ?? null)),
             serviceKeyFilter: appointmentDiscountPreset
               ? (appointmentDiscountPreset.service_key_filter || null)
               : (appointmentDiscountChanged ? null : (existing?.discount_service_key_filter || null)),
@@ -7049,6 +7059,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const existingPrice = await db('scheduled_services')
           .where({ id: req.params.id })
           .first('estimated_price', 'discount_type', 'discount_amount',
+            ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
           .catch(() => null);
@@ -7109,7 +7120,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             appointmentDiscount: {
               discountType,
               discountAmount: Number(discountAmount),
-              maxDiscountDollars: appointmentDiscountPreset?.max_discount_dollars ?? null,
+              maxDiscountDollars: appointmentDiscountPreset
+                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+                : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
               serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
               serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
             },
@@ -7162,6 +7175,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (presetCols.discount_name) updates.discount_name = appointmentDiscountPreset.name;
       if (presetCols.discount_service_key_filter) updates.discount_service_key_filter = appointmentDiscountPreset.service_key_filter || null;
       if (presetCols.discount_service_category_filter) updates.discount_service_category_filter = appointmentDiscountPreset.service_category_filter || null;
+      if (presetCols.discount_max_dollars) updates.discount_max_dollars = appointmentDiscountPreset.max_discount_dollars ?? null;
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
