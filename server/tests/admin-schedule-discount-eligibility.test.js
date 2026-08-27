@@ -18,6 +18,7 @@ const {
   calculateStoredVisitFinancials,
   lineExcludedFromPercentDiscount,
   isPercentDiscountType,
+  computePriceServiceGroupChanges,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
@@ -333,6 +334,30 @@ describe('admin schedule appointment discount eligibility', () => {
 
     expect(pricing.appointmentDiscount.discountDollars).toBe(11.7);
     expect(pricing.finalPrice).toBe(165.3);
+  });
+
+  test('treats a same-valued preset switch with a different scope as a price change', () => {
+    const before = {
+      primary_line_price: 117,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_id: 'preset-unscoped',
+      discount_service_key_filter: null,
+      discount_service_category_filter: null,
+    };
+    const updates = {
+      primary_line_price: 117,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_id: 'preset-termite',
+      discount_service_key_filter: null,
+      discount_service_category_filter: 'termite',
+    };
+    const groups = computePriceServiceGroupChanges(before, updates);
+    expect(groups.priceChanged).toBe(true);
+    expect(groups.fields.discount_id).toBe('preset-termite');
+    expect(groups.fields.discount_service_category_filter).toBe('termite');
+    expect(computePriceServiceGroupChanges(before, { ...updates, discount_id: 'preset-unscoped', discount_service_category_filter: null }).priceChanged).toBe(false);
   });
 
   test('still spreads a fixed-dollar appointment discount across every line', () => {

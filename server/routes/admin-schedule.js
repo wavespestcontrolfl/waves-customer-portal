@@ -2376,7 +2376,15 @@ function computePriceServiceGroupChanges(before, updates) {
     || (updates.discount_amount !== undefined
       && moneyValuesDiffer(updates.discount_amount, before?.discount_amount))
     || (updates.line_discount_dollars !== undefined
-      && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars));
+      && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars))
+    // A preset switch with the same type/amount but a different identity or
+    // service scope still changes what the series bills (Codex #3531 r2 P1).
+    || (updates.discount_id !== undefined
+      && String(updates.discount_id ?? '') !== String(before?.discount_id ?? ''))
+    || (updates.discount_service_key_filter !== undefined
+      && (updates.discount_service_key_filter || null) !== (before?.discount_service_key_filter || null))
+    || (updates.discount_service_category_filter !== undefined
+      && (updates.discount_service_category_filter || null) !== (before?.discount_service_category_filter || null));
   const fields = {};
   if (serviceChanged) {
     for (const key of PRICE_SERVICE_SERVICE_KEYS) {
@@ -2638,6 +2646,7 @@ function mapAddonRow(row) {
     serviceId: row.service_id || null,
     serviceName: row.service_name,
     serviceKey: row.service_key_snapshot || null,
+    serviceCategory: row.service_category_snapshot || null,
     excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
     estimatedDuration: row.estimated_duration_minutes ?? null,
     basePrice: row.base_price != null ? Number(row.base_price) : null,
@@ -3252,6 +3261,8 @@ router.get('/', async (req, res, next) => {
             autopayActive,
             duesCollectedThisMonth: visitMonthDuesCollected,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            serviceKey: s.service_key_snapshot || null,
+            serviceCategorySnapshot: s.service_category_snapshot || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
             isRecurring: !!s.is_recurring,
             isCallback: !!s.is_callback,
@@ -3270,6 +3281,8 @@ router.get('/', async (req, res, next) => {
           billingMode: s.billing_mode || null,
           autopayActive,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          serviceKey: s.service_key_snapshot || null,
+          serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           monthlyRate: s.monthly_rate,
           perApplicationFee: s.per_application_fee,
@@ -3372,6 +3385,8 @@ router.get('/', async (req, res, next) => {
         // (codex P2).
         ...traceFeedFields(rowPrimaryVerdict, rowAddonVerdicts),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        serviceKey: s.service_key_snapshot || null,
+        serviceCategorySnapshot: s.service_category_snapshot || null,
         excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -3609,7 +3624,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
-          'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot',
+          'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
@@ -3799,6 +3814,8 @@ router.get('/week', async (req, res, next) => {
               autopayActive,
               duesCollectedThisMonth: visitMonthDuesCollected,
               estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+              serviceKey: s.service_key_snapshot || null,
+              serviceCategorySnapshot: s.service_category_snapshot || null,
               excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
               isRecurring: !!s.is_recurring,
               isCallback: !!s.is_callback,
@@ -3817,6 +3834,8 @@ router.get('/week', async (req, res, next) => {
             billingMode: s.billing_mode || null,
             autopayActive,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            serviceKey: s.service_key_snapshot || null,
+            serviceCategorySnapshot: s.service_category_snapshot || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
             monthlyRate: s.monthly_rate,
             perApplicationFee: s.per_application_fee,
@@ -3885,6 +3904,8 @@ router.get('/week', async (req, res, next) => {
           windowEnd: s.window_end,
           estimatedDuration: s.estimated_duration_minutes,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          serviceKey: s.service_key_snapshot || null,
+          serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -4006,7 +4027,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.service_type', 'scheduled_services.status',
         'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.zone',
-        'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot',
+        'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
         'scheduled_services.is_recurring',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
@@ -5591,7 +5612,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.estimated_price',
+        'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
@@ -5640,6 +5661,8 @@ router.get('/list', async (req, res, next) => {
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,
       estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+      serviceKey: s.service_key_snapshot || null,
+      serviceCategorySnapshot: s.service_category_snapshot || null,
       excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
       primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
@@ -6397,8 +6420,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         discountAmount = appointmentDiscountPreset.amount != null ? Number(appointmentDiscountPreset.amount) : null;
       }
     }
-    const presetEligibilityCheck = async (subtotal, serviceKey, serviceCategory) => {
+    // Eligibility is judged on the lines the preset can actually reach —
+    // the same matching + percent-eligible filter buildAppointmentPricing
+    // applies on create — so a termite-scoped preset on a pest-primary
+    // visit passes on its add-on, and out-of-scope / excluded lines can't
+    // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
+    // [{ amount, serviceKey, serviceCategory }], primary first.
+    const presetEligibilityCheck = async (lines) => {
       if (!appointmentDiscountPreset) return;
+      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
+      const matching = (lines || []).filter((line) => (
+        (!keyFilter || keyFilter === line.serviceKey)
+        && (!categoryFilter || categoryFilter === line.serviceCategory)
+      ));
+      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
+        ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
+        : matching;
+      const context = eligible[0] || matching[0] || {};
+      const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
+      const serviceKey = context.serviceKey || null;
+      const serviceCategory = context.serviceCategory || null;
       const customerRef = await db('scheduled_services').where({ id: req.params.id }).first('customer_id');
       const customerRow = customerRef?.customer_id
         ? await db('customers').where({ id: customerRef.customer_id }).first()
@@ -6929,11 +6971,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null)),
           } : null,
         }, normalizedAddons);
-        await presetEligibilityCheck(
-          primaryNet + normalizedAddons.reduce((sum, l) => sum + (l.price || 0), 0),
-          updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
-          updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
-        );
+        await presetEligibilityCheck([
+          {
+            amount: primaryNet,
+            serviceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
+            serviceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          },
+          ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
         if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
@@ -7012,7 +7057,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }, legacyLines);
           if (exclusionAware.price != null) finalPrice = exclusionAware.price;
         }
-        await presetEligibilityCheck(basePrice, existingPrice?.service_key_snapshot || null, existingPrice?.service_category_snapshot || null);
+        await presetEligibilityCheck([
+          {
+            amount: primaryGross,
+            serviceKey: existingPrice?.service_key_snapshot || null,
+            serviceCategory: existingPrice?.service_category_snapshot || null,
+          },
+          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
         const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
@@ -14598,6 +14650,7 @@ router.get('/services-dropdown', async (req, res, next) => {
             base_price: toPrice(s.base_price),
             default_duration_minutes: s.default_duration_minutes,
             serviceKey: s.service_key || null,
+            serviceCategory: s.category || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
           });
         }

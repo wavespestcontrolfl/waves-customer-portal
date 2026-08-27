@@ -1174,6 +1174,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // takes a percentage appointment discount (termite bond, ...). Preview
     // only — the server recomputes on save.
     excludedFromPercentDiscount: service.excludedFromPercentDiscount === true,
+    serviceKey: service.serviceKey || null,
+    // *Snapshot: the list payloads' bare serviceCategory is the display
+    // family (pest/lawn/...), not the catalog category the filters use.
+    serviceCategory: service.serviceCategorySnapshot || null,
     windowStart: service.windowStart || "",
     windowEnd: service.windowEnd || "",
     serviceType: service.serviceType || "",
@@ -1326,6 +1330,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // discount (termite bond, rodent bait, ...). Drives the preview only —
         // the server recomputes the same exclusion on save.
         excludedFromPercentDiscount: a.excludedFromPercentDiscount === true,
+        serviceKey: a.serviceKey || null,
+        serviceCategory: a.serviceCategory || null,
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
         recurringIntervalDays: a.recurringIntervalDays ?? null,
@@ -1737,6 +1743,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountId: null,
         _origDiscountName: null,
         excludedFromPercentDiscount: false,
+        serviceKey: null,
+        serviceCategory: null,
         estimatedDuration: "",
         recurringPattern: null,
         recurringIntervalDays: null,
@@ -2328,28 +2336,45 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     0,
   );
   const servicePrice = primaryPrice + addonLinesTotal;
-  // A percentage discount skips percent-excluded lines (termite bond, rodent
-  // bait, ...) — mirrors calculateVisitFinancialsForAddons on the server so
-  // the preview matches what saves. The primary line only carries the flag
-  // when it was picked from the catalog in this session; the server is
-  // authoritative either way.
+  const selectedDiscountPreset =
+    discountPresetId && discountPresetId !== "custom"
+      ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
+      : null;
+  // Mirrors calculateVisitFinancialsForAddons on the server so the preview
+  // matches what saves: a preset's service_key/category filter scopes the
+  // discount to matching lines, and a percentage additionally skips
+  // percent-excluded lines (termite bond, rodent bait, ...). The primary
+  // line's identity comes from the list payload or a catalog pick in this
+  // session; the server is authoritative either way.
+  const presetKeyFilter = selectedDiscountPreset?.service_key_filter || null;
+  const presetCategoryFilter =
+    selectedDiscountPreset?.service_category_filter || null;
+  const lineInDiscountScope = (line) =>
+    (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
+    (!presetCategoryFilter ||
+      presetCategoryFilter === (line.serviceCategory || null));
+  const lineTakesDiscount = (line) =>
+    lineInDiscountScope(line) &&
+    !(discountType === "percentage" && line.excludedFromPercentDiscount === true);
+  const primaryLineForDiscount = {
+    serviceKey: form.serviceKey,
+    serviceCategory: form.serviceCategory,
+    excludedFromPercentDiscount: form.excludedFromPercentDiscount === true,
+  };
   const percentExcludedLines = serviceLines.filter(
-    (l) => l.excludedFromPercentDiscount === true,
+    (l) => !lineTakesDiscount(l),
   );
   const percentDiscountBase =
-    (form.excludedFromPercentDiscount === true ? 0 : primaryPrice) +
+    (lineTakesDiscount(primaryLineForDiscount) ? primaryPrice : 0) +
     serviceLines.reduce(
       (sum, l) =>
-        l.excludedFromPercentDiscount === true ||
-        l.price === "" ||
-        isNaN(parseFloat(l.price))
+        !lineTakesDiscount(l) || l.price === "" || isNaN(parseFloat(l.price))
           ? sum
           : sum + parseFloat(l.price),
       0,
     );
   // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
-  // a percentage never exceeds its eligible base, a flat amount never exceeds
-  // the subtotal.
+  // never more than the lines the discount can reach.
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
@@ -2357,12 +2382,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             percentDiscountBase,
             percentDiscountBase * (Number(discountAmount) / 100),
           )
-        : Math.min(servicePrice, Number(discountAmount))
+        : Math.min(percentDiscountBase, Number(discountAmount))
       : 0;
-  const selectedDiscountPreset =
-    discountPresetId && discountPresetId !== "custom"
-      ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
-      : null;
   const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
@@ -2602,6 +2623,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                   onField(
                                     "excludedFromPercentDiscount",
                                     svc.excludedFromPercentDiscount === true,
+                                  );
+                                }
+                                if (svc.serviceKey !== undefined) {
+                                  onField("serviceKey", svc.serviceKey || null);
+                                  onField(
+                                    "serviceCategory",
+                                    svc.serviceCategory || null,
                                   );
                                 }
                                 setPickerKey(null);
@@ -3503,7 +3531,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
-                {discountType === "percentage" &&
+                {discountType &&
                   discountAmount !== "" &&
                   percentExcludedLines.length > 0 && (
                     <div
