@@ -1493,6 +1493,10 @@ export default function ServiceLibraryPage() {
   const [services, setServices] = useState([]);
   const [selectedView, setSelectedView] = useState("all");
   const [selectedId, setSelectedId] = useState(null);
+  // Sub-tabs + actions registered by the embedded Protocol & Readiness page
+  // (null on the other tabs). Declared before the mobile early return below
+  // so the hook order is stable.
+  const [secondary, setSecondary] = useState(null);
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState("");
@@ -1681,10 +1685,6 @@ export default function ServiceLibraryPage() {
     { key: "protocols", label: "Protocol & Readiness", Icon: Sprout },
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
-
-  // Sub-tabs + actions registered by the embedded Protocol & Readiness page
-  // (null on the other tabs).
-  const [secondary, setSecondary] = useState(null);
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
