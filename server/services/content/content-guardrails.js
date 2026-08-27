@@ -1851,18 +1851,34 @@ function spanCrossesBlockBoundary(whole, start, matched) {
   if (!matched.includes('\n')) return false;
   const prefixOf = (line) => (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
   const lineStart = whole.lastIndexOf('\n', start - 1) + 1;
-  const lineEnd = whole.indexOf('\n', start);
-  const openDepth = (prefixOf(whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)).match(/>/g) || []).length;
-  return matched.split('\n').slice(1).some((l) => {
-    const prefix = prefixOf(l);
+  const openLineEnd = whole.indexOf('\n', start);
+  const openDepth = (prefixOf(whole.slice(lineStart, openLineEnd === -1 ? undefined : openLineEnd)).match(/>/g) || []).length;
+  // Subsequent lines are judged on their FULL source text (the match may
+  // end mid-line at the closing run — a fence candidate's validity depends
+  // on the info string beyond it).
+  const matchEnd = start + matched.length;
+  let nl = whole.indexOf('\n', start);
+  while (nl !== -1 && nl < matchEnd) {
+    const ls = nl + 1;
+    const le = whole.indexOf('\n', ls);
+    const line = whole.slice(ls, le === -1 ? undefined : le);
+    const prefix = prefixOf(line);
     if ((prefix.match(/>/g) || []).length > openDepth) return true;
-    const content = l.slice(prefix.length);
+    const content = line.slice(prefix.length);
     // A marker whose content is only pipes/colons/dashes ("- | -") is a
     // table DELIMITER row shape, not a list interrupt — the table scanner
     // owns those lines at block level.
-    return /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(content)
-      && !/^ {0,3}(?:[-*+]|1[.)])[ \t]+[|:\- \t]+$/.test(content);
-  });
+    if (/^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(content)
+      && !/^ {0,3}(?:[-*+]|1[.)])[ \t]+[|:\- \t]+$/.test(content)) return true;
+    // A VALID fence-opener line (3+ run at line start; a backtick fence's
+    // info string carries no backtick) interrupts the paragraph and opens
+    // a fenced block — the run belongs to the fence pass, so a span can
+    // neither cross it nor close on it.
+    const fenceOpen = content.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceOpen && !(fenceOpen[1][0] === '`' && fenceOpen[2].includes('`'))) return true;
+    nl = le;
+  }
+  return false;
 }
 
 function blankNonRenderedMarkdown(text) {
@@ -1886,6 +1902,11 @@ function blankNonRenderedMarkdown(text) {
   const fenceIntervals = [];
   {
     let pos = 0; let openCh = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
+    // Ambient (unquoted) list tracking, mirroring pass 3's rules: a fence
+    // opened on a list CONTINUATION line ("- item" then "  ~~~") scopes to
+    // that item's content column too, not just fences whose own line
+    // carries the marker.
+    let ambientListIndent = 0; let prevBlank = true;
     for (const line of raw.split('\n')) {
       const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
       const depth = (quotePrefix.match(/>/g) || []).length;
@@ -1905,18 +1926,25 @@ function blankNonRenderedMarkdown(text) {
       } else {
         // A fence may open DIRECTLY as list-item content ("- ~~~html").
         const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+        const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
+        if (marker && depth === 0 && markerIndent <= ambientListIndent + 3) ambientListIndent = marker[0].length;
+        else if (!blank && depth === 0 && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
         const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
         const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
           || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
         if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+          // A dedented fence itself ends the ambient list (pass-3 posture).
+          if (!marker && depth === 0 && indent < ambientListIndent) ambientListIndent = 0;
           openCh = opener[1][0]; openLen = opener[1].length; start = pos;
           openDepth = depth;
           // The list column is QUOTE-RELATIVE (indent above is computed on
-          // the quote-stripped line), so a fence opened as list-item
-          // content INSIDE a blockquote ("> - ~~~") still ends when the
-          // quoted content dedents out of the item.
-          openListIndent = marker ? marker[0].length : 0;
+          // the quote-stripped line): a fence opened as list-item content
+          // INSIDE a blockquote ("> - ~~~"), or on an unquoted list
+          // CONTINUATION line, still ends when content dedents out of the
+          // item.
+          openListIndent = marker ? marker[0].length : (depth === 0 ? ambientListIndent : 0);
         }
+        prevBlank = blank;
       }
       pos += line.length + 1;
     }

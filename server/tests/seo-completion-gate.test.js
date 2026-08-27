@@ -1160,6 +1160,44 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(quotedListFenceDedent.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Destination parentheses balance at ANY depth — three nested levels
+    // still resolve to /contact/ and the wording-free CTA is flagged.
+    const deepParens = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Schedule Service](/x(a(b(c)))/../contact/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(deepParens.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A link label cannot cross a PARAGRAPH boundary — a blank line splits
+    // it, so no link renders and presence is NOT satisfied.
+    const splitLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite\n\nEstimate](/contact/) tail.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(splitLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A VALID fence-opener line interrupts the paragraph and opens a fence
+    // — a span cannot close on its run, so the CTA below it is code, not a
+    // clickable link.
+    const fenceOpenerSpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Intro ```\n```\n[Get a Termite Estimate](/contact/) tail' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(fenceOpenerSpan.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A fence opened on a list CONTINUATION line scopes to the item in the
+    // comment pre-scan too — the dedented comment's hidden link never
+    // satisfies presence.
+    const continuationFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '- item\n  ~~~\n<!--\n[Get My Free Pest Control Estimate](/contact/)\n-->' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(continuationFence.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

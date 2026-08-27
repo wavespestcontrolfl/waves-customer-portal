@@ -2278,8 +2278,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('``\n| A | B |\n| --- | --- |\n``')).toBe(false);
     // Escaped pipes are cell content — counts still match, table detected.
     expect(guardrails.hasRawMarkdownTable('A \\| B | C\n- | -\n1 | 2')).toBe(true);
-    // Inline code spans of 3+ backticks after prose are code.
-    expect(guardrails.hasRawMarkdownTable('See ```\nA | B\n--- | ---\n``` here')).toBe(false);
+    // A VALID fence-opener line ("``` here" — info string carries no
+    // backtick) interrupts the paragraph and opens a fence (CommonMark:
+    // "Foo" / "```" / "bar" fences bar), so the mid-prose run before it
+    // cannot pair as a span — the pipe lines between them stay visible.
+    expect(guardrails.hasRawMarkdownTable('See ```\nA | B\n--- | ---\n``` here')).toBe(true);
     // A rejected backtick-fence candidate (backtick in the info string) is
     // reprocessed inline: with a later matching run it opens a code SPAN,
     // hiding the table inside it.
@@ -2370,6 +2373,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   x\n> | A | B |\n> | - | - |')).toBe(true);
     // …while content still AT the item's column stays fenced.
     expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   | A | B |\n>   | - | - |\n>   ~~~')).toBe(false);
+    // A fence opened on a list CONTINUATION line ("- item" then "  ~~~")
+    // scopes to the item in the comment pre-scan too — the dedented comment
+    // after it is stripped, not treated as fenced.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ~~~\n<!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // A VALID fence-opener line interrupts the paragraph — a span cannot
+    // close on its run, so the fence opens and hides the table.
+    expect(guardrails.hasRawMarkdownTable('Intro ```\n```\n| A | B |\n| - | - |')).toBe(false);
     // An ESCAPED pipe inside a code span is cell CONTENT even at block
     // level — "| `a \| b` | c |" is a 2-cell header, no match for a 3-cell
     // delimiter.

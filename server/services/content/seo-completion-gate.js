@@ -480,22 +480,67 @@ function extractLinks(body) {
     while (i - 1 - n >= 0 && str[i - 1 - n] === '\\') n += 1;
     return n % 2 === 1;
   };
+  // A label cannot cross a PARAGRAPH boundary — a blank line (a blank
+  // quote line included), an ATX heading, a thematic break, or a list-item
+  // opener (bullet, or ordered numbered 1) ends the paragraph, so
+  // "[Get a Termite" + blank line + "Estimate](/contact/)" renders no link
+  // and must not satisfy CTA presence.
+  const labelBoundaryLine = (line) => {
+    const stripped = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '');
+    if (!stripped.trim()) return true;
+    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:[-*+]|1[.)])[ \t]+\S)/.test(stripped);
+  };
   const balancedLabelEnd = (str, open) => {
     let depth = 0;
     for (let i = open; i < str.length; i += 1) {
       const ch = str[i];
       if (ch === '\\') { i += 1; continue; }
+      if (ch === '\n') {
+        const le = str.indexOf('\n', i + 1);
+        if (labelBoundaryLine(str.slice(i + 1, le === -1 ? undefined : le))) return -1;
+        continue;
+      }
       if (ch === '[') depth += 1;
       else if (ch === ']') { depth -= 1; if (depth === 0) return i; }
     }
     return -1;
   };
-  // The inline DESTINATION may contain balanced parentheses
-  // ("/x(foo)/../contact/" — CommonMark accepts nested balanced pairs; the
-  // browser resolves the full path), so the non-angle arm consumes paren
-  // groups atomically (two levels deep) instead of stopping at the first
-  // ")". Whitespace is allowed inside the parentheses ("( /contact/ )").
-  const inlineDest = /^\(\s*(<[^<>\n]*>|(?:[^()\s]|\((?:[^()\s]|\([^()\s]*\))*\))+)[^)]*\)/;
+  // The inline DESTINATION may contain balanced parentheses at ANY depth
+  // ("/x(a(b(c)))/../contact/" — CommonMark accepts them; the browser
+  // resolves the full path), so it is parsed procedurally: an
+  // angle-bracketed form, or a bare run tracking paren depth, ending at
+  // whitespace (an optional title may follow) or the link's closing ")".
+  // Whitespace is allowed inside the parentheses ("( /contact/ )"); an
+  // UNBALANCED destination is not a link.
+  const parseInlineDest = (str) => {
+    if (str[0] !== '(') return null;
+    let i = 1;
+    while (i < str.length && /[ \t\n]/.test(str[i])) i += 1;
+    let destRaw;
+    if (str[i] === '<') {
+      const close = str.indexOf('>', i + 1);
+      const nl = str.indexOf('\n', i + 1);
+      if (close === -1 || (nl !== -1 && nl < close)) return null;
+      destRaw = str.slice(i, close + 1);
+      i = close + 1;
+    } else {
+      let depth = 0;
+      const from = i;
+      while (i < str.length) {
+        const ch = str[i];
+        if (ch === '\\' && i + 1 < str.length) { i += 2; continue; }
+        if (/\s/.test(ch)) break;
+        if (ch === '(') depth += 1;
+        else if (ch === ')') { if (depth === 0) break; depth -= 1; }
+        i += 1;
+      }
+      if (depth > 0 || i === from) return null;
+      destRaw = str.slice(from, i);
+    }
+    const close = str.indexOf(')', i);
+    if (close === -1) return null;
+    return { destRaw, end: close };
+  };
   const refLabel = /^\[((?:\\[\s\S]|[^\]\\])*)\]/;
   for (let i = 0; i < s.length; i += 1) {
     if (s[i] !== '[' || oddEscaped(s, i)) continue;
@@ -507,10 +552,10 @@ function extractLinks(body) {
     const text = s.slice(i + 1, end);
     if (!text) { i = end; continue; }
     const rest = s.slice(end + 1);
-    const inline = rest.match(inlineDest);
+    const inline = parseInlineDest(rest);
     if (inline) {
-      links.push({ anchor: text, href: dest(inline[1]) });
-      i = end + inline[0].length;
+      links.push({ anchor: text, href: dest(inline.destRaw) });
+      i = end + 1 + inline.end;
       continue;
     }
     // A following "(" without a parseable destination, or a ":" (this is a
