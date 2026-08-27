@@ -4848,7 +4848,6 @@ export default function Customer360ProfileV2({
   customerId,
   onClose,
   onSelectCustomer,
-  onAddProperty,
   initialTab = "overview",
   initialScheduledServiceId = null,
 }) {
@@ -5799,21 +5798,6 @@ export default function Customer360ProfileV2({
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Prepay Invoice
-                </button>
-              )}
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={() => onAddProperty?.(c)}
-                  // Sibling-PROFILE creation (customer_accounts layer, frozen
-                  // for new data by migration 20260629000001) — a separately
-                  // billed profile on this account. A service address for THIS
-                  // profile is added on the Property tab. Retirement of this
-                  // path is an owner ruling (see PR #3539 thread).
-                  title="Creates a separately billed sibling profile on this account. To add a service address to this profile, use the Property tab."
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                >
-                  Add Property
                 </button>
               )}
               <button
@@ -7768,18 +7752,6 @@ export default function Customer360ProfileV2({
                 >
                   Add note
                 </button>{" "}
-                {isAdmin && (
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      onAddProperty?.(c);
-                      setMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                  >
-                    Add property
-                  </button>
-                )}{" "}
               </div>
             )}
           </div>{" "}
