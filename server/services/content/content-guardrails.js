@@ -1911,8 +1911,11 @@ function blankNonRenderedMarkdown(text) {
     // ("- outer" + "    - inner") — the content column moves with them.
     const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     const markerAccepted = Boolean(listItem && listItem[1].length <= fenceListIndent + 3);
+    // An interrupting block (ATX heading) ends the list even with no blank
+    // line — a heading can never lazily continue a list item.
     if (markerAccepted) fenceListIndent = listItem[1].length + listItem[2].length;
-    else if (!blank && fencePrevBlank && depth === 0 && indent < fenceListIndent) fenceListIndent = 0;
+    else if (!blank && depth === 0 && indent < fenceListIndent
+      && (fencePrevBlank || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(stripped))) fenceListIndent = 0;
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
     // the item's content column, so "10. item" + a 4-space fence is a fence
@@ -1957,7 +1960,12 @@ function blankNonRenderedMarkdown(text) {
     if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
       listContext = true;
       listContentIndent = listItem[1].length + listItem[2].length;
-    } else if (!blank && !indented && prevBlank && rawIndent < listContentIndent) listContext = false;
+    } else if (!blank && rawIndent < listContentIndent
+      && ((!indented && prevBlank) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(stripped))) {
+      // A dedented paragraph after a blank — or an INTERRUPTING block
+      // (ATX heading) even without one — ends the list.
+      listContext = false;
+    }
     prevBlank = blank;
     if (indented) {
       if (!listContext) return '';

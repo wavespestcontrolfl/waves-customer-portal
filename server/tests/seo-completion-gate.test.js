@@ -773,6 +773,37 @@ describe('seo-completion-gate', () => {
     });
     expect(listItemDef.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // A definition's destination may sit on the NEXT line but never across
+    // a blank line — "[cta]:\n\n/contact/" registers nothing.
+    const blankLineDef = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere.\n\n[Get a Termite Estimate][cta]\n\n[cta]:\n\n/contact/' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(blankLineDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const nextLineDef = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere.\n\n[Get a Termite Estimate][cta]\n\n[cta]:\n/contact/' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(nextLineDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // An INFINITIVE suffix names the service ("…Estimate to Control
+    // Termites"); a determiner before a place noun stays place-shaped.
+    const infinitiveSuffix = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere.\n\n[Get an Estimate to Control Termites](/pest-control-calculator/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(infinitiveSuffix.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(infinitiveSuffix.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    const protectYourLawn = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate to Protect Your Lawn](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(protectYourLawn.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // A span cannot cross an ATX heading — the heading's live link is judged.
     const headingBoundary = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n> \`sample\n# [Schedule Service](/contact/) \`` }),

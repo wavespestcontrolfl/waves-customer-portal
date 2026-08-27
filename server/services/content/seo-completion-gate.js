@@ -452,7 +452,9 @@ function extractLinks(body) {
   const defs = new Map();
   // A definition may be a LIST ITEM's content ("- [cta]: /contact/") —
   // CommonMark registers it document-wide after removing the marker.
-  const def = /^\s{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[([^\]]+)\]:\s*(\S+)/gm;
+  // The destination may sit on the NEXT line but never across a blank
+  // line ("[cta]:\n\n/contact/" registers nothing).
+  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[([^\]]+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)/gm;
   while ((m = def.exec(s)) !== null) {
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
@@ -532,10 +534,13 @@ function conversionCtaLinks(body) {
       // Property-context nouns after a determiner/possessive ("for your
       // lawn", "on the trees") describe WHERE, not a service, so the
       // place-shaped services (lawn, tree-shrub) are dropped in that form.
-      const after = anchor.slice(end).match(/^\s+(?:for|on)\s+((?:[a-z&-]+\s?){1,5})/i);
+      const after = anchor.slice(end).match(/^\s+(?:for|on|to|against)\s+((?:[a-z&-]+\s?){1,5})/i);
       if (after) {
         const phrase = after[1];
-        const environmental = /^(?:your|my|our|the|a|an|this|that)\b/i.test(phrase);
+        // Place-shaped when a determiner sits directly before the place
+        // noun anywhere in the phrase ("for your lawn", "to protect your
+        // lawn") — "to Control Termites" names the service.
+        const environmental = /\b(?:your|my|our|the|a|an|this|that)\s+(?:[a-z&-]+\s+)?(?:lawn|tree|shrub)/i.test(phrase);
         for (const svc of termsIn(phrase)) {
           // "…for your lawn" names a PLACE unless lawn is this post's own
           // service — recorded separately; the brief-aware checks below

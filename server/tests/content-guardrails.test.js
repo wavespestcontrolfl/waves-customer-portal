@@ -2283,6 +2283,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('- ~~~\n  | A | B |\n  | - | - |')).toBe(false);
     // A span never crosses an ATX heading — a heading starts a new block.
     expect(guardrails.hasRawMarkdownTable('> `sample\n# | A | B | `\n| A | B |\n| - | - |')).toBe(true);
+    // An interrupting heading ends the list even without a blank line —
+    // later 4-space content is indented code again.
+    expect(guardrails.hasRawMarkdownTable('- item\n# Heading\n\n    | A | B |\n    | - | - |')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
