@@ -3405,9 +3405,10 @@ const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled
 /**
  * Customer IDs that every CARD-EXPIRY surface (dashboard cards_expiring_7d,
  * Monday sendCardExpiryWarnings, daily workflows/payment-expiry) must leave
- * alone: prepay coverage active across the WHOLE window (today AND horizon —
- * terms are contiguous, and a paid term starting inside the window does not
- * cover today, so the monthly run before term_start still charges) MINUS
+ * alone: ONE paid prepay term spanning the WHOLE window (term_start <= today
+ * and term_end >= horizon — a term starting inside the window does not
+ * cover today, a term ending inside it does not cover the horizon, and two
+ * terms with a gap between them are not continuous coverage) MINUS
  * customers who still have a card charge coming inside the window anyway.
  * Both subtractions DELEGATE to the billing authorities rather than
  * re-deriving them:
@@ -3438,10 +3439,17 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
   const today = etDateString();
   let covered;
   try {
-    const atHorizon = await getActivelyCoveredCustomerIds(horizon, conn);
-    covered = atHorizon.size
-      ? new Set([...(await getActivelyCoveredCustomerIds(today, conn))].filter((id) => atHorizon.has(id)))
-      : atHorizon;
+    // ONE paid term must span the whole window [today, horizon]: the schema
+    // does not enforce contiguous terms, so "covered today" ∩ "covered at
+    // the horizon" could be two terms with a gap in between during which
+    // monthly billing charges the card. Same covered-term SQL as
+    // getActivelyCoveredCustomerIds (coveredTermsAsOf), bounded on both
+    // ends instead of at one date.
+    const rows = await coveredTermsAsOf(conn, null)
+      .where('t.term_start', '<=', today)
+      .where('t.term_end', '>=', horizon)
+      .distinct('t.customer_id');
+    covered = new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
     return new Set();
@@ -3549,17 +3557,22 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         completionAutopayChargeEnabled,
       });
       if (prediction.kind !== 'auto_charge') continue;
-      // Completion REUSES an existing non-cancelled invoice for the visit
-      // (admin-dispatch completionSuppressorInvoiceLookup — a route-module
-      // helper, so the 3-line lookup is mirrored here with the same status
-      // set) and marks paid / prepaid / processing / refunded ones as
-      // already settled: no second card charge, no warning.
-      const existingInvoice = await conn('invoices')
+      // Completion's invoice state machine (admin-dispatch; route-module
+      // helpers, mirrored here with the same status sets):
+      //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
+      //     parks it — no charge;
+      //   - completionSuppressorInvoiceLookup: the most recent NON-cancelled
+      //     invoice is reused, and paid / prepaid / processing means already
+      //     settled — no second card charge.
+      // Either way the expiring card is not what breaks: no warning.
+      const visitInvoices = await conn('invoices')
         .where({ scheduled_service_id: v.id })
-        .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
         .orderBy('created_at', 'desc')
-        .first('id', 'status');
-      if (existingInvoice && ['paid', 'prepaid', 'processing', 'refunded'].includes(String(existingInvoice.status || '').toLowerCase())) continue;
+        .select('id', 'status');
+      const statusOf = (inv) => String(inv?.status || '').toLowerCase();
+      if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
+      const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
+      if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
       // Only an auto_charge touches the saved card at completion ('invoice'
       // — gate off or a priced callback — goes out as a pay-link).
       covered.delete(customerId);

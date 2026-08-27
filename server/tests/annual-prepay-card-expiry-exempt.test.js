@@ -61,20 +61,24 @@ const baseVisit = (over) => ({
 beforeEach(() => jest.clearAllMocks());
 
 describe('getCardExpiryExemptCustomerIds — coverage window', () => {
-  test('covered today AND at the horizon → exempt; both ends are asked', async () => {
+  test('ONE term spanning today..horizon → exempt (single bounded covered-term query, not two endpoint lookups)', async () => {
     const calls = route({ terms: coveredAlways(['c-prepaid']) });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
     expect(calls.terms).toEqual(expect.arrayContaining([
-      ['where', 't.term_end', '>=', HORIZON], ['where', 't.term_end', '>=', TODAY],
+      ['where', 't.term_start', '<=', TODAY], ['where', 't.term_end', '>=', HORIZON],
     ]));
+    // a gap between two terms cannot slip through an endpoint intersection:
+    // there is no second, single-date coverage lookup for the window
+    expect(calls.terms.filter((c) => c[0] === 'where' && c[1] === 't.term_end').length).toBe(1);
     expect(calls.visits).toEqual(expect.arrayContaining([
       ['whereNotIn', 'ss.status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']],
       ['where', 'ss.scheduled_date', '>=', TODAY], ['where', 'ss.scheduled_date', '<=', HORIZON],
     ]));
   });
 
-  test('a paid term that starts AFTER today (covered at the horizon only) is not exempt', async () => {
-    const calls = route({ terms: (own) => (asked(own, 't.term_end') === HORIZON ? coveredAlways(['c-future']) : []) });
+  test('a term that does not span the window (starts after today, or ends before the horizon) is not exempt', async () => {
+    // the bounded query returns nothing for such a term
+    const calls = route({ terms: (own) => (asked(own, 't.term_start') === TODAY && asked(own, 't.term_end') === HORIZON ? [] : coveredAlways(['c-future'])) });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
     expect(calls.payments).toEqual([]);
   });
@@ -100,7 +104,7 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
 
   test('a pre-term WaveGuard Monthly retry (obligation date not covered, not collected) keeps the warning', async () => {
     route({
-      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
+      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' && asked(own, 't.term_start') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
       payments: (own) => (isSiblingLookup(own) ? [] : armed()),
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
@@ -113,7 +117,7 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
 
   test('a WaveGuard Monthly retry already collected by a paid sibling for that month → stays exempt', async () => {
     const calls = route({
-      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
+      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' && asked(own, 't.term_start') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
       payments: (own) => (isSiblingLookup(own) ? [{ id: 'p-paid' }] : armed()),
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
@@ -156,14 +160,19 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
-  test('an auto_charge visit whose existing invoice is already paid / prepaid / processing / refunded is settled — stays exempt', async () => {
+  test('an auto_charge visit whose invoice is already settled (paid / prepaid / processing) or parked (refunded) stays exempt', async () => {
     for (const status of ['paid', 'prepaid', 'processing', 'refunded']) {
       route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status }] });
       expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
     }
-    // an open (sent) invoice is what completion will charge → keep the warning
-    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status: 'sent' }] });
-    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // refunded parks the visit even when a newer open invoice exists (terminal lookup wins)
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-2', status: 'sent' }, { id: 'inv-1', status: 'refunded' }] });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // a voided invoice is ignored (completion cuts a new one); an open (sent) one is what completion charges → keep the warning
+    for (const invoices of [[{ id: 'inv-1', status: 'void' }], [{ id: 'inv-1', status: 'sent' }], [{ id: 'inv-2', status: 'sent' }, { id: 'inv-1', status: 'void' }]]) {
+      route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    }
   });
 
   test('a malformed annual_prepay_invoice stamp (no amount / no term) fails toward the warning — nobody exempt', async () => {
