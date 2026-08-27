@@ -348,22 +348,26 @@ router.post('/engagement/sync', async (req, res, next) => {
     let markStarted;
     const started = new Promise((resolve) => { markStarted = resolve; });
     runExclusive('social-engagement-ingest', async () => {
-      markStarted(true);
+      markStarted({ ok: true });
       return syncRecentEngagement({ lookbackDays });
     })
       .then((result) => {
-        if (result?.skipped) markStarted(false);
+        if (result?.skipped) markStarted({ ok: false, reason: result.reason });
         else logger.info(`[social-engagement] manual sweep done: ${JSON.stringify(result)}`);
       })
       .catch((err) => {
-        markStarted(false);
+        markStarted({ ok: false, reason: 'error', message: err.message });
         logger.error(`[social-engagement] manual sweep failed: ${err.message}`);
       });
 
-    const ok = await started;
-    res.status(ok ? 202 : 409).json(ok
-      ? { started: true, lookbackDays }
-      : { started: false, error: 'an engagement sweep is already running — try again in a few minutes' });
+    const outcome = await started;
+    if (outcome.ok) return res.status(202).json({ started: true, lookbackDays });
+    // Contention is the only "try again" case; a lost DB connection or a
+    // sweep that died before its first fetch is an operational failure.
+    if (outcome.reason === 'lease_held') {
+      return res.status(409).json({ started: false, error: 'an engagement sweep is already running — try again in a few minutes' });
+    }
+    return res.status(503).json({ started: false, error: `engagement sweep could not start (${outcome.reason})` });
   } catch (err) {
     next(err);
   }

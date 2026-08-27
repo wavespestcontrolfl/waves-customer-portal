@@ -2,11 +2,18 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // =============================================================================
-// Social engagement ingest — likes/comments/shares/views for OUR published
-// posts, per platform, pulled from the platform APIs into
-// social_post_engagement. Feeds the analytics "top posts" ranking (which was
-// most-recent-first before this existed) so formats can be judged on what
-// actually gets engagement, not on delivery.
+// Social engagement ingest — likes/comments/shares for OUR published posts,
+// per platform, pulled from the platform APIs into social_post_engagement.
+// Feeds the analytics "top posts" ranking (which was most-recent-first
+// before this existed) so formats can be judged on what actually gets
+// engagement, not on delivery.
+//
+// Views are NOT ingested in v1: Reels/video view counts live behind the
+// per-media insights endpoints (different metric names per media type and
+// API version), so views_count stays 0 and the score contract here is
+// likes + comments + shares. The column and the views term in scoreCounts
+// are kept so the numbers stay comparable with competitor_social_posts and
+// a later insights fetch slots in without a schema change.
 //
 // Sources: Facebook Graph (page posts + videos) and Instagram Graph (media).
 // GBP exposes no per-post metrics. LinkedIn is deliberately out of v1: its
@@ -151,7 +158,9 @@ async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = 
   const posts = await db('social_media_posts')
     .where({ status: 'published' })
     .where((qb) => qb.where('published_at', '>=', since).orWhere((q) => q.whereNull('published_at').andWhere('created_at', '>=', since)))
-    .orderBy('published_at', 'desc')
+    // Same fallback the predicate uses — a NULL published_at (legacy /
+    // tech-authored rows) must not sort first and eat the cap.
+    .orderByRaw('COALESCE(published_at, created_at) DESC')
     .limit(Math.max(1, Math.min(1000, Number(limit) || 200)))
     .select('id', 'platforms_posted');
   summary.posts = posts.length;
@@ -171,6 +180,12 @@ async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = 
     }
   }
   logger.info(`[social-engagement] sweep: ${summary.synced}/${summary.targets} targets across ${summary.posts} posts (${summary.failed} failed)`);
+  // Per-target failures are soft, but a sweep where EVERY target failed (dead
+  // token, provider down) must not read as a healthy run — throw after the
+  // sweep so runExclusive's job_health records the failure streak.
+  if (summary.targets > 0 && summary.synced === 0) {
+    throw new Error(`engagement sweep refreshed 0/${summary.targets} targets — check FACEBOOK_ACCESS_TOKEN / provider status`);
+  }
   return summary;
 }
 

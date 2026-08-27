@@ -29,9 +29,9 @@ exports.up = async function up(knex) {
     t.timestamp('last_success_at');
     t.text('last_error');
     t.timestamps(true, true);
+    // The unique (post_id, platform) index also serves the only reader
+    // (filter by post_id); no other indexes until a query needs them.
     t.unique(['post_id', 'platform']);
-    t.index('engagement_score');
-    t.index('fetched_at');
   });
 };
 
