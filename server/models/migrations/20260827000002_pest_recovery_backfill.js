@@ -119,6 +119,10 @@ exports.up = async function up(knex) {
     // neither stampable nor exposed — no alert for them.
     .whereRaw('(p.primary_line_price IS NULL OR p.primary_line_price <= 0)')
     .whereRaw("(p.recurring_template_overrides IS NULL OR NOT jsonb_exists(p.recurring_template_overrides, 'anchored_split_per_visit'))")
+    // An operator who already reconciled the series ("apply to following")
+    // left an explicit estimated_price override, which the extension
+    // resolver honours — nothing to flag (codex r3 P2).
+    .whereRaw("(p.recurring_template_overrides IS NULL OR NOT jsonb_exists(p.recurring_template_overrides, 'estimated_price'))")
     .select('p.id', 'p.customer_id', 'p.scheduled_date');
   if (unproven.length) {
     const ids = unproven.map((r) => r.id);

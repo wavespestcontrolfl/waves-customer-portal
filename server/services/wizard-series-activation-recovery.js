@@ -34,7 +34,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // draft can match, and none of those exist before this feature family.
 const DEFAULT_OLDER_THAN_MINUTES = 15;
 
-async function findStrandedParents(database, { olderThanMinutes, limit }) {
+async function findStrandedParents(database, { olderThanMinutes, limit, cursor = null }) {
   return database('scheduled_services as ss')
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereNotNull('ss.self_booking_id')
@@ -89,7 +89,14 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
         .whereRaw('c.recurring_parent_id = ss.id')
         .whereNot('c.status', 'cancelled');
     })
+    // Keyset cursor (codex r3 P1): rows the sweep loop must skip (pre-epoch
+    // pest-family labels the SQL regex cannot classify — serviceKeyFor is
+    // order-dependent) would otherwise pin the oldest-first page forever.
+    .modify((qb) => {
+      if (cursor) qb.whereRaw('(ss.created_at, ss.id) > (?, ?)', [cursor.created_at, cursor.id]);
+    })
     .orderBy('ss.created_at', 'asc')
+    .orderBy('ss.id', 'asc')
     .limit(limit)
     .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status', 'ss.created_at');
 }
@@ -179,15 +186,34 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
     logger.error('[wizard-series-recovery] scheduled_services is missing source_estimate_generation / wizard_recovery_reconciled_at (migration 20260827000001 not applied) — stranded sweep SKIPPED');
     return { examined: 0, stripped: 0, skipped: 'schema' };
   }
-  const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
+  // Page by keyset until `limit` PROCESSABLE rows were handled or the set
+  // is exhausted (codex r3 P1): skipped rows advance the cursor instead of
+  // being re-selected every tick. MAX_PAGES is a runaway guard — a whole
+  // page of skips per tick × 25 is far beyond any real backlog; hitting it
+  // logs loud and the next tick resumes from the top (skips are cheap).
+  const MAX_PAGES = 25;
   let stripped = 0;
-  for (const parent of stranded) {
+  let examined = 0;
+  let processed = 0;
+  let pages = 0;
+  let cursor = null;
+  let exhausted = false;
+  while (processed < limit && pages < MAX_PAGES && !exhausted) {
+    const stranded = await findStrandedParents(database, { olderThanMinutes, limit, cursor });
+    if (!stranded.length) break;
+    pages += 1;
+    if (stranded.length < limit) exhausted = true;
+    for (const parent of stranded) {
+    cursor = parent;
+    if (processed >= limit) break;
     // Belt-and-braces for the SQL epoch predicate (labels the regex misses).
     const familyKey = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: parent.service_type });
     if (familyKey === 'pest_control') {
       const epoch = pestRecoveryEpoch();
       if (!epoch || !parent.created_at || new Date(parent.created_at) < epoch) continue;
     }
+    examined += 1;
+    processed += 1;
     try {
       const didStrip = await database.transaction(async (trx) => {
         // Re-validate the ENTIRE stranded predicate under the comms lock
@@ -390,8 +416,12 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
     } catch (err) {
       logger.error(`[wizard-series-recovery] strip failed for parent=${parent.id}: ${err.message}`);
     }
+    }
   }
-  return { examined: stranded.length, stripped };
+  if (pages >= MAX_PAGES && !exhausted) {
+    logger.warn(`[wizard-series-recovery] stranded sweep walked ${MAX_PAGES} pages of skipped rows this tick — resuming from the top next tick`);
+  }
+  return { examined, stripped };
 }
 
 // Post-activation follow-through — tier sync, the tagger/welcome re-run,

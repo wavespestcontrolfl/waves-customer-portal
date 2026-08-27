@@ -1003,6 +1003,16 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control'\) \{\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(!epoch \|\| !parent\.created_at \|\| new Date\(parent\.created_at\) < epoch\) continue;/);
     const backfillSrc0 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
     expect((backfillSrc0.match(/primary_line_price IS NULL OR p\.primary_line_price <= 0/g) || []).length).toBe(2);
+    // r3: operator-reconciled series (explicit estimated_price override) are
+    // not flagged; the sweep pages by keyset so loop-skipped rows (pest
+    // labels the SQL regex cannot classify) never pin the page.
+    expect(backfillSrc0).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'estimated_price'\)/);
+    const sweepBody = recoverySrc.slice(recoverySrc.indexOf('async function sweepStrandedWizardActivations'), recoverySrc.indexOf('// Post-activation follow-through'));
+    expect(sweepBody).toMatch(/while \(processed < limit && pages < MAX_PAGES && !exhausted\) \{/);
+    expect(sweepBody).toMatch(/findStrandedParents\(database, \{ olderThanMinutes, limit, cursor \}\)/);
+    expect(recoverySrc).toMatch(/async function findStrandedParents\(database, \{ olderThanMinutes, limit, cursor = null \}\)/);
+    const findBody2 = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
+    expect(findBody2).toMatch(/whereRaw\('\(ss\.created_at, ss\.id\) > \(\?, \?\)', \[cursor\.created_at, cursor\.id\]\)/);
     // The locked re-validation re-reads the marker and refuses a stamped row.
     expect(recoverySrc).toMatch(/'source_estimate_generation', 'wizard_recovery_reconciled_at'\);/);
     expect(recoverySrc).toMatch(/\|\| fresh\.wizard_recovery_reconciled_at\s*\n\s*\|\| \['cancelled', 'canceled'\]/);
