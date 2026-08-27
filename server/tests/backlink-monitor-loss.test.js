@@ -492,10 +492,18 @@ describe('crawlForLink goes through the SSRF-pinned fetcher', () => {
     await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: gone }))
       .resolves.toEqual({ found: false, status: 404, blocked: false, truncated: false, error: null });
 
+    // a complete-but-EMPTY 2xx (204 / blank 200) is unverifiable, never "link removed"
+    for (const [status, html] of [[204, ''], [200, ''], [200, '   \n']]) {
+      const emptyOk = jest.fn(async () => ({ status, html, blocked: false, truncated: false, error: null }));
+      await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: emptyOk }))
+        .resolves.toEqual(expect.objectContaining({ found: false, status, unverifiable: 'empty' }));
+      await expect(BacklinkMonitor.verifyLoss({ source_url: 'https://blog.example/p', target_url: 'https://wavespestcontrol.com/', miss_count: 1 }, { crawlFn: () => emptyOk().then(pg => verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: async () => pg })) }))
+        .resolves.toEqual(expect.objectContaining({ outcome: 'unverified', error: 'empty_page' }));
+    }
     // empty-but-truncated 2xx keeps the truncation flag so verifyLoss stays 'unverified'
     const emptyCut = jest.fn(async () => ({ status: 200, html: '', blocked: false, truncated: true, error: null }));
     await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: emptyCut }))
-      .resolves.toEqual({ found: false, status: 200, blocked: false, truncated: true, error: null });
+      .resolves.toEqual({ found: false, status: 200, blocked: false, truncated: true, unverifiable: 'empty', error: null });
   });
 
   test('contact-finder.fetchPage refuses private hosts before any network call and revalidates redirects', async () => {

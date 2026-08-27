@@ -351,9 +351,16 @@ async function crawlForLink(liveUrl, targetPage, { fetchPageFn, exact = false } 
   if (!expectedTarget) return { found: false, status: 0, blocked: false, truncated: false, error: 'no_target' };
   const fetchPage = fetchPageFn || require('./contact-finder').fetchPage;
   const page = await fetchPage(liveUrl, { timeoutMs: 12000 });
-  if (!page || !page.html) {
-    // An empty 2xx body that was cut short is still a truncated page, not proof of absence.
-    return { found: false, status: page ? page.status : 0, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated), error: page ? page.error : 'fetch_failed' };
+  if (!page || !page.html || !String(page.html).trim()) {
+    // No body at all. A 2xx with nothing in it (204, blank 200) proves nothing
+    // about the link — report it unverifiable, never "not found on the page".
+    const status = page ? page.status : 0;
+    const empty2xx = !!page && status >= 200 && status < 300 && !page.blocked;
+    return {
+      found: false, status, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated),
+      ...(empty2xx ? { unverifiable: 'empty' } : {}),
+      error: page ? page.error : 'fetch_failed',
+    };
   }
   const kind = classifyPageBody(page.html, page.contentType);
   if (kind !== 'html') {
