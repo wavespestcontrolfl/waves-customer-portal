@@ -10,15 +10,14 @@ const { resolveLeadSource, MAIN_SITE_NAME, GOOGLE_ADS_WEB_FORM_NAME } = require(
 
 // Mock lead_sources lookups: the resolver hits exactly one of
 //   .whereRaw("LOWER(name) LIKE '%facebook%'").first()   (meta)
-//   .where({ source_type: 'google_ads' }).first()        (google paid)
+//   .where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()   (google paid — `google` fixture)
 //   .where({ name }).first()                              (everything else)
 function mockLeadSources({ facebook = null, google = null, byName = {} } = {}) {
   db.mockImplementation(() => ({
     whereRaw: () => ({ first: async () => facebook }),
     where: (clause) => ({
       first: async () => {
-        if (clause && clause.name === GOOGLE_ADS_WEB_FORM_NAME) return byName[clause.name] || null;
-        if (clause && clause.source_type === 'google_ads') return google;
+        if (clause && clause.name === GOOGLE_ADS_WEB_FORM_NAME) return google;
         if (clause && clause.name) return byName[clause.name] || null;
         return null;
       },
