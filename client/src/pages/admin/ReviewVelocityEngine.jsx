@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 import { Phone, MessageSquare } from "lucide-react";
 
@@ -2011,6 +2012,8 @@ function CustomerDrawer({
   startSequence: startSequenceFn,
   sequencesEnabled,
 }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [msg, setMsg] = useState("");
   const [selectedTpl, setSelectedTpl] = useState("");
   const [sending, setSending] = useState(false);
@@ -2513,6 +2516,8 @@ function BatchModal({
   setSelectedIds,
   sendReviewRequest,
 }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [sending, setSending] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 

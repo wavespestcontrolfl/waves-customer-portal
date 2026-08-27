@@ -32,6 +32,7 @@
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
@@ -1153,6 +1154,8 @@ const EDIT_FALLBACK_SERVICES = [
 ];
 
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -4300,6 +4303,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
 export function ProtocolPanel({ service, onClose }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   // Monochrome admin V2 palette — shadows the module-level D inside this panel
   // so the Service Protocol flyout matches the zinc admin shell instead of the
   // warmer legacy slate/teal/amber accents.
@@ -5843,6 +5848,8 @@ export function ProtocolPanel({ service, onClose }) {
 }
 
 export function RescheduleModal({ service, onClose, onRescheduled }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState("customer_request");
   const [notes, setNotes] = useState("");

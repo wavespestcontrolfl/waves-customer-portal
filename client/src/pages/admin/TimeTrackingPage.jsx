@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 import {
   BarChart3,
@@ -1527,6 +1528,8 @@ function EntriesTab({ showToast }) {
 }
 
 function EditEntryModal({ entry, onClose, onSave }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [form, setForm] = useState({
     id: entry.id,
     clock_in: etDatetimeLocalValue(entry.clock_in),
@@ -3195,6 +3198,8 @@ export function TeamTab({ showToast }) {
 // (or $35 fallback shown explicitly so an admin can spot a missing
 // pay_rate config), OT at 1.5×.
 function EarningsModal({ tech, onClose, showToast }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [thisWeek, setThisWeek] = useState(null);
   const [lastWeek, setLastWeek] = useState(null);
   const [loading, setLoading] = useState(true);

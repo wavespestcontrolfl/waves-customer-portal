@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
@@ -651,6 +652,8 @@ function EquipmentEditModal({
   onSave,
   saving,
 }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const field = (key, label, type = "text", opts = null) => (
     <label style={{ display: "block" }}>
       {" "}
