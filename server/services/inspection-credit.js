@@ -106,6 +106,22 @@ function configuredCreditAmountForServiceKey(serviceKey) {
  * Read-only and fail-soft: a lookup error is a null, never a thrown
  * closeout.
  */
+// What the estimate says about the customer being recurring when it was
+// quoted: true / false when the inputs carry an explicit flag, null when
+// they carry none. The V2 estimator persists isRecurringCustomer as the
+// STRINGS "YES"/"NO" (codex #3521 r9 P1) — parse explicitly.
+function recurringCustomerEvidence(estData) {
+  const inputs = estData?.inputs || estData?.engineInputs || estData?.engineRequest || {};
+  const raw = inputs.recurringCustomer !== undefined ? inputs.recurringCustomer : inputs.isRecurringCustomer;
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (raw === true || raw === 1) return true;
+  if (raw === false || raw === 0) return false;
+  const text = String(raw).trim().toLowerCase();
+  if (['yes', 'y', 'true', '1'].includes(text)) return true;
+  if (['no', 'n', 'false', '0'].includes(text)) return false;
+  return null;
+}
+
 // Every fee the rodent inspection has ever carried: the fee configured
 // today, every value in the pricing_config audit trail (20260826000002
 // records 125 → 75 there), and the legacy $125 as a seed for a database
@@ -221,6 +237,12 @@ async function soldInspectionAmountForVisit(db, svc) {
             // A row that persisted its own perk rate is self-describing.
             const ownRate = Number(row.recurringCustomerDiscountRate);
             if (Number.isFinite(ownRate) && ownRate > 0 && ownRate < 1) return round2(netFace / (1 - ownRate));
+            // A perk is reversed ONLY when the estimate establishes one
+            // applied (uncapped audit P0 on #3521): explicit non-member
+            // evidence ("NO"/false) or no evidence at all means the net IS
+            // the face — never mint an unearned credit by matching a
+            // non-member's $75 against a 40%-off $125.
+            if (recurringCustomerEvidence(estData) !== true) return round2(netFace);
             // Otherwise recover the HISTORICAL face without consulting live
             // config (codex #3521 r13 P1 — the perk rate is admin-editable,
             // so dividing by today's rate would drift the promise): match
