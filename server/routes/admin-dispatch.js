@@ -10933,7 +10933,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // charge service re-asserts the anchor under its own locks.
     const extendedAutopayCharge = !perApplicationBilling && !apptCardOneTimeCharge
       && require('../config/feature-gates').gates.completionAutopayCharge === true;
+    // Callbacks / re-treats and always-free service types (appointment,
+    // estimate, re-service, follow-up) never auto-charge (manual-audit P0):
+    // shouldAutoInvoiceCompletion treats them as free, but a reused or
+    // pre-minted collectible invoice with a stale estimated_price would
+    // otherwise pass the anchor — the same exclusions every explicit lane
+    // applies, revalidated again under the locked visit row inside
+    // verifyExtendedCompletionAnchor.
     const extendedChargeCandidate = extendedAutopayCharge && visitPerformed
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
       && !!invoice?.id && !alreadyPaid && !invoice.payer_id && customerAutopayActive;
     let extendedLaneAnchor = null;
     let extendedLaneOverCap = false;

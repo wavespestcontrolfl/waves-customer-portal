@@ -2341,7 +2341,15 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   if (!(Number(scheduledService.prepaid_amount) > 0)) return false;
   const termId = scheduledService.annual_prepay_term_id;
   if (!termId) return false;
-  if (!(await annualPrepayTableExists())) return false;
+  // Strict callers (the extended-completion charging guard) must see a
+  // schema-probe failure as UNVERIFIABLE, not as "no table → not covered"
+  // (manual-audit P0): annualPrepayTableExists catches probe errors and
+  // caches false, which would read a db failure as confirmed-stale
+  // coverage on the charging side. Probe directly so the error propagates;
+  // a genuinely absent table (fresh env) still returns false.
+  if (throwOnError) {
+    if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+  } else if (!(await annualPrepayTableExists())) return false;
   try {
     const term = await coveredTermsAsOf(conn, null)
       .where('t.id', termId)

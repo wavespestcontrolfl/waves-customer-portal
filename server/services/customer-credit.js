@@ -267,7 +267,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
         const lockedSvc = await t('scheduled_services')
           .where({ id: requireSelfPayScheduledServiceId })
           .forUpdate()
-          .first('id', 'customer_id', 'is_recurring', 'estimated_price', 'is_callback', 'prepaid_method', 'status');
+          .first('id', 'customer_id', 'is_recurring', 'estimated_price', 'is_callback', 'prepaid_method', 'status', 'service_type');
         if (!lockedSvc) return { applied: 0, skipped: 'service_missing' };
         if (String(lockedSvc.customer_id) !== String(invoice.customer_id)) {
           return { applied: 0, skipped: 'customer_mismatch' };

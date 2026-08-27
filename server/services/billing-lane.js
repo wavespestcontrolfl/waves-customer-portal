@@ -322,6 +322,12 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   if (String(lockedSvc.status || '') !== 'completed') {
     return { ok: false, reason: 'visit_not_completed' };
   }
+  // Callbacks / re-treats and always-free service types never auto-charge
+  // (manual-audit P0) — revalidated under the lock so a visit re-typed or
+  // re-flagged after the route's admission check refuses too.
+  if (lockedSvc.is_callback === true || isAlwaysFreeServiceType(lockedSvc.service_type)) {
+    return { ok: false, reason: 'no_cost_visit' };
+  }
   const lane = resolveBillingLane(lockedCustomer);
   if (lockedCustomer.billing_mode === 'per_application' || lane.mode === 'per_application') {
     return { ok: false, reason: 'per_application_lane' };

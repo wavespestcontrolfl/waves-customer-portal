@@ -2035,7 +2035,7 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method');
+            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method', 'service_type');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
           // Completed-one-time eligibility under the SAME lock (hold-rail
           // pre-push r9 P0): a completion charge is only authorized for a
@@ -2128,6 +2128,7 @@ const StripeService = {
                 annual_prepay_coverage: 'The visit is now under annual-prepay coverage. Review before charging.',
                 annual_prepay_coverage_unverifiable: 'Annual-prepay coverage could not be verified. Review before charging.',
                 visit_not_completed: 'The visit is no longer completed. Review before charging.',
+                no_cost_visit: 'Callbacks and no-cost visit types are never auto-charged. Review before charging.',
                 dues_covered: 'Membership dues cover this visit. Review before charging.',
               };
               throw new Error(anchorRefusals[anchorVerdict.reason]

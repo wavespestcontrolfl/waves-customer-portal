@@ -468,6 +468,14 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       lockedInvoice: invoiceAt(150),
     })).resolves.toEqual({ ok: true, anchor: 150 });
   });
+  test('callbacks and always-free service types refuse under the lock (no_cost_visit)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, is_callback: true }, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, service_type: 'Pest Control Re-Service' }, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
+  });
   test('a visit that is no longer completed refuses under the lock (cancel/reschedule race)', async () => {
     await expect(verifyExtendedCompletionAnchor({
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, status: 'cancelled' }, lockedInvoice: invoiceAt(90.55),
