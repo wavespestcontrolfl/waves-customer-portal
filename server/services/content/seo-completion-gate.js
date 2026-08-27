@@ -321,7 +321,11 @@ function allowedAnchorServices(briefService) {
 // actionable CTA ("Contact Waves", "Talk to Us", "View Options", "Schedule
 // Service", "Click here") must carry estimate/quote wording; prose
 // references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
-const PROSE_REFERENCE_ANCHOR_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
+const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
+const ACTION_VERB_RE = /\b(?:request|schedule|book|get|call|click|start|claim|arrange|visit|open|tap|reach|talk|see|view|learn)\b/i;
+function isProseReferenceAnchor(anchor) {
+  return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
+}
 
 // Canonicalize a brief's service for CTA-anchor validation. Specialty
 // topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
@@ -363,6 +367,17 @@ function extractLinks(body) {
   const md = /\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
   while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: m[2] });
+  // Reference-style links: [text][ref] / [text][] with a [ref]: /url definition.
+  const defs = new Map();
+  const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
+  while ((m = def.exec(s)) !== null) defs.set(m[1].toLowerCase(), m[2]);
+  if (defs.size) {
+    const ref = /\[([^\]]+)\]\[([^\]]*)\]/g;
+    while ((m = ref.exec(s)) !== null) {
+      const href = defs.get((m[2] || m[1]).toLowerCase());
+      if (href) links.push({ anchor: m[1], href });
+    }
+  }
   const html = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[2].replace(/<[^>]+>/g, ''), href: m[1] });
   return links;
@@ -427,7 +442,7 @@ function badCtaAnchor(body, brief = {}) {
       // (or its family) — a generic "Request a Quote" is not tied to the post.
       return allowed && (link.named.length === 0 || !link.named.every((svc) => allowed.has(svc)));
     }
-    return !PROSE_REFERENCE_ANCHOR_RE.test(link.anchor);
+    return !isProseReferenceAnchor(link.anchor);
   });
   return bad ? bad.anchor : null;
 }
@@ -438,7 +453,11 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection-REQUEST phrasing only ("Request an Inspection", "Book a Termite
 // Inspection", "Schedule your inspection") — editorial anchors like "Get
 // ready for your termite inspection" are not CTAs and must not be flagged.
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule)\b.{0,30}?\binspection\b/i;
+// verb + optional determiner + up to two qualifier words + "inspection":
+// "Request an Inspection", "Get a Termite Inspection", "Schedule your free
+// inspection", "Arrange an inspection" — but NOT "Get ready for your termite
+// inspection" (four words between verb and noun).
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b/i;
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

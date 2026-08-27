@@ -1836,6 +1836,7 @@ function extractRawMarkdownTables(text) {
   // rows) it is the item's child block and a table there is a live table.
   // Context ends at a blank line followed by a non-indented, non-list line.
   let listContext = false;
+  let listContentIndent = 0; // column where a list item's child blocks start
   let prevBlank = true;
   const lines = raw.map((l) => {
     // Strip blockquote prefixes first so fences/tables inside quotes are seen.
@@ -1843,11 +1844,17 @@ function extractRawMarkdownTables(text) {
     if (!fence) {
       const blank = stripped.trim() === '';
       const indented = /^(?: {4}|\t)/.test(stripped);
-      const listItem = /^ {0,3}(?:[-*+]|\d+[.)])\s+/.test(stripped);
-      if (listItem) listContext = true;
+      const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
+      if (listItem) { listContext = true; listContentIndent = listItem[1].length; }
       else if (!blank && !indented && prevBlank) listContext = false;
       prevBlank = blank;
       if (indented && !listContext) return '';
+      // Inside a list item, content indented 4+ columns PAST the item's
+      // content column is an indented code block nested in the item.
+      if (indented && listContext) {
+        const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
+        if (indent >= listContentIndent + 4) return '';
+      }
       const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
       return stripped.replace(/^\s+/, '');

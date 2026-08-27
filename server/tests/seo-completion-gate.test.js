@@ -365,6 +365,29 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('determiner-led anchors with action verbs are CTAs; reference-style and get/arrange inspection CTAs are caught', () => {
+    const cases = [
+      `${baseDraft().body}\n\n[The fastest way to schedule an inspection](/contact/)`,
+      `${baseDraft().body}\n\n[Request an Inspection][contact]\n\n[contact]: /contact/`,
+      `${baseDraft().body}\n\n[Get a Termite Inspection](/termite-inspection/)`,
+      `${baseDraft().body}\n\n[Arrange an inspection](/contact/)`,
+    ];
+    for (const body of cases) {
+      const result = SeoCompletionGate.evaluate({ draft: baseDraft({ body }), brief: baseBrief(), shadowMode: true });
+      expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    }
+  });
+
+  test('"Anticipated" is not the ant service', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarms. [Get a Termite Quote with Anticipated Timing](/pest-control-quote/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('raw HTML anchors are validated like markdown links', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
