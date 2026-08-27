@@ -888,27 +888,12 @@ async function maybeAutoMerge(run, pr) {
     const contentFiles = prFiles.filter((f) => (
       /^src\/content\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
     const blogFiles = contentFiles.filter((f) => /^src\/content\/blog\//.test(String(f?.filename || '')));
-    // EVERY row on a bound lane must be in the publisher's expected output
-    // set (hook r8 P1): the content markdown judged by the binding +
-    // comparison checks below, or a publisher-owned hero/og asset under
-    // public/images/blog/. Any other row (.astro pages, JS modules, config,
-    // shared assets — modified, deleted, or renamed) is outside the single
-    // brief's authorization and withholds; a green build + Codex-clear
-    // review must not let it ride an unattended merge.
-    if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
-      const unexpected = prFiles.find((f) => {
-        const name = String(f?.filename || '');
-        const prev = String(f?.previous_filename || '');
-        const allowed = (n) => !n
-          || /^src\/content\/.+\.(md|mdx)$/.test(n)
-          || /^public\/images\/blog\//.test(n);
-        return !(allowed(name) && allowed(prev));
-      });
-      if (unexpected) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR touches a file outside the publisher's expected output set (${unexpected.filename}) — PR left open for a human decision`);
-        return { pending: true, reason: 'named_competitor_head_gate_failed' };
-      }
-    }
+    // Populated by whichever binding branch runs below: the hero/og asset
+    // directory prefixes belonging to THIS run's bound post. The row
+    // allowlist after the bindings only accepts assets under these — an
+    // unrelated post's image can't be altered or deleted on this PR
+    // (PR r7 P1).
+    const allowedAssetPrefixes = [];
     // Bind the run's single-brief authorization to its OWN generated file
     // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
     // blog file, and its path must be the one the run's canonical routes to
@@ -958,6 +943,11 @@ async function maybeAutoMerge(run, pr) {
           if (departingOk && routeMatches(blogFiles[0].filename)) {
             boundOk = true;
             boundExpectedPath = expectedPath;
+            // The publisher keys this post's hero dir by its route slug —
+            // nested and (legacy flat) leaf forms both allowed.
+            const trimmed = expectedPath.replace(/^\/+|\/+$/g, '');
+            if (trimmed) allowedAssetPrefixes.push(`public/images/blog/${trimmed}/`);
+            if (leaf) allowedAssetPrefixes.push(`public/images/blog/${leaf}/`);
           }
         }
       } catch (_) { boundOk = false; }
@@ -991,10 +981,35 @@ async function maybeAutoMerge(run, pr) {
           boundOk = contentFiles.length === 1
             && contentFiles[0].filename === expected
             && departing.every((name) => name === expected);
+          if (boundOk) {
+            // Only THIS target's own hero dir (blog refreshes) may carry
+            // asset rows; a services-page refresh touches no image dir.
+            const targetPath = new URL(String(target)).pathname.replace(/^\/+|\/+$/g, '');
+            if (targetPath) allowedAssetPrefixes.push(`public/images/blog/${targetPath}/`);
+          }
         }
       } catch (_) { boundOk = false; }
       if (!boundOk) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: refresh PR content files do not match the reviewed target's Astro source — PR left open for a human decision`);
+        return { pending: true, reason: 'named_competitor_head_gate_failed' };
+      }
+    }
+    // EVERY row on a bound lane must be in the publisher's expected output
+    // set (PR r6/r7 P1s): the content markdown judged by the binding +
+    // comparison checks, or a hero/og asset under THIS run's own post
+    // directory (allowedAssetPrefixes — never the whole public/images/blog
+    // tree, so an unrelated post's image can't be altered or deleted here).
+    // Any other row (.astro pages, JS modules, config, shared assets —
+    // modified, deleted, or renamed; previous_filename checked too) is
+    // outside the single brief's authorization and withholds: a green build
+    // + Codex-clear review must not let it ride an unattended merge.
+    if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
+      const allowed = (n) => !n
+        || /^src\/content\/.+\.(md|mdx)$/.test(n)
+        || allowedAssetPrefixes.some((p) => n.startsWith(p));
+      const unexpected = prFiles.find((f) => !(allowed(String(f?.filename || '')) && allowed(String(f?.previous_filename || ''))));
+      if (unexpected) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR touches a file outside the publisher's expected output set (${unexpected.filename}) — PR left open for a human decision`);
         return { pending: true, reason: 'named_competitor_head_gate_failed' };
       }
     }

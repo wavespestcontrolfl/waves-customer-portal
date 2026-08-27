@@ -888,7 +888,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     greenMergePath();
     gh.listPrFiles.mockResolvedValue([
       { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'public/images/blog/blog-test-post/hero.webp', status: 'added' },
+      // The publisher keys the hero dir by the post's route slug.
+      { filename: 'public/images/blog/blog/test-post/hero.webp', status: 'added' },
     ]);
     gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
@@ -898,6 +899,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res2 = await poller.pollPending();
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test("a new-blog PR touching ANOTHER post's hero asset is withheld — assets bind to the run's own post dir (PR r7 P1)", async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'public/images/blog/pest-control/unrelated-post/hero.webp', status: 'removed' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('a new-blog PR DELETING a non-blog content file is withheld too (hook r7 P1)', async () => {
