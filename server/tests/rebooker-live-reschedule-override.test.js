@@ -332,7 +332,7 @@ describe('live-status reschedule override (allowLive)', () => {
 
   // Wire db/trx mocks for a series reschedule pass. The anchor doubles as
   // the recurring parent (recurring_parent_id null, weekly pattern).
-  function wireSeriesMocks(anchorStatus, siblings) {
+  function wireSeriesMocks(anchorStatus, siblings, { preferredDay = null, anchorOverrides = {} } = {}) {
     const anchor = {
       ...liveService(anchorStatus),
       recurring_parent_id: null,
@@ -341,6 +341,7 @@ describe('live-status reschedule override (allowLive)', () => {
       recurring_nth: null,
       recurring_weekday: null,
       recurring_interval_days: null,
+      ...anchorOverrides,
     };
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
@@ -370,11 +371,70 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // B6: rescheduleSeries consults the customer's live weekday preference.
+      if (table === 'property_preferences') {
+        return chain({ first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
+      }
       throw new Error(`Unexpected db table ${table}`);
     });
 
     return { updates, historyInsert, logInsert, siblingsQuery, escalationCount };
   }
+
+  test('collapsed weekend shifts dedupe — a daily cadence re-anchored Friday never doubles Monday (B6)', async () => {
+    // Relative dates: next Friday at least 3 weeks out. A 1-day cadence
+    // projects Sat and Sun siblings; the weekend shift maps BOTH to Monday
+    // — the deduped projection must advance the second to Tuesday.
+    const friBase = new Date(Date.now() + 21 * 86400000);
+    while (friBase.getUTCDay() !== 5) friBase.setUTCDate(friBase.getUTCDate() + 1);
+    const iso2 = (d) => d.toISOString().slice(0, 10);
+    const FRI_TARGET = iso2(friBase);
+    const MON = iso2(new Date(friBase.getTime() + 3 * 86400000));
+    const TUE = iso2(new Date(friBase.getTime() + 4 * 86400000));
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-3', status: 'confirmed', scheduled_date: SIB2, window_start: '09:00:00', window_end: '11:00:00' },
+    ], {
+      preferredDay: 'tuesday',
+      anchorOverrides: { recurring_pattern: 'custom', recurring_interval_days: 1 },
+    });
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', FRI_TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: FRI_TARGET });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: MON });
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TUE });
+  });
+
+  test('non-seasonal series re-anchor shifts weekend siblings for a weekday-preference customer (B6)', async () => {
+    // Relative dates (AGENTS.md — freshness-validated values must not be
+    // fixed): the next Saturday at least 3 weeks out, so the not-in-the-past
+    // guard holds on any run date. Customer-picked anchor, honored as-is;
+    // the raw +7d sibling lands the following Saturday → forward to Monday.
+    const satBase = new Date(Date.now() + 21 * 86400000);
+    while (satBase.getUTCDay() !== 6) satBase.setUTCDate(satBase.getUTCDate() + 1);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const SAT_TARGET = iso(satBase);
+    const MON_SIB_SHIFTED = iso(new Date(satBase.getTime() + 9 * 86400000));
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+    ], { preferredDay: 'tuesday' });
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', SAT_TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: SAT_TARGET });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: MON_SIB_SHIFTED });
+  });
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
     const { updates, historyInsert } = wireSeriesMocks('on_site', [

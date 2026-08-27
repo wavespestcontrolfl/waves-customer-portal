@@ -53,7 +53,7 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
 
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
@@ -905,10 +905,19 @@ class SmartRebooker {
     // picked anchor date itself is honored as-is; only projected siblings
     // shift. Scoped to seasonal so every other cadence keeps its
     // long-standing unshifted re-anchor behavior.
+    // B6: the projected siblings honor the customer's LIVE weekday
+    // preference alongside the operator-set series flag — the flag alone
+    // is operator provenance; the preference is never persisted onto rows.
+    const seriesSkipWeekends = !!parent.skip_weekends
+      || await customerPrefersNoWeekends(db, parent.customer_id);
     const projectSeriesDate = (raw) => {
-      if (pattern !== SEASONAL_FEB_OCT) return raw;
       let out = String(raw).split('T')[0];
-      if (parent.skip_weekends) {
+      // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
+      // the old seasonal-only scoping predates the ruling): a weekend-
+      // averse customer re-anchoring a quarterly/monthly series must not
+      // get weekend siblings. The customer's picked anchor date itself is
+      // honored as-is; only projected siblings shift.
+      if (seriesSkipWeekends) {
         const at = parseETDateTime(`${out}T12:00`);
         const { dayOfWeek } = etParts(at);
         if (dayOfWeek === 0 || dayOfWeek === 6) {
@@ -917,11 +926,12 @@ class SmartRebooker {
           out = etDateString(addETDays(at, delta));
         }
       }
+      if (pattern !== SEASONAL_FEB_OCT) return out;
       // No blackout layer is threaded here, so the clamp can only exhaust
       // on 75 straight in-season weekend days — impossible. The || keeps
       // this caller's legacy always-a-date contract if that ever changes
       // (its write sites are not null-safe).
-      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends }) || out;
+      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
     };
     const opts = {
       ...(isMonthBasedPattern
@@ -931,6 +941,35 @@ class SmartRebooker {
             weekday: parent.recurring_weekday,
           }),
       intervalDays: parent.recurring_interval_days,
+    };
+    // Weekend shifts can COLLAPSE consecutive occurrences onto one weekday
+    // (a daily series re-anchored Friday maps Sat+Sun+Mon all to Monday; a
+    // 2-day cadence anchored Thursday maps Sat and Mon both to Monday) — a
+    // plan must never write two of its own visits on one date (codex
+    // #3509). Project each occurrence ONCE, memoized, advancing a collided
+    // date day-by-day (still honoring the weekend rule and the season
+    // clamp) — the collision probe and the write loop below read this same
+    // mapping, so what gets probed is exactly what gets written.
+    const projectedByOccurrence = new Map();
+    const projectOccurrenceDate = (occurrenceIndex) => {
+      if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
+      let out = occurrenceIndex === 0
+        ? String(newDate).split('T')[0]
+        : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
+      const used = new Set(projectedByOccurrence.values());
+      for (let guard = 0; guard < 31 && used.has(out); guard++) {
+        let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
+        if (seriesSkipWeekends) {
+          const { dayOfWeek } = etParts(at);
+          if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
+        }
+        out = etDateString(at);
+        if (pattern === SEASONAL_FEB_OCT) {
+          out = clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
+        }
+      }
+      projectedByOccurrence.set(occurrenceIndex, out);
+      return out;
     };
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
@@ -1049,9 +1088,7 @@ class SmartRebooker {
           const sib = siblings[i];
           if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
           const oi = i - startIdx;
-          projectedDates.push(oi === 0
-            ? String(newDate).split('T')[0]
-            : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, oi, opts)));
+          projectedDates.push(projectOccurrenceDate(oi));
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -1122,9 +1159,11 @@ class SmartRebooker {
 
         const occurrenceIndex = i - startIdx;
         const isAnchor = occurrenceIndex === 0;
+        // Memoized deduped projection — identical to what the collision
+        // probe above locked and probed (codex #3509).
         const date = isAnchor
           ? newDate
-          : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
+          : projectOccurrenceDate(occurrenceIndex);
 
         // Non-live rows rewind only when this row's date actually changes
         // (same-date landings keep a genuine same-day attempt intact).

@@ -342,7 +342,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -895,6 +895,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   id, updates, isRecurring, recurringPattern, spawnRecurringChildren, recurringCount, recurringOngoing,
   recurringOngoingBaseline, recurringIntervalDays, skipWeekends, weekendShift, editMonthAnchorOpts,
   wantsVisitCountReconcile, parsedPlannedCount,
+  prefNoWeekends: prefNoWeekendsSnapshot,
 }) {
   const dates = new Set();
   if (!isRecurring) return dates;
@@ -902,6 +903,13 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!before) return dates;
   const cols = await conn('scheduled_services').columnInfo();
   const after = { ...before, ...updates };
+  // B6: the same weekday preference the trx write paths consult — the plan
+  // must mirror it or the pre-locked slot dates diverge from the writes.
+  // The update-details route passes its per-edit snapshot; other callers
+  // resolve fresh.
+  const prefNoWeekends = prefNoWeekendsSnapshot !== undefined
+    ? !!prefNoWeekendsSnapshot
+    : await customerPrefersNoWeekends(conn, before.customer_id);
   const blackoutDates = await loadSeriesBlackoutDates(conn, dateOnly(after.scheduled_date));
   const shouldSpawn = spawnRecurringChildren !== false;
   const editOpts = (parent) => ({
@@ -914,7 +922,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!shouldSpawn && recurringPattern && before.is_recurring && !before.recurring_parent_id
     && shouldRewritePendingRecurringRows(before, after)) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
-    const skip = skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends;
+    // The edit UI submits skipWeekends:false whenever recurring controls
+    // are active, so a submitted false is the form default, NOT operator
+    // intent — the saved preference ORs over it (hook B6 P1). Overriding
+    // for one customer = clear their preference.
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : after.weekend_shift) === 'back' ? 'back' : 'forward';
     const pendingChildren = await conn('scheduled_services')
       .where({ recurring_parent_id: before.id, is_recurring: true })
@@ -960,9 +972,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   const spawnCount = shouldSpawn ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
   if (recurringPattern && spawnCount > 1 && !before.recurring_parent_id) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
-    const skipParent = after.skip_weekends != null ? !!after.skip_weekends : false;
+    const skipParent = (after.skip_weekends != null ? !!after.skip_weekends : false) || prefNoWeekends;
     const dirParent = after.weekend_shift === 'back' ? 'back' : 'forward';
-    const skip = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+    // Same rule as the rewrite branch: the preference ORs over the form's
+    // routinely-submitted false (hook B6 P1).
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
     const seen = new Set();
     seen.add(dateOnly(baseDateStr) || '');
@@ -1022,7 +1036,10 @@ async function planUpdateDetailsRecurrenceDates(conn, {
             }),
             intervalDays: parent.recurring_interval_days,
           };
-          const skip = cols.skip_weekends ? !!parent.skip_weekends : false;
+          // B6: mirrors the reconcile WRITER's live-preference OR — a
+          // divergent plan locks the weekend slot while the writer shifts
+          // to a weekday and SERIES_CHANGED_RETRY loops forever (hook P1).
+          const skip = (cols.skip_weekends ? !!parent.skip_weekends : false) || prefNoWeekends;
           const dir = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
           const latest = await latestLiveSeriesVisit(conn, parentId);
           const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
@@ -1986,7 +2003,7 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
 // on that occurrence, so the add-on walk applies the same nudge before the
 // exact-date match.
-function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null) {
+function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   const pattern = line?.recurringPattern || line?.recurring_pattern || null;
   if (!pattern) return true;
   if (pattern === 'one_time') return false;
@@ -1999,7 +2016,11 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
     nth: line.recurringNth ?? line.recurring_nth,
     weekday: line.recurringWeekday ?? line.recurring_weekday,
   };
-  const skip = line.skipWeekends ?? line.skip_weekends;
+  // B6: the caller's EFFECTIVE weekend rule (operator flag OR the live
+  // customer preference) ORs in — the child date was generated with it, so
+  // the add-on's projected due date must shift identically or the sold
+  // add-on silently drops off the shifted visit (codex #3509).
+  const skip = (line.skipWeekends ?? line.skip_weekends) || skipWeekendsOverride;
   const dir = (line.weekendShift || line.weekend_shift) === 'back' ? 'back' : 'forward';
   for (let i = 1; i <= 120; i++) {
     const raw = nextRecurringDate(base, pattern, i, opts);
@@ -2011,9 +2032,9 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
-function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null) {
+function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
-    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates));
+    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
 }
 
 function calculateAppointmentDiscountDollars(discount, subtotal) {
@@ -4446,6 +4467,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       : 0;
     const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
     const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    // B6 (owner ruling 2026-08-27): a customer whose saved property
+    // preference names a weekday has said "not weekends" — generated
+    // children/booster DATES honor it even when the operator left the
+    // skip-weekends box unticked. The STAMPED flag stays the operator's
+    // raw value: every generator and the rebooker consult the preference
+    // LIVE, so removing it restores weekend eligibility without touching
+    // series rows. The ANCHOR date itself never moves — the operator
+    // picked it deliberately.
+    const skipWeekendsEffective = !!skipWeekends
+      || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false);
     // Blackout days (one-off + weekly days off) over the series horizon —
     // every generated child/booster date runs through the shared nudge.
     const seriesBlackoutDates = (isRecurring && recurringPattern)
@@ -4462,7 +4493,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir, seriesBlackoutDates);
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
         if (!nextDateStr) continue;
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
@@ -4488,7 +4519,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const dates = computeBoosterDates(scheduledDate, cleaned, 12);
       let droppedBoosters = 0;
       for (const rawDate of dates) {
-        const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, !!skipWeekends, shiftDir), seriesBlackoutDates, { skipWeekends: !!skipWeekends });
+        const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, skipWeekendsEffective, shiftDir), seriesBlackoutDates, { skipWeekends: skipWeekendsEffective });
         // A null nudge = the blackout walk exhausted — that booster is a
         // SOLD billable visit that would otherwise vanish silently while
         // the create still returns 201. Count it and warn below (the
@@ -4653,7 +4684,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
-        if (cols.weekend_shift && skipWeekends) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
+        if (cols.weekend_shift && skipWeekendsEffective) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
           const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
           if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
@@ -4726,9 +4757,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
-        if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
+        if (cols.weekend_shift && skipWeekendsEffective) childData.weekend_shift = shiftDir;
         if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
-        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates);
+        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
         // operator turns a re-service into a repeating cadence, every future
@@ -4796,7 +4827,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
-          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates);
+          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
@@ -4814,7 +4845,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
-          if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
+          if (cols.weekend_shift && skipWeekendsEffective) boosterData.weekend_shift = shiftDir;
           if (cols.source_estimate_id && insertLinkId) boosterData.source_estimate_id = insertLinkId;
           if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) boosterData.discount_id = pricing.appointmentDiscount.discountId;
           if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
@@ -6448,6 +6479,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.recurring_nth) updates.recurring_nth = (editMonthAnchorOpts.nth != null && editMonthAnchorOpts.nth !== '' && !isNaN(parseInt(editMonthAnchorOpts.nth))) ? parseInt(editMonthAnchorOpts.nth) : null;
         if (cols.recurring_weekday) updates.recurring_weekday = (editMonthAnchorOpts.weekday != null && editMonthAnchorOpts.weekday !== '' && !isNaN(parseInt(editMonthAnchorOpts.weekday))) ? parseInt(editMonthAnchorOpts.weekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
+        // B6: the stored flag is OPERATOR intent only — the customer's
+        // weekday preference is consulted LIVE by every generator and the
+        // rebooker, never persisted (removing the preference must restore
+        // weekend eligibility without touching series rows).
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
@@ -6806,9 +6841,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // generators those paths run inside the trx — re-verified under the
     // lock at each write (guardRecurrenceDestination). Empty for a save that
     // writes no other date.
+    // B6 (codex #3509 P2): ONE preference snapshot for the whole edit — the
+    // plan and every write path read this same value, so a transient
+    // lookup failure can't make the plan lock unshifted dates while the
+    // writer shifts (SERIES_CHANGED_RETRY), or vice versa.
+    const editPrefRow = await db('scheduled_services')
+      .where({ id: req.params.id }).first('customer_id').catch(() => null);
+    const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);
     const plannedRecurrenceDates = await planUpdateDetailsRecurrenceDates(db, {
       id: req.params.id,
       updates,
+      prefNoWeekends: editPrefNoWeekends,
       isRecurring,
       recurringPattern,
       spawnRecurringChildren,
@@ -7687,7 +7730,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
+          // B6: DATES honor the live weekday preference (ORed over both the
+          // parent flag and the form's routinely-submitted false — the edit
+          // UI always sends the checkbox), mirroring
+          // planUpdateDetailsRecurrenceDates so the pre-locked slot plan
+          // and this write land the same dates. The STAMPED flag stays the
+          // operator's raw value: the preference is consulted live by every
+          // consumer, so preference removal restores weekends without
+          // touching series rows (hook P1 — provenance).
+          const skipChildStamp = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
+          const skipChild = skipChildStamp || editPrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
           // track_state + lifecycle stamps ride along as rewind evidence: a
           // pending child can still carry a live tracker or stale stamps
@@ -7803,7 +7855,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.recurring_nth) childUpdates.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (seriesCols.recurring_weekday) childUpdates.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
               if (seriesCols.recurring_interval_days) childUpdates.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
-              if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChild;
+              if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChildStamp;
               if (seriesCols.weekend_shift && skipChild) childUpdates.weekend_shift = dirChild;
               // Keep existing future visits' Bill-To in lockstep with the
               // (freshly-updated) series parent so a payer change propagates.
@@ -7877,7 +7929,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 // Fence-or-clear contract — same as the child rewrite above.
                 if (boosterDateChanged) boosterUpdates.route_order = null;
-                if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
+                if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChildStamp;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
                 let boosterRewound = false;
                 if (boosterDateChanged) {
@@ -8023,9 +8075,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+          // B6: DATES honor the live preference; the STAMPED flag stays the
+          // operator's raw value (see the rewrite branch above).
+          const spawnPrefNoWeekends = editPrefNoWeekends;
+          const skipParentStamp = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+          const skipParent = skipParentStamp || spawnPrefNoWeekends;
           const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+          const skipChildStamp = skipWeekends !== undefined ? !!skipWeekends : skipParentStamp;
+          const skipChild = skipChildStamp || spawnPrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
           // Pull parent's existing add-on lines once so we can mirror them
           // onto each spawned child below.
@@ -8111,7 +8168,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
               if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
-              if (cols.skip_weekends) childData.skip_weekends = skipChild;
+              if (cols.skip_weekends) childData.skip_weekends = skipChildStamp;
               if (cols.weekend_shift && skipChild) childData.weekend_shift = dirChild;
               const dType = discountType !== undefined ? discountType : parent.discount_type;
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
@@ -8119,7 +8176,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
-              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
+              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates, skipChild);
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               if (memberSeriesCovered && cols.estimated_price) {
                 // Dues cover the base visit — keep an ADD-ON-ONLY stamp when
@@ -8166,7 +8223,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (parentAddons.length > 0 && childRow?.id) {
               try {
                 const addonCols = await db('scheduled_service_addons').columnInfo();
-                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
+                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates, skipChild);
                 for (const addon of dueAddons) {
                   const addonData = {
                     scheduled_service_id: childRow.id,
@@ -8279,6 +8336,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               claimToken: visitCountClaimToken,
               protectedVisitId: req.params.id,
               ongoingSeries: true,
+              prefNoWeekends: editPrefNoWeekends,
               occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
             });
             // An EXHAUSTED plan (zero upcoming) flipped to ongoing with zero
@@ -8322,6 +8380,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             baselineCount: Number.isInteger(Number.parseInt(recurringPlannedCountBaseline, 10))
               ? Number.parseInt(recurringPlannedCountBaseline, 10)
               : null,
+            prefNoWeekends: editPrefNoWeekends,
             occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
           });
           recurringCreated += visitCountResult.added.length;
@@ -9753,6 +9812,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // insert is verified against the caller's held rung-1 date keys and probed
   // for global occupancy right before the write (guardRecurrenceDestination).
   occupancyGuard = null,
+  // B6 (codex #3509 P2): update-details passes its per-edit preference
+  // snapshot so this writer and the pre-lock plan agree; other callers
+  // resolve fresh.
+  prefNoWeekends = undefined,
 }) {
   const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
@@ -9840,7 +9903,13 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     }),
     intervalDays: parent.recurring_interval_days,
   };
-  const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+  // B6: top-up DATES honor the customer's live weekday preference even on
+  // legacy series; the STAMPED flag stays the operator's raw value so
+  // preference removal restores weekends without touching rows.
+  const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+  const skipParent = skipParentStamp || (prefNoWeekends !== undefined
+    ? !!prefNoWeekends
+    : await customerPrefersNoWeekends(trx, parent.customer_id));
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
   const latest = await latestLiveSeriesVisit(trx, parentId);
   const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
@@ -9889,7 +9958,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
     if (cols.recurring_interval_days && parent.recurring_interval_days != null) data.recurring_interval_days = parent.recurring_interval_days;
-    if (cols.skip_weekends) data.skip_weekends = skipParent;
+    if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
     if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -9897,7 +9966,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
     applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
@@ -9988,7 +10057,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
 // see a committed visit row) — same ordering the pre-lock code had.
 async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
-  const runLocked = async (trx) => {
+    const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the auto-extend
     // insert serializes against a concurrent merge-undo of this customer.
@@ -10104,7 +10173,11 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           intervalDays: parent.recurring_interval_days,
         };
         const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-        const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+        // B6: auto-extend DATES honor the customer's live weekday
+        // preference even on legacy series; the STAMPED flag stays the
+        // operator's raw value (provenance — see reconcile).
+        const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+        const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
         const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
         // Pre-load every active date on this series so the auto-extend
         // insert dedupes against future booster rows — shared preload
@@ -10172,7 +10245,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             recurring_parent_id: parentId,
           };
           if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-          if (cols.skip_weekends) nextData.skip_weekends = skipParent;
+          if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
           if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
           if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
@@ -10190,7 +10263,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
           } catch { parentAddons = []; }
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates);
+          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
           applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
@@ -11800,7 +11873,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // knows nothing about skip_weekends, so a seeded tail can land on the
     // Sat/Sun the operator excluded. Only refuse when there IS a tail — a
     // fully pre-seeded year is adopted as booked, weekend rule included.
-    if (coverageSeedsTail && input.skipWeekends) {
+    // B6: the customer's LIVE weekday preference counts like the operator
+    // flag here — the preference is never persisted onto rows, and a
+    // pref customer's weekend-blind seeded tail would violate it the same
+    // way. Consulted only when a tail would actually seed.
+    if (coverageSeedsTail
+      && (input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))) {
       return blocked(`isn’t available on an ongoing series that skips weekends — the ${visitsPerYear - ONGOING_PRESEEDED_VISITS} visits seeded after the booked ones ignore that rule. Enter ${visitsPerYear} in Visits to book the whole year`);
     }
 
@@ -14633,6 +14711,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
   let alertBlackoutDates = null;
   const spawned = []; // committed inserts → post-commit addon/reminder steps
 
+  // B6: effective weekend rule captured out of the locked closure for the
+  // post-commit add-on mirror.
+  let alertSkipEffective = false;
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the spawn inserts
@@ -14707,8 +14788,14 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
 
     // Honor skip-weekends preference set on the parent (POST + PUT + auto-
     // extend already do; the alert action endpoint must too or weekend
-    // visits reappear on plans configured to skip them).
-    const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+    // visits reappear on plans configured to skip them). B6: extend DATES
+    // also honor the customer's live weekday preference; the STAMPED flag
+    // stays the operator's raw value (provenance — see reconcile).
+    const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+    const skipParent = skipParentStamp || await customerPrefersNoWeekends(trx, parent.customer_id);
+    // Captured for the post-commit add-on mirror, which runs OUTSIDE this
+    // locked closure but must match the dates it generated.
+    alertSkipEffective = skipParent;
     const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
 
     // Pull parent's add-on lines once so we can mirror them onto each new
@@ -14782,11 +14869,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd });
@@ -14855,11 +14942,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd });
@@ -14949,7 +15036,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
     try {
       const addonCols = await conn('scheduled_service_addons').columnInfo();
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates);
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates, alertSkipEffective);
       for (const addon of dueAddons) {
         const addonData = {
           scheduled_service_id: childId,
