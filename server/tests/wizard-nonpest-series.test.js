@@ -744,6 +744,19 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r27: bells match the billing state left on the visit; locked service identity is drift-checked; placeholder label reads ride the trx', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect((recoverySrc.match(/bell: mintedPriceConfirmed\s*\n\s*\?/g) || []).length).toBe(2);
+    expect(recoverySrc).toMatch(/BILLING WAS LEFT UNTOUCHED[^`]*convert the quote for the REMAINING program only/);
+    expect(booking).toMatch(/'service_type', 'service_id',\s*\n\s*\.\.\.\(\(await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\)\)/);
+    expect(booking).toMatch(/\|\| RecurringAppointmentSeeder\.serviceKeyFor\(\{ service_type: lockedParent\.service_type \}\)\s*\n\s*!== RecurringAppointmentSeeder\.serviceKeyFor\(\{ service_type: resolvedServiceType \}\)/);
+    expect(booking).toMatch(/String\(lockedParent\.service_id\) !== String\(seriesParentRow\.service_id\)\)\) \{/);
+    const reminders = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+    expect(reminders).toMatch(/async function buildServiceLabel\(scheduledServiceId, parentName, conn = db\) \{\s*\n\s*const resolvedParent = await estimateBackedServiceName\(scheduledServiceId, parentName, conn\);/);
+    expect(reminders).toMatch(/const addons = await conn\('scheduled_service_addons'\)/);
+    expect(reminders).toMatch(/await buildServiceLabel\(svc\.id, lockedVisit\.service_type, trx\);/);
+  });
+
   test('r26: reconciled marker (not billing mutation) leaves the claim; unconfirmed price leaves billing untouched; sweep defers to in-flight completions; placeholder insert is idempotent', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/\.whereNull\('ss\.wizard_recovery_reconciled_at'\)/);

@@ -299,11 +299,15 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           },
           terminal_unbilled: {
             patch: (mintedPriceConfirmed ? STRIP_PATCH : BILLING_UNTOUCHED_PATCH)(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, ${mintedPriceConfirmed ? 'pricing stripped' : 'billing left as-is'}${priceKeptNote}; office converts the live quote for the FULL program`),
-            bell: `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed and none was invoiced. The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the FULL plan.`,
+            bell: mintedPriceConfirmed
+              ? `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed and none was invoiced. The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the FULL plan.`
+              : `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed. Its BILLING WAS LEFT UNTOUCHED (price, pay-at-visit, auto-invoice kept as they are — possibly a staff edit). Verify that visit's billing first; then convert the quote to schedule and bill the FULL plan.`,
           },
           in_flight: {
             patch: (mintedPriceConfirmed ? STRIP_PATCH : BILLING_UNTOUCHED_PATCH)(trx, ` — series activation never completed (worker died mid-booking); ${mintedPriceConfirmed ? 'pricing stripped' : 'billing left as-is'}${priceKeptNote}, office converts from the live quote`),
-            bell: `${who} committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
+            bell: mintedPriceConfirmed
+              ? `${who} committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`
+              : `${who} committed its first visit but the series never activated (worker died mid-request). That visit's BILLING WAS LEFT UNTOUCHED (price, pay-at-visit, auto-invoice kept as they are — possibly a staff edit), so it will still invoice on its own when completed. Verify that visit's billing FIRST, then convert the quote for the REMAINING program only — converting the full plan on top of it would bill the first application twice.`,
           },
         }[disposition];
         await trx('scheduled_services')

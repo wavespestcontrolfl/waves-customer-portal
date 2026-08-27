@@ -3017,6 +3017,7 @@ async function createSelfBooking(payload = {}) {
             .first('id', 'is_recurring', 'status', 'payment_method_preference',
               'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
               'scheduled_date', 'window_start', 'window_end', 'technician_id',
+              'service_type', 'service_id',
               ...((await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation')) ? ['source_estimate_generation'] : []));
           if (lockedParent && lockedParent.is_recurring) {
             // is_recurring alone is NOT activation-owned evidence (codex
@@ -3062,7 +3063,15 @@ async function createSelfBooking(payload = {}) {
             || lockedParent.payment_method_preference !== 'pay_at_visit'
             || lockedParent.create_invoice_on_complete !== true
             || Number(lockedParent.estimated_price) !== Number(visitPrice)
-            || String(lockedParent.source_estimate_id || '') !== String(pricing_estimate_id)) {
+            || String(lockedParent.source_estimate_id || '') !== String(pricing_estimate_id)
+            // Service IDENTITY too (codex #3504 r27): an admin can switch
+            // the committed visit's service while activation waits on its
+            // locks; seeding the quoted family onto a re-typed visit (and
+            // overwriting the staff-chosen catalog identity) is drift.
+            || RecurringAppointmentSeeder.serviceKeyFor({ service_type: lockedParent.service_type })
+              !== RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType })
+            || (lockedParent.service_id != null && seriesParentRow.service_id != null
+              && String(lockedParent.service_id) !== String(seriesParentRow.service_id))) {
             logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} no longer matches its priced state under lock (stripped/cancelled concurrently) — activation skipped`);
             return { stale: true };
           }

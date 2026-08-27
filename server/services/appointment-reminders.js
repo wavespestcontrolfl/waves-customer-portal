@@ -752,11 +752,15 @@ async function estimateBackedServiceName(scheduledServiceId, parentName, conn = 
 // "A, B, and C" for three or more. The result is persisted into
 // appointment_reminders.service_type so the cron / reschedule / cancel paths
 // inherit it automatically without re-querying addons.
-async function buildServiceLabel(scheduledServiceId, parentName) {
-  const resolvedParent = await estimateBackedServiceName(scheduledServiceId, parentName);
+// `conn` (optional) keeps every read on the caller's connection (codex
+// #3504 r27): the self-heal already holds a pool connection and the visit
+// row lock, and a pool read here could wait on a second connection at the
+// pool limit and time the healing transaction out.
+async function buildServiceLabel(scheduledServiceId, parentName, conn = db) {
+  const resolvedParent = await estimateBackedServiceName(scheduledServiceId, parentName, conn);
   const fallback = smsServiceLabel(resolvedParent) || 'service';
   try {
-    const addons = await db('scheduled_service_addons')
+    const addons = await conn('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId })
       .pluck('service_name');
     const all = [resolvedParent, ...addons].map(smsServiceLabel).filter(Boolean);
@@ -2115,7 +2119,7 @@ const AppointmentReminders = {
             if (!lockedVisit.window_start) {
               const placeholderTime = parseETDateTime(`${datePart}T08:00`);
               if (isNaN(placeholderTime.getTime())) return { skip: 'bad_date' };
-              const serviceLabel = await buildServiceLabel(svc.id, lockedVisit.service_type);
+              const serviceLabel = await buildServiceLabel(svc.id, lockedVisit.service_type, trx);
               const record = await AppointmentReminders.insertPreClosedPlaceholderRowInTx(trx, {
                 scheduledServiceId: svc.id,
                 customerId: lockedVisit.customer_id,
