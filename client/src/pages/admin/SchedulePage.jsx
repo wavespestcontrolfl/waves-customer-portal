@@ -9372,27 +9372,11 @@ export function CompletionPanel({
   const [reentrySeeds, setReentrySeeds] = useState(null);
   const [reentryExtMinutes, setReentryExtMinutes] = useState(null);
   const [reentryIntMinutes, setReentryIntMinutes] = useState(null);
-  useEffect(() => {
-    let live = true;
-    if (!service?.id) return undefined;
-    adminFetch(`/admin/dispatch/${service.id}/reentry-defaults`)
-      .then((d) => {
-        if (!live) return;
-        const ext = Number(d?.exteriorMinutes);
-        const int_ = Number(d?.interiorMinutes);
-        const seeds = {
-          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
-          interiorMinutes: Number.isFinite(int_) && int_ > 0 ? Math.round(int_) : 0,
-        };
-        setReentrySeeds(seeds);
-        // Functional updates: a draft restore may have already set a value —
-        // the seed must never clobber restored operator input.
-        setReentryExtMinutes((cur) => (cur == null ? seeds.exteriorMinutes : cur));
-        setReentryIntMinutes((cur) => (cur == null ? seeds.interiorMinutes : cur));
-      })
-      .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
-    return () => { live = false; };
-  }, [service?.id]);
+  // The seed fetch lives below, after sprayEvidenceInForm is derived — a
+  // no-spray termite identity seeds 0/0 (no steppers) until the form
+  // records spray evidence, at which point the seeds refresh to the line
+  // defaults and the steppers appear (codex inline r6 on #3516).
+  const reentrySeedsRef = useRef(null);
   // Dirty per side = the tech moved the stepper off its seed (or a restored
   // draft carries a moved value). Only dirty sides post — see the body build.
   const reentryExtDirty =
@@ -10311,6 +10295,33 @@ export function CompletionPanel({
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
     return !!method && !["bait_placement", "station_check", "trunk_injection"].includes(method);
   }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
+  // completion would persist for this visit. Re-fetched whenever spray
+  // evidence appears/disappears so a bait/inspection identity that gains a
+  // supplemental spray application gets its 30/120 seeds — and its
+  // steppers — back. A side the tech never moved (still equal to the prior
+  // seed, or unset) adopts the new seed; a moved side is never clobbered.
+  useEffect(() => {
+    let live = true;
+    if (!service?.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/reentry-defaults?applicationsRecorded=${sprayEvidenceInForm ? 1 : 0}`)
+      .then((d) => {
+        if (!live) return;
+        const ext = Number(d?.exteriorMinutes);
+        const int_ = Number(d?.interiorMinutes);
+        const seeds = {
+          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
+          interiorMinutes: Number.isFinite(int_) && int_ > 0 ? Math.round(int_) : 0,
+        };
+        const prev = reentrySeedsRef.current;
+        reentrySeedsRef.current = seeds;
+        setReentrySeeds(seeds);
+        setReentryExtMinutes((cur) => (cur == null || cur === prev?.exteriorMinutes ? seeds.exteriorMinutes : cur));
+        setReentryIntMinutes((cur) => (cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur));
+      })
+      .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
+    return () => { live = false; };
+  }, [service?.id, sprayEvidenceInForm]);
   const areasTreatedHidden = treeShrubCloseoutOn
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",

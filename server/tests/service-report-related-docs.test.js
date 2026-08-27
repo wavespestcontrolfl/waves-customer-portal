@@ -15,6 +15,7 @@
 
 const {
   buildReportV1Data,
+  normalizeAdvisoryForTreatmentScope,
 } = require('../services/service-report/report-data');
 
 function fixtureKnex(fixtures) {
@@ -153,6 +154,17 @@ describe('legacy no-spray termite advisories', () => {
     }, 'token-legacy', knex, { mode: 'live' });
     expect(data.advisory.exterior_reentry_min).toBe(45);
     expect(data.advisory.interior_reentry_min).toBe(0);
+  });
+
+  test('the legacy boolean reentry_adjusted marker protects both sides', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 45, interior_reentry_min: 90, reentry_adjusted: true }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory.interior_reentry_min).toBe(90);
   });
 
   test('a legacy methodless termiticide row (inferred station_check) is treatment evidence', async () => {
@@ -383,4 +395,17 @@ describe('nextAppointment cross-line fallback', () => {
     }, 'token-next', knex, { mode: 'live' });
     expect(data.nextAppointment).toBeNull();
   });
+});
+
+describe('exterior scope vocabulary covers the new termite/mosquito area labels', () => {
+  const advisory = { exterior_reentry_min: 30, interior_reentry_min: 0 };
+  for (const area of ['Screened enclosure', 'Standing water areas', 'Under deck / patio', 'Bait stations', 'Crawlspace', 'Garage / slab edge', 'Wood contact points']) {
+    test(`${area} keeps the exterior countdown`, () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify([area]) },
+        applications: [{ application_area: area, application_method: 'fog_ulv' }],
+      });
+      expect(normalized.exterior_reentry_min).toBe(30);
+    });
+  }
 });

@@ -487,7 +487,13 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   // "Trash area" — clearly exterior choices that previously fell through
   // and (under the explicit-exterior rule) would wrongly zero the
   // customer's dry-down timer (codex P1 #3007).
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash)\b/.test(text);
+  // screened/enclosure, standing water, deck, station(s), crawlspace, slab
+  // edge and wood contact cover the termite + mosquito area vocabularies
+  // added 2026-08-27 ("Screened enclosure", "Standing water areas", "Under
+  // deck / patio", "Bait stations", "Crawlspace", "Garage / slab edge",
+  // "Wood contact points") — exterior choices that would otherwise fall
+  // through and zero the customer's dry-down timer (codex inline r6).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
@@ -3792,9 +3798,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Fail closed: a failed product load means treatment evidence is UNKNOWN,
   // so the stored guidance stands (uncapped codex P1 r5).
   if (config.id === 'termite' && !productsLoadFailed && !readTimeSprayEvidence && isTermiteNoReentryServiceType(service.service_type)) {
-    const adjusted = storedAdvisory.reentry_adjusted && typeof storedAdvisory.reentry_adjusted === 'object'
-      ? storedAdvisory.reentry_adjusted
-      : {};
+    // The legacy BOOLEAN marker means both sides were corrected by a person
+    // (normalizeAdvisoryForTreatmentScope honors it the same way) — it must
+    // never be read as "nothing adjusted" (codex inline r6).
+    const rawAdjusted = storedAdvisory.reentry_adjusted;
+    const adjusted = rawAdjusted === true
+      ? { exterior: true, interior: true }
+      : (rawAdjusted && typeof rawAdjusted === 'object' ? rawAdjusted : {});
     if (!adjusted.exterior && storedAdvisory.exterior_reentry_min != null) storedAdvisory.exterior_reentry_min = 0;
     if (!adjusted.interior && storedAdvisory.interior_reentry_min != null) storedAdvisory.interior_reentry_min = 0;
   }

@@ -2881,7 +2881,12 @@ router.get('/:serviceId/reentry-defaults', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+    // `applicationsRecorded=1` = the panel currently records spray evidence
+    // (spray-class product or treatment-applied action) on a visit whose
+    // identity alone is no-spray — seeds return to the line defaults so the
+    // steppers reappear and the tech can adjust (codex inline r6).
+    const applicationsRecorded = ['1', 'true'].includes(String(req.query.applicationsRecorded || '').toLowerCase());
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, { applicationsRecorded });
     res.json({
       exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
       interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
