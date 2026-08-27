@@ -1827,7 +1827,11 @@ function extractRawMarkdownTables(text) {
   // Fenced code (``` / ~~~) is not rendered markdown — a table shown inside
   // a code example is documentation, not a live table. Blank those lines
   // out (keeping line count) before scanning.
-  const raw = String(text || '').split('\n');
+  // HTML/MDX comments render nothing — blank them (newlines preserved so
+  // line-based fence/list tracking stays aligned) before scanning.
+  const raw = String(text || '')
+    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}/g, (c) => c.replace(/[^\n]/g, ''))
+    .split('\n');
   // CommonMark fences: a fence closes only on the SAME marker character with
   // at least the opening run length — a ``` inside a ~~~ block is content.
   let fence = null; // { ch, len }
