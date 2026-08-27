@@ -168,12 +168,17 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(updates.find(u => u.patch.recovery_queued_at)).toBeUndefined(); // stamp goes through whereIn, captured below
   });
 
-  test('recovery stamping: terminal outcomes stamp recovery_queued_at, errors are left for the next scan', async () => {
+  test('recovery stamping: terminal outcomes stamp recovery_queued_at; errors AND deferred (stale live board row) are left for the next scan', async () => {
     const crawl = jest.fn(async () => ({ found: false, status: 200 }));
-    const recovery = jest.fn(async (losses) => ({ queued: 0, results: losses.map(l => ({ domain: l.domain, outcome: l.domain === 'flaky.example' ? 'error' : 'skipped' })) }));
+    const outcomeFor = { 'flaky.example': 'error', 'stale.example': 'deferred' };
+    const recovery = jest.fn(async (losses) => ({ queued: 0, results: losses.map(l => ({ domain: l.domain, outcome: outcomeFor[l.domain] || 'skipped' })) }));
     const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
     const log = [];
-    const active = [activeRow({ miss_count: 1 }), activeRow({ id: 'bl-2', source_url: 'https://flaky.example/p', source_domain: 'flaky.example', miss_count: 1 })];
+    const active = [
+      activeRow({ miss_count: 1 }),
+      activeRow({ id: 'bl-2', source_url: 'https://flaky.example/p', source_domain: 'flaky.example', miss_count: 1 }),
+      activeRow({ id: 'bl-3', source_url: 'https://stale.example/p', source_domain: 'stale.example', miss_count: 1 }),
+    ];
     const { increments } = scanWith({ items: [seen], active });
     // capture whereIn-based updates (stamps)
     const origImpl = db.getMockImplementation();
@@ -181,7 +186,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: recovery, now: new Date('2026-08-30T07:30:00Z') });
     const stamps = log.filter(l => l.patch.recovery_queued_at);
     expect(stamps).toHaveLength(1);
-    expect(stamps[0].ins).toEqual(['bl-1']); // blog.example settled; flaky.example errored → not stamped
+    expect(stamps[0].ins).toEqual(['bl-1']); // blog.example settled; flaky.example errored + stale.example deferred → not stamped
     expect(stamps[0].patch.recovery_queued_at).toEqual(new Date('2026-08-30T07:30:00Z'));
     expect(increments).toEqual([]);
   });
@@ -469,6 +474,17 @@ describe('lost-link recovery', () => {
     const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
     expect(r).toEqual({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'already on board (contacted for /other/)' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'skipped' }] });
     expect(ops[0].ins[0]).toEqual(['status', expect.arrayContaining(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed'])]);
+  });
+
+  test('a STALE live/indexed board row (verifier has not demoted it yet) defers recovery instead of terminally skipping it', async () => {
+    makeDb({ seo_link_prospects: (op, st) => {
+      if (op === 'first' && st.ins.some(i => i[0] === 'status')) return { id: 'p-live', status: 'live', target_page: 'https://www.wavespestcontrol.com/x/' };
+      if (op === 'insert') throw new Error('must not insert');
+      return null;
+    } });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r.results).toEqual([{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'deferred' }]); // NOT 'skipped' → monitor leaves recovery_queued_at null
+    expect(r.reasons[0].reason).toMatch(/still live for \/x\/ — deferred/);
   });
 
   test('a lost signup-lane placement (citation) is not reopened into the outreach board', async () => {

@@ -26,6 +26,9 @@ const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
 const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
 // Board states that mean "someone is already on this" — never reopened here.
 const IN_FLIGHT_STATUSES = new Set(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
+// Board says the link is up, monitor says the domain is dark: the board is
+// stale (verifier runs after the scan). Deferred, never a terminal skip.
+const STALE_WHEN_DOMAIN_DARK = new Set(['live', 'indexed']);
 
 function normalizeDomain(d) {
   return String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^(www|mail)\./, '').replace(/[/:].*$/, '');
@@ -63,8 +66,8 @@ function targetPageVariants(url) {
  * BacklinkMonitor.domainLevelLosses(). Returns { queued, skipped, reasons[] }.
  */
 async function queueLostDomains(losses, { scorer } = {}) {
-  // results[] carries one terminal verdict per loss so the caller can stamp the
-  // backlink row: 'queued' / 'skipped' are final, 'error' is retried next scan.
+  // results[] carries one verdict per loss so the caller can stamp the backlink
+  // row: 'queued' / 'skipped' are final, 'error' / 'deferred' are retried next scan.
   const out = { queued: 0, skipped: 0, reasons: [], results: [] };
   if (!Array.isArray(losses) || !losses.length) return out;
   const scoreMod = scorer || require('./prospect-scorer');
@@ -72,8 +75,11 @@ async function queueLostDomains(losses, { scorer } = {}) {
   for (const loss of losses) {
     const before = { q: out.queued, s: out.skipped };
     try {
-      await queueOne(loss, out, scoreMod);
-      out.results.push({ domain: loss && loss.domain, backlink_id: loss && loss.backlink_id, outcome: out.queued > before.q ? 'queued' : 'skipped' });
+      const verdict = await queueOne(loss, out, scoreMod);
+      // 'deferred' (like 'error') is NOT terminal: the caller leaves the
+      // backlink's recovery marker null and the owed sweep retries next scan.
+      const outcome = verdict === 'deferred' ? 'deferred' : out.queued > before.q ? 'queued' : 'skipped';
+      out.results.push({ domain: loss && loss.domain, backlink_id: loss && loss.backlink_id, outcome });
     } catch (err) {
       out.results.push({ domain: loss && loss.domain, backlink_id: loss && loss.backlink_id, outcome: 'error' });
       // One bad row must not abort the batch — the rest still queue, and the
@@ -101,8 +107,18 @@ async function queueOne(loss, out, scoreMod) {
     const inFlight = await db('seo_link_prospects').where({ target_domain: domain })
       .whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
     if (inFlight && IN_FLIGHT_STATUSES.has(inFlight.status)) {
+      const where = inFlight.target_page ? ` for ${targetPathOf(inFlight.target_page)}` : '';
+      if (STALE_WHEN_DOMAIN_DARK.has(inFlight.status)) {
+        // The board still says live/indexed, but the monitor just verified the
+        // domain has NO active link — the daily verifier (04:30 ET, after the
+        // 03:30 scan) has not demoted it yet. Not a terminal verdict: leave the
+        // recovery marker null so the owed sweep re-evaluates once the row is lost.
+        out.skipped++;
+        out.reasons.push({ domain, reason: `board row still ${inFlight.status}${where} — deferred until the verifier demotes it` });
+        return 'deferred';
+      }
       out.skipped++;
-      out.reasons.push({ domain, reason: `already on board (${inFlight.status}${inFlight.target_page ? ` for ${targetPathOf(inFlight.target_page)}` : ''})` });
+      out.reasons.push({ domain, reason: `already on board (${inFlight.status}${where})` });
       return;
     }
 

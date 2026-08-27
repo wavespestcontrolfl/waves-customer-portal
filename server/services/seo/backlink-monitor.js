@@ -298,9 +298,10 @@ class BacklinkMonitor {
         const recovery = recoveryFn || require('./lost-link-recovery').queueLostDomains;
         const r = await recovery(alertable);
         recoveryQueued = r?.queued || 0;
-        // Stamp every loss whose domain reached a terminal outcome; 'error'
-        // rows stay unstamped and are swept again next scan.
-        const terminal = new Set((r?.results || []).filter(x => x.outcome !== 'error').map(x => x.domain));
+        // Stamp every loss whose domain reached a terminal outcome; 'error' and
+        // 'deferred' (stale live board row) rows stay unstamped and are swept
+        // again next scan.
+        const terminal = new Set((r?.results || []).filter(x => !['error', 'deferred'].includes(x.outcome)).map(x => x.domain));
         // every lost row on a settled domain, not just the representative — else
         // the sibling rows would be swept and re-evaluated on every scan
         const ids = evaluated.filter(l => terminal.has(comparableDomain(l.source_domain))).map(l => l.id);
