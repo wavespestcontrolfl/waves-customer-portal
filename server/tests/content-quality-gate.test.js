@@ -17,6 +17,7 @@ const {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
+  checkNoRawMarkdownTables,
 } = require('../services/content/content-quality-gate')._internals;
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -393,6 +394,17 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
   test('FAQ section', () => {
     expect(checkFaqSectionPresent({ body: 'FAQ\n- Q?\n- A.' }).ok).toBe(true);
     expect(checkFaqSectionPresent({ body: 'no section' }).ok).toBe(false);
+  });
+  test('raw markdown tables are hard-blocked (owner rule 2026-08-27: ComparisonTable only)', () => {
+    const rawTable = 'Intro.\n\n| Method | Cost |\n| --- | --- |\n| DIY | $10 |\n';
+    expect(checkNoRawMarkdownTables({ body: rawTable }).ok).toBe(false);
+    expect(checkNoRawMarkdownTables({ body: rawTable }).reason).toMatch(/ComparisonTable/);
+    // Aligned/colon variants of the delimiter row still match.
+    expect(checkNoRawMarkdownTables({ body: '| A | B |\n|:---|---:|\n| 1 | 2 |' }).ok).toBe(false);
+    // <ComparisonTable> JSX, prose pipes, and plain dashed dividers pass.
+    expect(checkNoRawMarkdownTables({ body: '<ComparisonTable columns={["a","b"]} rows={[{ label: "x", values: ["y"] }]} />' }).ok).toBe(true);
+    expect(checkNoRawMarkdownTables({ body: 'Choose either|or — both work.\n\n---\n\nNext section.' }).ok).toBe(true);
+    expect(checkNoRawMarkdownTables({ body: '' }).ok).toBe(true);
   });
   test('voice match', () => {
     const body = 'Your sandy soil and afternoon storms create perfect conditions. You should protect your home. Your yard matters. You need this. Your call.';

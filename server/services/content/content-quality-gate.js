@@ -154,6 +154,11 @@ const PAGE_TYPE_CHECKS = {
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
     { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
+    // Owner rule 2026-08-27: tabular data renders via <ComparisonTable>,
+    // never a raw markdown pipe table (they render as unstyled prose and
+    // bypass the comparison-table gate's honesty regime). Weight 0 like
+    // the other pure hard gates — blocks without moving thresholds.
+    { name: 'no_raw_markdown_tables', weight: 0, isHard: true, evaluate: checkNoRawMarkdownTables },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -1011,6 +1016,24 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
+// Raw markdown pipe table detector — the delimiter row (|---|:---:|…) is
+// the unambiguous signature: a line of only pipes/dashes/colons/spaces
+// with 2+ dashes. Prose pipes ("either|or") and <ComparisonTable> JSX
+// never match it. Fires only when a header-style pipe row sits adjacent,
+// so a stray dashed divider alone can't false-positive.
+function checkNoRawMarkdownTables(draft) {
+  const body = String(draft.body || '');
+  const lines = body.split('\n');
+  for (let i = 1; i < lines.length; i += 1) {
+    const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
+    const headerAbove = /^\s*\|.*\|\s*$/.test(lines[i - 1]);
+    if (delimiter && headerAbove) {
+      return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
+    }
+  }
+  return { ok: true };
+}
+
 function checkVoiceMatch(draft) {
   const body = String(draft.body || '').toLowerCase();
   // Lightweight voice signals from the canonical waves_default voice
@@ -1202,4 +1225,5 @@ module.exports._internals = {
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
   checkBlogMetaSoftCta, checkAuthoredMetaLength,
+  checkNoRawMarkdownTables,
 };
