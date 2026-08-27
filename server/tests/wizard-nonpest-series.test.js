@@ -978,6 +978,17 @@ describe('booking route wiring (source contracts)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).not.toMatch(/ypest/);
     expect(recoverySrc).not.toMatch(/familyKey === 'pest_control'/);
+    // The locked re-validation re-reads the marker and refuses a stamped row.
+    expect(recoverySrc).toMatch(/'source_estimate_generation', 'wizard_recovery_reconciled_at'\);/);
+    expect(recoverySrc).toMatch(/\|\| fresh\.wizard_recovery_reconciled_at\s*\n\s*\|\| \['cancelled', 'canceled'\]/);
+    // Pre-deploy pest one-offs are backfilled with the marker.
+    const backfill = require('../models/migrations/20260827000002_pest_recovery_backfill');
+    expect(typeof backfill.up).toBe('function');
+    expect(typeof backfill.down).toBe('function');
+    const backfillSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    expect(backfillSrc).toMatch(/hasColumn\('scheduled_services', 'wizard_recovery_reconciled_at'\)/);
+    expect(backfillSrc).toMatch(/whereRaw\("COALESCE\(ss\.service_type, ''\) ~\* '\\\\ypest\\\\y'"\)/);
+    expect(backfillSrc).toMatch(/whereNotExists\(function child\(\)/);
     // Pest prices as the fixed quarterly-4 plan for the minted-amount proof.
     expect(recoverySrc).toMatch(/const planVisits = family === 'pest_control' \? 4 : resolveWizardSeriesPlan\(freshDraft, planKey\)\?\.visits;/);
     // The kept branch stamps the durable marker so the sweep can tell a

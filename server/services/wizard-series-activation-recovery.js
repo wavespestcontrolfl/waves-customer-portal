@@ -179,11 +179,15 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           .where({ id: parent.id })
           .forUpdate()
           .first('id', 'is_recurring', 'payment_method_preference', 'create_invoice_on_complete', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id',
-            ...(hasGenerationColumn ? ['source_estimate_generation'] : []));
+            'source_estimate_generation', 'wizard_recovery_reconciled_at');
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
           || fresh.create_invoice_on_complete !== true
+          // Reconciled (or kept-on-purpose) between discovery and this
+          // lock — e.g. the pest funnel's duplicate-kept stamp landing
+          // after the unlocked read: never strip a marked row.
+          || fresh.wizard_recovery_reconciled_at
           || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
         // A completion whose post-commit side effects (the completion
