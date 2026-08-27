@@ -1957,14 +1957,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   }
 
   const moved = results.filter((r) => r.ok);
+  // Every advisory overlap warning from every moved stop, flattened: a
+  // series shift returns one dated warning per clashing occurrence, so the
+  // count is per WARNING (per clashing date), never per stop, and the sheets
+  // render the dated text rather than a bare count.
+  const overlapWarnings = moved.flatMap((r) => (Array.isArray(r.warnings) ? r.warnings : []));
   return {
     ok: moved.length > 0,
     reason: moved.length === 0 ? (results[0]?.error || 'nothing_moved') : undefined,
     movedCount: moved.length,
     failedCount: results.length - moved.length,
-    // Stops that moved ONTO an occupied slot (advisory) — the sheets name
-    // the count so the dispatcher eyeballs the day's route.
-    overlapCount: moved.filter((r) => Array.isArray(r.warnings) && r.warnings.length > 0).length,
+    overlapCount: overlapWarnings.length,
+    overlapWarnings,
     results,
   };
 }

@@ -599,8 +599,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       // Stops that moved onto an occupied slot: the move COMMITS (schedule
       // overlaps are advisory on every staff surface) — say so and keep the
       // sheet open so the dispatcher eyeballs the day's route.
-      const overlapCount = data.overlapCount
-        || (data.results || []).filter((r) => r.ok && Array.isArray(r.warnings) && r.warnings.length).length;
+      const overlapWarnings = Array.isArray(data.overlapWarnings)
+        ? data.overlapWarnings
+        : (data.results || []).flatMap((r) => (r.ok && Array.isArray(r.warnings) ? r.warnings : []));
+      const overlapCount = overlapWarnings.length;
       const notifyClause = !notify ? ''
         : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
           : texted === 0 ? ', customer NOT texted'
@@ -618,13 +620,15 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         const smsClause = notTexted
           ? ' Some customers were NOT texted (no phone or template disabled) — follow up manually.'
           : '';
+        // The dated warnings themselves (one per clashing occurrence — a
+        // series shift can report several future dates), never a bare count.
         const overlapClause = overlapCount > 0
-          ? ` Heads up: ${overlapCount} ${overlapCount === 1 ? 'stop overlaps' : 'stops overlap'} another appointment on the schedule — both are kept on the calendar; check the day's route.`
+          ? ` ${overlapWarnings.join(' ')} Check the route on ${overlapCount === 1 ? 'that day' : 'those days'}.`
           : '';
         setError(`${summary}.${failClause}${smsClause}${overlapClause}`);
         setBusy(false);
       }
-      onDone?.({ summary, movedCount, failedCount, notTexted, overlapCount });
+      onDone?.({ summary, movedCount, failedCount, notTexted, overlapCount, overlapWarnings });
     } catch (err) {
       setError(err.message || 'Quick Move failed');
       setBusy(false);

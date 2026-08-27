@@ -1359,9 +1359,15 @@ function RainOutSheet({ service, onClose, onDone }) {
       const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
       // Overlaps are advisory on staff surfaces: the stop moved, but onto an
       // occupied slot — name it so the tech / office checks the route.
-      const overlapCount = data.overlapCount
-        || (data.results || []).filter((r) => r.ok && Array.isArray(r.warnings) && r.warnings.length).length;
-      const overlaps = overlapCount ? `, ${overlapCount} overlap${overlapCount === 1 ? 's' : ''} another job — check the route` : '';
+      const overlapWarnings = Array.isArray(data.overlapWarnings)
+        ? data.overlapWarnings
+        : (data.results || []).flatMap((r) => (r.ok && Array.isArray(r.warnings) ? r.warnings : []));
+      // One warning per clashing date (a series shift can name several) —
+      // surface the dates, not a bare count.
+      const overlapDates = [...new Set(overlapWarnings.map((w) => (String(w).match(/\d{4}-\d{2}-\d{2}/) || [])[0]).filter(Boolean))];
+      const overlaps = overlapWarnings.length
+        ? `, overlaps another job${overlapDates.length ? ` on ${overlapDates.join(', ')}` : ''} — check the route`
+        : '';
       // Report what actually HAPPENED, not the request flag — a disabled
       // template or missing phone moves the visit without an SMS.
       const movedCount = data.movedCount || 0;

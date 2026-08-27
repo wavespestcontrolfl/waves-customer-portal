@@ -861,7 +861,10 @@ describe('rain-out service', () => {
       SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
         success: true,
         rescheduledOccurrences: [],
-        warnings: ['Heads up: this booking overlaps another appointment on the schedule on 2026-06-12 — both are kept on the calendar.'],
+        warnings: [
+          'Heads up: this booking overlaps another appointment on the schedule on 2026-06-12 — both are kept on the calendar.',
+          'Heads up: this booking overlaps another appointment on the schedule on 2026-09-12 — both are kept on the calendar.',
+        ],
       });
 
       const result = await RainOut.commit(DAY_MOVE_ARGS);
@@ -869,8 +872,11 @@ describe('rain-out service', () => {
       expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).toMatchObject({ overlapAdvisory: true });
       const member = result.results.find((r) => r.id === 'svc-1');
       expect(member.ok).toBe(true);
-      expect(member.warnings).toEqual([expect.stringContaining('2026-06-12')]);
-      expect(result.overlapCount).toBe(1);
+      expect(member.warnings).toHaveLength(2);
+      // Counted per dated WARNING (a series shift names each clashing
+      // occurrence), never per stop — and the dated text is returned.
+      expect(result.overlapCount).toBe(2);
+      expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-06-12'), expect.stringContaining('2026-09-12')]);
     });
 
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
