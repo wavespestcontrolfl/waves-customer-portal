@@ -2895,6 +2895,11 @@ export function usageLeafFor(tab, templateKind) {
   return leaf.replace(/_/g, "-");
 }
 
+const TEMPLATE_KINDS = [
+  { key: "sms", label: "SMS Templates" },
+  { key: "email", label: "Email Templates" },
+];
+
 export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   // SMS / Email are sub-views of the single Message Templates tab.
@@ -2966,6 +2971,11 @@ export default function CommunicationsPageV2() {
         onSectionChange={setTab}
         ariaLabel="Communications section"
         navGridClassName="grid-cols-2 md:grid-cols-7"
+        secondarySections={tab === "templates" ? TEMPLATE_KINDS : []}
+        secondaryActiveKey={templateKind}
+        onSecondaryChange={setTemplateKind}
+        secondaryAriaLabel="Template kind"
+        secondaryNavGridClassName="grid-cols-2"
       />
       <PrepSendDialog
         open={prepSendOpen}
@@ -2977,30 +2987,6 @@ export default function CommunicationsPageV2() {
       {tab === "triage" && <TriageInboxTabV2 />}
       {tab === "templates" && (
         <>
-          <div className="flex gap-2 mb-4">
-            {[
-              { key: "sms", label: "SMS Templates" },
-              { key: "email", label: "Email Templates" },
-            ].map((k) => {
-              const active = templateKind === k.key;
-              return (
-                <button
-                  key={k.key}
-                  type="button"
-                  onClick={() => setTemplateKind(k.key)}
-                  aria-current={active ? "page" : undefined}
-                  className={
-                    "h-9 px-4 rounded-sm border-hairline text-12 font-medium uppercase tracking-label inline-flex items-center justify-center gap-2 u-focus-ring transition-colors " +
-                    (active
-                      ? "bg-zinc-900 text-white border-zinc-900"
-                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900")
-                  }
-                >
-                  {k.label}
-                </button>
-              );
-            })}
-          </div>
           {templateKind === "sms" ? (
             <SmsTemplatesTabV2 />
           ) : (

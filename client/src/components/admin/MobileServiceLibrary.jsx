@@ -9,6 +9,8 @@
 // use the same URL-addressable workflow.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { Library } from "lucide-react";
+import AdminCommandHeader from "./AdminCommandHeader";
 import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
 import { buildMobileServicePayload } from "../../lib/serviceLibraryPayload";
 
@@ -171,21 +173,7 @@ function MenuView({ onNav, onOpenProtocols }) {
   return (
     <div className="pt-0 pb-10 mx-auto" style={{ maxWidth: 640 }}>
       {" "}
-      <div
-        className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-        style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-      >
-        <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-          <div className="flex items-center px-4 py-3">
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-            >
-              Services
-            </h1>
-          </div>
-        </div>
-      </div>
+      <AdminCommandHeader title="Services" icon={Library} />
       <div className="flex flex-col gap-2">
         {items.map((it) => (
           <button

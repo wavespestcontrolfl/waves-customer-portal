@@ -40,7 +40,7 @@ function isoDatePlusDays(days) {
   return d.toISOString().slice(0, 10);
 }
 
-export default function AdminPriceChangePage() {
+export default function AdminPriceChangePage({ embedded = false } = {}) {
   const [locationId, setLocationId] = useState("");
   const [incType, setIncType] = useState("amount");
   const [incValue, setIncValue] = useState("");
@@ -115,7 +115,9 @@ export default function AdminPriceChangePage() {
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1100px] mx-auto p-6 space-y-4">
       <div>
-        <h1 className="text-18 font-medium text-zinc-900">Price Change Notices</h1>
+        {!embedded && (
+          <h1 className="text-18 font-medium text-zinc-900">Price Change Notices</h1>
+        )}
         <p className="text-12 text-ink-secondary mt-0.5 max-w-2xl">
           Formal advance notice for recurring-service price changes — a short email + text per
           customer linking to their personal notice page (current price, new price, effective date,

@@ -221,7 +221,10 @@ function TextArea(props) {
   );
 }
 
-export default function DocumentTemplatesPage() {
+// `embedded` (under ContractsPage): the hub owns the header card, so this
+// page hands its category tabs + actions up via `onSecondaryNav` instead of
+// rendering its own header. Standalone rendering is unchanged.
+export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav } = {}) {
   const [category, setCategory] = useState("all");
   const [templates, setTemplates] = useState([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -582,8 +585,27 @@ export default function DocumentTemplatesPage() {
     }
   };
 
+  const hubNavRef = useRef({});
+  hubNavRef.current = { setCategory, loadTemplates, startNew };
+  useEffect(() => {
+    if (!embedded || !onSecondaryNav) return undefined;
+    onSecondaryNav({
+      sections: CATEGORY_TABS,
+      activeKey: category,
+      onChange: (key) => hubNavRef.current.setCategory(key),
+      ariaLabel: "Template category",
+      navGridClassName: "grid-cols-2 md:grid-cols-6",
+      actions: [
+        { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: () => hubNavRef.current.loadTemplates(), disabled: loading },
+        { label: "New Template", icon: Plus, onClick: () => hubNavRef.current.startNew() },
+      ],
+    });
+    return () => onSecondaryNav(null);
+  }, [embedded, onSecondaryNav, category, loading]);
+
   return (
     <div className="mx-auto max-w-[1500px]">
+      {!embedded && (
       <AdminCommandHeader
         title="Contract Templates"
         icon={FileText}
@@ -596,6 +618,7 @@ export default function DocumentTemplatesPage() {
           { label: "New Template", icon: Plus, onClick: startNew },
         ]}
       />
+      )}
 
       {error && (
         <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">

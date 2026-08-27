@@ -175,6 +175,33 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(joined).toMatch(/notes_for_reviewer/);
   });
 
+  test('A0/A1: the operator brief text authorizes "HomeTeam Pest Defense" so a table-less draft naming it routes to review, not comparison_table_failed', async () => {
+    // Regression: both A-cluster briefs said bare "HomeTeam's ...", which is
+    // deliberately NOT a competitor-facts alias, so the comparison gate's
+    // operator authorization never matched and every run hard-blocked on
+    // COMPARISON_COMPETITOR_IN_PROSE (06-13 → 08-26). The gate reads the
+    // runner's operatorBriefTextForComparisonGate() fields — thesis/outline
+    // must carry the allowlisted canonical name.
+    const gate = require('../services/content/comparison-table-gate');
+    const { operatorBriefTextForComparisonGate, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/autonomous-runner')._internals;
+    const draft = {
+      frontmatter: { title: 'Your New Lakewood Ranch Home Came With Taexx: What It Misses', description: 'What the in-wall system covers and what it does not.' },
+      body: 'Service is usually a Saturday. HomeTeam Pest Defense states in its FAQ that the key "is not commercially available" ([source](https://pestdefense.com/taexx/)).',
+    };
+    for (const id of ['A0', 'A1']) {
+      queue.getById.mockResolvedValue(opportunityFor(id));
+      const brief = await briefBuilder.compose(`opp-${id}`, { persist: false, skipSerp: true });
+      const operatorBriefText = operatorBriefTextForComparisonGate({ bucket: OPERATOR_INTERCEPT_BUCKET }, brief);
+      const result = gate.evaluate(draft, { namedCompetitorEnabled: true, operatorBriefText });
+      expect(result.findings.map((f) => f.code)).toEqual([]);
+      expect(result.pass).toBe(true);
+      expect(result.requiresHumanReview).toBe(true);
+      // The writer must not reach for a <ComparisonTable> on these posts —
+      // any column naming the vendor/system fails closed.
+      expect(brief.voice_constraints.operator_brief.verify_notes.join('\n')).toMatch(/Do NOT emit a <ComparisonTable>/);
+    }
+  });
+
   test('every intercept brief carries the price-guard framing rule for sourced competitor dollar figures', async () => {
     queue.getById.mockResolvedValue(opportunityFor('B3')); // brief whose outline mandates dollar figures
     const brief = await briefBuilder.compose('opp-B3', { persist: false, skipSerp: true });

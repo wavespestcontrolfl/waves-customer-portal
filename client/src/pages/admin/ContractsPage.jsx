@@ -20,10 +20,10 @@
  *
  * Tier 1 V2 styling.
  */
-import React, { Suspense } from "react";
+import React, { Suspense, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { FileClock, FileText } from "lucide-react";
-import { cn } from "../../components/ui";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const DocumentTemplatesPage = React.lazy(() => import("./DocumentTemplatesPage"));
@@ -52,40 +52,39 @@ export default function ContractsPage() {
     setSearchParams(next, { replace: true });
   };
 
+  const [secondary, setSecondary] = useState(null);
+
   return (
     <div className="mx-auto max-w-[1500px]">
-      <nav
-        aria-label="Contracts section"
-        className="mb-4 flex items-center gap-1"
-      >
-        {TABS.map(({ key, label, Icon }) => {
-          const active = tab === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setTab(key)}
-              aria-current={active ? "page" : undefined}
-              className={cn(
-                "inline-flex items-center gap-2 h-9 px-3 rounded-sm text-12 font-medium uppercase tracking-label u-focus-ring transition-colors",
-                active
-                  ? "bg-zinc-900 text-white"
-                  : "bg-white text-zinc-700 border-hairline border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-              )}
-            >
-              <Icon size={15} strokeWidth={1.8} aria-hidden />
-              {label}
-            </button>
-          );
-        })}
-      </nav>
+      {/* One header card: Templates / Requests on the first row; the active
+          tab page hands its category/status filters + actions up for the
+          second row instead of stacking a second header. */}
+      <AdminCommandHeader
+        title="Contracts"
+        icon={FileText}
+        sections={TABS}
+        activeKey={tab}
+        onSectionChange={setTab}
+        ariaLabel="Contracts section"
+        navGridClassName="grid-cols-2"
+        actions={secondary?.actions}
+        secondarySections={secondary?.sections || []}
+        secondaryActiveKey={secondary?.activeKey}
+        onSecondaryChange={secondary?.onChange}
+        secondaryAriaLabel={secondary?.ariaLabel}
+        secondaryNavGridClassName={secondary?.navGridClassName}
+      />
 
       <Suspense
         fallback={
           <div className="p-10 text-13 text-ink-secondary">Loading…</div>
         }
       >
-        {tab === "requests" ? <DocumentRequestsPage /> : <DocumentTemplatesPage />}
+        {tab === "requests" ? (
+          <DocumentRequestsPage embedded onSecondaryNav={setSecondary} />
+        ) : (
+          <DocumentTemplatesPage embedded onSecondaryNav={setSecondary} />
+        )}
       </Suspense>
     </div>
   );

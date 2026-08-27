@@ -10,8 +10,26 @@ vi.mock("../../lib/adminAuth", () => ({
   getAdminUser: (...args) => mockGetAdminUser(...args),
 }));
 
+// The Logic area registers its section tabs with the hub header (second
+// tab row) the way the real page does, so the wiring is exercised here.
+const mockLogicSectionChange = vi.fn();
 vi.mock("./PricingLogicPage", () => ({
-  default: () => <div>Logic workspace</div>,
+  default: ({ embedded, onSecondaryNav }) => {
+    React.useEffect(() => {
+      if (!embedded || !onSecondaryNav) return undefined;
+      onSecondaryNav({
+        sections: [
+          { key: "margins", label: "Margins" },
+          { key: "brackets", label: "Brackets" },
+        ],
+        activeKey: "margins",
+        onChange: mockLogicSectionChange,
+        ariaLabel: "Pricing section",
+      });
+      return () => onSecondaryNav(null);
+    }, [embedded, onSecondaryNav]);
+    return <div>Logic workspace</div>;
+  },
 }));
 vi.mock("./PricingStrategyPage", () => ({
   default: () => <div>Strategy workspace</div>,
@@ -89,5 +107,23 @@ describe("PricingHubPage", () => {
     expect(screen.getByTestId("location-search")).toHaveTextContent(
       "?source=alert&section=reality&area=notices",
     );
+  });
+
+  it("shows the embedded area's sub-tabs on the hub header and drops them when the area changes", () => {
+    renderHub();
+
+    // One header card: hub area tabs + the Logic area's section tabs.
+    expect(screen.getByRole("heading", { level: 1, name: "Pricing" })).toBeInTheDocument();
+    const sectionNav = screen.getByRole("navigation", { name: "Pricing section" });
+    expect(sectionNav).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Margins" })).toHaveAttribute("aria-current", "page");
+    fireEvent.click(screen.getByRole("button", { name: "Brackets" }));
+    expect(mockLogicSectionChange).toHaveBeenCalledWith("brackets");
+
+    // Strategy has no sub-tabs — the second row must unmount with Logic.
+    fireEvent.click(screen.getByRole("button", { name: "Strategy & Offers" }));
+    expect(screen.getByText("Strategy workspace")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Pricing section" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Pricing" })).toBeInTheDocument();
   });
 });

@@ -4439,6 +4439,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5:15 AM ET — Social engagement ingest (likes/comments/shares for
+  // our own published posts → social_post_engagement). Read-only against the
+  // platform APIs; sweep-style so runExclusive's skip-on-contention is safe.
+  // Dark until SOCIAL_ENGAGEMENT_SYNC_ENABLED=true.
+  // =========================================================================
+  cron.schedule('15 5 * * *', async () => {
+    const { SOCIAL_FLAGS } = require('./social-media');
+    if (!SOCIAL_FLAGS.engagementSync) return; // silently skip — dark
+    try {
+      await runExclusive('social-engagement-ingest', async () => {
+        const { syncRecentEngagement } = require('./social-engagement');
+        await syncRecentEngagement();
+      });
+    } catch (err) {
+      logger.error(`[social-engagement] ingest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:30 AM ET — Autonomous Social Content Studio
   // One post per day at a fixed, good-engagement time (avoids the off-hours
   // drift an hourly check + 24h interval produced). runAutonomous still enforces
