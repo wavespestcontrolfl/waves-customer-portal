@@ -65,7 +65,7 @@ async function getRecipientOptin(phone, customerId = null) {
 // Webhook hook: the sender replied YES (status 'confirmed') or STOP
 // ('declined'). No-op when the phone has no row — a plain customer opt-in/
 // opt-out is not recipient state.
-async function markRecipientOptin(phone, status) {
+async function markRecipientOptin(phone, status, { dbh = db } = {}) {
   const key = recipientPhoneKey(phone);
   if (!key) return false;
   try {
@@ -78,12 +78,23 @@ async function markRecipientOptin(phone, status) {
     // ask_failed rows are excluded from confirmation (that property's ask
     // never reached them — the save-triggered retry must still run) but ARE
     // declined on STOP (they said stop; never re-ask).
-    const q = db('recipient_optin').where({ phone_key: key });
+    const q = dbh('recipient_optin').where({ phone_key: key });
     // A YES can only confirm rows whose ask actually went out: ask_failed
     // (delivery failed) and undispatched pending rows (claim committed,
     // dispatch not yet run/crashed) are excluded — the recovery sweep or
-    // next save re-asks them. STOP still declines everything.
-    if (status === 'confirmed') q.whereNot({ status: 'ask_failed' }).whereNotNull('dispatched_at');
+    // next save re-asks them. STOP still declines everything. DECLINED
+    // rows confirm regardless of dispatched_at (codex #3495 r13): a
+    // synchronous 21610 declines the row BEFORE dispatch stamps
+    // dispatched_at, and no sweep re-asks a declined row — without this
+    // carve-out the person's later explicit START+YES clears suppression
+    // but can never unblock their appointment texts. An explicit inbound
+    // YES from an already-declined person supersedes the carrier verdict,
+    // exactly as it does for the callback path's dispatched declines.
+    if (status === 'confirmed') {
+      q.whereNot({ status: 'ask_failed' }).where(function confirmable() {
+        this.whereNotNull('dispatched_at').orWhere({ status: 'declined' });
+      });
+    }
     let updated = await q.update(stamp);
     // Marker-recovery window: Twilio accepted the ask but the dispatched_at
     // write crashed, and the person replied YES before the sweep
@@ -95,9 +106,9 @@ async function markRecipientOptin(phone, status) {
       // Per-row reconciliation: only a row whose OWN property's ask was
       // accepted (customer-scoped sms_log) confirms — property B's
       // undispatched pending row stays pending when only A's ask went out.
-      const pendingRows = await db('recipient_optin').where({ phone_key: key, status: 'pending' });
+      const pendingRows = await dbh('recipient_optin').where({ phone_key: key, status: 'pending' });
       for (const row of pendingRows) {
-        const priorAskRow = await db('sms_log')
+        const priorAskRow = await dbh('sms_log')
           .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
           .where({ customer_id: row.customer_id })
           .where(function optinAsk() {
@@ -106,10 +117,20 @@ async function markRecipientOptin(phone, status) {
           })
           .orderBy('created_at', 'desc')
           .first('id', 'twilio_sid', 'status')
-          .catch(() => null);
+          .catch((err) => {
+            // On a transactional dbh Postgres has already ABORTED on this
+            // error; swallowing it here can let COMMIT silently resolve as a
+            // rollback when no later query trips 25P02 (hook #3495) — the
+            // caller would report success with nothing persisted. Rethrow so
+            // the outer catch returns FALSE and the webhook's fail-loud
+            // guard runs its locked fallback. Fire-and-forget callers keep
+            // the best-effort null.
+            if (dbh && dbh.isTransaction) throw err;
+            return null;
+          });
         const { isFailureStatus } = require('./twilio-failure-alerts');
         if (priorAskRow && !isFailureStatus(priorAskRow.status)) {
-          updated += await db('recipient_optin')
+          updated += await dbh('recipient_optin')
             .where({ phone_key: key, customer_id: row.customer_id, status: 'pending' })
             .update({
               ...stamp,
@@ -120,7 +141,12 @@ async function markRecipientOptin(phone, status) {
       }
     }
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
-    return updated > 0;
+    // Returns the UPDATED COUNT (0 = no recipient rows — the normal case
+    // for most phones), reserving FALSE for the swallowed-error path below
+    // so transactional callers can distinguish "nothing to decline" from
+    // "the write failed and aborted my transaction" (codex #3495). Both are
+    // falsy, so fire-and-forget callers behave exactly as before.
+    return updated;
   } catch (err) {
     logger.warn(`[recipient-optin] mark ${status} failed: ${err.message}`);
     return false;

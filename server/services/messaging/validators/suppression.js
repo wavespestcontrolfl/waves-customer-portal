@@ -140,18 +140,18 @@ async function loadSuppressionState(input, contactState) {
  * the moment STOP / wrong-number is detected, before any outbound queue
  * fires. Idempotent — repeated calls just re-stamp the row.
  */
-async function recordSuppression({ phone, reason, source, capturedBody }) {
+async function recordSuppression({ phone, reason, source, capturedBody, dbh = db }) {
   if (!phone) throw new Error('recordSuppression: phone is required');
   if (!reason) throw new Error('recordSuppression: reason is required');
   try {
-    await db('messaging_suppression')
+    await dbh('messaging_suppression')
       .insert({
         phone,
         reason,
         source: source || null,
         captured_body: capturedBody ? String(capturedBody).slice(0, 1000) : null,
         active: true,
-        created_at: db.fn.now(),
+        created_at: dbh.fn.now(),
       })
       .onConflict('phone')
       .merge({
@@ -181,21 +181,68 @@ async function recordSuppression({ phone, reason, source, capturedBody }) {
  *
  * Returns { ok, recorded } — recorded=true only when a brand-new row was written.
  */
-async function recordNonMobileSuppression({ phone, source }) {
+async function recordNonMobileSuppression({ phone, source, supersedeClearedBefore = null, dbh = db }) {
   if (!phone) throw new Error('recordNonMobileSuppression: phone is required');
   try {
-    const inserted = await db('messaging_suppression')
+    const q = dbh('messaging_suppression')
       .insert({
         phone,
         reason: 'non_mobile',
         source: source || 'twilio_status_callback',
         active: true,
-        created_at: db.fn.now(),
+        created_at: dbh.fn.now(),
       })
       .onConflict('phone')
-      .ignore();
-    // Knex returns the inserted rows ([] when the conflict was ignored). Treat a
-    // non-empty result as "newly recorded"; fall back to length-agnostic ok.
+      // insert-if-absent, with ONE carve-out: a pure clearance TOMBSTONE
+      // (reason='cleared' — written by clearSuppression when a START
+      // arrived for a phone with no standing row) is supersedable by a
+      // genuine landline verdict, or generic SMS keeps burning sends at a
+      // known non-mobile number forever (codex #3495). Every other
+      // existing row — active anything, or an inactive row that kept its
+      // original reason (admin-cleared opt_out etc.) — stays untouched,
+      // preserving the never-clobber contract above.
+      .merge({
+        reason: 'non_mobile',
+        source: source || 'twilio_status_callback',
+        active: true,
+        cleared_at: null,
+      })
+      // Supersedable rows (codex r7 P1): the pure clearance TOMBSTONE
+      // (reason='cleared') AND a previously-suppressed non_mobile row a
+      // START cleared — clearSuppression keeps the original reason, so
+      // without the second arm a known landline that once STARTed could
+      // never be re-suppressed by a genuinely newer bounce (every later
+      // send burns forever). A RECIPIENT-cleared opt_out is supersedable
+      // too (hook #3495 r17): after opt_out → explicit START, a genuinely
+      // NEWER 30006 is fresh carrier evidence the line cannot take SMS,
+      // and without this arm every later send burns forever — the
+      // recipient clear is identified by its cleared_by:twilio_* source
+      // (webhook START / late-callback undo / sync undo are the only
+      // writers of it). ADMIN-cleared opt_out (any other source) and
+      // wrong_number/manual_dnc stay untouchable.
+      .where('messaging_suppression.active', false)
+      .where(function supersedableReason() {
+        this.whereIn('messaging_suppression.reason', ['cleared', 'non_mobile'])
+          .orWhere(function recipientClearedOptOut() {
+            this.where('messaging_suppression.reason', 'opt_out')
+              .whereRaw("messaging_suppression.source LIKE 'cleared_by:twilio\\_%' ESCAPE '\\'");
+          });
+      });
+    // A tombstone is only superseded when its clearance PREDATES the send
+    // that bounced (codex #3495): a START received after that send proves
+    // the number takes SMS — a delayed 30006 for an older message is stale
+    // evidence and must not resurrect suppression. Callers that cannot
+    // date the send never supersede (whereRaw false ⇒ insert-if-absent).
+    if (supersedeClearedBefore) q.where('messaging_suppression.cleared_at', '<', supersedeClearedBefore);
+    else q.whereRaw('false');
+    // RETURNING makes recorded trustworthy on Postgres (codex r6 P2): without
+    // it the resolved value doesn't reliably distinguish an applied
+    // insert/merge from a conflict the WHERE guards rejected — and callers
+    // now gate the customers.line_type cache write on this flag, so a false
+    // negative would starve the cache while the store suppresses.
+    const inserted = await q.returning('phone');
+    // Non-empty = the insert landed or the guarded merge ran; [] = the
+    // conflict was rejected by the tombstone guards (stale/standing row).
     const recorded = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
     return { ok: true, recorded };
   } catch (err) {
@@ -207,28 +254,99 @@ async function recordNonMobileSuppression({ phone, source }) {
 /**
  * Clear a suppression record (e.g. on inbound START keyword).
  */
-async function clearSuppression({ phone, source }) {
+async function clearSuppression({ phone, source, dbh = db }) {
   if (!phone) throw new Error('clearSuppression: phone is required');
   try {
-    await db('messaging_suppression')
-      .where({ phone })
-      .update({
+    // UPSERT, not update: a clearance against a phone with NO standing row
+    // must still persist an inactive tombstone (codex #3495) — otherwise a
+    // late provider opt-out callback arriving after this clear finds
+    // neither a clearance to defer to nor a row to overwrite, and
+    // re-suppresses a recipient who explicitly opted in. Inactive rows are
+    // inert to every send-path read (they filter active = true).
+    await dbh('messaging_suppression')
+      .insert({
+        phone,
+        reason: 'cleared',
+        source: source ? `cleared_by:${source}` : null,
         active: false,
-        cleared_at: db.fn.now(),
+        created_at: dbh.fn.now(),
+        cleared_at: dbh.fn.now(),
+      })
+      .onConflict('phone')
+      .merge({
+        active: false,
+        cleared_at: dbh.fn.now(),
         source: source ? `cleared_by:${source}` : null,
       });
-    // Also drop any cached line-type so a START/admin clear fully un-blocks the
-    // number. The proactive line-type guard (phone_line_types, gated) blocks
-    // cached landlines on its own authority, independent of this suppression row;
-    // without clearing it a false positive or a number ported landline->mobile
-    // would stay blocked forever despite the clear. Next send re-evaluates fresh.
-    // Best-effort: the table may not exist yet, and a cache miss is harmless.
-    try {
-      await db('phone_line_types').where({ phone }).del();
-    } catch (cacheErr) {
-      if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
-        logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
+    // Also drop the cached line-types so a START/admin clear fully
+    // un-blocks the number — phone_line_types (the gated proactive guard)
+    // and the LEGACY customers.line_type primary-phone cache (hook #3495
+    // P1: the appointment reader treats it as authoritative after the
+    // phone_line_types miss, so without this an explicit START
+    // un-suppresses the number but appointment SMS stays blocked forever).
+    // The inbound text itself proves the number can SMS; clearing makes
+    // the next send re-evaluate fresh via Lookup. UNIQUE primary-phone
+    // ownership only for the legacy cache (same rule as the prefs flip):
+    // a shared number must not clear a sibling's verdict. Best-effort on
+    // the GLOBAL connection: errors are swallowed, and inside a caller's
+    // transaction a swallowed failure would still ABORT it, silently
+    // rolling back the clearance above (codex #3495).
+    // Cleanup runs in its OWN short transaction that reacquires the
+    // per-phone lock and re-verifies the clearance still owns the row
+    // (hook #3495 r16): by post-commit time the caller's lock is released,
+    // so a NEWER 30006/line-type verdict can have recorded and cached in
+    // between — an unguarded delete would wipe that newer cache. Under the
+    // lock, a standing ACTIVE row means someone newer owns the phone:
+    // leave their caches alone. The brief window where a post-START send
+    // reads the not-yet-cleared cache is self-healing (the next send
+    // re-evaluates fresh) — correctness only needs the ownership check.
+    const runCacheCleanup = async () => {
+      try {
+        await db.transaction(async (ctrx) => {
+          await ctrx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [phone]);
+          const standing = await ctrx('messaging_suppression').where({ phone }).first('active');
+          if (standing && standing.active === true) return; // newer verdict owns the phone
+          try {
+            // SAVEPOINT (nested trx), not a bare try/catch: the table may
+            // not exist yet, and a swallowed error would leave this trx
+            // ABORTED — the legacy clear below must still run (try/catch
+            // in a trx ≠ fail-open; rolling back to the savepoint keeps
+            // the outer transaction healthy).
+            await ctrx.transaction(async (sp) => {
+              await sp('phone_line_types').where({ phone }).del();
+            });
+          } catch (cacheErr) {
+            if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
+              logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
+            }
+          }
+          const digits = String(phone).replace(/\D/g, '').slice(-10);
+          if (digits.length === 10) {
+            const holders = await ctrx('customers')
+              .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+              .whereNull('deleted_at')
+              .whereNotNull('line_type')
+              .select('id');
+            if (holders.length === 1) {
+              await ctrx('customers').where({ id: holders[0].id }).update({ line_type: null });
+            }
+          }
+        });
+      } catch (cleanupErr) {
+        logger.warn(`[messaging:suppression] cache cleanup skipped: ${cleanupErr.message}`);
       }
+    };
+    if (dbh.isTransaction && dbh.executionPromise) {
+      // POST-COMMIT when called inside a transaction (hook #3495 r16):
+      // awaiting the global connection while the trx holds its own can
+      // deadlock the pool under a START/21610 burst (every trx waits for
+      // one more connection), and the writes would escape rollback — a
+      // rolled-back clear must not have already wiped the caches. Fires
+      // only after the trx commits; a rollback skips it. Same pattern as
+      // the repo's other executionPromise post-commit hooks.
+      dbh.executionPromise.then(runCacheCleanup).catch(() => {});
+    } else {
+      await runCacheCleanup();
     }
     return { ok: true };
   } catch (err) {

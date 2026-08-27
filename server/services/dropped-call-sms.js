@@ -43,44 +43,7 @@ const { isWithinSendWindowET } = require('./messaging/send-window');
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
 const { isRealProviderSend } = require('./sms-auto-send');
-const { recordSuppression } = require('./messaging/validators/suppression');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-
-// A Twilio 21610 is the RECIPIENT's opt-out verdict, not a feature-local
-// fact — feed the canonical suppression store so EVERY SMS workflow stops
-// texting this number, not just this lane (codex P1). Best-effort: a failed
-// write never breaks the calling path (the claim/card verdict still holds
-// locally).
-async function recordProviderOptOutSuppression(phone, source) {
-  try {
-    // recordSuppression resolves { ok: false } on a swallowed DB error — it
-    // does NOT reject (codex P1) — so the escalation must check the result,
-    // not rely on the catch.
-    const result = await recordSuppression({ phone, reason: 'opt_out', source });
-    if (result?.ok === false) throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
-  } catch (e) {
-    // A failed write here means OTHER workflows may keep texting an
-    // opted-out number — that must never fail silently (codex P1). The
-    // admin bell is the backstop: the office records the suppression by
-    // hand. Notification itself is best-effort too.
-    logger.warn(`[dropped-call-sms] global opt-out suppression write FAILED for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
-    try {
-      await require('./notification-service').notifyAdmin(
-        'system',
-        'Opt-out suppression write failed',
-        `A Twilio 21610 opt-out for ${maskPhone(phone)} could not be saved to the suppression list (${source}). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
-        // bell: true — a compliance backstop must ring even when the bell
-        // policy would suppress the 'system' category (codex P1): this alert
-        // exists precisely for the case where the canonical suppression
-        // write failed and other workflows can still text an opted-out
-        // number.
-        { bell: true, metadata: { source, error: e.code || e.name || 'db_error' } },
-      );
-    } catch (notifyErr) {
-      logger.error(`[dropped-call-sms] opt-out suppression failure notify also failed: ${notifyErr.code || notifyErr.name || 'error'}`);
-    }
-  }
-}
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
@@ -610,7 +573,12 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       return { sent: false, skipped: 'sender_config_terminal', code: providerCode };
     }
     const optedOut = providerCode === '21610';
-    if (optedOut) await recordProviderOptOutSuppression(phone, 'dropped_call_sms_21610');
+    // No duplicate suppression write here (codex #3495 r17): every send
+    // funnels through TwilioService.sendSMS, whose choke point records the
+    // synchronous 21610 via recordSyncProviderOptOut — attempt-timestamped,
+    // advisory-locked, START-reconciled. An unconditional local write here
+    // could re-activate a verdict the canonical recorder just deferred or
+    // undid against a concurrent START. Local claim/card state only.
     await stampStatus(leadId, 'blocked');
     await stampPhoneClaim(phone, optedOut ? 'opted_out' : 'provider_terminal');
     logger.info(`[dropped-call-sms] Terminal provider rejection for ${maskPhone(phone)}: ${providerCode}`);
@@ -718,7 +686,10 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to, isR
       // never instruct a callback for it, and the follow-up pull below must
       // NOT queue outreach for it (codex P1).
       const optedOut = String(errorCode || '') === '21610';
-      if (optedOut) await recordProviderOptOutSuppression(phone, 'dropped_call_sms_bounce_21610');
+      // No duplicate suppression write here either (codex #3495 r17): the
+      // /status webhook that dispatches this handler already runs the
+      // canonical advisory-locked 21610 recorder for EVERY delivery
+      // callback. Local claim/card state only.
       if (lead) {
         if (!optedOut) {
           await trx('leads')

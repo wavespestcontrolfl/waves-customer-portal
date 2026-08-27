@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 const PaymentLifecycleEmail = require('../payment-lifecycle-email');
@@ -11,25 +12,202 @@ class PaymentExpiry {
    */
   async checkExpiringCards() {
     const now = new Date();
-    const thisMonth = now.getMonth() + 1; // 1-based
-    const thisYear = now.getFullYear();
+    // ET calendar month, not the server's UTC (hook P1): getMonth() on
+    // Railway rolls at 8/7pm ET, so a final-evening run would scan the
+    // NEXT two months and skip the current ET month entirely.
+    const [thisYear, thisMonth] = etDateString(now).split('-').map(Number);
 
     // Next month (handle December → January rollover)
     const nextMonth = thisMonth === 12 ? 1 : thisMonth + 1;
     const nextYear = thisMonth === 12 ? thisYear + 1 : thisYear;
 
-    // Query payment methods expiring this month or next
-    const expiringCards = await db('payment_methods')
+    // Query payment methods expiring this month or next.
+    // Scope: live Stripe rows for customers we still serve — the unfiltered
+    // version texted churned/deleted customers about dead cards (and legacy
+    // Square rows). Former stages are excluded even when the active flag is
+    // stale; a NULL pipeline_stage (legacy rows) stays included. exp_* are
+    // varchar and legacy rows hold 2-digit years — compare via guarded
+    // casts (CASE evaluates THEN only after the WHEN regexes pass, so a
+    // non-numeric value never reaches ::integer), normalizing years < 100
+    // by +2000 like the charge path does.
+    const { FORMER_CUSTOMER_STAGES } = require('../customer-stages');
+    const expiringCards = await db('payment_methods as pm')
+      .join('customers as c', 'pm.customer_id', 'c.id')
+      .where('pm.processor', 'stripe')
+      // CARD rows only (hook P1): a bank/ACH row with populated legacy
+      // expiry fields must never receive a "card expiring" notice. NULL
+      // method_type = legacy card rows, kept.
+      .whereRaw(`(pm.method_type IS NULL OR pm.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))`)
+      .where('c.active', true)
+      .whereNull('c.deleted_at')
       .where(function () {
-        this.where({ exp_month: thisMonth, exp_year: thisYear })
-          .orWhere({ exp_month: nextMonth, exp_year: nextYear });
+        this.whereNull('c.pipeline_stage')
+          .orWhereNotIn('c.pipeline_stage', [...FORMER_CUSTOMER_STAGES, 'lost']);
       })
-      .whereNotNull('customer_id')
-      .select('id', 'customer_id', 'last_four', 'exp_month', 'exp_year', 'card_brand');
+      // Lead-stage rows (customers.active defaults TRUE for CRM leads) only
+      // get expiry notices when a real payment relationship exists — the
+      // stuck-at-new_lead PAYER gap is documented in customer-stages.js,
+      // but a pure lead with a saved card must not be texted about billing
+      // (hook r5 P1).
+      .where(function () {
+        this.whereIn('c.pipeline_stage', ['active_customer', 'won', 'at_risk'])
+          .orWhereExists(function () {
+            this.select(db.raw('1')).from('payments as p')
+              .whereRaw('p.customer_id = c.id')
+              .where('p.status', 'paid');
+          })
+          // Booked-but-stuck-at-new_lead (the documented lead-booking reuse
+          // gap in customer-stages.js): an upcoming visit is a real payment
+          // relationship even before the first paid ledger row — their card
+          // expiring matters (codex P2).
+          .orWhereExists(function () {
+            this.select(db.raw('1')).from('scheduled_services as ss')
+              .whereRaw('ss.customer_id = c.id')
+              .whereIn('ss.status', ['pending', 'confirmed'])
+              // ET date, not the session's UTC CURRENT_DATE (hook P1):
+              // Railway runs UTC, so CURRENT_DATE rolls at 8/7pm ET and
+              // would drop an ET-today visit from the relationship guard.
+              .whereRaw('ss.scheduled_date >= ?', [etDateString(now)]);
+          });
+      })
+      // Only the customer's ONE current method, charge-path semantics: the
+      // enrollment pointer when set; otherwise the single newest default
+      // row (legacy data permits multiple defaults — without the NOT EXISTS
+      // dedupe a customer gets one notice per stale default). Replaced
+      // cards linger with is_default=false and never match (hook P1 ×2).
+      .whereRaw(`(
+        (pm.id = c.autopay_payment_method_id AND pm.autopay_enabled = true
+          AND pm.stripe_payment_method_id IS NOT NULL)
+        OR (
+          pm.is_default = true
+          AND pm.autopay_enabled = true
+          AND pm.stripe_payment_method_id IS NOT NULL
+          -- fallback fires when the pointer is absent OR ineligible
+          -- (disabled, or a bank row) — mirroring the charge path's
+          -- pointer-then-default walk; a stale pointer must not suppress
+          -- the real card's warning (hook P1).
+          AND NOT EXISTS (
+            SELECT 1 FROM payment_methods pp
+             WHERE pp.id = c.autopay_payment_method_id
+               AND pp.customer_id = c.id
+               AND pp.processor = 'stripe' AND pp.autopay_enabled = true
+               AND pp.stripe_payment_method_id IS NOT NULL
+               -- the pointer only suppresses the fallback when charge()
+               -- would actually accept it (hook P1 ×2): a healthy BANK
+               -- pointer counts (the customer is charged via ACH, so no
+               -- card notice should fire at all); a CARD pointer counts
+               -- only unexpired (guarded casts + 2-digit rule); an
+               -- expired/shell/blocked pointer falls back to the default
+               -- card, whose warning must fire.
+               AND (
+                 (
+                   pp.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+                   AND (c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active')
+                   AND (pp.ach_status IS NULL
+                        OR pp.ach_status NOT IN ('pending_verification', 'verification_failed'))
+                 )
+                 OR (
+                 (pp.method_type IS NULL
+                    OR pp.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
+               AND CASE
+                     WHEN NULLIF(BTRIM(pp.exp_month), '') ~ '^[0-9]{1,2}$'
+                       AND NULLIF(BTRIM(pp.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+                     THEN (
+                       -- month 1-12 guard mirrors autopayActivePredicate /
+                       -- isExpiredCardMethod (codex r5 P1): exp_month='99'
+                       -- passes the regex and the >= comparison, but
+                       -- charge() rejects it and falls back
+                       NULLIF(BTRIM(pp.exp_month), '')::integer BETWEEN 1 AND 12
+                       AND (
+                       (CASE WHEN NULLIF(BTRIM(pp.exp_year), '')::integer < 100
+                             THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
+                             ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) > ?
+                       OR ((CASE WHEN NULLIF(BTRIM(pp.exp_year), '')::integer < 100
+                                 THEN NULLIF(BTRIM(pp.exp_year), '')::integer + 2000
+                                 ELSE NULLIF(BTRIM(pp.exp_year), '')::integer END) = ?
+                           AND NULLIF(BTRIM(pp.exp_month), '')::integer >= ?)
+                       )
+                     )
+                     ELSE FALSE
+                   END
+                 )
+               )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM payment_methods pm2
+             WHERE pm2.customer_id = pm.customer_id
+               AND pm2.processor = 'stripe' AND pm2.is_default = true
+               AND pm2.autopay_enabled = true
+               AND pm2.stripe_payment_method_id IS NOT NULL
+               -- only another CHARGEABLE default can outrank this one —
+               -- "chargeable" means the FULL charge-time predicate (codex
+               -- r4+r5 P1s), because charge() walks the same defaults in
+               -- this same order and picks the first eligible row: a newer
+               -- HEALTHY BANK default outranks (the customer is charged via
+               -- ACH — the card notice is noise, same rule as the pointer
+               -- branch), while a disabled/shell/blocked-bank/expired/
+               -- malformed-expiry default does NOT (charge() skips it, so
+               -- the older valid card's warning must fire)
+               AND (
+                 (
+                   pm2.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+                   AND (c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active')
+                   AND (pm2.ach_status IS NULL
+                        OR pm2.ach_status NOT IN ('pending_verification', 'verification_failed'))
+                 )
+                 OR (
+                   (pm2.method_type IS NULL
+                    OR pm2.method_type NOT IN ('ach', 'us_bank_account', 'bank', 'bank_account'))
+                   AND CASE
+                     WHEN NULLIF(BTRIM(pm2.exp_month), '') ~ '^[0-9]{1,2}$'
+                       AND NULLIF(BTRIM(pm2.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+                     THEN (
+                       NULLIF(BTRIM(pm2.exp_month), '')::integer BETWEEN 1 AND 12
+                       AND (
+                       (CASE WHEN NULLIF(BTRIM(pm2.exp_year), '')::integer < 100
+                             THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
+                             ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) > ?
+                       OR ((CASE WHEN NULLIF(BTRIM(pm2.exp_year), '')::integer < 100
+                                 THEN NULLIF(BTRIM(pm2.exp_year), '')::integer + 2000
+                                 ELSE NULLIF(BTRIM(pm2.exp_year), '')::integer END) = ?
+                           AND NULLIF(BTRIM(pm2.exp_month), '')::integer >= ?)
+                       )
+                     )
+                     ELSE FALSE
+                   END
+                 )
+               )
+               AND (pm2.updated_at > pm.updated_at
+                    OR (pm2.updated_at = pm.updated_at AND pm2.id < pm.id))
+          )
+        )
+      )`, [thisYear, thisYear, thisMonth, thisYear, thisYear, thisMonth])
+      .whereRaw(
+        `CASE
+           WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
+             AND NULLIF(BTRIM(pm.exp_year), '') ~ '^([0-9]{2}|[0-9]{4})$'
+           THEN (
+             (CASE WHEN NULLIF(BTRIM(pm.exp_year), '')::integer < 100
+                   THEN NULLIF(BTRIM(pm.exp_year), '')::integer + 2000
+                   ELSE NULLIF(BTRIM(pm.exp_year), '')::integer END,
+              NULLIF(BTRIM(pm.exp_month), '')::integer) IN ((?, ?), (?, ?))
+           )
+           ELSE FALSE
+         END`,
+        [thisYear, thisMonth, nextYear, nextMonth],
+      )
+      .select('pm.id', 'pm.customer_id', 'pm.last_four', 'pm.exp_month', 'pm.exp_year', 'pm.card_brand');
 
     let notified = 0;
 
-    for (const card of expiringCards) {
+    for (const rawCard of expiringCards) {
+      // Normalize legacy 2-digit years for EVERY downstream consumer — the
+      // email path's expiry-stage math runs new Date(year, ...), where a raw
+      // '26' reads as 1926 and the card emails as already expired.
+      const rawYear = parseInt(rawCard.exp_year, 10);
+      const card = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100
+        ? { ...rawCard, exp_year: rawYear + 2000 }
+        : rawCard;
       try {
         const customer = await db('customers').where({ id: card.customer_id }).first();
         if (!customer) continue;
