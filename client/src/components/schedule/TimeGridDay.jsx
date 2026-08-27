@@ -23,13 +23,11 @@ import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// DISPLAY range starts at 6 so existing earlier rows (legacy / lead-created)
-// still render on dispatch; CREATION and MOVES start at 8 — no client
-// appointments before 8am ET (owner rule; the server's window validator,
-// scheduling/window-rules.js, refuses them with a 422). Rows before
-// BOOKABLE_START_HOUR are muted, non-droppable, and not drag-creatable.
+// Grid runs 6am–8pm; every displayed row is bookable (creation, drops,
+// drag-create) — there is no earliest-start floor (owner ruling 2026-08-27;
+// the server's window validator, scheduling/window-rules.js, only requires
+// on-the-hour starts that end by DAY_END_HOUR).
 const DAY_START_HOUR = 6;
-const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -476,14 +474,13 @@ export function snapSlotIdxToHourMin(slotIdx) {
   return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
 }
 
-// A row accepts drops / drag-create only from BOOKABLE_START_HOUR on, AND
-// only if a visit of `durationMin` starting there ends by DAY_END_HOUR —
-// the server refuses an end past the day end with a 422, so a 2-hour visit
-// must not be offered the 19:00 row.
+// A row accepts drops / drag-create only if a visit of `durationMin`
+// starting there ends by DAY_END_HOUR — the server refuses an end past the
+// day end with a 422, so a 2-hour visit must not be offered the 19:00 row.
 export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   const startMin = snapSlotIdxToHourMin(slotIdx);
   const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
-  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
+  return startMin + dur <= DAY_END_HOUR * 60;
 }
 
 function SlotDroppable({ techId, slotIdx, onCreateStart }) {
@@ -548,8 +545,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
       // Hour-aligned block: start floors, end ceils to the next hour mark.
-      // A selection dragged up into the pre-opening rows is clamped to 8am.
-      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), DAY_START_HOUR * 60);
       const endMin = Math.min(
         DAY_END_HOUR * 60,
         Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
@@ -1081,9 +1077,8 @@ export default function TimeGridDay({
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
     const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
-    // Pre-opening rows are disabled droppables; belt-and-braces for a stale
-    // drop payload — the server would 422 it anyway.
-    if (drop.slotMin != null && toMin < BOOKABLE_START_HOUR * 60) return;
+    // Past-day-end landings are disabled droppables; belt-and-braces for a
+    // stale drop payload — the server would 422 it anyway.
     if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
     if (fromTech === toTech && fromMin === toMin) return;
 

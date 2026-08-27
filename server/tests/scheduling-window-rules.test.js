@@ -9,18 +9,16 @@ const {
   assertAdminAppointmentWindow,
   probeSlotOverlap,
   slotOverlapWarning,
-  ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
 } = require('../services/scheduling/window-rules');
 const findTime = require('../services/scheduling/find-time');
 
 describe('assertAdminAppointmentWindow', () => {
-  test('day START is the customer slot finder\'s (08:00); day END is the admin grid\'s 20:00', () => {
-    expect(ADMIN_DAY_START_MINUTES).toBe(findTime.DAY_START_HOUR * 60);
-    expect(ADMIN_DAY_START_MINUTES).toBe(8 * 60);
+  test('day END is the admin grid\'s 20:00; there is no day-start floor', () => {
     // Admins book evening visits the self-booking path never offers; the
     // bound is TimeGridDay's DAY_END_HOUR, not find-time's 17:00.
     expect(ADMIN_DAY_END_MINUTES).toBe(20 * 60);
+    expect(findTime.DAY_START_HOUR).toBe(8); // customer slot finder only — not an admin rule
   });
 
   test('good case normalizes and derives the end from the duration', () => {
@@ -42,9 +40,13 @@ describe('assertAdminAppointmentWindow', () => {
     expect(caught.message).toMatch(pattern);
   }
 
-  test('pre-8am start is refused', () => {
-    expect422({ windowStart: '07:00', windowEnd: '08:00' }, /before 08:00/);
-    expect422({ windowStart: '06:00' }, /before 08:00/);
+  test('early on-the-hour starts are accepted — the former "no client appointments before 08:00" floor is gone', () => {
+    expect(assertAdminAppointmentWindow({ windowStart: '07:00', windowEnd: '08:00' }))
+      .toEqual({ window_start: '07:00', window_end: '08:00' });
+    expect(assertAdminAppointmentWindow({ windowStart: '06:00' }))
+      .toEqual({ window_start: '06:00', window_end: '07:00' });
+    expect(assertAdminAppointmentWindow({ windowStart: '00:00' }))
+      .toEqual({ window_start: '00:00', window_end: '01:00' });
   });
 
   test(':30 start is refused (slots start on the hour)', () => {

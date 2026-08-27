@@ -1330,7 +1330,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // Appointment windows start ON THE HOUR (owner rule; Codex #3109 r37 —
     // this convert path was the remaining bypass). Same rejection shape as
     // above, then the SHARED admin window validator
-    // (scheduling/window-rules.js — >= 08:00, end > start, end <= day end,
+    // (scheduling/window-rules.js — end > start, end <= day end,
     // no midnight wrap) derives the end; its 422 is mapped onto this route's
     // existing 400 shape for the lead-conversion UI.
     if (windowStart && !windowStart.endsWith(':00')) {

@@ -475,8 +475,9 @@ const SAME_DAY_OFFSETS_MINUTES = [120, 240];
 const RESCHEDULE_WINDOW_MINUTES = 60;
 
 // Same-day presets live inside the service day the slot engine uses
-// (find-time DAY_START_HOUR..DAY_END_HOUR, ET): no client appointment before
-// 8 AM, and the last allowed start must leave a full slot before day close
+// (find-time DAY_START_HOUR..DAY_END_HOUR, ET) — these are the OFFERED
+// presets only, not a bound on what an operator may save — and the last
+// allowed start must leave a full slot before day close
 // (17:00 close → 16:00 is the last start; the old 17:00 cap let a slot run
 // past close).
 const SAME_DAY_FIRST_START_MINUTES = DAY_START_HOUR * 60;
@@ -1001,17 +1002,13 @@ async function checkTarget({ serviceId, target, caller = null }) {
 // tech-blind occupancy snapshot commit enforces, minus the caller-supplied
 // excludeServiceIds (the visit being edited, or a whole bulk selection so
 // intra-selection overlap isn't reported). Warn-only everywhere it renders:
-// none of these surfaces block saving on this data. Gated behind
-// GATE_SLOT_CONFLICT_HINTS (read at call time — a flip needs no redeploy);
-// while off the response says gated:true and the clients render nothing.
+// none of these surfaces block saving on this data. Always on — the former
+// GATE_SLOT_CONFLICT_HINTS dark gate was removed (owner ruling 2026-08-27:
+// conflicts are advisory everywhere and nothing about them is gated).
 const SLOT_CHECK_TARGET_CAP = 25;
 const SLOT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 async function checkSlots({ targets, caller = null } = {}) {
-  const { gateEnvValue } = require('../config/feature-gates');
-  if (!gateEnvValue('GATE_SLOT_CONFLICT_HINTS')) {
-    return { ok: true, gated: true, results: [] };
-  }
   if (!Array.isArray(targets) || targets.length === 0) return { ok: false, reason: 'bad_target' };
   if (targets.length > SLOT_CHECK_TARGET_CAP) return { ok: false, reason: 'too_many_targets' };
   const parsed = [];

@@ -580,11 +580,11 @@ describe('seriesOccurrenceWindow — REBOOKER_NULL_END_OCCUPANCY=off outranks th
     expect(out).toEqual({ start: '10:00', end: null });
   });
 
-  test('switch OFF still VALIDATES against the temporary end — a pre-08:00 start is refused', () => {
+  test('switch OFF still VALIDATES against the temporary end — a pre-08:00 start is fine (no floor), a late derived end is refused', () => {
     process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
-    expect(() => seriesOccurrenceWindow({ start: '07:00' }, sib, { adminWindowRules: true }))
-      .toThrow(/before 08:00/);
-    // …and a derived end past the day end is refused too (120-min sibling).
+    expect(seriesOccurrenceWindow({ start: '07:00' }, sib, { adminWindowRules: true }))
+      .toEqual({ start: '07:00', end: null });
+    // …but a derived end past the day end is refused (120-min sibling).
     expect(() => seriesOccurrenceWindow({ start: '19:00' }, { ...sib, estimated_duration_minutes: 120 }, { adminWindowRules: true }))
       .toThrow(/end by 20:00/);
   });

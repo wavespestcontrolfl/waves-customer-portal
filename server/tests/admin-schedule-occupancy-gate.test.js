@@ -504,14 +504,16 @@ describe('PUT /:id/update-details — presence is not change (legacy off-hour ro
     expect(body.error).toBeUndefined();
   });
 
-  test('the SAME legacy row moved to a new date is still refused (a 07:00 window must not ride onto another day)', async () => {
-    const { status, body } = await put('svc-1', {
-      notes: 'gate code updated',
-      scheduledDate: '2099-07-05', windowStart: '07:00', windowEnd: '08:00', estimatedDuration: 60,
+  test('a real WINDOW edit to an even EARLIER hour (06:00) is accepted and persisted — there is no day-start floor', async () => {
+    const updateCalls = [];
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...LEGACY } : undefined);
+      if (table === 'scheduled_services') c.update = jest.fn(async (data) => { updateCalls.push(data); return 1; });
+      return c;
     });
-    expect(status).toBe(422);
-    expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
-    expect(body.error).toMatch(/before 08:00/);
+    const { status } = await put('svc-1', { scheduledDate: '2099-07-01', windowStart: '06:00', windowEnd: '07:00' });
+    expect(status).toBe(200);
+    expect(updateCalls.find((d) => d && d.window_start === '06:00' && d.window_end === '07:00')).toBeTruthy();
   });
 
   test('a real WINDOW edit on the legacy row is validated (an end past the day end is refused)', async () => {
@@ -522,12 +524,12 @@ describe('PUT /:id/update-details — presence is not change (legacy off-hour ro
     expect(body.error).toMatch(/end by 20:00/);
   });
 
-  test('a real DURATION edit on the legacy row is validated too', async () => {
+  test('a real DURATION edit on the legacy row is validated too (only the day END bounds it)', async () => {
     const { status, body } = await put('svc-1', {
-      scheduledDate: '2099-07-01', windowStart: '07:00', windowEnd: '08:00', estimatedDuration: 120,
+      scheduledDate: '2099-07-01', windowStart: '19:00', estimatedDuration: 120,
     });
     expect(status).toBe(422);
-    expect(body.error).toMatch(/before 08:00/);
+    expect(body.error).toMatch(/end by 20:00/);
   });
 
   test('moving the legacy row to a LEGAL window is accepted and persisted', async () => {

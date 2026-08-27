@@ -89,10 +89,10 @@ test('a 06:30 drop is refused with 422 INVALID_APPOINTMENT_WINDOW before the reb
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
 
-test('a pre-8am on-the-hour window and a series-scope half-hour window are refused the same way', async () => {
+test('a pre-8am on-the-hour window reaches the rebooker (no day-start floor); a series-scope half-hour window is refused', async () => {
   let r = await reschedule({ newDate: TARGET, newWindow: { start: '07:00', end: '08:00' } });
-  expect(r.status).toBe(422);
-  expect(r.body.error).toMatch(/before 08:00/);
+  expect(r.status).toBe(200);
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
   r = await reschedule({ newDate: TARGET, newWindow: '09:30-10:30', scope: 'series' });
   expect(r.status).toBe(422);
   expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
@@ -150,19 +150,18 @@ describe('window resolved against the CURRENT visit row', () => {
     expect(r.body.error).toMatch(/explicit end/);
   });
 
-  test('date-only move: a legacy 07:00 stored window is refused (422); a windowless row still moves', async () => {
+  test('date-only move: a 07:00 stored window rides along (no day-start floor); a windowless row still moves', async () => {
     mockVisitRow = { window_start: '07:00:00', window_end: '08:00:00' };
     let r = await reschedule({ newDate: TARGET });
-    expect(r.status).toBe(422);
-    expect(r.body.error).toMatch(/before 08:00/);
+    expect(r.status).toBe(200);
     r = await reschedule({ newDate: TARGET, scope: 'series' });
-    expect(r.status).toBe(422);
-    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(r.status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
     mockVisitRow = { window_start: null, window_end: null };
     r = await reschedule({ newDate: TARGET });
     expect(r.status).toBe(200);
-    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
   });
 });
 

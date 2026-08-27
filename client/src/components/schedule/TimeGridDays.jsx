@@ -23,11 +23,10 @@ import { etStartOfWeek } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// DISPLAY from 6 (existing early rows render); CREATION / MOVES from 8, on
-// the hour, ending by DAY_END_HOUR — same rules as TimeGridDay and the
-// server's window validator (scheduling/window-rules.js).
+// Grid runs 6am–8pm; every displayed row is bookable — on the hour, ending
+// by DAY_END_HOUR, no earliest-start floor — same rules as TimeGridDay and
+// the server's window validator (scheduling/window-rules.js).
 const DAY_START_HOUR = 6;
-const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -295,11 +294,11 @@ export function snapSlotIdxToHourMin(slotIdx) {
   return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
 }
 
-// Bookable only from 8 AM and only if a `durationMin` visit ends by 8 PM.
+// Bookable only if a `durationMin` visit starting there ends by 8 PM.
 export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   const startMin = snapSlotIdxToHourMin(slotIdx);
   const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
-  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
+  return startMin + dur <= DAY_END_HOUR * 60;
 }
 
 function SlotDroppable({ date, slotIdx, onCreateStart }) {
@@ -390,8 +389,8 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
       if (!cur) return;
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
-      // Hour-aligned block clamped to the bookable day (8 AM – 8 PM).
-      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
+      // Hour-aligned block clamped to the grid day (6 AM – 8 PM).
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), DAY_START_HOUR * 60);
       const endMin = Math.min(
         DAY_END_HOUR * 60,
         Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
@@ -853,9 +852,9 @@ export default function TimeGridDays({
     if (fromDate === toDate && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);
-    // Pre-opening / past-day-end landings are disabled droppables; belt and
-    // braces for a stale drop payload (the server would 422 it anyway).
-    if (toMin == null || toMin < BOOKABLE_START_HOUR * 60 || toMin + dur > DAY_END_HOUR * 60) return;
+    // Past-day-end landings are disabled droppables; belt and braces for a
+    // stale drop payload (the server would 422 it anyway).
+    if (toMin == null || toMin + dur > DAY_END_HOUR * 60) return;
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
     const updatedSvc = {

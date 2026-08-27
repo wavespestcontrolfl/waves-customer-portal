@@ -1109,7 +1109,7 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
-  test('drops the promised window (keeping the date) when it collides at seeding time', async () => {
+  test('keeps the promised window when it overlaps at seeding time — overlaps are advisory', async () => {
     const columnQuery = query({
       columnInfo: {
         scheduled_date: {},
@@ -1142,11 +1142,12 @@ describe('annual prepay renewal helpers', () => {
       first_visit_window_start: '08:00',
     }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
 
-    // Right date, no time — an overlapping timed promise is never materialized.
+    // Right date AND the promised time — an overlap warns, it never drops
+    // the time the customer was quoted.
     expect(seeded.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-08-01',
-      window_start: null,
-      window_end: null,
+      window_start: '08:00',
+      window_end: '09:00',
     }));
   });
 

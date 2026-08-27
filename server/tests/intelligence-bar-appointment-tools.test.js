@@ -322,12 +322,17 @@ describe('create_appointment', () => {
 });
 
 describe('create_appointment — shared admin window rules (scheduling/window-rules.js)', () => {
-  test('a 7:00 AM start is refused before any DB call — no insert', async () => {
+  test('a 7:00 AM start is accepted (no day-start floor) and inserts 07:00-08:00', async () => {
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
+      scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
+    });
     const result = await executeTool('create_appointment', {
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '7:00 AM',
     });
-    expect(result.error).toMatch(/before 08:00/);
-    expect(db).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ window_start: '07:00', window_end: '08:00' });
   });
 
   test('an 8:00 PM start (flat-60 end 21:00, past the day end) is refused — no insert', async () => {
@@ -750,12 +755,16 @@ describe('reschedule_appointment — shared admin window rules', () => {
     window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
   };
 
-  test('a 7:00 AM new start is refused — nothing updated', async () => {
+  test('a 7:00 AM new start is accepted (no day-start floor) — updated to 07:00-08:00', async () => {
     const updateChain = chain();
-    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), updateChain] });
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), updateChain], // middle chain: advisory probe (clean)
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
     const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '7:00 AM' });
-    expect(result.error).toMatch(/before 08:00/);
-    expect(updateChain.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '07:00', window_end: '08:00' });
   });
 
   test('an 8:00 PM new start on a 60-min visit (end 21:00) is refused — nothing updated', async () => {
@@ -766,12 +775,16 @@ describe('reschedule_appointment — shared admin window rules', () => {
     expect(updateChain.update).not.toHaveBeenCalled();
   });
 
-  test('a date-only move validates the STORED window (legacy 07:00 row refused); an end-less row uses its estimated duration', async () => {
+  test('a date-only move validates the STORED window against the day END only (a 07:00 row moves; a 19:00 end-less 120-min row is refused)', async () => {
     const updateChain = chain();
-    wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...appt, window_start: '07:00:00', window_end: '08:00:00' }) }), updateChain] });
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...appt, window_start: '07:00:00', window_end: '08:00:00' }) }), chain(), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
     let result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
-    expect(result.error).toMatch(/before 08:00/);
-    expect(updateChain.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.update).toHaveBeenCalled();
     wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...appt, window_start: '19:00:00', window_end: null, estimated_duration_minutes: 120 }) }), chain()] });
     result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
     expect(result.error).toMatch(/end by 20:00/);

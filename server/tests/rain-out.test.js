@@ -3051,26 +3051,25 @@ describe('rain-out service', () => {
     });
   });
 
-  describe('checkSlots (GATE_SLOT_CONFLICT_HINTS batch advisory)', () => {
+  describe('checkSlots (batch advisory, always on — no gate)', () => {
     const { listOccupiedWindows } = require('../services/scheduling/occupancy');
     const ADMIN = { isAdmin: true, technicianId: 'tech-1' };
 
-    beforeEach(() => { process.env.GATE_SLOT_CONFLICT_HINTS = 'true'; });
     afterEach(() => {
-      delete process.env.GATE_SLOT_CONFLICT_HINTS;
       listOccupiedWindows.mockReset();
       listOccupiedWindows.mockResolvedValue([]);
     });
 
-    test('gate off: answers gated with no results and never touches the DB', async () => {
+    test('runs with no GATE_SLOT_CONFLICT_HINTS env at all — the gate is gone', async () => {
       delete process.env.GATE_SLOT_CONFLICT_HINTS;
       const result = await RainOut.checkSlots({
         targets: [{ date: '2026-08-20', window: { start: '14:00', end: '15:00' } }],
         caller: ADMIN,
       });
-      expect(result).toEqual({ ok: true, gated: true, results: [] });
-      expect(listOccupiedWindows).not.toHaveBeenCalled();
-      expect(db).not.toHaveBeenCalled();
+      expect(result.ok).toBe(true);
+      expect(result.gated).toBeUndefined();
+      expect(result.results).toHaveLength(1);
+      expect(listOccupiedWindows).toHaveBeenCalled();
     });
 
     test('batch: results align by index — overlap flags, back-to-back (half-open) does not', async () => {

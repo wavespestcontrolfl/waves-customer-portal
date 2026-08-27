@@ -1058,8 +1058,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     })());
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
-    let windowStart = firstVisitWindowStart;
+    const windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
+    let overlapConflict = null;
     try {
       // SAVEPOINT: Postgres aborts the whole transaction on any statement
       // error, so catching a failed lock/conflict query on `trx` directly would
@@ -1094,16 +1095,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           durationMinutes: baseDuration,
           adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
         });
+        // ADVISORY (owner ruling 2026-08-27 — schedule overlaps never block
+        // or drop a booking): the promised window is kept either way; a hit
+        // is surfaced as a coverage exception so the office can eyeball the
+        // day's route.
         if (conflict) {
-          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
-          windowStart = null;
+          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} overlaps visit ${conflict.id} — keeping the promised window (overlaps are advisory)`);
+          overlapConflict = conflict;
         }
       });
     } catch (err) {
-      // Fail CLOSED: an unverifiable window must not become an overlapping
-      // timed promise. The visit still seeds on the right date, windowless.
-      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
-      windowStart = null;
+      // The probe is advisory, so a failed probe changes nothing about the
+      // window — the visit still seeds at the promised time.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit overlap probe failed (${err.message}) — seeding with the promised window unprobed`);
       // The savepoint died before its adoption recheck ran (e.g. the date
       // lock was held by a concurrent booking — which may be creating exactly
       // the visit we would duplicate). Best-effort unlocked recheck before
@@ -1125,9 +1129,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
-    if (!windowStart && firstVisitWindowStart) {
+    if (overlapConflict) {
       await fileCoverageException(term, 'window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
     }
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
     // activation already holds invoice/term row locks, and a merge-undo
@@ -1166,6 +1170,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     const row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
     let staleAdoption = false;
+    let overlapConflict = null;
     try {
       await trx.transaction(async (sp) => {
         // Same late-rung-1 posture as the timed seed: try, never wait.
@@ -1192,13 +1197,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           durationMinutes: adoptedDuration,
           excludeServiceIds: [row.id],
         });
+        // ADVISORY (owner ruling 2026-08-27): the adopted visit is retimed
+        // to the promise regardless; a hit is filed for the office to see.
         if (conflict) {
-          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} collides with visit ${conflict.id} — leaving adopted visit ${row.id} untimed`);
-          windowStart = null;
+          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} overlaps visit ${conflict.id} — retiming adopted visit ${row.id} anyway (overlaps are advisory)`);
+          overlapConflict = conflict;
         }
       });
     } catch (err) {
-      logger.warn(`[annual-prepay] term ${term.id} adopted-visit window check failed (${err.message}) — leaving visit ${row.id} as-is`);
+      // The savepoint died before the identity recheck ran, so the row is
+      // unverified — that (not the overlap) is why it is left as-is.
+      logger.warn(`[annual-prepay] term ${term.id} adopted-visit recheck failed (${err.message}) — leaving visit ${row.id} as-is`);
       windowStart = null;
     }
     if (staleAdoption) {
@@ -1208,9 +1217,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       return;
     }
     if (!windowStart) {
-      await fileCoverageException(term, 'adopted_window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (it overlaps another job). Re-slot it with the customer.`);
+      await fileCoverageException(term, 'adopted_window_unverified',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (the schedule recheck failed). Re-time it by hand.`);
       return;
+    }
+    if (overlapConflict) {
+      await fileCoverageException(term, 'adopted_window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} overlaps another job on the schedule. The visit was retimed as promised — confirm the day's route.`);
     }
     const updates = { updated_at: new Date() };
     if (cols.window_start) updates.window_start = windowStart;

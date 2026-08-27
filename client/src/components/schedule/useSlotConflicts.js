@@ -1,11 +1,9 @@
 // Advisory slot-conflict hooks for the admin date/time pickers — the shared
 // sibling of RainOutSheet's inline live target-check effect (same 300ms
 // debounce, same abort-stale, same fail-open contract: any error just hides
-// the hint). Backed by POST /admin/dispatch/slot-check, which is gated
-// server-side (GATE_SLOT_CONFLICT_HINTS) — while the gate is off the
-// endpoint answers gated:true and these hooks report no conflicts, so every
-// picker renders exactly as today. Warn-only: consumers never disable a
-// save button on this data.
+// the hint). Backed by POST /admin/dispatch/slot-check, always on (the
+// former GATE_SLOT_CONFLICT_HINTS gate was removed 2026-08-27). Warn-only:
+// consumers never disable a save button on this data.
 
 import { useEffect, useState } from 'react';
 
@@ -37,7 +35,7 @@ async function fetchSlotCheck(targets, signal) {
     body: JSON.stringify({ targets }),
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.ok || data.gated || !Array.isArray(data.results)) return null;
+  if (!res.ok || !data?.ok || !Array.isArray(data.results)) return null;
   return data.results;
 }
 
