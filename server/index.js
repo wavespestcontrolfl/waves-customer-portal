@@ -1146,7 +1146,7 @@ httpServer.listen(PORT, () => {
           // follow-through (property stamps, tier sync, welcome) for
           // recently activated parents — a worker death after the
           // activation commit loses it with no other recovery path.
-          await healActivatedFollowThroughs({ limit: 10 });
+          await healActivatedFollowThroughs();
         } catch (err) {
           logger.error(`[wizard-series-recovery] sweep failed: ${err.message}`);
         }

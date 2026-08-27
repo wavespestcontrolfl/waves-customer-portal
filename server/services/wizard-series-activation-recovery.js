@@ -189,7 +189,13 @@ async function runActivationFollowThroughForParent(parent, { database = db } = {
 // follow-through re-run; re-running a healthy one is a no-op by design.
 // The 7-day window here is generous coverage for a seconds-wide crash
 // window (unlike the stranded strip above, nothing billable rides on it).
-async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, limit = 10 } = {}) {
+// The 7-day window bounds the eligible set (a handful of self-booked
+// wizard activations), so every run processes ALL of it, oldest first —
+// a fixed newest-N slice with no completion marker would re-heal the
+// same rows forever and starve older ones past the window (codex #3504
+// r9 hook). The limit is a runaway safety cap only; hitting it logs
+// loud so it never silently truncates.
+async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, limit = 200 } = {}) {
   const parents = await database('scheduled_services as ss')
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereNotNull('ss.self_booking_id')
@@ -199,9 +205,12 @@ async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 1
     .where('e.source', 'quote_wizard')
     .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
     .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
-    .orderBy('ss.created_at', 'desc')
+    .orderBy('ss.created_at', 'asc')
     .limit(limit)
     .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
+  if (parents.length >= limit) {
+    logger.warn(`[wizard-series-recovery] follow-through heal hit its ${limit}-row safety cap — eligible set exceeds the cap, raise it or shrink the window`);
+  }
   for (const parent of parents) {
     try {
       await runActivationFollowThroughForParent(parent, { database });

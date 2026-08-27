@@ -408,7 +408,11 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/where\('ss\.is_recurring', true\)/);
     expect(typeof require('../services/wizard-series-activation-recovery').healActivatedFollowThroughs).toBe('function');
     const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-    expect(indexSrc).toMatch(/healActivatedFollowThroughs\(\{ limit: 10 \}\)/);
+    expect(indexSrc).toMatch(/healActivatedFollowThroughs\(\)/);
+    // Every run walks the WHOLE windowed set oldest-first — a newest-N
+    // slice with no completion marker starves older rows (r9 hook).
+    expect(recoverySrc).toMatch(/orderBy\('ss\.created_at', 'asc'\)/);
+    expect(recoverySrc).toMatch(/safety cap/);
     // The stranded-strip predicate keeps NO upper age bound (r9 P2): an
     // outage must never expire an unrecovered billable row.
     expect(recoverySrc).not.toMatch(/youngerThanDays[\s\S]{0,400}findStrandedParents/);
