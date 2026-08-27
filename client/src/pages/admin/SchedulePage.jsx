@@ -10301,15 +10301,26 @@ export function CompletionPanel({
   // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
   // off the same flag so hidden state can't ride a restored draft into
   // the submit.
+  // A bait-station visit that ALSO records a spray-class product or a
+  // treatment-applied protocol action needs its treatment scope captured
+  // (the server's exterior/interior advisory keys off it) — so the
+  // station-lane hide only applies while nothing sprayed is recorded
+  // (codex inline r5 on #3516). Mirrors the server's
+  // isSprayApplicationMethod exclusions (bait / station check / injection).
+  const sprayEvidenceInForm = selectedProducts.some((p) => {
+    const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    return !!method && !["bait_placement", "station_check", "trunk_injection"].includes(method);
+  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
   const areasTreatedHidden = treeShrubCloseoutOn
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
       "rodent_inspection", "rodent_bait_station", "bed_bug",
-      // Station visits have no meaningful "areas treated" — the station
-      // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
-      // termite lanes keep the termite area list.
-      "termite_bait_station",
-    ].includes(service.completionProfile?.findingsType);
+    ].includes(service.completionProfile?.findingsType)
+    // Station visits have no meaningful "areas treated" — the station
+    // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
+    // termite lanes keep the termite area list, and a station visit that
+    // records spray evidence gets the picker back.
+    || (service.completionProfile?.findingsType === "termite_bait_station" && !sprayEvidenceInForm);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
