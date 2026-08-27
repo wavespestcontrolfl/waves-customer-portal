@@ -807,7 +807,10 @@ describe('booking route wiring (source contracts)', () => {
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);
-    expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
+    // (Pest lane: the reconciled-column read + in-transaction kept guard now
+    // sit between the generation-column read and the INSERT.)
+    expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const hasReconciledColumn = await trx\.schema\.hasColumn\('scheduled_services', 'wizard_recovery_reconciled_at'\);/);
+    expect(booking).toMatch(/const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
     const migration = require('../models/migrations/20260827000001_source_estimate_generation');
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
@@ -848,7 +851,12 @@ describe('booking route wiring (source contracts)', () => {
     // #1 customer row FOR UPDATE precedes the recurring-series advisory
     // (converter order: customers → series advisory).
     expect(booking).toMatch(/const bookedCustomerRow = await trx\('customers'\)\s*\n\s*\.where\(\{ id: custId \}\)\s*\n\s*\.forUpdate\(\)/);
-    expect(booking.indexOf("const bookedCustomerRow = await trx('customers')")).toBeLessThan(booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {'));
+    // The activation's OWN guard call (the pest lane added an earlier one
+    // inside the booking transaction) follows the customer row lock.
+    const bookedCustomerRowAt = booking.indexOf("const bookedCustomerRow = await trx('customers')");
+    const activationGuardAt = booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', bookedCustomerRowAt);
+    expect(bookedCustomerRowAt).toBeGreaterThan(0);
+    expect(activationGuardAt).toBeGreaterThan(bookedCustomerRowAt);
     // #2 the healer requires the activation-archived draft, never
     // is_recurring alone (same rule as the request path, r18).
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
@@ -1000,7 +1008,45 @@ describe('booking route wiring (source contracts)', () => {
     const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(schedule).toMatch(/async function resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\)/);
     expect(schedule).toMatch(/const extensionPriceParent = await resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\);\s*\n\s*applyStoredVisitFinancials\(nextData, cols, extensionPriceParent,/);
-    expect(schedule).toMatch(/if \(diff >= 1\) return parent;/);
+    // Every extension writer (auto-extend, top-up, plan-ending extend and
+    // convert) templates off the resolver — never the raw parent.
+    expect((schedule.match(/applyStoredVisitFinancials\((?:data|nextData), cols, extensionPriceParent,/g) || []).length).toBe(4);
+    expect(schedule).not.toMatch(/applyStoredVisitFinancials\(data, cols, parent,/);
+    // Explicit provenance only — never inferred from child prices.
+    expect(schedule).toMatch(/raw\.anchored_split_per_visit/);
+    expect(schedule).not.toMatch(/if \(diff >= 1\) return parent;/);
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/anchored_split_per_visit: Math\.round\(Number\(opts\.estimatedPrice\) \* 100\) \/ 100/);
+    // Duplicate-kept is decided INSIDE the booking transaction and the
+    // marker is born with the row; the post-commit seeding is skipped.
+    expect(booking).toMatch(/if \(shouldSeedQuarterlyPestFollowUps && !callbackVisit && hasReconciledColumn\) \{\s*\n\s*await trx\('customers'\)\.where\(\{ id: custId \}\)\.forUpdate\(\)\.first\('id'\);/);
+    expect(booking).toMatch(/\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),/);
+    expect(booking).toMatch(/if \(shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking\) \{/);
+    expect(booking.indexOf('const shouldSeedQuarterlyPestFollowUps =')).toBeLessThan(booking.indexOf('let txResult;'));
+    const backfillSrc2 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    // Cent-exact re-derivation from the stored annual + fixed 4-visit
+    // plan — never a price-pattern inference.
+    expect(backfillSrc2).toMatch(/FLOOR\(annual_cents \/ 4\) AS quotient_cents/);
+    expect(backfillSrc2).toMatch(/annual_cents - 3 \* FLOOR\(annual_cents \/ 4\) AS first_cents/);
+    expect(backfillSrc2).toMatch(/WHERE s\.parent_cents = s\.first_cents/);
+    // The three EARLIEST seeded follow-ups prove the split (lifetime child
+    // count irrelevant); unproven Ongoing series are surfaced, not stamped.
+    expect(backfillSrc2).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY c\.recurring_parent_id ORDER BY c\.scheduled_date ASC/);
+    expect(backfillSrc2).toMatch(/JOIN seeded c ON c\.parent_id = s\.parent_id AND c\.rn <= 3/);
+    expect(backfillSrc2).toMatch(/HAVING COUNT\(\*\) = 3/);
+    expect(backfillSrc2).toMatch(/jsonb_exists\(p\.recurring_template_overrides, 'anchored_split_per_visit'\)/);
+    expect(backfillSrc2).not.toMatch(/recurring_template_overrides \? 'anchored_split_per_visit'/);
+    expect(backfillSrc2).toMatch(/dedupeKey: 'pest-renewal-price-unverified-20260827'/);
+    expect(backfillSrc2).toMatch(/RENEWAL PRICE UNVERIFIED/);
+    // The edit lane's merge carries the provenance key across service-only
+    // edits and drops it on an explicit price edit; the resolver yields to
+    // an explicit price override.
+    expect(schedule).toMatch(/const PROVENANCE_OVERRIDE_KEYS = new Set\(\['anchored_split_per_visit'\]\);/);
+    expect(schedule).toMatch(/const priceEdit = entries\.some\(\(\[key\]\) => key === 'estimated_price'\);\s*\n\s*const merged = \{ \.\.\.\(priceEdit \? \{\} : provenance\), \.\.\.existing \};/);
+    expect(schedule).toMatch(/if \(raw\.estimated_price !== undefined && raw\.estimated_price !== null\) return parent;/);
+    expect(backfillSrc2).toMatch(/BOOL_AND\(c\.estimated_price IS NOT NULL AND ROUND\(c\.estimated_price \* 100\) = s\.quotient_cents\)/);
+    expect(backfillSrc2).not.toMatch(/< 1\s*\n/);
+    expect(backfillSrc2).toMatch(/anchored_split_per_visit/);
   });
 
   test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
