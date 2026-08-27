@@ -16,6 +16,11 @@ const {
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
+  lineExcludedFromPercentDiscount,
+  buildPercentExclusionCatalog,
+  appointmentDiscountIdentityChanged,
+  isPercentDiscountType,
+  computePriceServiceGroupChanges,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
@@ -250,6 +255,254 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(financials).toEqual({
       price: 100,
       appointmentDiscountDollars: 50,
+    });
+  });
+
+  test('resolves percent-discount exclusion by engine identity, then explicit aliases', () => {
+    const catalog = buildPercentExclusionCatalog([
+      { service_key: 'rodent_bait_quarterly', engine_keys: ['rodent_bait'] },
+      { service_key: 'rodent_bait_setup', engine_keys: '["rodent_bait_setup"]' },
+      { service_key: 'bed_bug_treatment', engine_keys: ['bed_bug', 'bed_bug_chemical'] },
+      { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
+      { service_key: 'termite_bond_1yr', engine_keys: null },
+    ]);
+    // engine identity wins — including over a would-be prefix guess
+    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', catalog)).toBe(false);
+    expect(lineExcludedFromPercentDiscount('bed_bug_treatment', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bait', catalog)).toBe(false);
+    // no engine link → pricing map, then the explicit alias table
+    expect(lineExcludedFromPercentDiscount('termite_bond', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond_1yr', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond_5yr', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('palm_injection_semiannual', catalog)).toBe(true);
+    // the archived nutritional program is NOT an injection variant (r11 P1)
+    expect(lineExcludedFromPercentDiscount('palm_treatment', catalog)).toBe(false);
+    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(true);
+    // unknown prefixed keys are NOT inferred
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(false);
+    expect(lineExcludedFromPercentDiscount('pest_general_quarterly', catalog)).toBe(false);
+    expect(lineExcludedFromPercentDiscount(null, catalog)).toBe(false);
+  });
+
+  test('a preset replaced by an equivalent custom discount counts as a discount change', () => {
+    const existing = { discount_type: 'percentage', discount_amount: 10, discount_id: 'preset-termite' };
+    expect(appointmentDiscountIdentityChanged(existing, undefined)).toBe(true);
+    expect(appointmentDiscountIdentityChanged(existing, 'preset-other')).toBe(true);
+    expect(appointmentDiscountIdentityChanged(existing, 'preset-termite')).toBe(false);
+    expect(appointmentDiscountIdentityChanged({ discount_id: null }, undefined)).toBe(false);
+  });
+
+  test('keeps the termite bond out of a percentage appointment discount', () => {
+    // Quarterly pest $117 + bait $105.30 + bond $60, WaveGuard Silver 10%:
+    // the bond is a fixed warranty rider and never takes the bundle %.
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 117,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'percentage',
+        discountAmount: 10,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [
+      { price: 105.3, serviceKey: 'termite_bait', serviceCategory: 'termite' },
+      { price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' },
+    ]);
+
+    expect(financials).toEqual({
+      price: 260.07,
+      appointmentDiscountDollars: 22.23,
+    });
+  });
+
+  test('treats variable percentages like percentages for the exclusion', () => {
+    expect(isPercentDiscountType('percentage')).toBe(true);
+    expect(isPercentDiscountType('variable_percentage')).toBe(true);
+    expect(isPercentDiscountType('fixed_amount')).toBe(false);
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 100,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'variable_percentage',
+        discountAmount: 10,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
+    expect(financials).toEqual({ price: 150, appointmentDiscountDollars: 10 });
+  });
+
+  test('prices the initially created visit with the same bond exclusion as its children', async () => {
+    const discount = {
+      id: 'discount-silver',
+      name: 'WaveGuard Silver',
+      discount_type: 'percentage',
+      amount: 10,
+    };
+    db
+      .mockReturnValueOnce(discountQuery({ service_key: 'termite_bond_1yr', category: 'termite', base_price: 60 }))
+      .mockReturnValueOnce(discountQuery(discount));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 117 },
+      estimatedPrice: 117,
+      serviceAddons: [{ serviceId: 'bond-1', name: 'Termite Bond Service (1-Year Term)', price: 60 }],
+      discountId: discount.id,
+      discountType: discount.discount_type,
+      customer: { id: 'customer-1' },
+    });
+
+    expect(pricing.appointmentDiscount.discountDollars).toBe(11.7);
+    expect(pricing.finalPrice).toBe(165.3);
+  });
+
+  test('treats a same-valued preset switch with a different scope as a price change', () => {
+    const before = {
+      primary_line_price: 117,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_id: 'preset-unscoped',
+      discount_service_key_filter: null,
+      discount_service_category_filter: null,
+    };
+    const updates = {
+      primary_line_price: 117,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_id: 'preset-termite',
+      discount_service_key_filter: null,
+      discount_service_category_filter: 'termite',
+    };
+    const groups = computePriceServiceGroupChanges(before, updates);
+    expect(groups.priceChanged).toBe(true);
+    expect(groups.fields.discount_id).toBe('preset-termite');
+    expect(groups.fields.discount_service_category_filter).toBe('termite');
+    expect(computePriceServiceGroupChanges(before, { ...updates, discount_id: 'preset-unscoped', discount_service_category_filter: null }).priceChanged).toBe(false);
+  });
+
+  test('parent creation honors the preset cap, including an explicit $0 (r11 P1)', async () => {
+    const capped = {
+      id: 'discount-capped',
+      name: '10% capped at $5',
+      discount_type: 'percentage',
+      amount: 10,
+      max_discount_dollars: 5,
+    };
+    db.mockReturnValueOnce(discountQuery(capped));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 200 },
+      estimatedPrice: 200,
+      serviceAddons: [],
+      discountId: capped.id,
+      discountType: capped.discount_type,
+      customer: { id: 'customer-1' },
+    });
+    expect(pricing.appointmentDiscount.discountDollars).toBe(5);
+    expect(pricing.finalPrice).toBe(195);
+
+    // a numeric 0 cap is a real cap, not "uncapped" — children clamp to $0
+    // via calculateVisitFinancialsForAddons, so the parent must too
+    const zeroCapped = { ...capped, id: 'discount-zero', max_discount_dollars: 0 };
+    db.mockReturnValueOnce(discountQuery(zeroCapped));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+    const zeroPricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 200 },
+      estimatedPrice: 200,
+      serviceAddons: [],
+      discountId: zeroCapped.id,
+      discountType: zeroCapped.discount_type,
+      customer: { id: 'customer-1' },
+    });
+    expect(zeroPricing.appointmentDiscount.discountDollars).toBe(0);
+    expect(zeroPricing.finalPrice).toBe(200);
+  });
+
+  test('honors a preset max_discount_dollars cap on edit like creation does', () => {
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 200,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'percentage',
+        discountAmount: 10,
+        maxDiscountDollars: 5,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, []);
+    expect(financials).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+    // an explicit $0 cap (Postgres hands it back as "0.00") is a real cap
+    const zero = calculateVisitFinancialsForAddons({
+      primaryNet: 200,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: { discountType: 'percentage', discountAmount: 10, maxDiscountDollars: '0.00', serviceKeyFilter: null, serviceCategoryFilter: null },
+    }, []);
+    expect(zero).toEqual({ price: 200, appointmentDiscountDollars: null });
+  });
+
+  test('stored replays honor the snapshotted preset cap', () => {
+    const parent = {
+      service_id: 'pest-service',
+      service_key_snapshot: 'pest_general_quarterly',
+      primary_line_price: 200,
+      line_discount_dollars: 0,
+      discount_type: 'percentage',
+      discount_amount: 10,
+      discount_max_dollars: 5,
+    };
+    expect(calculateStoredVisitFinancials(parent, [], [], null)).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+    const groups = computePriceServiceGroupChanges(
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'uncapped' },
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 5 },
+    );
+    expect(groups.priceChanged).toBe(true);
+    expect(groups.fields.discount_max_dollars).toBe(5);
+    // a catalog cap change on the SAME preset still counts (r8 P1)
+    expect(computePriceServiceGroupChanges(
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 5 },
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 8 },
+    ).priceChanged).toBe(true);
+  });
+
+  test('still spreads a fixed-dollar appointment discount across every line', () => {
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 100,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'fixed_amount',
+        discountAmount: 25,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
+
+    expect(financials).toEqual({ price: 135, appointmentDiscountDollars: 25 });
+  });
+
+  test('keeps the bond out of the percentage base on stored replays', () => {
+    const parent = {
+      service_id: 'pest-service',
+      service_key_snapshot: 'pest_general_quarterly',
+      primary_line_price: 117,
+      line_discount_dollars: 0,
+      discount_type: 'percentage',
+      discount_amount: 10,
+    };
+    const addons = [
+      { service_id: 'bait-service', service_key_snapshot: 'termite_bait', estimated_price: 105.3 },
+      { service_id: 'bond-service', service_key_snapshot: 'termite_bond_1yr', estimated_price: 60 },
+    ];
+
+    expect(calculateStoredVisitFinancials(parent, addons, addons, null)).toEqual({
+      price: 260.07,
+      appointmentDiscountDollars: 22.23,
     });
   });
 

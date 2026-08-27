@@ -1120,35 +1120,45 @@ function editClampToSeason(date, pattern, skip) {
   }
   return date;
 }
+// serviceKey = the stable catalog identity (labels here are NOT catalog
+// display names — the save resolves the row by key). Items without a key
+// (the lawn one-offs) have no single catalog row and save identity-less.
 const EDIT_FALLBACK_SERVICES = [
   {
     category: "pest_control",
     items: [
-      { name: "Pest Control Service" },
-      { name: "Mosquito Control Service" },
-      { name: "Tick Control Service" },
-      { name: "Wasp Control Service" },
-      { name: "Quarterly Pest Control Service" },
-      { name: "Bi-Monthly Pest Control Service" },
-      { name: "Monthly Pest Control Service" },
+      { name: "Pest Control Service", serviceKey: "one_time_pest_control" },
+      { name: "Mosquito Control Service", serviceKey: "mosquito_one_time" },
+      { name: "Tick Control Service", serviceKey: "tick_control" },
+      { name: "Wasp Control Service", serviceKey: "bee_wasp_removal" },
+      { name: "Quarterly Pest Control Service", serviceKey: "pest_general_quarterly" },
+      { name: "Bi-Monthly Pest Control Service", serviceKey: "pest_general_bimonthly" },
+      { name: "Monthly Pest Control Service", serviceKey: "pest_general_monthly" },
     ],
   },
   {
     category: "rodent",
     items: [
-      { name: "Rodent Control Service" },
-      { name: "Rodent Trapping Service" },
-      { name: "Rodent Exclusion Service" },
-      { name: "Rodent Bait Station Service" },
+      { name: "Rodent Control Service", serviceKey: "rodent_general_one_time" },
+      { name: "Rodent Trapping Service", serviceKey: "rodent_trapping" },
+      { name: "Rodent Exclusion Service", serviceKey: "rodent_exclusion_only" },
+      {
+        name: "Rodent Bait Station Service",
+        serviceKey: "rodent_bait_quarterly",
+        // rodent_bait is a percent-excluded family (pricing-engine
+        // WAVEGUARD.excludedFromPercentDiscount) — the only such family in
+        // this static list; stamped so the preview matches the save.
+        excludedFromPercentDiscount: true,
+      },
     ],
   },
   {
     category: "termite",
     items: [
-      { name: "Termite Monitoring Service" },
-      { name: "Termite Active Bait Station Service" },
-      { name: "Termite Spot Treatment Service" },
-      { name: "Termite Trenching Service" },
+      { name: "Termite Monitoring Service", serviceKey: "termite_monitoring" },
+      { name: "Termite Active Bait Station Service", serviceKey: "termite_active_bait_quarterly" },
+      { name: "Termite Spot Treatment Service", serviceKey: "termite_spot_treatment" },
+      { name: "Termite Trenching Service", serviceKey: "termite_trenching" },
     ],
   },
   {
@@ -1163,15 +1173,15 @@ const EDIT_FALLBACK_SERVICES = [
   {
     category: "tree_shrub",
     items: [
-      { name: "Every 6 Weeks Tree & Shrub Care Service" },
-      { name: "Bi-Monthly Tree & Shrub Care Service" },
+      { name: "Every 6 Weeks Tree & Shrub Care Service", serviceKey: "tree_shrub_6week" },
+      { name: "Bi-Monthly Tree & Shrub Care Service", serviceKey: "tree_shrub_program" },
     ],
   },
   {
     category: "specialty",
     items: [
-      { name: "WaveGuard Membership" },
-      { name: "Waves Pest Control Appointment" },
+      { name: "WaveGuard Membership", serviceKey: "waveguard_membership" },
+      { name: "Waves Pest Control Appointment", serviceKey: "general_appointment" },
     ],
   },
 ];
@@ -1193,6 +1203,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     scheduledDate: service.scheduledDate
       ? String(service.scheduledDate).split("T")[0]
       : "",
+    // Server-stamped from the stored primary service key: the line never
+    // takes a percentage appointment discount (termite bond, ...). Preview
+    // only — the server recomputes on save.
+    excludedFromPercentDiscount: service.excludedFromPercentDiscount === true,
+    serviceKey: service.serviceKey || null,
+    // *Snapshot: the list payloads' bare serviceCategory is the display
+    // family (pest/lawn/...), not the catalog category the filters use.
+    serviceCategory: service.serviceCategorySnapshot || null,
     windowStart: service.windowStart || "",
     windowEnd: service.windowEnd || "",
     serviceType: service.serviceType || "",
@@ -1341,6 +1359,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: a.discountAmount != null ? a.discountAmount : null,
         _origDiscountId: a.discountId || null,
         _origDiscountName: a.discountName || null,
+        // Server-stamped: this line never takes a percentage appointment
+        // discount (termite bond, rodent bait, ...). Drives the preview only —
+        // the server recomputes the same exclusion on save.
+        excludedFromPercentDiscount: a.excludedFromPercentDiscount === true,
+        serviceKey: a.serviceKey || null,
+        serviceCategory: a.serviceCategory || null,
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
         recurringIntervalDays: a.recurringIntervalDays ?? null,
@@ -1545,10 +1569,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       try {
         const r = await adminFetch("/admin/discounts");
         const list = Array.isArray(r) ? r : [];
+        // Same invoice-visibility contract as CreateAppointmentModal: the
+        // save posts the preset id and the server loads it with
+        // show_in_invoices=true, so an invoice-hidden preset must not be
+        // offered here (it would 400 the whole save).
         const filtered = list.filter(
           (d) =>
             d.is_active &&
             !d.is_auto_apply &&
+            d.show_in_invoices &&
             (d.discount_type === "percentage" ||
               d.discount_type === "fixed_amount"),
         );
@@ -1751,6 +1780,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: null,
         _origDiscountId: null,
         _origDiscountName: null,
+        excludedFromPercentDiscount: false,
+        serviceKey: null,
+        serviceCategory: null,
         estimatedDuration: "",
         recurringPattern: null,
         recurringIntervalDays: null,
@@ -1963,6 +1995,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         ? cleanLines.map((l) => {
             const common = {
               serviceId: l.serviceId || null,
+              // Stable catalog key for a fallback pick (no serviceId) — the
+              // server resolves the row by it before trying the label.
+              serviceKey: l.serviceKey || undefined,
               serviceName: l.serviceType,
               estimatedDuration:
                 l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
@@ -2090,6 +2125,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           discountAmount:
             discountType && discountAmount !== ""
               ? Number(discountAmount)
+              : undefined,
+          // A catalog preset posts its id so the row keeps the discount's
+          // identity (name on the invoice line, service filters); "custom"
+          // stays an anonymous type/amount pair.
+          discountId:
+            discountType && discountPresetId && discountPresetId !== "custom"
+              ? discountPresetId
               : undefined,
           estimatedPrice:
             form.price !== "" && !isNaN(parseFloat(form.price))
@@ -2335,11 +2377,67 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     0,
   );
   const servicePrice = primaryPrice + addonLinesTotal;
+  const selectedDiscountPreset =
+    discountPresetId && discountPresetId !== "custom"
+      ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
+      : null;
+  // Mirrors calculateVisitFinancialsForAddons on the server so the preview
+  // matches what saves: a preset's service_key/category filter scopes the
+  // discount to matching lines, and a percentage additionally skips
+  // percent-excluded lines (termite bond, rodent bait, ...). The primary
+  // line's identity comes from the list payload or a catalog pick in this
+  // session; the server is authoritative either way.
+  const presetKeyFilter = selectedDiscountPreset?.service_key_filter || null;
+  const presetCategoryFilter =
+    selectedDiscountPreset?.service_category_filter || null;
+  const lineInDiscountScope = (line) =>
+    (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
+    (!presetCategoryFilter ||
+      presetCategoryFilter === (line.serviceCategory || null));
+  const lineTakesDiscount = (line) =>
+    lineInDiscountScope(line) &&
+    !(discountType === "percentage" && line.excludedFromPercentDiscount === true);
+  const primaryLineForDiscount = {
+    serviceKey: form.serviceKey,
+    serviceCategory: form.serviceCategory,
+    excludedFromPercentDiscount: form.excludedFromPercentDiscount === true,
+  };
+  const percentExcludedLines = serviceLines.filter(
+    (l) => !lineTakesDiscount(l),
+  );
+  const percentDiscountBase =
+    (lineTakesDiscount(primaryLineForDiscount) ? primaryPrice : 0) +
+    serviceLines.reduce(
+      (sum, l) =>
+        !lineTakesDiscount(l) || l.price === "" || isNaN(parseFloat(l.price))
+          ? sum
+          : sum + parseFloat(l.price),
+      0,
+    );
+  // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
+  // never more than the lines the discount can reach.
+  // A catalog preset's max_discount_dollars caps a percentage the same way
+  // calculateDiscountDollars / calculateAppointmentDiscountDollars do.
+  // Any non-null cap counts — an explicit $0 cap saves a $0 discount.
+  const presetMaxDiscountDollars =
+    selectedDiscountPreset?.max_discount_dollars != null &&
+    selectedDiscountPreset.max_discount_dollars !== "" &&
+    !isNaN(Number(selectedDiscountPreset.max_discount_dollars))
+      ? Math.max(0, Number(selectedDiscountPreset.max_discount_dollars))
+      : null;
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
-        ? servicePrice * (Number(discountAmount) / 100)
-        : Number(discountAmount)
+        ? Math.min(
+            percentDiscountBase,
+            presetMaxDiscountDollars != null
+              ? Math.min(
+                  presetMaxDiscountDollars,
+                  percentDiscountBase * (Number(discountAmount) / 100),
+                )
+              : percentDiscountBase * (Number(discountAmount) / 100),
+          )
+        : Math.min(percentDiscountBase, Number(discountAmount))
       : 0;
   const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
@@ -2573,9 +2671,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                     svc.duration || svc.default_duration_minutes,
                                   );
                                 }
-                                if (svc.id !== undefined) {
-                                  onField("serviceId", svc.id || null);
-                                }
+                                // A catalog item carries its identity; a
+                                // static-fallback item (dropdown unavailable)
+                                // carries none — post serviceId null so the
+                                // server recovers the identity by name and the
+                                // replaced line's key/exclusion never linger.
+                                onField("serviceId", svc.id || null);
+                                onField(
+                                  "excludedFromPercentDiscount",
+                                  svc.excludedFromPercentDiscount === true,
+                                );
+                                onField("serviceKey", svc.serviceKey || null);
+                                // Static-fallback items carry no category of
+                                // their own; the group's is the catalog
+                                // category a category-scoped preset compares.
+                                onField(
+                                  "serviceCategory",
+                                  svc.serviceCategory || group.category || null,
+                                );
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
@@ -3471,10 +3584,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     }}
                   >
                     {" "}
-                    <span>Custom Discount</span>
+                    <span>{selectedDiscountPreset?.name || "Custom Discount"}</span>
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
+                {discountType &&
+                  discountAmount !== "" &&
+                  percentExcludedLines.length > 0 && (
+                    <div
+                      style={{
+                        minWidth: 220,
+                        fontSize: 12,
+                        color: D.muted,
+                      }}
+                    >
+                      Not discounted:{" "}
+                      {percentExcludedLines
+                        .map((l) => l.serviceType || "add-on")
+                        .join(", ")}
+                    </div>
+                  )}
                 <div
                   style={{
                     minWidth: 220,

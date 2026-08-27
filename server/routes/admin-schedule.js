@@ -34,6 +34,7 @@ const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('..
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
+const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -277,6 +278,15 @@ router.post('/fix-service-types', devOnly, adminAuthenticate, requireAdmin, asyn
 // ─── Router-level auth ──────────────────────────────────────────────────────
 // Everything below requires admin OR tech.
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Prime the percent-discount exclusion catalog before any schedule route
+// prices, spawns, or lists a visit (see primePercentDiscountExclusions).
+router.use((req, res, next) => {
+  // Prime only. Readiness is enforced where money is computed
+  // (assertPercentExclusionCatalogReady in the calculators), so unrelated
+  // mutations keep working while the catalog is unavailable.
+  primePercentDiscountExclusions().then(() => next(), () => next());
+});
 
 // ─── Technician job scoping ─────────────────────────────────────────────────
 // requireTechOrAdmin admits both staff roles, but the board payloads below
@@ -1324,6 +1334,7 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
   if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
   if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
+  if (cols.discount_max_dollars) target.discount_max_dollars = source.discount_max_dollars ?? null;
 }
 
 // Third-party Bill-To stamp (payer / PO / self-pay override): a spawned
@@ -1371,6 +1382,15 @@ function clearAppointmentDiscountCatalogFields(target, cols) {
   if (cols.discount_name) target.discount_name = null;
   if (cols.discount_service_key_filter) target.discount_service_key_filter = null;
   if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
+  if (cols.discount_max_dollars) target.discount_max_dollars = null;
+}
+
+// A posted discountId that differs from the stored one — including "no id"
+// replacing a stored preset (custom discount with the same type/amount) —
+// is a change even when type/amount match: the old preset's service scope
+// and catalog identity must not survive (Codex #3531 r5 P1).
+function appointmentDiscountIdentityChanged(existing, discountId) {
+  return String(discountId || '') !== String(existing?.discount_id || '');
 }
 
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
@@ -1679,7 +1699,13 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
   let dollars = 0;
   if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
     dollars = baseAmount * (amount / 100);
-    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+    // Any non-null cap counts, including an explicit $0 (admin-discounts.js
+    // accepts it) — same clamp calculateAppointmentDiscountDollars applies to
+    // children/edits, so the parent visit and its series agree (Codex #3531
+    // r11 P1: a truthy check read a numeric 0 cap as "uncapped").
+    if (row.max_discount_dollars != null && row.max_discount_dollars !== '' && Number.isFinite(Number(row.max_discount_dollars))) {
+      dollars = Math.min(dollars, Math.max(0, Number(row.max_discount_dollars)));
+    }
   } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
     dollars = amount;
   } else if (row.discount_type === 'free_service') {
@@ -1919,9 +1945,17 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
           && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
         ))
         : appointmentServiceLines;
-      const eligibilityContext = matchingLines[0] || {};
-      appointmentDiscountBase = isServiceScoped
-        ? matchingLines.reduce((sum, line) => sum + line.amount, 0)
+      // Percent-excluded lines (termite bond, rodent bait, ...) never sit in
+      // the base of a percentage discount — same contract as
+      // calculateVisitFinancialsForAddons, so the parent visit and its
+      // spawned children agree (Codex #3531 r1 P1).
+      if (isPercentDiscountType(appointmentDiscount.discount_type)) assertPercentExclusionCatalogReady();
+      const eligibleLines = isPercentDiscountType(appointmentDiscount.discount_type)
+        ? matchingLines.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
+        : matchingLines;
+      const eligibilityContext = eligibleLines[0] || matchingLines[0] || {};
+      appointmentDiscountBase = (isServiceScoped || eligibleLines.length !== matchingLines.length)
+        ? Math.round(eligibleLines.reduce((sum, line) => sum + line.amount, 0) * 100) / 100
         : subtotal;
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscount, customer, {
         subtotal: appointmentDiscountBase,
@@ -1953,6 +1987,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountDollars: resolvedAppointmentDiscount.dollars,
         serviceKeyFilter: appointmentDiscount.service_key_filter || null,
         serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
+        maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
       } : null,
     };
   }
@@ -2043,12 +2078,125 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
   let dollars = 0;
   if (discount.discountType === 'percentage' || discount.discountType === 'variable_percentage') {
     dollars = subtotal * ((Number(discount.discountAmount) || 0) / 100);
+    // Catalog cap — same clamp calculateDiscountDollars applies on creation
+    // (pre-push Codex P0 on #3531: an edited capped preset stored more than
+    // the cap).
+    if (discount.maxDiscountDollars != null && discount.maxDiscountDollars !== '' && Number.isFinite(Number(discount.maxDiscountDollars))) {
+      dollars = Math.min(dollars, Math.max(0, Number(discount.maxDiscountDollars)));
+    }
   } else if (discount.discountType === 'fixed_amount' || discount.discountType === 'variable_amount') {
     dollars = Number(discount.discountAmount) || 0;
   } else if (discount.discountType === 'free_service') {
     dollars = subtotal;
   }
   return Math.min(subtotal, Math.max(0, Math.round(dollars * 100) / 100));
+}
+
+// Lines that never receive a PERCENTAGE appointment-level discount. The
+// WaveGuard exclusion map (pricing-engine constants — termite_bond, rodent
+// bait, palm injection, ...) is keyed by FAMILY key, while catalog rows and
+// service_key_snapshot carry variant keys ("termite_bond_1yr"): resolve via
+// the catalog engine link first, then the family fallback. A line with no
+// service key resolves to "not excluded" — the pre-fix behavior. Fixed
+// dollar discounts are untouched: the owner ruling is "no bundle % discount"
+// on the bond, and a flat operator credit is not a bundle percentage.
+// Both percentage shapes the catalog supports (calculateAppointmentDiscountDollars
+// already treats them alike) — the exclusion must, too (Codex #3531 r1 P1).
+function isPercentDiscountType(discountType) {
+  return discountType === 'percentage' || discountType === 'variable_percentage';
+}
+
+// Catalog rows whose ENGINE identity (services.engine_keys, the canonical
+// catalog→pricing-family link) lands on an excluded family — e.g.
+// rodent_bait_quarterly → ['rodent_bait']. Cached in-process with a short
+// TTL and primed by the router middleware below, so the sync lookup every
+// financial calculator uses sees the same catalog. A prime failure keeps the
+// last good set (empty before the first success) and the family fallback in
+// lineExcludedFromPercentDiscount still covers the suffixed keys.
+const PERCENT_EXCLUSION_CATALOG_TTL_MS = 5 * 60 * 1000;
+// Catalog rows that carry NO engine link but are variants of an excluded
+// pricing family. Explicit on purpose — inferring the family from a key
+// prefix mis-filed rodent_bait_setup (engine key rodent_bait_setup, which
+// IS discountable) under rodent_bait (Codex #3531 r5 P1). Add a row here
+// only when the catalog can't express it via engine_keys.
+const PERCENT_EXCLUSION_KEY_ALIASES = Object.freeze({
+  termite_bond_1yr: 'termite_bond',
+  termite_bond_5yr: 'termite_bond',
+  termite_bond_10yr: 'termite_bond',
+  palm_injection_semiannual: 'palm_injection',
+  // palm_treatment is NOT here: it is the distinct archived nutritional/
+  // fertilization program (20260811000010 keeps it separate from the typed
+  // palm_injection lane), so it stays percent-discountable (Codex #3531 r11 P1).
+});
+// service_key → boolean verdict for every catalog row that HAS engine keys
+// (built by buildPercentExclusionCatalog). A row present here is judged by
+// its engine identity alone — no alias or map lookup can override it.
+let percentExclusionCatalog = new Map();
+let percentExcludedCatalogLoadedAt = 0;
+// FAIL CLOSED (pre-push Codex P0): until the catalog has loaded once,
+// variant keys (rodent_bait_quarterly, bed_bug_treatment, …) would resolve
+// as discountable, so pricing mutations are refused (503) rather than
+// priced against an empty catalog. A later refresh failure keeps the
+// last-good catalog.
+let percentExclusionCatalogReady = false;
+function percentExclusionCatalogIsReady() {
+  // No raw() = mocked/absent knex (unit tests): nothing to load, nothing to gate.
+  return percentExclusionCatalogReady || typeof db?.raw !== 'function';
+}
+// Called by every calculator the moment a PERCENTAGE discount is about to be
+// priced — the only place the catalog verdict changes money. Status/notes/
+// assignment/blackout routes never hit it (Codex #3531 r10 P1).
+const PERCENT_EXCLUSION_CATALOG_UNAVAILABLE = 'percent_exclusion_catalog_unavailable';
+function assertPercentExclusionCatalogReady() {
+  if (percentExclusionCatalogIsReady()) return;
+  const err = httpError(503, 'Service catalog unavailable — percentage-discount pricing is paused until it loads. Retry in a moment.');
+  err.code = PERCENT_EXCLUSION_CATALOG_UNAVAILABLE;
+  throw err;
+}
+let percentExcludedCatalogInflight = null;
+
+function buildPercentExclusionCatalog(rows) {
+  const catalog = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    let keys = row?.engine_keys;
+    if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch { keys = null; } }
+    if (!Array.isArray(keys) || keys.length === 0) continue;
+    const serviceKey = String(row.service_key || '').trim().toLowerCase();
+    if (!serviceKey) continue;
+    catalog.set(serviceKey, keys.some((k) => serviceExcludedFromPercentDiscount(String(k || '').trim().toLowerCase())));
+  }
+  return catalog;
+}
+async function primePercentDiscountExclusions() {
+  if (Date.now() - percentExcludedCatalogLoadedAt < PERCENT_EXCLUSION_CATALOG_TTL_MS) return;
+  if (percentExcludedCatalogInflight) return percentExcludedCatalogInflight;
+  // A mocked/absent knex (unit tests) has no raw() — nothing to prime from.
+  if (typeof db?.raw !== 'function') return;
+  percentExcludedCatalogInflight = (async () => {
+    try {
+      const result = await db.raw('select service_key, engine_keys from services where engine_keys is not null');
+      percentExclusionCatalog = buildPercentExclusionCatalog(Array.isArray(result?.rows) ? result.rows : []);
+      percentExcludedCatalogLoadedAt = Date.now();
+      percentExclusionCatalogReady = true;
+    } catch (e) {
+      logger.warn(`[schedule] percent-discount exclusion catalog prime failed: ${e.message}`);
+    } finally {
+      percentExcludedCatalogInflight = null;
+    }
+  })();
+  return percentExcludedCatalogInflight;
+}
+
+primePercentDiscountExclusions().catch(() => {});
+
+function lineExcludedFromPercentDiscount(serviceKey, catalog = percentExclusionCatalog) {
+  const key = String(serviceKey || '').trim().toLowerCase();
+  if (!key) return false;
+  // Engine identity first: a catalog row with engine keys is judged by them.
+  if (catalog?.has(key)) return catalog.get(key) === true;
+  if (serviceExcludedFromPercentDiscount(key)) return true;
+  const alias = PERCENT_EXCLUSION_KEY_ALIASES[key];
+  return alias ? serviceExcludedFromPercentDiscount(alias) : false;
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
@@ -2064,10 +2212,17 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
     (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
     && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
   );
-  const discountBase = isServiceScoped
-    ? (matchesScope(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
+  if (isPercentDiscountType(discount?.discountType)) assertPercentExclusionCatalogReady();
+  const pctExcluded = (serviceKey) => isPercentDiscountType(discount?.discountType)
+    && lineExcludedFromPercentDiscount(serviceKey);
+  const lineEligible = (serviceKey, serviceCategory) => matchesScope(serviceKey, serviceCategory)
+    && !pctExcluded(serviceKey);
+  const anyPctExcluded = pctExcluded(pricing.primaryServiceKey)
+    || addons.some((line) => pctExcluded(line.serviceKey));
+  const discountBase = (isServiceScoped || anyPctExcluded)
+    ? (lineEligible(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
       + addons.reduce((sum, line) => (
-        matchesScope(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
+        lineEligible(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
       ), 0)
     : subtotal;
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
@@ -2100,17 +2255,26 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
   let discountBase = subtotal;
-  if (discountScope?.isScoped) {
-    const servicesById = discountScope.servicesById || new Map();
+  // Percent-excluded lines (termite bond, ...) come out of the base on every
+  // stored replay too, so an auto-extended / propagated visit never re-adds
+  // the bond to a WaveGuard percentage. Keys come from the identity
+  // snapshots the rows already carry — no catalog read.
+  const pctType = isPercentDiscountType(parent?.discount_type);
+  if (pctType) assertPercentExclusionCatalogReady();
+  const parentPctExcluded = pctType && lineExcludedFromPercentDiscount(parent?.service_key_snapshot);
+  const addonPctExcluded = (addon) => pctType && lineExcludedFromPercentDiscount(addon?.service_key_snapshot);
+  if (discountScope?.isScoped || parentPctExcluded || addons.some(addonPctExcluded)) {
+    const servicesById = discountScope?.servicesById || new Map();
     const matchesScope = (serviceId) => {
+      if (!discountScope?.isScoped) return true;
       const service = servicesById.get(serviceId) || {};
       return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
         && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
     };
-    discountBase = matchesScope(parent?.service_id) ? primaryNet : 0;
+    discountBase = matchesScope(parent?.service_id) && !parentPctExcluded ? primaryNet : 0;
     discountBase += addons.reduce((sum, addon) => {
       const amount = Number(addon.estimated_price);
-      return matchesScope(addon.service_id) && Number.isFinite(amount) && amount > 0
+      return matchesScope(addon.service_id) && !addonPctExcluded(addon) && Number.isFinite(amount) && amount > 0
         ? sum + amount
         : sum;
     }, 0);
@@ -2119,6 +2283,7 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars({
     discountType: parent?.discount_type,
     discountAmount: parent?.discount_amount,
+    maxDiscountDollars: parent?.discount_max_dollars ?? null,
   }, discountBase);
   return {
     price: subtotal > 0 ? Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100) : null,
@@ -2236,7 +2401,7 @@ const PRICE_SERVICE_PRICE_KEYS = [
   'estimated_price', 'primary_line_price',
   'discount_type', 'discount_amount', 'discount_dollars',
   'discount_id', 'discount_name',
-  'discount_service_key_filter', 'discount_service_category_filter',
+  'discount_service_key_filter', 'discount_service_category_filter', 'discount_max_dollars',
   'line_discount_id', 'line_discount_name', 'line_discount_type',
   'line_discount_amount', 'line_discount_dollars',
 ];
@@ -2276,7 +2441,17 @@ function computePriceServiceGroupChanges(before, updates) {
     || (updates.discount_amount !== undefined
       && moneyValuesDiffer(updates.discount_amount, before?.discount_amount))
     || (updates.line_discount_dollars !== undefined
-      && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars));
+      && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars))
+    // A preset switch with the same type/amount but a different identity or
+    // service scope still changes what the series bills (Codex #3531 r2 P1).
+    || (updates.discount_id !== undefined
+      && String(updates.discount_id ?? '') !== String(before?.discount_id ?? ''))
+    || (updates.discount_service_key_filter !== undefined
+      && (updates.discount_service_key_filter || null) !== (before?.discount_service_key_filter || null))
+    || (updates.discount_service_category_filter !== undefined
+      && (updates.discount_service_category_filter || null) !== (before?.discount_service_category_filter || null))
+    || (updates.discount_max_dollars !== undefined
+      && moneyValuesDiffer(updates.discount_max_dollars, before?.discount_max_dollars));
   const fields = {};
   if (serviceChanged) {
     for (const key of PRICE_SERVICE_SERVICE_KEYS) {
@@ -2537,6 +2712,9 @@ function mapAddonRow(row) {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
+    serviceKey: row.service_key_snapshot || null,
+    serviceCategory: row.service_category_snapshot || null,
+    excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
     estimatedDuration: row.estimated_duration_minutes ?? null,
     basePrice: row.base_price != null ? Number(row.base_price) : null,
     estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
@@ -3150,6 +3328,9 @@ router.get('/', async (req, res, next) => {
             autopayActive,
             duesCollectedThisMonth: visitMonthDuesCollected,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            serviceKey: s.service_key_snapshot || null,
+            serviceCategorySnapshot: s.service_category_snapshot || null,
+            excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
             isRecurring: !!s.is_recurring,
             isCallback: !!s.is_callback,
             serviceType: s.service_type,
@@ -3167,6 +3348,9 @@ router.get('/', async (req, res, next) => {
           billingMode: s.billing_mode || null,
           autopayActive,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          serviceKey: s.service_key_snapshot || null,
+          serviceCategorySnapshot: s.service_category_snapshot || null,
+          excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           monthlyRate: s.monthly_rate,
           perApplicationFee: s.per_application_fee,
           isRecurring: !!s.is_recurring,
@@ -3268,6 +3452,9 @@ router.get('/', async (req, res, next) => {
         // (codex P2).
         ...traceFeedFields(rowPrimaryVerdict, rowAddonVerdicts),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        serviceKey: s.service_key_snapshot || null,
+        serviceCategorySnapshot: s.service_category_snapshot || null,
+        excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
@@ -3504,7 +3691,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
-          'scheduled_services.estimated_duration_minutes',
+          'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
@@ -3694,6 +3881,9 @@ router.get('/week', async (req, res, next) => {
               autopayActive,
               duesCollectedThisMonth: visitMonthDuesCollected,
               estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+              serviceKey: s.service_key_snapshot || null,
+              serviceCategorySnapshot: s.service_category_snapshot || null,
+              excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
               isRecurring: !!s.is_recurring,
               isCallback: !!s.is_callback,
               serviceType: s.service_type,
@@ -3711,6 +3901,9 @@ router.get('/week', async (req, res, next) => {
             billingMode: s.billing_mode || null,
             autopayActive,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            serviceKey: s.service_key_snapshot || null,
+            serviceCategorySnapshot: s.service_category_snapshot || null,
+            excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
             monthlyRate: s.monthly_rate,
             perApplicationFee: s.per_application_fee,
             isRecurring: !!s.is_recurring,
@@ -3778,6 +3971,9 @@ router.get('/week', async (req, res, next) => {
           windowEnd: s.window_end,
           estimatedDuration: s.estimated_duration_minutes,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          serviceKey: s.service_key_snapshot || null,
+          serviceCategorySnapshot: s.service_category_snapshot || null,
+          excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
@@ -3898,7 +4094,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.service_type', 'scheduled_services.status',
         'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.zone',
-        'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
         'scheduled_services.is_recurring',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
@@ -3941,6 +4137,9 @@ router.get('/month', async (req, res, next) => {
         // display name carries service lines the normalized one loses.
         serviceTypeRaw: s.service_type,
         serviceCategory: category,
+        serviceKey: s.service_key_snapshot || null,
+        serviceCategorySnapshot: s.service_category_snapshot || null,
+        excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
         status: s.status,
         techName: s.tech_name,
         technicianId: s.technician_id,
@@ -4817,6 +5016,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
       if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
       if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+      if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -4900,6 +5100,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
         if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
         if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+        if (pricing.appointmentDiscount && cols.discount_max_dollars) childData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -4974,6 +5175,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
           if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
           if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+          if (pricing.appointmentDiscount && cols.discount_max_dollars) boosterData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -5483,7 +5685,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes', 'scheduled_services.estimated_price',
+        'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
@@ -5532,6 +5734,9 @@ router.get('/list', async (req, res, next) => {
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,
       estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+      serviceKey: s.service_key_snapshot || null,
+      serviceCategorySnapshot: s.service_category_snapshot || null,
+      excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
       primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -6263,15 +6468,87 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       recurringOngoingBaseline,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
-      discountType, discountAmount, estimatedPrice,
+      estimatedPrice,
       primaryLinePrice,
       addons,
       serviceId,
+      serviceKey: postedServiceKey,
       createInvoice,
       payerId, poNumber, selfPayOverride,
       notifyCustomer,
+      discountId,
     } = req.body;
+    let { discountType, discountAmount } = req.body;
     const updates = {};
+    // A catalog preset (the modal's Discount select) posts its id so the row
+    // keeps the discount's identity — name on the invoice line, service
+    // filters, and the catalog's own type/amount as the authority. Without
+    // it the save stored an anonymous "custom" percentage. Variable presets
+    // keep the operator-entered amount.
+    let appointmentDiscountPreset = null;
+    if (discountId) {
+      appointmentDiscountPreset = await loadInvoiceDiscount(discountId);
+      discountType = appointmentDiscountPreset.discount_type;
+      const variablePreset = ['variable_percentage', 'variable_amount'].includes(discountType);
+      if (!variablePreset || discountAmount == null || discountAmount === '') {
+        discountAmount = appointmentDiscountPreset.amount != null ? Number(appointmentDiscountPreset.amount) : null;
+      }
+    }
+    // Eligibility is judged on the lines the preset can actually reach —
+    // the same matching + percent-eligible filter buildAppointmentPricing
+    // applies on create — so a termite-scoped preset on a pest-primary
+    // visit passes on its add-on, and out-of-scope / excluded lines can't
+    // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
+    // [{ amount, serviceKey, serviceCategory }], primary first.
+    const presetEligibilityCheck = async (lines) => {
+      if (!appointmentDiscountPreset) return;
+      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
+      const matching = (lines || []).filter((line) => (
+        (!keyFilter || keyFilter === line.serviceKey)
+        && (!categoryFilter || categoryFilter === line.serviceCategory)
+      ));
+      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
+      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
+        ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
+        : matching;
+      const context = eligible[0] || matching[0] || {};
+      const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
+      const serviceKey = context.serviceKey || null;
+      const serviceCategory = context.serviceCategory || null;
+      const visitRow = await db('scheduled_services').where({ id: req.params.id })
+        .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
+      const customerRow = visitRow?.customer_id
+        ? await db('customers').where({ id: visitRow.customer_id }).first()
+        : null;
+      // Same membership-sale context buildAppointmentPricing passes on create
+      // (pre-push Codex P1): a save that makes this visit recurring WaveGuard
+      // coverage IS the membership sale, so a member-tier requirement must
+      // see it before the tier sync stamps the customer row. Evaluated on
+      // the EDITED state — posted values, then the pending `updates`, then
+      // the stored row.
+      const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
+      const effectiveServiceRecord = effectiveServiceId
+        ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
+        : null;
+      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+        isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
+        isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
+        serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
+        serviceRecord: effectiveServiceRecord,
+        customer: customerRow,
+        scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
+      });
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
+        subtotal,
+        serviceKey: serviceKey || null,
+        serviceCategory: serviceCategory || null,
+        recurringMembershipBooking,
+      });
+      if (failures.length) {
+        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
+      }
+    };
     let clearAddonDiscountsOnPriceEdit = false;
     let appointmentDiscountChanged = false;
     let appointmentDiscountCols = null;
@@ -6279,12 +6556,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       appointmentDiscountCols = await db('scheduled_services').columnInfo();
       const existingDiscount = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('discount_type', 'discount_amount');
+        .first('discount_type', 'discount_amount', ...(appointmentDiscountCols.discount_id ? ['discount_id'] : []));
       appointmentDiscountChanged = appointmentDiscountInputChanged(
         existingDiscount,
         discountType,
         discountAmount
-      );
+      ) || (!!appointmentDiscountCols.discount_id
+        && appointmentDiscountIdentityChanged(existingDiscount, discountId));
     }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
@@ -6321,11 +6599,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         let resolvedServiceCategory;
 
         if (serviceId !== undefined) {
+          // serviceId null + a label = a pick from the modal's static fallback
+          // list (services-dropdown unavailable). Recover the catalog identity
+          // by the item's STABLE service_key first (fallback labels are not
+          // catalog display names — "Rodent Bait Station Service" vs the
+          // seeded "Quarterly Rodent Bait Station Service"), then by exact
+          // name as a last resort; an unknown pick clears the stale snapshot
+          // instead of carrying the replaced service's identity (Codex #3531
+          // r6/r8 P2).
+          const fallbackKey = String(postedServiceKey || '').trim().toLowerCase();
           const svcRow = serviceId
-            ? await db('services').where({ id: serviceId }).first('service_key', 'category', 'name').catch(() => null)
-            : null;
+            ? await db('services').where({ id: serviceId }).first('id', 'service_key', 'category', 'name').catch(() => null)
+            : ((fallbackKey
+              ? await db('services').where({ service_key: fallbackKey, is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+              : null)
+              || (serviceType
+                ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+                : null));
           incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
-          resolvedServiceId = serviceId || null;
+          resolvedServiceId = serviceId || svcRow?.id || null;
           resolvedServiceKey = svcRow?.service_key || null;
           resolvedServiceCategory = svcRow?.category || null;
         } else if (isReService({ serviceType })) {
@@ -6674,6 +6966,26 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
         : [];
       const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
+      // Lines picked from the modal's static fallback list carry a name but
+      // no serviceId — recover the catalog identity by exact active name so
+      // the percent-discount exclusion (and stored snapshots) hold
+      // (Codex #3531 r6 P2).
+      const addonFallbackNames = Array.from(new Set(addons
+        .filter((addon) => addon && !addon.serviceId)
+        .map((addon) => String(addon.serviceName || addon.name || '').trim())
+        .filter(Boolean)));
+      const addonServicesByName = addonFallbackNames.length > 0
+        ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
+        : [];
+      const addonServiceByName = new Map(addonServicesByName.map((service) => [service.name, service]));
+      const addonFallbackKeys = Array.from(new Set(addons
+        .filter((addon) => addon && !addon.serviceId && addon.serviceKey)
+        .map((addon) => String(addon.serviceKey).trim().toLowerCase())
+        .filter(Boolean)));
+      const addonServicesByKey = addonFallbackKeys.length > 0
+        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
+        : [];
+      const addonServiceByKey = new Map(addonServicesByKey.map((service) => [service.service_key, service]));
       if (addonServices.length !== addonServiceIds.length) {
         return res.status(400).json({ error: 'One or more add-on services no longer exist' });
       }
@@ -6686,7 +6998,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
-        const catalogService = a.serviceId ? addonServiceById.get(a.serviceId) : null;
+        const catalogService = a.serviceId
+          ? addonServiceById.get(a.serviceId)
+          : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
+            || addonServiceByName.get(serviceName)
+            || null);
         const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
@@ -6704,7 +7020,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           };
         }
         normalizedAddons.push({
-          serviceId: a.serviceId || null,
+          serviceId: a.serviceId || catalogService?.id || null,
           serviceKey: catalogService?.service_key || null,
           serviceCategory: catalogService?.category || null,
           serviceName: serviceName.slice(0, 200),
@@ -6746,6 +7062,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
         if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
+        if (cols.discount_max_dollars) existingFields.push('discount_max_dollars');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
           .first(...existingFields)
@@ -6781,14 +7098,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           appointmentDiscount: effDiscountType ? {
             discountType: effDiscountType,
             discountAmount: effDiscountAmount,
-            serviceKeyFilter: appointmentDiscountChanged
-              ? null
-              : (existing?.discount_service_key_filter || null),
-            serviceCategoryFilter: appointmentDiscountChanged
-              ? null
-              : (existing?.discount_service_category_filter || null),
+            maxDiscountDollars: appointmentDiscountPreset
+              ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+              : (appointmentDiscountChanged ? null : (existing?.discount_max_dollars ?? null)),
+            serviceKeyFilter: appointmentDiscountPreset
+              ? (appointmentDiscountPreset.service_key_filter || null)
+              : (appointmentDiscountChanged ? null : (existing?.discount_service_key_filter || null)),
+            serviceCategoryFilter: appointmentDiscountPreset
+              ? (appointmentDiscountPreset.service_category_filter || null)
+              : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null)),
           } : null,
         }, normalizedAddons);
+        await presetEligibilityCheck([
+          {
+            amount: primaryNet,
+            serviceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
+            serviceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          },
+          ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
         if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
@@ -6808,8 +7136,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const basePrice = Number(estimatedPrice);
         const existingPrice = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('estimated_price', 'discount_type', 'discount_amount')
+          .first('estimated_price', 'discount_type', 'discount_amount',
+            ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
+            ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
           .catch(() => null);
+        // A service change in the SAME save already placed the new identity
+        // in `updates` — price/scope/validate against that, not the stored
+        // row (Codex #3531 r10 P1).
+        const legacyPrimaryKey = updates.service_key_snapshot !== undefined
+          ? (updates.service_key_snapshot || null)
+          : (existingPrice?.service_key_snapshot || null);
+        const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
+          ? (updates.service_category_snapshot || null)
+          : (existingPrice?.service_category_snapshot || null);
         const existingEstimatedPrice = Number(existingPrice?.estimated_price);
         const priceChanged = !Number.isFinite(existingEstimatedPrice)
           || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
@@ -6821,7 +7161,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           : null;
         const discountAmountChanged = discountAmount !== undefined
           && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged;
+        // appointmentDiscountChanged folds in the preset identity (a
+        // same-valued preset switch): the replacement preset must still run
+        // eligibility and the scope-aware recomputation before its id/name/
+        // filters persist (Codex #3531 r6 P1).
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
         if (!shouldRebaseStoredDiscounts) {
           if (cols.estimated_price) updates.estimated_price = basePrice;
           throw new Error('noop-price-save');
@@ -6840,6 +7184,46 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           return Number.isFinite(value) && value > 0 ? sum + value : sum;
         }, 0);
         const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
+        // Percent-excluded lines stay out of a percentage discount here too —
+        // this branch runs for add-on-less saves (Codex #3531 r1 P1), and a
+        // catalog PRESET always goes through the canonical calculator so its
+        // scope and max_discount_dollars cap hold (pre-push Codex P0). Only a
+        // custom discount with no excluded line keeps the applyDiscount math
+        // verbatim.
+        const legacyLines = addonRows.map((addon) => ({
+          price: Number(addon.base_price != null ? addon.base_price : addon.estimated_price) || 0,
+          serviceKey: addon.service_key_snapshot || null,
+          serviceCategory: addon.service_category_snapshot || null,
+        }));
+        const legacyExclusionApplies = isPercentDiscountType(discountType)
+          && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
+            || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
+        if (discountType && discountAmount != null && discountAmount !== ''
+          && (appointmentDiscountPreset || legacyExclusionApplies)) {
+          const exclusionAware = calculateVisitFinancialsForAddons({
+            primaryNet: primaryGross,
+            primaryServiceKey: legacyPrimaryKey,
+            primaryServiceCategory: legacyPrimaryCategory,
+            appointmentDiscount: {
+              discountType,
+              discountAmount: Number(discountAmount),
+              maxDiscountDollars: appointmentDiscountPreset
+                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+                : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
+              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
+              serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
+            },
+          }, legacyLines);
+          if (exclusionAware.price != null) finalPrice = exclusionAware.price;
+        }
+        await presetEligibilityCheck([
+          {
+            amount: primaryGross,
+            serviceKey: legacyPrimaryKey,
+            serviceCategory: legacyPrimaryCategory,
+          },
+          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
         const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
@@ -6871,6 +7255,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     if (appointmentDiscountChanged) {
       clearAppointmentDiscountCatalogFields(updates, appointmentDiscountCols);
+    }
+    if (appointmentDiscountPreset && discountType !== undefined) {
+      const presetCols = appointmentDiscountCols || await db('scheduled_services').columnInfo();
+      if (presetCols.discount_id) updates.discount_id = appointmentDiscountPreset.id;
+      if (presetCols.discount_name) updates.discount_name = appointmentDiscountPreset.name;
+      if (presetCols.discount_service_key_filter) updates.discount_service_key_filter = appointmentDiscountPreset.service_key_filter || null;
+      if (presetCols.discount_service_category_filter) updates.discount_service_category_filter = appointmentDiscountPreset.service_category_filter || null;
+      if (presetCols.discount_max_dollars) updates.discount_max_dollars = appointmentDiscountPreset.max_discount_dollars ?? null;
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
@@ -8322,7 +8714,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // anchored on a secondary/rental-property visit must not spawn
               // children that fall back to the customer's primary address.
               copyStampedServiceAddressFields(childData, parent, cols);
-            } catch { /* non-blocking */ }
+            } catch (spawnStampErr) {
+              // The optional column stamps above are non-blocking, but a
+              // pricing refusal (exclusion catalog not loaded) must abort
+              // the spawn — a child inserted without recomputed financials
+              // is a mispriced visit (pre-push Codex P0).
+              if (spawnStampErr?.code === PERCENT_EXCLUSION_CATALOG_UNAVAILABLE) throw spawnStampErr;
+            }
             await guardRecurrenceDestination(trx, {
               lockedDates: lockedRecurrenceDates,
               date: nextDateStr,
@@ -14417,6 +14815,9 @@ router.get('/services-dropdown', async (req, res, next) => {
             priceMax: toPrice(s.price_range_max ?? s.base_price),
             base_price: toPrice(s.base_price),
             default_duration_minutes: s.default_duration_minutes,
+            serviceKey: s.service_key || null,
+            serviceCategory: s.category || null,
+            excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
           });
         }
         groups = Object.values(byCategory);
@@ -14425,7 +14826,13 @@ router.get('/services-dropdown', async (req, res, next) => {
 
     // Fallback to full service library (42 services, all default 1hr / $0 except noted)
     if (groups.length === 0) {
-      const S = (name, dur = 60) => ({ name, duration: dur, priceMin: 0, priceMax: 0 });
+      // serviceKey = the stable catalog identity for a fallback item (labels
+      // are not display names); carried through a pick so the save can
+      // resolve the row and the discount exclusion holds.
+      const S = (name, dur = 60, serviceKey = null) => ({
+        name, duration: dur, priceMin: 0, priceMax: 0,
+        serviceKey, excludedFromPercentDiscount: lineExcludedFromPercentDiscount(serviceKey),
+      });
       groups = [
         { category: 'pest_control', items: [
           // One-Time
@@ -14437,40 +14844,40 @@ router.get('/services-dropdown', async (req, res, next) => {
           S('Tick Control Service'),
           S('Yellow Jacket Control Service'),
           S('Wasp Control Service'),
-          S('Wildlife Trapping Service'),
+          S('Wildlife Trapping Service', 60, 'wildlife_trapping'),
           // Recurring
-          S('Semiannual Pest Control Service'),
-          S('Quarterly Pest Control Service'),
-          S('Bi-Monthly Pest Control Service'),
-          S('Monthly Pest Control Service'),
+          S('Semiannual Pest Control Service', 60, 'pest_general_semiannual'),
+          S('Quarterly Pest Control Service', 60, 'pest_general_quarterly'),
+          S('Bi-Monthly Pest Control Service', 60, 'pest_general_bimonthly'),
+          S('Monthly Pest Control Service', 60, 'pest_general_monthly'),
         ]},
         { category: 'rodent', items: [
           // One-Time
           S('Rodent Control Service'),
-          S('Rodent Trapping Service'),
-          S('Rodent Exclusion Service'),
-          S('Rodent Trapping & Exclusion Service'),
-          S('Rodent Trapping & Sanitation Service'),
-          S('Rodent Trapping, Exclusion & Sanitation Service'),
-          S('Rodent Pest Control'),
+          S('Rodent Trapping Service', 60, 'rodent_trapping'),
+          S('Rodent Exclusion Service', 60, 'rodent_exclusion_only'),
+          S('Rodent Trapping & Exclusion Service', 60, 'rodent_trapping_exclusion'),
+          S('Rodent Trapping & Sanitation Service', 60, 'rodent_trapping_sanitation'),
+          S('Rodent Trapping, Exclusion & Sanitation Service', 60, 'rodent_trapping_exclusion_sanitation'),
+          S('Rodent Pest Control', 60, 'rodent_general_one_time'),
           // Recurring
-          S('Rodent Bait Station Service'),
+          S('Rodent Bait Station Service', 60, 'rodent_bait_quarterly'),
         ]},
         { category: 'termite', items: [
           // Recurring - Bonds
-          { name: 'Termite Bond (Billed Quarterly | 10-Year Term)', duration: 60, priceMin: 45, priceMax: 45 },
-          { name: 'Termite Bond (Billed Quarterly | 5-Year Term)', duration: 60, priceMin: 54, priceMax: 54 },
-          { name: 'Termite Bond (Billed Quarterly | 1-Year Term)', duration: 60, priceMin: 60, priceMax: 60 },
+          { name: 'Termite Bond (Billed Quarterly | 10-Year Term)', duration: 60, priceMin: 45, priceMax: 45, serviceKey: 'termite_bond_10yr', excludedFromPercentDiscount: true },
+          { name: 'Termite Bond (Billed Quarterly | 5-Year Term)', duration: 60, priceMin: 54, priceMax: 54, serviceKey: 'termite_bond_5yr', excludedFromPercentDiscount: true },
+          { name: 'Termite Bond (Billed Quarterly | 1-Year Term)', duration: 60, priceMin: 60, priceMax: 60, serviceKey: 'termite_bond_1yr', excludedFromPercentDiscount: true },
           // Recurring - Monitoring
-          { name: 'Termite Monitoring Service', duration: 60, priceMin: 99, priceMax: 99 },
-          { name: 'Termite Active Annual Bait Station Service', duration: 60, priceMin: 199, priceMax: 199 },
-          S('Termite Active Bait Station Service'),
-          S('Termite Installation Setup'),
+          { name: 'Termite Monitoring Service', duration: 60, priceMin: 99, priceMax: 99, serviceKey: 'termite_monitoring', excludedFromPercentDiscount: false },
+          { name: 'Termite Active Annual Bait Station Service', duration: 60, priceMin: 199, priceMax: 199, serviceKey: 'termite_active_annual', excludedFromPercentDiscount: false },
+          S('Termite Active Bait Station Service', 60, 'termite_active_bait_quarterly'),
+          S('Termite Installation Setup', 60, 'termite_installation_setup'),
           // One-Time
-          S('Termite Spot Treatment Service'),
-          S('Termite Pretreatment Service'),
-          S('Termite Trenching Service'),
-          { name: 'Termite Bait Station Cartridge Replacement', duration: 60, priceMin: 20, priceMax: 20 },
+          S('Termite Spot Treatment Service', 60, 'termite_spot_treatment'),
+          S('Termite Pretreatment Service', 60, 'termite_pretreatment'),
+          S('Termite Trenching Service', 60, 'termite_trenching'),
+          { name: 'Termite Bait Station Cartridge Replacement', duration: 60, priceMin: 20, priceMax: 20, serviceKey: 'termite_cartridge_replacement', excludedFromPercentDiscount: false },
           S('Slab Pre-Treat Termite'),
         ]},
         { category: 'lawn_care', items: [
@@ -14481,17 +14888,24 @@ router.get('/services-dropdown', async (req, res, next) => {
           S('Lawn Aeration Service'),
         ]},
         { category: 'tree_shrub', items: [
-          S('Every 6 Weeks Tree & Shrub Care Service'),
-          S('Bi-Monthly Tree & Shrub Care Service'),
+          S('Every 6 Weeks Tree & Shrub Care Service', 60, 'tree_shrub_6week'),
+          S('Bi-Monthly Tree & Shrub Care Service', 60, 'tree_shrub_program'),
         ]},
         { category: 'specialty', items: [
-          S('WaveGuard Membership', 0),
-          S('WaveGuard Initial Setup'),
-          S('Waves Pest Control Appointment'),
+          S('WaveGuard Membership', 0, 'waveguard_membership'),
+          S('WaveGuard Initial Setup', 60, 'waveguard_initial_setup'),
+          S('Waves Pest Control Appointment', 60, 'general_appointment'),
         ]},
       ];
     }
 
+    // Fallback items carry their group's category so a pick keeps the
+    // catalog scope a category-filtered preset compares against.
+    for (const group of groups) {
+      for (const item of group.items || []) {
+        if (item.serviceCategory === undefined) item.serviceCategory = group.category || null;
+      }
+    }
     res.json({ groups });
   } catch (err) { next(err); }
 });
@@ -15413,6 +15827,10 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  lineExcludedFromPercentDiscount,
+  buildPercentExclusionCatalog,
+  appointmentDiscountIdentityChanged,
+  isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
