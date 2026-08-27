@@ -1528,6 +1528,14 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
       { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, recurringCustomerDiscountRate: 0.15 },
     ] } } } };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: rated }), { ...svc, source_estimate_id: 'est-6' })).toBe(125);
+    // The V2 estimator persists the flag as "YES"/"NO" strings — "NO" must
+    // never read as recurring (codex #3521 r9 P1), "YES" must.
+    const v2No = { id: 'est-8', estimate_data: { inputs: { isRecurringCustomer: 'NO' },
+      result: { oneTime: { total: 125, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: v2No }), { ...svc, source_estimate_id: 'est-8' })).toBe(125);
+    const v2Yes = { id: 'est-9', estimate_data: { inputs: { isRecurringCustomer: 'YES' },
+      result: { oneTime: { total: 106.25, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: v2Yes }), { ...svc, source_estimate_id: 'est-9' })).toBe(125);
     // A non-member's net IS the face.
     const nonMember = { id: 'est-7', estimate_data: { inputs: { recurringCustomer: false },
       result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };

@@ -114,9 +114,20 @@ function perkRateForStoredRow(row, estData) {
   const own = Number(row?.recurringCustomerDiscountRate);
   if (Number.isFinite(own) && own > 0 && own < 1) return own;
   const inputs = estData?.inputs || estData?.engineInputs || estData?.engineRequest || {};
+  // The V2 estimator persists isRecurringCustomer as the STRINGS "YES"/"NO"
+  // — a truthiness check reads "NO" as recurring and inflates a non-member's
+  // face (codex #3521 r9 P1). Parse explicitly; anything unrecognised is
+  // "not recurring" (never invent a perk to undo).
+  const asFlag = (value) => {
+    if (value === true || value === 1) return true;
+    if (value === false || value === 0 || value == null) return false;
+    const text = String(value).trim().toLowerCase();
+    if (['yes', 'y', 'true', '1'].includes(text)) return true;
+    return false;
+  };
   const flagged = inputs.recurringCustomer !== undefined
-    ? !!inputs.recurringCustomer
-    : (inputs.isRecurringCustomer !== undefined ? !!inputs.isRecurringCustomer : false);
+    ? asFlag(inputs.recurringCustomer)
+    : asFlag(inputs.isRecurringCustomer);
   if (!flagged) return 0;
   try {
     const { WAVEGUARD } = require('./pricing-engine/constants');
