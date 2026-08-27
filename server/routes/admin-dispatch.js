@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -7022,13 +7022,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // A treatment-applied protocol action is evidence too: products are
             // optional on inspection/bait lanes, so an interior/exterior action
             // marked treatmentApplied must keep the guidance (codex inline r4).
+            const reentryApplicationsRecorded = productReentryMin != null
+              || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
+                p?.applicationMethod || p?.method || p?.application_method,
+              )))
+              || reportProtocolActionScopes.some((s) => s.treatmentApplied);
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
-              applicationsRecorded: productReentryMin != null
-                || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
-                  p?.applicationMethod || p?.method || p?.application_method,
-                )))
-                || reportProtocolActionScopes.some((s) => s.treatmentApplied),
+              applicationsRecorded: reentryApplicationsRecorded,
             });
+            // Server-authoritative no-re-entry visit: a no-spray termite
+            // identity with no treatment evidence persists 0/0 and IGNORES
+            // client stepper overrides — a stale adjustment submitted before
+            // the panel's async re-seed cleared it must not become a
+            // reentry_adjusted countdown (uncapped codex P1 r8).
+            const noReentryTermiteVisit = !reentryApplicationsRecorded
+              && getServiceLineConfig(svc.service_type).id === 'termite'
+              && isTermiteNoReentryServiceType(svc.service_type);
             let advisoryDefaultsForVisit = productReentryMin != null
               ? {
                 ...lineAdvisoryDefaults,
@@ -7046,8 +7055,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // stays the exterior floor — a tech-lowered dry-down window
             // never undercuts the most restrictive product label applied.
             {
-              let techExterior = reentryOverridePlan.exterior;
-              const techInterior = reentryOverridePlan.interior;
+              let techExterior = noReentryTermiteVisit ? undefined : reentryOverridePlan.exterior;
+              const techInterior = noReentryTermiteVisit ? undefined : reentryOverridePlan.interior;
               // Fail closed when the label floor is UNVERIFIABLE (codex P1
               // #3360): a lowering exterior override is dropped entirely —
               // the computed default (line default raised by any known REI)
@@ -9974,31 +9983,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             return caption && customerCopyViolations(caption).length === 0;
           });
           let promoted = 0;
+          let promotionError = null;
           for (const m of publishable) {
             // Conditional on the EXACT screened state (codex P1 r3): a
             // concurrent admin rejection, deletion, or caption edit between
             // the screen and this write leaves the row untouched — only a
             // row still internal_only, undeleted, with the captions the
             // screen approved is promoted.
-            promoted += await db('visual_service_moments')
-              .where({ id: m.id, job_id: svc.id, visibility_status: 'internal_only' })
-              .whereNull('deleted_at')
-              .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
-              .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
-              // The screened tag group is frozen too — a concurrent
-              // reclassification to an excluded group leaves it internal.
-              .whereRaw('tag_group IS NOT DISTINCT FROM ?', [m.tag_group ?? null])
-              .update({
-                visibility_status: 'approved_customer',
-                customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
-                updated_at: db.fn.now(),
-              });
+            try {
+              promoted += await db('visual_service_moments')
+                .where({ id: m.id, job_id: svc.id, visibility_status: 'internal_only' })
+                .whereNull('deleted_at')
+                .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
+                .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
+                // The screened tag group is frozen too — a concurrent
+                // reclassification to an excluded group leaves it internal.
+                .whereRaw('tag_group IS NOT DISTINCT FROM ?', [m.tag_group ?? null])
+                .update({
+                  visibility_status: 'approved_customer',
+                  customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
+                  updated_at: db.fn.now(),
+                });
+            } catch (rowErr) {
+              // A later row failing must not skip cache invalidation for
+              // the rows already promoted (uncapped codex P1 r8).
+              promotionError = rowErr;
+              break;
+            }
           }
           if (promoted) {
             const { invalidateVisualMomentReportPdfCache } = require('../services/visual-service-notes');
             await invalidateVisualMomentReportPdfCache(svc.id).catch(() => {});
             logger.info(`[dispatch] auto-published ${promoted}/${candidates.length} visual moment(s) for ${svc.id}`);
-          } else if (candidates.length) {
+          }
+          if (promotionError) throw promotionError;
+          if (!promoted && candidates.length) {
             logger.info(`[dispatch] visual moments held internal_only for ${svc.id}: ${candidates.length} failed the caption screen`);
           }
         }
