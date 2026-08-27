@@ -105,3 +105,90 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(JSON.parse(patch[1].body)).toEqual({ occupancy_type: 'seasonal' });
   });
 });
+
+describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('refetches when refreshToken changes (profile address save synced the primary row)', async () => {
+    const fetchMock = vi.fn(() => jsonResponse({ properties: [PRIMARY] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { rerender } = render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit refreshToken="a" />);
+    await screen.findByText(/10 Palm Ave/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    rerender(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit refreshToken="b" />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it('edits a label inline and PATCHes it (Enter commits; unchanged label is a no-op)', async () => {
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'PATCH') return jsonResponse({ properties: [{ ...PRIMARY, label: 'Main house' }] });
+      return jsonResponse({ properties: [PRIMARY] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit />);
+    await screen.findByText(/10 Palm Ave/);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit label for 10 Palm Ave' }));
+    const input = screen.getByLabelText('Label for 10 Palm Ave');
+    fireEvent.change(input, { target: { value: 'Main house' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit label for 10 Palm Ave' })).toHaveTextContent('Main house'));
+    const patch = fetchMock.mock.calls.find(([, o]) => o && o.method === 'PATCH');
+    expect(patch[0]).toBe('/api/admin/customers/c1/properties/p1');
+    expect(JSON.parse(patch[1].body)).toEqual({ label: 'Main house' });
+
+    // Re-open and commit the same value → no second PATCH.
+    fireEvent.click(screen.getByRole('button', { name: 'Edit label for 10 Palm Ave' }));
+    fireEvent.blur(screen.getByLabelText('Label for 10 Palm Ave'));
+    await waitFor(() => expect(screen.queryByLabelText('Label for 10 Palm Ave')).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.filter(([, o]) => o && o.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('serializes row edits: every row control is disabled while one PATCH is in flight', async () => {
+    let resolvePatch;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'PATCH') return new Promise((res) => { resolvePatch = () => res(new Response(JSON.stringify({ properties: [{ ...PRIMARY, occupancy_type: 'seasonal' }, SECOND] }), { status: 200, headers: { 'Content-Type': 'application/json' } })); });
+      return jsonResponse({ properties: [PRIMARY, SECOND] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit />);
+    const first = await screen.findByLabelText('Occupancy for 10 Palm Ave');
+    const second = screen.getByLabelText('Occupancy for 20 Oak St');
+    fireEvent.change(first, { target: { value: 'seasonal' } });
+    await waitFor(() => expect(second).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Edit label for 20 Oak St' })).toBeDisabled();
+    // A second change while busy is ignored — still one PATCH.
+    fireEvent.change(second, { target: { value: 'vacant' } });
+    expect(fetchMock.mock.calls.filter(([, o]) => o && o.method === 'PATCH')).toHaveLength(1);
+    resolvePatch();
+    await waitFor(() => expect(second).not.toBeDisabled());
+  });
+
+  it('constrains state to a two-letter code client-side', async () => {
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'POST') return jsonResponse({ propertyId: 'p2', properties: [PRIMARY, SECOND] }, 201);
+      return jsonResponse({ properties: [PRIMARY] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit />);
+    await screen.findByText(/10 Palm Ave/);
+    fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'Florida' } });
+    // Input sanitizes to the first two letters, uppercased.
+    expect(screen.getByLabelText('State').value).toBe('FL');
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'f' } });
+    fireEvent.change(screen.getByLabelText('Street address'), { target: { value: '20 Oak St' } });
+    fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Naples' } });
+    fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '34103' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+    expect(await screen.findByText('State must be a two-letter code (e.g. FL).')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'POST')).toBe(false);
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'fl' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'POST')).toBe(true));
+    const post = fetchMock.mock.calls.find(([, o]) => o && o.method === 'POST');
+    expect(JSON.parse(post[1].body).state).toBe('FL');
+  });
+});

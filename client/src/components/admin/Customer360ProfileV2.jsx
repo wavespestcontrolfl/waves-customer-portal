@@ -87,7 +87,7 @@ import {
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
-import { CONTACT_ROLE_OPTIONS, contactRoleLabel } from "../../lib/contact-roles";
+import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import {
@@ -5625,7 +5625,7 @@ export default function Customer360ProfileV2({
                   <Badge
                     tone="neutral"
                     className="normal-case tracking-normal"
-                    title="Contact role — payer is not the occupant"
+                    title={contactRoleTitle(c.contactRole)}
                   >
                     {contactRoleLabel(c.contactRole)}
                   </Badge>
@@ -5884,7 +5884,7 @@ export default function Customer360ProfileV2({
                 <Badge
                   tone="neutral"
                   className="normal-case tracking-normal"
-                  title="Contact role — payer is not the occupant"
+                  title={contactRoleTitle(c.contactRole)}
                 >
                   {contactRoleLabel(c.contactRole)}
                 </Badge>
@@ -7269,6 +7269,16 @@ export default function Customer360ProfileV2({
                   key={customerId}
                   customerId={customerId}
                   contactRole={c.contactRole}
+                  // A profile-address save syncs the primary customer_properties
+                  // row server-side; the tuple changing tells the panel to refetch
+                  // so it never shows a stale primary beside the refreshed profile.
+                  refreshToken={[
+                    c.address?.line1,
+                    c.address?.line2,
+                    c.address?.city,
+                    c.address?.state,
+                    c.address?.zip,
+                  ].join("|")}
                   canEdit
                 />
               )}

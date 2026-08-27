@@ -16,6 +16,18 @@ export function contactRoleLabel(role) {
   return CONTACT_ROLE_LABELS[role] || "";
 }
 
+// Badge tooltip — say what the role MEANS for this profile, per role.
+const CONTACT_ROLE_TITLES = {
+  owner: "Contact owns / occupies the serviced property",
+  property_manager:
+    "Contact manages the properties for their owners — payer is not the occupant",
+  tenant: "Contact occupies but does not own the serviced property",
+};
+
+export function contactRoleTitle(role) {
+  return CONTACT_ROLE_TITLES[role] || "Contact role";
+}
+
 // Occupancy vocabulary of customer_properties.occupancy_type (server
 // services/customer-properties.js OCCUPANCY_TYPES).
 export const OCCUPANCY_OPTIONS = [

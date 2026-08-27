@@ -2395,6 +2395,13 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     if (!String(city || '').trim() || !String(zip || '').trim()) {
       return res.status(400).json({ error: 'city and zip are required' });
     }
+    // customer_properties.state is varchar(2): reject "Florida" here with a
+    // real validation error instead of letting PostgreSQL bounce the insert
+    // as a generic save failure.
+    const stateCode = String(state || '').trim().toUpperCase();
+    if (stateCode && !/^[A-Z]{2}$/.test(stateCode)) {
+      return res.status(400).json({ error: 'state must be a two-letter code' });
+    }
     // If this address is the customer's OWN primary that's only PARTIAL on file
     // (same street, missing city/ZIP), complete that primary first — otherwise its
     // partial address_key wouldn't match this full address and recordCallProperty
@@ -2409,7 +2416,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const result = await customerProperties.recordCallProperty({
       customerId: req.params.id,
-      address_line1, address_line2, city, state, zip,
+      address_line1, address_line2, city, state: stateCode || null, zip,
       occupancyType: occupancy_type,
       label,
       source: 'manual',

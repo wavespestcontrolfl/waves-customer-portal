@@ -27,6 +27,9 @@ function formatPropertyAddress(p) {
  * via PATCH — the same admin-only endpoints the call pipeline's manual lane
  * uses, so the dedupe / primary-fence rules are the server's, not ours.
  *
+ * Row edits (occupancy / label) are serialized — one PATCH in flight, every
+ * row control disabled meanwhile — because each response replaces the list.
+ *
  * The PRIMARY row is the customer's default service address (it mirrors
  * customers.address_*). For a property manager that is NOT a residence —
  * the panel says so instead of letting the star imply "lives here".
@@ -35,6 +38,10 @@ export default function CustomerPropertiesPanelV2({
   customerId,
   contactRole,
   canEdit = false,
+  // Any value the parent changes when the profile address is saved (the PUT
+  // path syncs the primary customer_properties row) — the panel refetches so
+  // the primary row never lags the refreshed profile.
+  refreshToken = "",
 }) {
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -45,6 +52,8 @@ export default function CustomerPropertiesPanelV2({
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
   const [rowErr, setRowErr] = useState("");
+  // Inline label editing: { id, value } while a row's label input is open.
+  const [labelEdit, setLabelEdit] = useState(null);
 
   useEffect(() => {
     if (!customerId) return undefined;
@@ -64,13 +73,18 @@ export default function CustomerPropertiesPanelV2({
     return () => {
       cancelled = true;
     };
-  }, [customerId]);
+  }, [customerId, refreshToken]);
 
   const submitAdd = async (e) => {
     e.preventDefault();
     setSaveErr("");
     if (!form.address_line1.trim() || !form.city.trim() || !form.zip.trim()) {
       setSaveErr("Street, city and ZIP are required.");
+      return;
+    }
+    const stateCode = form.state.trim().toUpperCase();
+    if (stateCode && !/^[A-Z]{2}$/.test(stateCode)) {
+      setSaveErr("State must be a two-letter code (e.g. FL).");
       return;
     }
     setSaving(true);
@@ -81,7 +95,7 @@ export default function CustomerPropertiesPanelV2({
           address_line1: form.address_line1.trim(),
           address_line2: form.address_line2.trim() || null,
           city: form.city.trim(),
-          state: form.state.trim() || null,
+          state: stateCode || null,
           zip: form.zip.trim(),
           occupancy_type: form.occupancy_type || "unknown",
           label: form.label.trim() || null,
@@ -97,7 +111,11 @@ export default function CustomerPropertiesPanelV2({
     }
   };
 
+  // One PATCH at a time: every response replaces the whole list, so two
+  // in-flight edits could let an older snapshot overwrite the newer one.
+  // All row controls are disabled while rowBusy is set (see below).
   const patchRow = async (propertyId, patch) => {
+    if (rowBusy) return;
     setRowBusy(propertyId);
     setRowErr("");
     try {
@@ -111,6 +129,16 @@ export default function CustomerPropertiesPanelV2({
     } finally {
       setRowBusy(null);
     }
+  };
+
+  const commitLabel = async () => {
+    if (!labelEdit) return;
+    const { id, value } = labelEdit;
+    const current = properties.find((p) => p.id === id);
+    const next = value.trim();
+    setLabelEdit(null);
+    if (!current || (current.label || "") === next) return;
+    await patchRow(id, { label: next || null });
   };
 
   const isManager = contactRole === "property_manager";
@@ -161,14 +189,46 @@ export default function CustomerPropertiesPanelV2({
                     )}
                     {formatPropertyAddress(p)}
                   </div>
-                  {p.label && (
-                    <div className="text-12 text-ink-secondary">{p.label}</div>
+                  {labelEdit?.id === p.id ? (
+                    <input
+                      aria-label={`Label for ${p.address_line1}`}
+                      autoFocus
+                      value={labelEdit.value}
+                      maxLength={120}
+                      onChange={(e) =>
+                        setLabelEdit((le) => (le ? { ...le, value: e.target.value } : le))
+                      }
+                      onBlur={commitLabel}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          commitLabel();
+                        } else if (e.key === "Escape") {
+                          setLabelEdit(null);
+                        }
+                      }}
+                      className="mt-1 w-full max-w-xs h-8 px-2 text-12 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    />
+                  ) : canEdit ? (
+                    <button
+                      type="button"
+                      aria-label={`Edit label for ${p.address_line1}`}
+                      disabled={!!rowBusy}
+                      onClick={() => setLabelEdit({ id: p.id, value: p.label || "" })}
+                      className="text-12 text-ink-secondary hover:text-zinc-900 u-focus-ring text-left disabled:opacity-50"
+                    >
+                      {p.label || "Add label"}
+                    </button>
+                  ) : (
+                    p.label && (
+                      <div className="text-12 text-ink-secondary">{p.label}</div>
+                    )
                   )}
                 </div>
                 <select
                   aria-label={`Occupancy for ${p.address_line1}`}
                   value={p.occupancy_type || "unknown"}
-                  disabled={!canEdit || rowBusy === p.id}
+                  disabled={!canEdit || !!rowBusy}
                   onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
                   className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
                 >
@@ -233,7 +293,14 @@ export default function CustomerPropertiesPanelV2({
                   id="cp-state"
                   className={inputCls}
                   value={form.state}
-                  onChange={(e) => setForm((f) => ({ ...f, state: e.target.value }))}
+                  maxLength={2}
+                  placeholder="FL"
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      state: e.target.value.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 2),
+                    }))
+                  }
                 />
               </div>
               <div>
