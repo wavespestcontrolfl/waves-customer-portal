@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Send, XCircle, RotateCcw, ChevronRight, ExternalLink, AlertTriangle, Search, Play } from "lucide-react";
+import { Tag, RefreshCw, Send, XCircle, RotateCcw, ChevronRight, ExternalLink, AlertTriangle, Search, Play } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -221,6 +221,7 @@ export default function PriceMatchPage() {
     <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
       <AdminCommandHeader
         title="Price Match"
+        icon={Tag}
         actions={[
           { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadDrafts },
           { key: "preview", label: "Preview scan", size: "sm", variant: "ghost", icon: Search, disabled: scanning, onClick: () => triggerScan("select") },

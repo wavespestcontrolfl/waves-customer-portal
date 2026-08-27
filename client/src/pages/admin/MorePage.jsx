@@ -1,10 +1,12 @@
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
+  LayoutGrid,
   ExternalLink,
   ChevronRight,
 } from "lucide-react";
 import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
 import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
@@ -36,10 +38,8 @@ export default function MorePage() {
       {" "}
       <div className="px-4 pt-4 pb-3">
         {" "}
-        <h1 className="text-28 font-normal text-zinc-900 tracking-tight">
-          More
-        </h1>{" "}
-        <p className="text-13 text-zinc-500 mt-1">
+        <AdminCommandHeader title="More" icon={LayoutGrid} sticky={false} className="mb-0" />{" "}
+        <p className="text-13 text-zinc-500 mt-3">
           Everything beyond the five tabs.
         </p>{" "}
       </div>

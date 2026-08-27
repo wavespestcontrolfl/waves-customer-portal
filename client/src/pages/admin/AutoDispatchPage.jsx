@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCw, Play, ChevronRight } from "lucide-react";
+import { Route, RefreshCw, Play, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -151,6 +151,7 @@ export default function AutoDispatchPage({ embedded = false }) {
       ) : (
         <AdminCommandHeader
           title="Auto-Dispatch"
+          icon={Route}
           actions={[
             { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadRuns },
             { key: "dryrun", label: running ? "Running…" : "Run dry-run", size: "sm", icon: Play, disabled: running, onClick: triggerDryRun },

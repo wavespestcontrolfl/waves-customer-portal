@@ -6,6 +6,7 @@ import {
   Send as SendIcon, Link as LinkIcon, CheckCircle2, Copy,
   ClipboardList, ChevronDown, ChevronUp, Wand2,
 } from 'lucide-react';
+import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -969,18 +970,17 @@ export default function CommercialProposalPage() {
   return (
     <div className="max-w-6xl mx-auto px-4 py-5">
       {/* Header */}
+      <AdminCommandHeader
+        title={`Commercial proposal — ${estimate?.customerName || 'Estimate'}`}
+        icon={Building2}
+        actions={[
+          { key: 'back', label: 'Estimates', size: 'sm', variant: 'ghost', icon: ArrowLeft, onClick: () => navigate('/admin/estimates') },
+        ]}
+      />
       <div className="flex flex-wrap items-center gap-3 mb-5">
-        <Button variant="ghost" size="sm" onClick={() => navigate('/admin/estimates')}>
-          <ArrowLeft size={15} /> Estimates
-        </Button>
-        <div className="min-w-0">
-          <h1 className="text-18 text-zinc-900 truncate">
-            Commercial proposal — {estimate?.customerName || 'Estimate'}
-          </h1>
-          {estimate?.address && (
-            <div className="text-13 text-zinc-500 truncate">{estimate.address}</div>
-          )}
-        </div>
+        {estimate?.address && (
+          <div className="min-w-0 text-13 text-zinc-500 truncate">{estimate.address}</div>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <Badge tone={estimate?.status === 'accepted' ? 'strong' : 'neutral'}>{statusLabel}</Badge>
           {estimate?.billByInvoice && <Badge tone="neutral">Bill by invoice</Badge>}
