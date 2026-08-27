@@ -1834,7 +1834,7 @@ function tenureClaimFinding(text) {
 function blankNonRenderedMarkdown(text) {
   // Pass 1 — comments and <pre> (whole-text, newline-preserving).
   const afterComments = String(text || '')
-    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''));
+    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c) => c.replace(/[^\n]/g, ''));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
   // lines), masked BEFORE fences so a span opened after prose can close at a
   // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
@@ -1874,7 +1874,15 @@ function blankNonRenderedMarkdown(text) {
   let fenceListIndent = 0; // content column of the current list item (0 = top level)
   let fencePrevBlank = true;
   const fenced = spanned.split('\n').map((l, i) => {
-    const prefix = l.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/);
+    // Blockquote-prefix matching is LIST-RELATIVE (same posture as pass 4):
+    // inside a list item the first ">" may sit up to 3 past the item's
+    // content column ("10. x" + "    > ```"). A fence opened at quote
+    // depth > 0 scopes to its QUOTE container (depth check), so its
+    // listIndent is 0.
+    const quoteRe = fenceListIndent > 0
+      ? new RegExp(`^ {0,${fenceListIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
+      : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
+    const prefix = l.match(quoteRe);
     const depth = prefix ? (prefix[0].match(/>/g) || []).length : 0;
     const stripped = prefix ? l.slice(prefix[0].length) : l;
     const blank = stripped.trim() === '';
@@ -1895,9 +1903,11 @@ function blankNonRenderedMarkdown(text) {
     }
     // List tracking (pass-4 posture): a marker sets the item's content
     // column; a dedented non-blank line after a blank ends the list.
+    // Quote-stripped indent is not comparable to the list content column,
+    // so dedent-based list-END rules apply only to UNQUOTED lines.
     const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
     if (listItem) fenceListIndent = listItem[1].length;
-    else if (!blank && fencePrevBlank && indent < fenceListIndent) fenceListIndent = 0;
+    else if (!blank && fencePrevBlank && depth === 0 && indent < fenceListIndent) fenceListIndent = 0;
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
     // the item's content column, so "10. item" + a 4-space fence is a fence
@@ -1908,8 +1918,8 @@ function blankNonRenderedMarkdown(text) {
       const srcStripped = sourceLines[i].slice(prefix ? prefix[0].length : 0);
       const srcOpen = srcStripped.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
-        if (indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
-        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: fenceListIndent };
+        if (depth === 0 && indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
+        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? 0 : fenceListIndent };
         return '';
       }
     }
@@ -1978,9 +1988,9 @@ function extractRawMarkdownTables(text) {
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
     const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && cellCount(lines[i]) === cellCount(lines[i - 1]);
-    // Header = a pipe row with at least one non-empty cell — icon-only
-    // headings ("| ✅ | ❌ |") are still headings.
-    const headerAbove = lines[i - 1].includes('|') && /[^\s|]/.test(lines[i - 1]);
+    // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
+    // visible-text requirement — the count match above is the signature.
+    const headerAbove = lines[i - 1].includes('|');
     if (!delimiter || !headerAbove) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
     // whitespace-normalized, so refresh grandfathering can compare table

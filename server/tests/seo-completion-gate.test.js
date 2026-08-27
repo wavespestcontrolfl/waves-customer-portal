@@ -700,6 +700,39 @@ describe('seo-completion-gate', () => {
     });
     expect(dataHref.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // A closing tag with whitespace ("</a >") still delimits the anchor.
+    const spacedClose = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href="/contact/">Schedule Service</a >` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(spacedClose.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Nested tags with quoted ">" strip cleanly from the rendered label.
+    const nestedQuotedGt = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href="/termite-inspection/"><span title="1 > 0">Schedule a Termite Inspection</span></a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(nestedQuotedGt.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // An ESCAPED opening bracket renders literal syntax, not a link — it
+    // cannot satisfy the conversion-CTA requirement.
+    const escapedBracket = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere today.\n\n\\[Get My Free Termite Estimate](/contact/)' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(escapedBracket.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A quoted fence nested in a list item hides its CTA example.
+    const quotedListFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n10. example\n    > \`\`\`\n    > [Schedule Service](/contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quotedListFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // Lawn specialty terms name the lawn family in CTA anchors.
     // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
     // it satisfies presence and is not forbidden wording.

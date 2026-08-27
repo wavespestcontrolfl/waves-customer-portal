@@ -2264,6 +2264,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Blockquote stripping is LIST-RELATIVE: a quoted table nested under
     // "10. item" (content column 4) renders as a table, not indented code.
     expect(guardrails.hasRawMarkdownTable('10. comparison\n    > | A | B |\n    > | - | - |')).toBe(true);
+    // …and a quoted FENCE in that position opens, hiding its contents.
+    expect(guardrails.hasRawMarkdownTable('10. example\n    > ```\n    > | A | B |\n    > | - | - |')).toBe(false);
+    // A <pre> block closing as "</pre >" is still preformatted.
+    expect(guardrails.hasRawMarkdownTable('<pre>\nA | B\n- | -\n</pre >')).toBe(false);
+    // GFM allows EMPTY header cells — "| | |" over a matching delimiter is
+    // a table.
+    expect(guardrails.hasRawMarkdownTable('| | |\n|-|-|\n| a | b |')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
