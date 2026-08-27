@@ -1235,10 +1235,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (the schedule recheck failed). Re-time it by hand.`);
       return;
     }
-    if (overlapConflict) {
-      await fileCoverageException(term, 'adopted_window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} overlaps another job on the schedule. The visit was retimed as promised — confirm the day's route.`);
-    }
     const updates = { updated_at: new Date() };
     if (cols.window_start) updates.window_start = windowStart;
     if (cols.window_end) updates.window_end = addMinutesHHMM(windowStart, adoptedDuration);
@@ -1248,6 +1244,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update(updates);
+    // Filed only once the retime is written (same rule as the seed path):
+    // the notice claims the visit WAS retimed, so it must never outlive a
+    // failed update.
+    if (overlapConflict) {
+      await fileCoverageException(term, 'adopted_window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} overlaps another job on the schedule. The visit was retimed as promised — confirm the day's route.`);
+    }
   };
   // Skip when the adopted visit is already completed (or otherwise terminal):
   // annual prepay collected at the completion appointment can adopt the
