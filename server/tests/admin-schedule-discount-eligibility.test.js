@@ -396,6 +396,14 @@ describe('admin schedule appointment discount eligibility', () => {
       },
     }, []);
     expect(financials).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+    // an explicit $0 cap (Postgres hands it back as "0.00") is a real cap
+    const zero = calculateVisitFinancialsForAddons({
+      primaryNet: 200,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: { discountType: 'percentage', discountAmount: 10, maxDiscountDollars: '0.00', serviceKeyFilter: null, serviceCategoryFilter: null },
+    }, []);
+    expect(zero).toEqual({ price: 200, appointmentDiscountDollars: null });
   });
 
   test('stored replays honor the snapshotted preset cap', () => {

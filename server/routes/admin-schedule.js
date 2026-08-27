@@ -282,17 +282,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // Prime the percent-discount exclusion catalog before any schedule route
 // prices, spawns, or lists a visit (see primePercentDiscountExclusions).
 router.use((req, res, next) => {
-  primePercentDiscountExclusions().then(() => {
-    // Reads still serve (their exclusion flags are preview hints; the save
-    // is authoritative); anything that can price or spawn a visit waits.
-    if (req.method !== 'GET' && !percentExclusionCatalogIsReady()) {
-      return res.status(503).json({
-        error: 'Service catalog unavailable — pricing is paused until it loads. Retry in a moment.',
-        code: 'percent_exclusion_catalog_unavailable',
-      });
-    }
-    return next();
-  }, () => next());
+  // Prime only. Readiness is enforced where money is computed
+  // (assertPercentExclusionCatalogReady in the calculators), so unrelated
+  // mutations keep working while the catalog is unavailable.
+  primePercentDiscountExclusions().then(() => next(), () => next());
 });
 
 // ─── Technician job scoping ─────────────────────────────────────────────────
@@ -1950,6 +1943,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       // the base of a percentage discount — same contract as
       // calculateVisitFinancialsForAddons, so the parent visit and its
       // spawned children agree (Codex #3531 r1 P1).
+      if (isPercentDiscountType(appointmentDiscount.discount_type)) assertPercentExclusionCatalogReady();
       const eligibleLines = isPercentDiscountType(appointmentDiscount.discount_type)
         ? matchingLines.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matchingLines;
@@ -2081,7 +2075,9 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
     // Catalog cap — same clamp calculateDiscountDollars applies on creation
     // (pre-push Codex P0 on #3531: an edited capped preset stored more than
     // the cap).
-    if (discount.maxDiscountDollars) dollars = Math.min(dollars, Number(discount.maxDiscountDollars));
+    if (discount.maxDiscountDollars != null && discount.maxDiscountDollars !== '' && Number.isFinite(Number(discount.maxDiscountDollars))) {
+      dollars = Math.min(dollars, Math.max(0, Number(discount.maxDiscountDollars)));
+    }
   } else if (discount.discountType === 'fixed_amount' || discount.discountType === 'variable_amount') {
     dollars = Number(discount.discountAmount) || 0;
   } else if (discount.discountType === 'free_service') {
@@ -2138,6 +2134,16 @@ let percentExclusionCatalogReady = false;
 function percentExclusionCatalogIsReady() {
   // No raw() = mocked/absent knex (unit tests): nothing to load, nothing to gate.
   return percentExclusionCatalogReady || typeof db?.raw !== 'function';
+}
+// Called by every calculator the moment a PERCENTAGE discount is about to be
+// priced — the only place the catalog verdict changes money. Status/notes/
+// assignment/blackout routes never hit it (Codex #3531 r10 P1).
+const PERCENT_EXCLUSION_CATALOG_UNAVAILABLE = 'percent_exclusion_catalog_unavailable';
+function assertPercentExclusionCatalogReady() {
+  if (percentExclusionCatalogIsReady()) return;
+  const err = httpError(503, 'Service catalog unavailable — percentage-discount pricing is paused until it loads. Retry in a moment.');
+  err.code = PERCENT_EXCLUSION_CATALOG_UNAVAILABLE;
+  throw err;
 }
 let percentExcludedCatalogInflight = null;
 
@@ -2198,6 +2204,7 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
     (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
     && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
   );
+  if (isPercentDiscountType(discount?.discountType)) assertPercentExclusionCatalogReady();
   const pctExcluded = (serviceKey) => isPercentDiscountType(discount?.discountType)
     && lineExcludedFromPercentDiscount(serviceKey);
   const lineEligible = (serviceKey, serviceCategory) => matchesScope(serviceKey, serviceCategory)
@@ -2245,6 +2252,7 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   // the bond to a WaveGuard percentage. Keys come from the identity
   // snapshots the rows already carry — no catalog read.
   const pctType = isPercentDiscountType(parent?.discount_type);
+  if (pctType) assertPercentExclusionCatalogReady();
   const parentPctExcluded = pctType && lineExcludedFromPercentDiscount(parent?.service_key_snapshot);
   const addonPctExcluded = (addon) => pctType && lineExcludedFromPercentDiscount(addon?.service_key_snapshot);
   if (discountScope?.isScoped || parentPctExcluded || addons.some(addonPctExcluded)) {
@@ -6492,6 +6500,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         (!keyFilter || keyFilter === line.serviceKey)
         && (!categoryFilter || categoryFilter === line.serviceCategory)
       ));
+      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
       const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
         ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matching;
@@ -7104,6 +7113,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
           .catch(() => null);
+        // A service change in the SAME save already placed the new identity
+        // in `updates` — price/scope/validate against that, not the stored
+        // row (Codex #3531 r10 P1).
+        const legacyPrimaryKey = updates.service_key_snapshot !== undefined
+          ? (updates.service_key_snapshot || null)
+          : (existingPrice?.service_key_snapshot || null);
+        const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
+          ? (updates.service_category_snapshot || null)
+          : (existingPrice?.service_category_snapshot || null);
         const existingEstimatedPrice = Number(existingPrice?.estimated_price);
         const priceChanged = !Number.isFinite(existingEstimatedPrice)
           || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
@@ -7150,14 +7168,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           serviceCategory: addon.service_category_snapshot || null,
         }));
         const legacyExclusionApplies = isPercentDiscountType(discountType)
-          && (lineExcludedFromPercentDiscount(existingPrice?.service_key_snapshot)
+          && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
             || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
         if (discountType && discountAmount != null && discountAmount !== ''
           && (appointmentDiscountPreset || legacyExclusionApplies)) {
           const exclusionAware = calculateVisitFinancialsForAddons({
             primaryNet: primaryGross,
-            primaryServiceKey: existingPrice?.service_key_snapshot || null,
-            primaryServiceCategory: existingPrice?.service_category_snapshot || null,
+            primaryServiceKey: legacyPrimaryKey,
+            primaryServiceCategory: legacyPrimaryCategory,
             appointmentDiscount: {
               discountType,
               discountAmount: Number(discountAmount),
@@ -7173,8 +7191,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await presetEligibilityCheck([
           {
             amount: primaryGross,
-            serviceKey: existingPrice?.service_key_snapshot || null,
-            serviceCategory: existingPrice?.service_category_snapshot || null,
+            serviceKey: legacyPrimaryKey,
+            serviceCategory: legacyPrimaryCategory,
           },
           ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
         ]);
@@ -8668,7 +8686,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // anchored on a secondary/rental-property visit must not spawn
               // children that fall back to the customer's primary address.
               copyStampedServiceAddressFields(childData, parent, cols);
-            } catch { /* non-blocking */ }
+            } catch (spawnStampErr) {
+              // The optional column stamps above are non-blocking, but a
+              // pricing refusal (exclusion catalog not loaded) must abort
+              // the spawn — a child inserted without recomputed financials
+              // is a mispriced visit (pre-push Codex P0).
+              if (spawnStampErr?.code === PERCENT_EXCLUSION_CATALOG_UNAVAILABLE) throw spawnStampErr;
+            }
             await guardRecurrenceDestination(trx, {
               lockedDates: lockedRecurrenceDates,
               date: nextDateStr,

@@ -2395,10 +2395,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // never more than the lines the discount can reach.
   // A catalog preset's max_discount_dollars caps a percentage the same way
   // calculateDiscountDollars / calculateAppointmentDiscountDollars do.
+  // Any non-null cap counts — an explicit $0 cap saves a $0 discount.
   const presetMaxDiscountDollars =
     selectedDiscountPreset?.max_discount_dollars != null &&
-    Number(selectedDiscountPreset.max_discount_dollars) > 0
-      ? Number(selectedDiscountPreset.max_discount_dollars)
+    selectedDiscountPreset.max_discount_dollars !== "" &&
+    !isNaN(Number(selectedDiscountPreset.max_discount_dollars))
+      ? Math.max(0, Number(selectedDiscountPreset.max_discount_dollars))
       : null;
   const manualDiscount =
     discountType && discountAmount !== ""
