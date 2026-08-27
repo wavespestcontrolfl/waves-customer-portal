@@ -48,6 +48,7 @@ describe('BacklinkMonitor snapshots', () => {
       }
       if (table === 'seo_backlink_snapshots') {
         const builder = {
+          where: jest.fn(() => builder),
           orderBy: jest.fn(() => builder),
           first: jest.fn(async () => null),
           insert: jest.fn((payload) => {
@@ -63,6 +64,8 @@ describe('BacklinkMonitor snapshots', () => {
     await BacklinkMonitor.takeSnapshot();
 
     expect(snapshotWrites).toHaveLength(1);
+    // the baseline is the previous DAY's snapshot, never a same-day row about to be merged over
+    expect(db.mock.results.map(r => r.value).find(b => b.where && b.orderBy && b.first).where).toHaveBeenCalledWith('snapshot_date', '<', expect.any(String));
     expect(snapshotWrites[0]).toEqual(expect.objectContaining({
       total_backlinks: 3,
       dofollow_count: 1,

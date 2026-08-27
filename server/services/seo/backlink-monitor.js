@@ -261,7 +261,9 @@ class BacklinkMonitor {
     const crawl = crawlFn || require('./link-prospect-verifier').crawlForLink;
     const target = String(link.target_url || '').split('#')[0].split('?')[0];
     let res;
-    try { res = await crawl(link.source_url, target); }
+    // exact: the lost link's own page must be present — a surviving link to a
+    // descendant path (/service/article for a lost /service) does not count.
+    try { res = await crawl(link.source_url, target, { exact: true }); }
     catch (err) { res = { found: false, error: err.message }; }
 
     if (res?.found) return { outcome: 'live', isDofollow: res.isDofollow !== false, status: res.status };
@@ -284,12 +286,22 @@ class BacklinkMonitor {
    */
   async domainLevelLosses(lostLinks) {
     if (!lostLinks.length) return [];
+    // Representative per domain: prefer the row that can make the domain
+    // alertable (verified reason + editorial-ish type), then DR. domain_rating is
+    // domain-level so ties are the norm — picking "first row" would let a
+    // rotated directory page or an unreachable row mask a real editorial loss.
+    const rank = (l) => {
+      const type = l.link_type || this.classifyLinkType(l);
+      return (['page_gone', 'link_removed'].includes(l.lost_reason) ? 2 : 0)
+        + (NON_EDITORIAL_TYPES.has(type) ? 0 : 1)
+        + (l.domain_rating || 0) / 1000;
+    };
     const byDomain = new Map();
     for (const l of lostLinks) {
       const domain = comparableDomain(l.source_domain);
       if (!domain) continue;
       const cur = byDomain.get(domain);
-      if (!cur || (l.domain_rating || 0) > (cur.domain_rating || 0)) byDomain.set(domain, { ...l, domain });
+      if (!cur || rank(l) > rank(cur)) byDomain.set(domain, { ...l, domain });
     }
     const out = [];
     for (const [domain, best] of byDomain) {
@@ -392,7 +404,10 @@ class BacklinkMonitor {
     all.forEach(l => { const t = this.classifyAnchor(l.anchor_text); anchors[t] = (anchors[t] || 0) + 1; });
     const total = all.length || 1;
 
-    const prev = await db('seo_backlink_snapshots').orderBy('snapshot_date', 'desc').first();
+    // "Since last" means since the previous DAY's snapshot — a same-day re-take
+    // (cron, then a GSC import or manual Scan) must not treat the row it is about
+    // to overwrite as the baseline, or the day's losses collapse to 0.
+    const prev = await db('seo_backlink_snapshots').where('snapshot_date', '<', today).orderBy('snapshot_date', 'desc').first();
     const prevDomains = prev ? new Set() : new Set(); // simplified
 
     await db('seo_backlink_snapshots').insert({

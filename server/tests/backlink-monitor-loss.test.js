@@ -137,7 +137,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: recovery, now: new Date('2026-08-30T07:30:00Z') });
 
     // crawl gets the target WITHOUT the query string so utm-tagged links still match
-    expect(crawl).toHaveBeenCalledWith('https://blog.example/post', 'https://wavespestcontrol.com/pest-control-sarasota-fl/');
+    expect(crawl).toHaveBeenCalledWith('https://blog.example/post', 'https://wavespestcontrol.com/pest-control-sarasota-fl/', { exact: true });
     const lost = updates.find(u => u.patch.status === 'lost');
     expect(lost.ids).toBe('bl-1');
     expect(lost.patch).toEqual(expect.objectContaining({ lost_reason: 'link_removed', miss_count: 2 }));
@@ -204,6 +204,15 @@ describe('BacklinkMonitor verified loss detection', () => {
       ['veniceflpestcontrol.com', false], ['good.example', true], ['dir.example', false], ['small.example', false], ['flaky.example', false], ['spam.example', false],
     ]);
 
+    // several rows from one domain: the ALERTABLE row represents the domain, not the first/rotated one
+    makeDb({ seo_backlinks: (op) => (op === 'first' ? null : []) });
+    const multi = await BacklinkMonitor.domainLevelLosses([
+      { id: 'r1', source_domain: 'multi.example', source_url: 'https://multi.example/directory/pest', domain_rating: 50, severity: 'clean', lost_reason: 'link_removed' },
+      { id: 'r2', source_domain: 'multi.example', source_url: 'https://multi.example/x', domain_rating: 50, severity: 'clean', lost_reason: 'unreachable' },
+      { id: 'r3', source_domain: 'multi.example', source_url: 'https://multi.example/resources', domain_rating: 50, severity: 'clean', lost_reason: 'page_gone' },
+    ]);
+    expect(multi).toEqual([expect.objectContaining({ domain: 'multi.example', backlink_id: 'r3', link_type: 'resource', alertable: true })]);
+
     makeDb({ seo_backlinks: (op) => (op === 'first' ? { id: 'still' } : []) });
     const still = await BacklinkMonitor.domainLevelLosses([
       { id: 'a', source_domain: 'good.example', source_url: 'https://good.example/p2', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
@@ -268,8 +277,9 @@ describe('lost-link recovery', () => {
     const r = await recovery.queueLostDomains([loss], { scorer });
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }] });
     expect(updates[0].where).toEqual({ id: 'p-lost' });
-    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, attempts: 0, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
   });
@@ -303,6 +313,14 @@ describe('lost-link recovery', () => {
 
 describe('crawlForLink goes through the SSRF-pinned fetcher', () => {
   const verifier = require('../services/seo/link-prospect-verifier');
+
+  test('exact mode refuses a descendant-path link as proof the lost link survives', () => {
+    const html = '<a href="https://wavespestcontrol.com/pest-control-sarasota-fl/article/">deep</a>';
+    expect(verifier.findLinkInHtml(html, 'https://wavespestcontrol.com/pest-control-sarasota-fl/', { exact: true })).toEqual({ found: false });
+    expect(verifier.findLinkInHtml(html, 'https://wavespestcontrol.com/pest-control-sarasota-fl/')).toEqual(expect.objectContaining({ found: true }));
+    const same = '<a href="https://www.wavespestcontrol.com/pest-control-sarasota-fl?utm=x#top">ok</a>';
+    expect(verifier.findLinkInHtml(same, 'https://wavespestcontrol.com/pest-control-sarasota-fl/', { exact: true })).toEqual(expect.objectContaining({ found: true, isDofollow: true }));
+  });
 
   test('returns status + rel from a fetched page and never follows into a blocked host', async () => {
     const html = '<p><a href="https://www.wavespestcontrol.com/pest-control-sarasota-fl/?utm=x" rel="sponsored">Waves</a></p>';

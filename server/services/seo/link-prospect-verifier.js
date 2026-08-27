@@ -297,15 +297,26 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
   return false;
 }
 
+// Exact-page match: same normalized path, optional trailing slash / query /
+// fragment — never a descendant path. Inbound loss verification uses this so a
+// surviving link to /service/article can't stand in for the lost link to /service.
+function matchesExactTargetUrl(candidate, expected) {
+  if (!candidate || !expected) return false;
+  const strip = (u) => String(u).split('#')[0].split('?')[0].replace(/\/+$/, '');
+  return strip(candidate) === strip(expected);
+}
+
 // Pure: find the first <a> in html pointing at the intended Waves target page.
-function findLinkInHtml(html, targetPage) {
+// opts.exact → matchesExactTargetUrl instead of the prefix/boundary match.
+function findLinkInHtml(html, targetPage, { exact = false } = {}) {
   const expectedTarget = normalizeComparableUrl(targetPage);
   if (!expectedTarget || typeof html !== 'string') return { found: false };
   const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+  const matches = exact ? matchesExactTargetUrl : matchesTargetUrl;
   let m;
   while ((m = anchorRe.exec(html)) !== null) {
     const href = normalizeComparableUrl(m[2]);
-    if (!matchesTargetUrl(href, expectedTarget)) continue;
+    if (!matches(href, expectedTarget)) continue;
     const attrs = `${m[1]} ${m[3]}`;
     const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
     const rel = relMatch ? relMatch[1].toLowerCase() : '';
@@ -323,7 +334,7 @@ function findLinkInHtml(html, targetPage) {
 // Returns { found, isDofollow?, anchorText?, status, blocked, truncated, error } so
 // callers can tell a page that is gone (4xx) from a page that dropped the link
 // (2xx, complete body, not found); a truncated body never proves absence.
-async function crawlForLink(liveUrl, targetPage, { fetchPageFn } = {}) {
+async function crawlForLink(liveUrl, targetPage, { fetchPageFn, exact = false } = {}) {
   const expectedTarget = normalizeComparableUrl(targetPage);
   if (!expectedTarget) return { found: false, status: 0, blocked: false, truncated: false, error: 'no_target' };
   const fetchPage = fetchPageFn || require('./contact-finder').fetchPage;
@@ -332,7 +343,7 @@ async function crawlForLink(liveUrl, targetPage, { fetchPageFn } = {}) {
     // An empty 2xx body that was cut short is still a truncated page, not proof of absence.
     return { found: false, status: page ? page.status : 0, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated), error: page ? page.error : 'fetch_failed' };
   }
-  return { ...findLinkInHtml(page.html, targetPage), status: page.status, blocked: false, truncated: !!page.truncated, error: null };
+  return { ...findLinkInHtml(page.html, targetPage, { exact }), status: page.status, blocked: false, truncated: !!page.truncated, error: null };
 }
 
 // Apply a live transition + fire indexing for a confirmed link. `discoveredUrl`
@@ -455,7 +466,7 @@ async function run({ limit = 200 } = {}) {
   return { checked: prospects.length, live, lost, pending };
 }
 
-module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
   comparableDomain, parseQuality, expectedTargetUrl,

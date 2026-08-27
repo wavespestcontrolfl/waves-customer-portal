@@ -50,15 +50,17 @@ async function queueLostDomains(losses, { scorer } = {}) {
     if (exists && exists.status === 'lost') {
       const note = `Lost-link recovery: our link on ${loss.source_url} was verified gone (${loss.lost_reason}). Re-pitch for the same placement.`;
       // A fresh outreach cycle: the worker/send valve treat a populated
-      // outreach_sent_at as "already sent", so the prior send moves into
-      // quality_signals.prior_outreach_sent_at instead of being erased.
+      // outreach_sent_at as "already sent" and the worker rejects rows whose
+      // lifetime `attempts` hit MAX_ATTEMPTS — so both restart, with the prior
+      // values kept in quality_signals (prior_outreach_sent_at, prior_attempts).
       await db('seo_link_prospects').where({ id: exists.id }).update({
         status: 'prospect',
         priority: 'high',
         claimed_at: null, claimed_by: null,
+        attempts: 0,
         outreach_status: 'none', outreach_send_token: null, outreach_attempted_at: null, outreach_sent_at: null,
         quality_signals: db.raw(
-          "jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true)",
+          "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
           [loss.lost_reason || 'unknown'],
         ),
         notes: exists.notes ? `${exists.notes}\n${note}` : note,
