@@ -86,6 +86,10 @@ describe('TimeGridDay hour-aligned grid', () => {
           id: 'svc-predawn-2', customerName: 'Night Customer', status: 'confirmed',
           windowStart: '01:00', windowEnd: '02:00', windowDisplay: '1–2 AM',
           technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-crossing', customerName: 'Crossing Customer', status: 'confirmed',
+          windowStart: '05:00', windowEnd: '07:00', windowDisplay: '5–7 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
         }]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={vi.fn()}
@@ -103,6 +107,15 @@ describe('TimeGridDay hour-aligned grid', () => {
     const night = screen.getByTitle(/Night Customer/).closest('[style]');
     expect(night).toBeInTheDocument();
     expect(predawn.style.left).not.toBe(night.style.left);
+    // A visit that CROSSES the first row is clipped to its visible portion
+    // (05:00–07:00 draws as one 60-min block from 06:00), not shifted — so
+    // it never fakes an overlap with the real 07:00 visit, which keeps a
+    // full-width lane of its own.
+    const crossing = screen.getByTitle(/Crossing Customer/).closest('[style]');
+    const early = screen.getByTitle(/Early Customer/).closest('[style]');
+    const first = screen.getByTitle(/First Customer/).closest('[style]');
+    expect(crossing.style.top).toBe(night.style.top); // pinned on the first row
+    expect(early.style.left).toBe(first.style.left); // 07:00 visit: its own full-width lane, no fake overlap
     // No row is muted for being early — the former 8 AM floor is gone.
     const rows = container.querySelectorAll('[data-slot-min]');
     expect(rows.length).toBeGreaterThan(0);

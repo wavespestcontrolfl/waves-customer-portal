@@ -698,13 +698,18 @@ function nameScopeFor(caller, service) {
 // conventions, and it precomputes endMin with the same
 // estimated_duration_minutes-or-60 fallback the SQL COALESCEs), and
 // windowsOverlap is the exported half-open comparison the SQL implements.
-async function loadOccupancy({ dateFrom, dateTo, nameScope = null }) {
+async function loadOccupancy({
+  dateFrom, dateTo, nameScope = null,
+  // Same status exclusions the rebooker enforces at its commit gate. The
+  // generic admin slot-check passes the admin set (skipped / no_show freed)
+  // so its hints agree with the save-side probe (window-rules.js).
+  excludeStatuses = ['cancelled', 'completed'],
+} = {}) {
   const { listOccupiedWindows } = require('./scheduling/occupancy');
   const rows = await listOccupiedWindows({
     dateFrom,
     dateTo,
-    // Same status exclusions the rebooker enforces at its commit gate.
-    excludeStatuses: ['cancelled', 'completed'],
+    excludeStatuses,
   });
   const canName = (row) => (nameScope === NAME_ALL
     ? true
@@ -1035,7 +1040,12 @@ async function checkSlots({ targets, caller = null } = {}) {
     // hints for that date, it never fails the request.
     let occupancy = EMPTY_OCCUPANCY;
     try {
-      occupancy = await loadOccupancy({ dateFrom: date, dateTo: date, nameScope });
+      // ADMIN_OCCUPANCY_EXCLUDE_STATUSES: a skipped / no-show row has freed
+      // its slot on the save-side probe, so it must not draw a hint here.
+      const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('./scheduling/window-rules');
+      occupancy = await loadOccupancy({
+        dateFrom: date, dateTo: date, nameScope, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+      });
     } catch (err) {
       logger.info(`[slot-check] occupancy snapshot failed for ${date}: ${err.message}`);
     }

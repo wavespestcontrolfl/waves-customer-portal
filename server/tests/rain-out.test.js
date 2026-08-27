@@ -3103,12 +3103,14 @@ describe('rain-out service', () => {
         isRouteSibling: false,
       }]);
       // One occupancy snapshot per DISTINCT date, with the commit-gate
-      // status exclusions (cancelled/completed don't occupy).
+      // status exclusions — the ADMIN set (window-rules.js): a skipped /
+      // no-show row has freed its slot on the save-side probe, so it must
+      // not draw a hint here either.
       expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
       expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
         dateFrom: '2026-08-20',
         dateTo: '2026-08-20',
-        excludeStatuses: ['cancelled', 'completed'],
+        excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
       }));
     });
 

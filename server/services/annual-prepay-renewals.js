@@ -559,6 +559,24 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
 // admin notification (dedupe-keyed per term+reason) alongside the log line so
 // the operator resolves it with the customer. Best-effort — a notification
 // failure never blocks payment activation.
+// Same notice, but deferred until the transaction that owns the write
+// COMMITS: fileCoverageException writes through the global connection and
+// dedupes per term+reason for 7 days, so a notice filed inside a trx that
+// later rolls back (attach/stamp failure downstream in refreshTermSnapshot)
+// would outlive the rollback and suppress the correct retry's notice.
+// `scope` is the outermost knex transaction (the caller-supplied conn when
+// it is one, else the transaction opened here); its executionPromise
+// settles at COMMIT (resolves) or ROLLBACK (rejects — nothing is filed).
+// A bare connection (or a test double) files immediately.
+function fileCoverageExceptionAfterCommit(scope, term, reason, body) {
+  const done = scope && scope !== db && scope.executionPromise;
+  if (done && typeof done.then === 'function') {
+    done.then(() => fileCoverageException(term, reason, body)).catch(() => {});
+    return Promise.resolve();
+  }
+  return fileCoverageException(term, reason, body);
+}
+
 async function fileCoverageException(term, reason, body) {
   try {
     // notifyAdmin does not interpret dedupeKey — enforce it here (same
@@ -1158,11 +1176,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     // through the global connection and dedupes for 7 days, so a notice
     // emitted before a deferred/aborted insert would outlive the rollback
     // and describe a visit that is not on the calendar.
+    const commitScope = conn === db ? trx : conn;
     if (overlapConflict) {
-      await fileCoverageException(term, 'window_conflict',
+      await fileCoverageExceptionAfterCommit(commitScope, term, 'window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
     } else if (!windowStart && firstVisitWindowStart) {
-      await fileCoverageException(term, 'window_unverified',
+      await fileCoverageExceptionAfterCommit(commitScope, term, 'window_unverified',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} could not be checked against the schedule while payment landed. The visit is on the schedule without a time — time it by hand.`);
     }
     return row;
@@ -1248,7 +1267,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     // the notice claims the visit WAS retimed, so it must never outlive a
     // failed update.
     if (overlapConflict) {
-      await fileCoverageException(term, 'adopted_window_conflict',
+      await fileCoverageExceptionAfterCommit(conn === db ? trx : conn, term, 'adopted_window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} overlaps another job on the schedule. The visit was retimed as promised — confirm the day's route.`);
     }
   };

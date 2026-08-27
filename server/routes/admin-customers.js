@@ -4422,7 +4422,9 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
           adoptableFor: { customerId: customer.id, coverageServiceType },
         });
         if (conflict) {
-          overlapWarning = `Heads up: the promised ${firstVisitWindowStart} first visit on ${firstVisitDate} overlaps another appointment on the schedule — both are kept on the calendar.`;
+          // Future tense on purpose: the promised visit is seeded when the
+          // term ACTIVATES (payment / credit), not when this invoice is minted.
+          overlapWarning = `Heads up: the promised ${firstVisitWindowStart} first visit on ${firstVisitDate} overlaps another appointment on the schedule. It will still be booked at that time when the invoice is paid — check the day's route.`;
         }
       } catch (probeErr) {
         logger.warn(`[annual-prepay] first-visit overlap probe failed (${probeErr.message}) — continuing without a warning`);

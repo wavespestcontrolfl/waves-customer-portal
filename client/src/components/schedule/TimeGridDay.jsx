@@ -166,14 +166,16 @@ function computeLanes(services) {
       const endRaw = parseHHMM(s.windowEnd);
       const dur = effectiveDuration(s);
       const end = endRaw != null ? endRaw : (start != null ? start + dur : null);
-      // Lanes are computed from the DISPLAYED interval: a visit timed before
-      // the grid's first row is pinned to that row (see the render clamp), so
-      // two early visits that don't overlap in real time still overlap on
-      // screen and need separate lanes.
+      // Lanes are computed from the DISPLAYED interval (see the render
+      // clip): a visit that starts before the grid's first row is clipped to
+      // the part that falls inside the grid; one wholly before it collapses
+      // to a compact block pinned on the first row. Two such pinned blocks
+      // overlap on screen even when their real times don't, so they get
+      // separate lanes.
       const rawStart = start ?? 0;
       const rawEnd = end ?? rawStart + 30;
-      const shift = Math.max(0, DAY_START_HOUR * 60 - rawStart);
-      return { svc: s, start: rawStart + shift, end: rawEnd + shift };
+      const dispStart = Math.max(rawStart, DAY_START_HOUR * 60);
+      return { svc: s, start: dispStart, end: Math.max(rawEnd, dispStart + SLOT_MIN) };
     })
     .sort((a, b) => a.start - b.start || a.end - b.end);
 
@@ -614,12 +616,16 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             const startMin = parseHHMM(svc.windowStart);
             if (startMin == null || startMin >= DAY_END_HOUR * 60) return null;
             // A visit timed before the grid's first row (there is no server
-            // floor any more) is pinned to that row rather than dropped — the
-            // block still carries its real window, so nothing accepted by the
-            // server ever vanishes from the board.
-            const top = minutesToTopPx(Math.max(startMin, DAY_START_HOUR * 60));
+            // floor any more) is never dropped: one that CROSSES the first
+            // row is clipped to its visible portion (05:00–07:00 draws as
+            // 06:00–07:00, so it can't fake an overlap with a real 07:00
+            // visit); one wholly before it is a compact block pinned on the
+            // first row. The block still carries its real window label.
             const dur = effectiveDuration(svc);
-            const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
+            const dispStart = Math.max(startMin, DAY_START_HOUR * 60);
+            const dispEnd = Math.max(startMin + dur, dispStart + SLOT_MIN);
+            const top = minutesToTopPx(dispStart);
+            const height = ((dispEnd - dispStart) / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
             const orderIdx = orderedIds.indexOf(svc.id);
             const routeOrder = orderIdx >= 0 ? orderIdx + 1 : null;
