@@ -5486,6 +5486,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     serviceType: visitTimelineServiceType,
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
+  // Engagement cards are INTERWOVEN, not stacked at the bottom: review ask
+  // high (under the status card), cross-sell mid, referral after the
+  // treatment record. Lawn/tree V2 and pest already place the review ask
+  // high; mosquito follows the pest layout (owner 2026-08-27: "evenly
+  // spaced — see the recurring pest control report"). The two review
+  // mounts are mutually exclusive on this flag.
+  const reviewAskOnTop = Boolean(data.reportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
   const hasReentry = Boolean(dynamicContext.reentry);
   // Bed bug: the typed narrative owns the report's ONE summary surface even
   // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
@@ -8723,9 +8730,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
-            lawn V2 (owner 2026-07-05); the bottom card below is suppressed
-            for pest to match. */}
-        {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
+            lawn V2 (owner 2026-07-05), mosquito too (owner 2026-08-27); the
+            bottom card below is suppressed for them to match. */}
+        {reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard
           typedReport={data.typedReport}
@@ -9176,7 +9183,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
-        {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
 
 
