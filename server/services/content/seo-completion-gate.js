@@ -619,11 +619,13 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection", "Schedule your inspection") — editorial anchors like "Get
 // ready for your termite inspection" are not CTAs and must not be flagged.
 // optional CTA lead-in ("Click to", "Tap here to") + verb + optional
-// determiner + up to two qualifier words + "inspection":
-// "Request an Inspection", "Get a Termite Inspection", "Schedule your free
-// inspection", "Click to Schedule a Termite Inspection" — but NOT "Get
-// ready for your termite inspection" (four words between verb and noun).
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
+// determiner + up to four qualifier words + "inspection":
+// "Request an Inspection", "Get a Termite Inspection", "Schedule a Free
+// Professional Termite Inspection", "Click to Schedule a Termite
+// Inspection". Qualifiers exclude the function words that mark EDITORIAL
+// phrasing ("Get ready for your termite inspection" — "ready"/"for" break
+// the request shape), so those anchors still pass.
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\b)[a-z&-]+\s+){0,4}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

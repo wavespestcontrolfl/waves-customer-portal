@@ -1844,9 +1844,13 @@ function blankNonRenderedMarkdown(text) {
   // inline content, so its run CAN open a span. A span never crosses a
   // BLANK line — inline code resolves within its paragraph, so an
   // unmatched backtick before a blank line cannot pair with one in a later
-  // block. Length-preserving mask.
+  // block. A backslash-ESCAPED backtick (odd backslash run) is literal text
+  // and cannot OPEN a span (inside a span backslashes are literal, so the
+  // closer needs no parity guard). Length-preserving mask to the U+0002 sentinel — code
+  // spans RENDER as visible text, so the sentinel keeps them countable as
+  // header-cell content while matching no link/table/word pattern.
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
-  const spanned = afterComments.replace(/(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
+  const spanned = afterComments.replace(/(?<!(?<!\\)(?:\\\\)*\\)(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
@@ -1858,7 +1862,7 @@ function blankNonRenderedMarkdown(text) {
     // is a JS template literal whose VALUE renders — an expression, not a
     // markdown code span. Leave it for the link scanners.
     if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
-    return c.replace(/[^\n]/g, ' ');
+    return c.replace(/[^\n]/g, '\u0002');
   });
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
   // containers. Opener VALIDITY is judged on the pre-span-mask source line:
@@ -1918,13 +1922,19 @@ function blankNonRenderedMarkdown(text) {
   return fenced.split('\n').map((l) => {
     // Nested markers may carry up to three spaces before the inner ">"
     // ("> " + "  > "); the LAST marker keeps only one optional space so
-    // remaining indentation stays content.
-    const stripped = l.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/, '');
+    // remaining indentation stays content. Blockquote stripping is
+    // LIST-RELATIVE: inside a list item the first marker may sit up to
+    // 3 past the item's content column ("10. x" + "    > quoted").
+    const rawIndent = l.match(/^ */)[0].length;
+    const quoteRe = listContext
+      ? new RegExp(`^ {0,${listContentIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
+      : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
+    const stripped = l.replace(quoteRe, '');
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
     const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
     if (listItem) { listContext = true; listContentIndent = listItem[1].length; }
-    else if (!blank && !indented && prevBlank) listContext = false;
+    else if (!blank && !indented && prevBlank && rawIndent < listContentIndent) listContext = false;
     prevBlank = blank;
     if (indented) {
       if (!listContext) return '';

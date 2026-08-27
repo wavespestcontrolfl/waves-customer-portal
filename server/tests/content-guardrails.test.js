@@ -2255,6 +2255,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Code spans never cross a BLANK line (paragraph boundary) — stray
     // unmatched backticks in different paragraphs stay literal text.
     expect(guardrails.hasRawMarkdownTable('Tick `code\n\n| A | B |\n| --- | --- |\n\nend` here')).toBe(true);
+    // A backslash-ESCAPED backtick is literal text and cannot open a span.
+    expect(guardrails.hasRawMarkdownTable('A \\` tick\n| A | B |\n| --- | --- |\nlater ` end')).toBe(true);
+    // Inline-code header labels render as visible text — still a header.
+    expect(guardrails.hasRawMarkdownTable('| `Option` | `Cost` |\n| --- | --- |\n| a | b |')).toBe(true);
+    // Blockquote stripping is LIST-RELATIVE: a quoted table nested under
+    // "10. item" (content column 4) renders as a table, not indented code.
+    expect(guardrails.hasRawMarkdownTable('10. comparison\n    > | A | B |\n    > | - | - |')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

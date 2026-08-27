@@ -652,6 +652,30 @@ describe('seo-completion-gate', () => {
     });
     expect(leadInInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // Longer qualifier runs do not launder inspection requests either;
+    // editorial function words ("ready for") still break the request shape.
+    const longQualifiers = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule a Free Professional Termite Inspection](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(longQualifiers.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const editorialInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Get ready for your termite inspection](/blog/inspection-prep/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(editorialInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // An escaped backtick cannot open a code span — the live link after it
+    // stays visible even with a stray unmatched backtick later.
+    const escapedBacktick = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nA \\\` tick [Schedule Service](/contact/) later \` end.` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(escapedBacktick.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     const spacedDest = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate]( /contact/ ) today.' }),
       brief: baseBrief({ service: 'termite-control' }),
