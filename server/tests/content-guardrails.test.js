@@ -2230,6 +2230,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // An unresolvable service value (a non-service category) arms nothing —
     // brief-independent behavior only.
     expect(ev('S. [Get a Lawn Care Quote](/contact/) now.', { service: 'seasonal' })).toBe(false);
+    // Canonical BLOG_TAGS resolve too — multi-service and non-strippable
+    // tags arm the check instead of silently dropping.
+    expect(ev('W. [Request a Cockroach Quote](/contact/) now.', { service: ['pest-control', 'Stinging Insects'] })).toBe(true);
+    expect(ev('W. [Get a Wasp Control Quote](/contact/) now.', { service: ['pest-control', 'Stinging Insects'] })).toBe(false);
+    expect(ev('F. [Get a Tick Control Estimate](/contact/) now.', { service: ['Pest Control', 'Fleas & Ticks'] })).toBe(false);
+    expect(ev('L. [Get My Free Termite Estimate](/contact/) now.', { service: 'Lawn Disease' })).toBe(true);
+    expect(ev('L. [Request a Lawn Care Quote](/contact/) now.', { service: 'Lawn Disease' })).toBe(false);
   });
 
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
@@ -2381,8 +2388,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // close on its run, so the fence opens and hides the table.
     expect(guardrails.hasRawMarkdownTable('Intro ```\n```\n| A | B |\n| - | - |')).toBe(false);
     // Header and delimiter pair only at the SAME quote depth — an outer
-    // paragraph over a NESTED quote is not a table.
+    // paragraph over a NESTED quote is not a table…
     expect(guardrails.hasRawMarkdownTable('> A | B\n> > - | -')).toBe(false);
+    // …but an UNQUOTED delimiter lazily continuing a quoted header's
+    // paragraph is still one table (GFM lazy continuation).
+    expect(guardrails.hasRawMarkdownTable('> A | B\n- | -')).toBe(true);
     // A fence opened on a QUOTED list continuation line ("> - item" then
     // ">   ~~~") scopes to the item's quote-relative column — content at
     // that column stays fenced…

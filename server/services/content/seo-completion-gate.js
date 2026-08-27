@@ -498,8 +498,13 @@ function extractLinks(body) {
   // Labels may contain backslash-ESCAPED brackets ("[cta\]]: /contact/") —
   // CommonMark accepts them; matching is on the raw label text, identical
   // on the definition and reference sides, so no unescaping is needed.
-  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)/gm;
+  // The WHOLE definition must be valid: after the destination, only
+  // whitespace or a valid title may follow — "[cta]: /contact/ garbage"
+  // is ordinary text, not a definition (CommonMark).
+  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)([^\n]*)/gm;
+  const defTail = /^[ \t]*$|^[ \t]+(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^()\\])*\))[ \t]*$/;
   while ((m = def.exec(sMd)) !== null) {
+    if (!defTail.test(m[3])) continue;
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
     consumed.push([m.index, m.index + m[0].length]);
@@ -862,7 +867,7 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection". Qualifiers exclude the function words that mark EDITORIAL
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
-const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspections?\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
+const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspections?\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor
@@ -888,17 +893,35 @@ function forbiddenCtaAnchor(body) {
 // coarse legacy category ("pest-control") never authorizes sibling
 // specialties when a more specific tag resolves too ("Termites" must not
 // admit a cockroach quote). Equally specific candidates still union.
+// The canonical BLOG_TAGS taxonomy (blog-writer.js) includes tags that
+// name MULTIPLE services or don't reduce to a vocabulary key by
+// suffix-stripping — resolve them explicitly so a legacy row carrying one
+// still arms the service-aware check.
+const CANONICAL_TAG_SERVICES = {
+  'fleas & ticks': ['flea', 'tick'],
+  'fleas and ticks': ['flea', 'tick'],
+  'stinging insects': ['wasp'],
+  'lawn disease': ['lawn'],
+  'lawn pests': ['lawn'],
+  'lawn pest': ['lawn'],
+};
+
 function collectForbiddenCtaAnchors(body, { service = null } = {}) {
   const out = [];
   let allowed = null;
   const resolvedCandidates = [];
+  const addResolved = (resolved) => {
+    resolvedCandidates.push({ resolved, rank: CTA_SERVICE_FAMILY[resolved] ? 2 : (resolved === 'pest' ? 0 : 1) });
+  };
   for (const candidate of [].concat(service ?? []).filter(Boolean)) {
+    const canonical = CANONICAL_TAG_SERVICES[String(candidate).toLowerCase().trim()];
+    if (canonical) { canonical.forEach(addResolved); continue; }
     let resolved = null;
     try { resolved = ctaBriefService(candidate); } catch (err) { resolved = null; }
     // Unresolvable candidates (a non-service category like "seasonal")
     // carry no CTA vocabulary — they contribute nothing.
     if (!resolved || !(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
-    resolvedCandidates.push({ resolved, rank: CTA_SERVICE_FAMILY[resolved] ? 2 : (resolved === 'pest' ? 0 : 1) });
+    addResolved(resolved);
   }
   if (resolvedCandidates.length) {
     const top = Math.max(...resolvedCandidates.map((c) => c.rank));

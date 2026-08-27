@@ -2214,18 +2214,21 @@ function extractRawMarkdownTables(text) {
     if (marked) headerCandidates.push(marked[1]);
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
-    // Header and delimiter pair only at the SAME quote depth — "> A | B"
-    // over "> > - | -" is an outer-quote paragraph before a nested quote,
-    // not a table.
+    // Header and delimiter pair at the SAME quote depth — "> A | B" over
+    // "> > - | -" is an outer-quote paragraph before a nested quote, not a
+    // table — OR when the delimiter is an UNQUOTED lazy continuation of a
+    // quoted header's paragraph ("> A | B" then "- | -"), which GFM still
+    // reads as one table.
     const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i])
-      && depths[i] === depths[i - 1]
+      && (depths[i] === depths[i - 1] || (depths[i] === 0 && depths[i - 1] > 0))
       && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
     if (!delimiter) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
     // whitespace-normalized, so refresh grandfathering can compare table
     // CONTENT rather than counts.
     let end = i + 1;
-    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== '' && depths[end] === depths[i]) end += 1;
+    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== ''
+      && (depths[end] === depths[i - 1] || depths[end] === 0)) end += 1;
     tables.push(lines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
     i = end;
   }

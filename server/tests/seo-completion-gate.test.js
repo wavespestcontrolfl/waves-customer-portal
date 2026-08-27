@@ -1278,6 +1278,38 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(quotedContinuationFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A reference DEFINITION with invalid trailing text is ordinary text —
+    // the reference renders literally and cannot satisfy presence; a valid
+    // quoted title still registers.
+    const invalidDefTail = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'See [Get a Termite Estimate][cta] now.\n\n[cta]: /contact/ garbage' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(invalidDefTail.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const titledDef = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'See [Get a Termite Estimate][cta] now.\n\n[cta]: /contact/ "call us"' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(titledDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // Invitation-prefixed inspection CTAs ("Ready to Schedule Your Termite
+    // Inspection") are the forbidden request shape; editorial "Get ready
+    // FOR your termite inspection" stays clean.
+    const readyTo = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Ready to Schedule Your Termite Inspection](/termite-inspection/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(readyTo.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const getReadyFor = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Get ready for your termite inspection](/termite-inspection/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(getReadyFor.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {
