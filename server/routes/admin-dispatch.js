@@ -9952,7 +9952,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const candidates = await db('visual_service_moments')
             .where({ job_id: svc.id, visibility_status: 'internal_only' })
             .whereNull('deleted_at')
-            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_url', 'media_storage_key');
+            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_storage_key');
           // Provenance rules (codex P1 r4): never auto-publish moments whose
           // customer copy could derive from the raw technician note — the
           // 'recommendation' tag's template embeds the note verbatim — nor
@@ -9966,7 +9966,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const AUTO_PUBLISH_EXCLUDED_TAG_GROUPS = new Set(['recommendation', 'access']);
           const publishable = candidates.filter((m) => {
             if (AUTO_PUBLISH_EXCLUDED_TAG_GROUPS.has(String(m.tag_group || ''))) return false;
-            if (!m.media_url && !m.media_storage_key) return false;
+            // Storage key REQUIRED: the report loader signs media from
+            // media_storage_key only, so a legacy URL-only row would publish
+            // as a caption-only card (codex inline r7).
+            if (!m.media_storage_key) return false;
             const caption = String(m.customer_caption || m.ai_caption || '').trim();
             return caption && customerCopyViolations(caption).length === 0;
           });

@@ -10327,7 +10327,18 @@ export function CompletionPanel({
           seeds.interiorMinutes === 0 || cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur
         ));
       })
-      .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
+      .catch(() => {
+        // Fail closed: a failed refresh must not leave the PREVIOUS seeds
+        // and adjusted values live (they would submit as overrides against
+        // an evidence state they no longer match — codex inline r7). Null
+        // seeds hide the steppers; null values post nothing; the server's
+        // computed defaults apply.
+        if (!live) return;
+        reentrySeedsRef.current = null;
+        setReentrySeeds(null);
+        setReentryExtMinutes(null);
+        setReentryIntMinutes(null);
+      });
     return () => { live = false; };
   }, [service?.id, sprayEvidenceInForm]);
   const areasTreatedHidden = treeShrubCloseoutOn

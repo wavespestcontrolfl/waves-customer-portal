@@ -3778,8 +3778,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // but an EPA-registered / pesticide-class product on such a row is a real
   // application — an EXPLICIT station_check (methodInferred === false) is a
   // deliberate device inspection and never counts.
+  // Bait/station product FAMILIES never count, even with an EPA number:
+  // a legacy Trelona/Advance cartridge row (null method, "termite bait"
+  // category) is station work, not a spray (codex inline r7).
+  const isBaitFamilyProduct = (app) => /bait|station|cartridge|monitor/i.test(
+    `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`,
+  );
   const isInferredPesticideApplication = (app) => app.method === 'station_check'
     && app.methodInferred !== false
+    && !isBaitFamilyProduct(app)
     && (
       !!String(app.product?.epa_reg || '').trim()
       || /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${app.product?.product_type || ''} ${app.product?.category || ''}`)

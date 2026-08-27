@@ -187,6 +187,23 @@ describe('legacy no-spray termite advisories', () => {
     expect(data.advisory.interior_reentry_min).toBe(120);
   });
 
+  test('a legacy methodless BAIT row (EPA-registered cartridge) is not treatment evidence', async () => {
+    const knex = fixtureKnex({
+      ...EMPTY_TABLES,
+      service_products: [{
+        id: 'sp1', service_record_id: 'record-1', product_name: 'Trelona ATBS Annual Bait Cartridge',
+        epa_reg_number: '499-557', product_category: 'termite bait', application_method: null,
+      }],
+    });
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Monitoring',
+      advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 120 }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+  });
+
   test('an EXPLICIT station check on a bait product is not treatment evidence', async () => {
     const knex = fixtureKnex({
       ...EMPTY_TABLES,
