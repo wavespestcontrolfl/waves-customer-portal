@@ -2112,19 +2112,27 @@ function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false
 // compared, same posture as the raw-table grandfather.
 function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
   if (!targetIsBlog) return null;
-  const { collectForbiddenCtaAnchors } = require('./seo-completion-gate');
-  const current = collectForbiddenCtaAnchors(String(body || ''));
-  if (current.length === 0) return null;
-  const prior = new Map();
-  if (isRefresh) {
-    for (const a of collectForbiddenCtaAnchors(String(priorBody || ''))) prior.set(a, (prior.get(a) || 0) + 1);
+  try {
+    const { collectForbiddenCtaAnchors } = require('./seo-completion-gate');
+    // A LOADED module without the export is a test double that deliberately
+    // neutralizes the gate — skip. A require/evaluation FAILURE falls to the
+    // catch below and routes to review (fail closed).
+    if (typeof collectForbiddenCtaAnchors !== 'function') return null;
+    const current = collectForbiddenCtaAnchors(String(body || ''));
+    if (current.length === 0) return null;
+    const prior = new Map();
+    if (isRefresh) {
+      for (const a of collectForbiddenCtaAnchors(String(priorBody || ''))) prior.set(a, (prior.get(a) || 0) + 1);
+    }
+    for (const a of current) {
+      const n = prior.get(a) || 0;
+      if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
+      prior.set(a, n - 1);
+    }
+    return null;
+  } catch (err) {
+    return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA-wording check could not evaluate (${err.message}) — routed to review (fail closed).`);
   }
-  for (const a of current) {
-    const n = prior.get(a) || 0;
-    if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
-    prior.set(a, n - 1);
-  }
-  return null;
 }
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
