@@ -574,13 +574,21 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
         normalizedRows = normalizeOneTimeBreakdown(estimateData).items || [];
       }
     } catch (_) { normalizedRows = []; }
-    const rows = normalizedRows.filter((row) => row && row.kind === 'charge' && num(row.amount) > 0);
-    const rowsTotal = Math.round(rows.reduce((sum, row) => sum + num(row.amount), 0) * 100) / 100;
-    if (rows.length > 0 && oneTimeTotal > 0 && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
-      for (const row of rows) {
+    // Charged rows must reconcile; rows a service credit zeroed print too,
+    // as "(Included)" at $0 — they are approved scope the page shows and
+    // the PDF must not drop (codex #3521 r4 P1).
+    const charged = normalizedRows.filter((row) => row && row.kind === 'charge' && num(row.amount) > 0);
+    const included = normalizedRows.filter((row) => row && row.kind === 'included');
+    const rowsTotal = Math.round(charged.reduce((sum, row) => sum + num(row.amount), 0) * 100) / 100;
+    if (charged.length > 0 && oneTimeTotal > 0 && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
+      for (const row of normalizedRows) {
+        const isCharged = charged.includes(row);
+        if (!isCharged && !included.includes(row)) continue;
         lineItems.push(normalizeLineItem({
-          description: row.label || row.service || 'One-time service',
-          unitPrice: num(row.amount),
+          description: isCharged
+            ? (row.label || row.service || 'One-time service')
+            : `${row.label || row.service || 'One-time service'} (Included)`,
+          unitPrice: isCharged ? num(row.amount) : 0,
           frequency: 'one_time',
           taxable: false,
         }));

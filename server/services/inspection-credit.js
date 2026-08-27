@@ -108,31 +108,43 @@ function configuredCreditAmountForServiceKey(serviceKey) {
  */
 async function soldInspectionAmountForVisit(db, svc) {
   if (!svc || typeof svc !== 'object') return null;
+  // FACE value, never net: a comped or line-discounted inspection still
+  // earns the full credit (owner ruling 2026-08-03, pinned in
+  // tests/inspection-credit.test.js) — the promise is "the inspection is
+  // worth its quoted fee toward service", not a refund of what was paid
+  // (codex #3521 r4 P0).
   const gross = Number(svc.primary_line_price);
-  if (Number.isFinite(gross) && gross > 0) {
-    const disc = Number(svc.line_discount_dollars);
-    return round2(Math.max(0, gross - (Number.isFinite(disc) && disc > 0 ? disc : 0)));
-  }
+  if (Number.isFinite(gross) && gross > 0) return round2(gross);
   if (typeof db !== 'function') return null;
   try {
     if (svc.source_estimate_id) {
       const estimate = await db('estimates').where({ id: svc.source_estimate_id }).first();
       if (estimate) {
-        // Lazy: estimate-public requires this service at module scope.
-        const ep = require('../routes/estimate-public');
-        const estData = typeof ep.parseEstimateDataSafe === 'function'
-          ? ep.parseEstimateDataSafe(estimate)
-          : (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
-        const rows = typeof ep.normalizeOneTimeBreakdown === 'function'
-          ? (ep.normalizeOneTimeBreakdown(estData).items || [])
-          : [];
-        const row = rows.find((r) => String(r?.service || '') === 'rodent_inspection'
-          && r.kind === 'charge' && Number(r.amount) > 0);
-        if (row) return round2(Number(row.amount));
+        const estData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data)
+          : (estimate.estimate_data || {});
+        const result = estData?.result && typeof estData.result === 'object'
+          ? estData.result
+          : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : {});
+        const oneTime = result?.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+        const rawRows = [
+          ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+          ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+          ...(Array.isArray(result?.results?.oneTime?.items) ? result.results.oneTime.items : []),
+        ];
+        // Gross line price — before any service-specific credit netted it.
+        const row = rawRows.find((r) => r && String(r.service || '') === 'rodent_inspection' && r.quoteRequired !== true);
+        const face = row ? Number(row.priceBeforeServiceSpecificDiscount ?? row.price ?? row.amount) : NaN;
+        if (Number.isFinite(face) && face > 0) return round2(face);
       }
     }
+    // Legacy grouped row with no primary line recorded: the parent price
+    // minus its add-ons is the inspection's face ONLY when nothing
+    // discounted the group — a discounted group would yield a net figure.
     const parent = Number(svc.estimated_price);
-    if (Number.isFinite(parent) && parent > 0 && svc.id) {
+    const groupDiscounted = [svc.discount_dollars, svc.line_discount_dollars, svc.discount_amount, svc.line_discount_amount]
+      .some((v) => Number.isFinite(Number(v)) && Number(v) > 0);
+    if (Number.isFinite(parent) && parent > 0 && svc.id && !groupDiscounted) {
       const addons = await db('scheduled_service_addons')
         .where({ scheduled_service_id: svc.id })
         .select('estimated_price');
@@ -147,11 +159,15 @@ async function soldInspectionAmountForVisit(db, svc) {
 }
 
 function closeoutCreditAmountForServiceKey(serviceKey, soldAmount) {
+  const configured = configuredCreditAmountForServiceKey(serviceKey);
   if (String(serviceKey || '') === 'rodent_inspection') {
     const sold = Number(soldAmount);
-    if (Number.isFinite(sold) && sold > 0) return round2(sold);
+    // The configured fee is the FLOOR (comped/discounted inspections still
+    // earn the full credit); a higher quoted face value — a $125 promise
+    // made before the fee dropped — is honored in full.
+    if (Number.isFinite(sold) && sold > 0) return round2(Math.max(sold, configured));
   }
-  return configuredCreditAmountForServiceKey(serviceKey);
+  return configured;
 }
 
 /**

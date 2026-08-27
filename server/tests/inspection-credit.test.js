@@ -1476,10 +1476,11 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
     return db;
   };
 
-  test('a grouped booking credits the primary line net of its line discount, not the group total', async () => {
+  test('a grouped booking credits the primary line FACE value — never the group total, never net of a line discount', async () => {
     const svc = { id: 'v1', estimated_price: 275, primary_line_price: 75, line_discount_dollars: 0 };
     expect(await IC.soldInspectionAmountForVisit(fakeDb(), svc)).toBe(75);
-    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { ...svc, line_discount_dollars: 10 })).toBe(65);
+    // Owner ruling 2026-08-03: a discounted inspection still earns the full credit.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { ...svc, line_discount_dollars: 10 })).toBe(75);
   });
 
   test('an estimate-accepted visit credits the estimate\'s inspection row', async () => {
@@ -1489,11 +1490,24 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
     ] } } } };
     const svc = { id: 'v2', estimated_price: 425, source_estimate_id: 'est-1' };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate }), svc)).toBe(125);
+    // A service-specific credit that comped the inspection leaves its FACE value intact.
+    const comped = { id: 'est-2', estimate_data: JSON.stringify({ engineResult: { oneTime: { total: 300, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125, priceAfterDiscount: 0, serviceSpecificDiscountApplied: true },
+    ] } } }) };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: comped }), { ...svc, source_estimate_id: 'est-2' })).toBe(125);
   });
 
-  test('a legacy grouped row with no primary line credits the parent price minus its add-ons', async () => {
+  test('a legacy grouped row with no primary line credits the parent price minus its add-ons — unless the group was discounted', async () => {
     const svc = { id: 'v3', estimated_price: 275 };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ addons: [{ estimated_price: 200 }] }), svc)).toBe(75);
+    // A discounted group would yield a NET figure — decline, so the closeout uses the configured face.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ addons: [{ estimated_price: 200 }] }), { ...svc, discount_dollars: 20 })).toBeNull();
+  });
+
+  test('the configured fee is the floor of the closeout credit; a higher quoted face is honored in full', () => {
+    const configured = IC.configuredCreditAmountForServiceKey('rodent_inspection');
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 125)).toBe(125);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', configured - 15)).toBe(configured);
   });
 
   test('nothing sold → null (caller falls back to the configured fee); lookup errors are soft', async () => {

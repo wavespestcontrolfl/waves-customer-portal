@@ -761,7 +761,12 @@ describe('one-time rows itemize on the proposal when they account for the stored
       ] } } },
     });
     const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
-    expect(oneTime.map((l) => l.description)).toEqual(['Rodent Trapping']);
+    // Quote-required rows never print; a credited (included) row prints as
+    // approved scope at $0 so the PDF matches the page (codex #3521 r4 P1).
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Inspection (Included)', 0],
+    ]);
   });
 });
 
