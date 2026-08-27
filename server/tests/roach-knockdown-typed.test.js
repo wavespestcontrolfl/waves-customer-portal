@@ -69,8 +69,8 @@ describe('knockdown schemas', () => {
   });
 
   test('owner-required cores enforced; both types require a next step', () => {
-    expect(REQUIRED_FINDINGS_FIELDS.german_roach_knockdown).toContain('prep_status');
-    expect(REQUIRED_FINDINGS_FIELDS.palmetto_roach_knockdown).toContain('roach_type');
+    expect(REQUIRED_FINDINGS_FIELDS.german_roach_knockdown).toEqual(['activity_level', 'treatment_completed', 'followup_required']);
+    expect(REQUIRED_FINDINGS_FIELDS.palmetto_roach_knockdown).toEqual(['activity_level', 'treatment_completed', 'followup_needed']);
     expect(nextStepRequiredForType('german_roach_knockdown')).toBe(true);
     expect(nextStepRequiredForType('palmetto_roach_knockdown')).toBe(true);
     for (const type of ['german_roach_knockdown', 'palmetto_roach_knockdown']) {
@@ -204,7 +204,8 @@ describe('validation', () => {
       enforceRequired: true,
     });
     expect(german.ok).toBe(false);
-    expect(german.missing).toEqual(expect.arrayContaining(['rooms_treated', 'prep_status', 'treatment_completed', 'followup_required']));
+    expect(german.missing).toEqual(expect.arrayContaining(['treatment_completed', 'followup_required']));
+    expect(german.missing).not.toContain('rooms_treated');
 
     const palmetto = validateTypedFindings({
       type: 'palmetto_roach_knockdown',
@@ -213,7 +214,8 @@ describe('validation', () => {
       enforceRequired: true,
     });
     expect(palmetto.ok).toBe(false);
-    expect(palmetto.missing).toEqual(expect.arrayContaining(['roach_type', 'exterior_harborage', 'customer_recommendations']));
+    expect(palmetto.missing).toEqual(expect.arrayContaining(['treatment_completed', 'followup_needed']));
+    expect(palmetto.missing).not.toContain('roach_type');
   });
 
   test('follow-up window required only when a follow-up is required', () => {
@@ -243,7 +245,10 @@ describe('validation', () => {
       enforceRequired: true,
     });
     expect(result.ok).toBe(false);
-    expect(result.missing).toEqual(expect.arrayContaining(['primary_harborage', 'treatment_completed']));
+    // primary_harborage is optional detail since the 2026-08-27 ruling — the
+    // empty-parts rule is exercised by the still-required treatment chips.
+    expect(result.missing).toEqual(expect.arrayContaining(['treatment_completed']));
+    expect(result.missing).not.toContain('primary_harborage');
   });
 
   test('"None observed" cannot contradict recorded live evidence (Codex P2 round 3)', () => {

@@ -240,27 +240,27 @@ const PROJECT_TYPES = {
       // gauge contract requires a 0-mapped option) — the initial knockdown
       // always has activity by definition.
       { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy', 'Severe'] },
-      { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Activity', placeholder: 'Kitchen, hall bath, laundry…' },
-      { key: 'primary_harborage', label: 'Primary harborage', type: 'chips', section: 'Activity', options: [
+      { key: 'rooms_treated', detail: true, label: 'Rooms treated', type: 'text', section: 'Activity', placeholder: 'Kitchen, hall bath, laundry…' },
+      { key: 'primary_harborage', detail: true, label: 'Primary harborage', type: 'chips', section: 'Activity', options: [
         'Behind refrigerator', 'Behind stove', 'Under sink', 'Dishwasher area',
         'Cabinet hinges', 'Pantry', 'Bathroom plumbing', 'Wall voids', 'Other',
       ] },
-      { key: 'live_roaches_observed', label: 'Live roaches observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
-      { key: 'droppings_egg_cases', label: 'Droppings / egg cases observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
-      { key: 'sanitation_issue', label: 'Sanitation issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
-      { key: 'moisture_leak_issue', label: 'Moisture / leak issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
-      { key: 'prep_status', label: 'Customer prep status', type: 'select', section: 'Conditions', options: ['Completed', 'Partial', 'Not started'] },
+      { key: 'live_roaches_observed', detail: true, label: 'Live roaches observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
+      { key: 'droppings_egg_cases', detail: true, label: 'Droppings / egg cases observed', type: 'select', section: 'Evidence', options: ['Yes', 'No'] },
+      { key: 'sanitation_issue', detail: true, label: 'Sanitation issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
+      { key: 'moisture_leak_issue', detail: true, label: 'Moisture / leak issue', type: 'select', section: 'Conditions', options: ['Yes', 'No'] },
+      { key: 'prep_status', detail: true, label: 'Customer prep status', type: 'select', section: 'Conditions', options: ['Completed', 'Partial', 'Not started'] },
       { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
         'Gel bait', 'Insect growth regulator', 'Crack & crevice treatment',
         'Dust application', 'Vacuum / flush-out', 'Monitors / glue boards',
         'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment',
       ] },
-      { key: 'monitors_placed', label: 'Monitors placed', type: 'select', section: 'Treatment', options: ['Yes', 'No'] },
+      { key: 'monitors_placed', detail: true, label: 'Monitors placed', type: 'select', section: 'Treatment', options: ['Yes', 'No'] },
       { key: 'followup_required', label: 'Follow-up required', type: 'select', section: 'Follow-up', options: ['Yes', 'No'] },
       // Conditionally required: only meaningful once a follow-up is required
       // ('Yes' is the only non-'No' answer). requiredUnless is served in the
       // schema slice so the client pre-submit gate mirrors the server.
-      { key: 'followup_window', label: 'Follow-up window', type: 'select', section: 'Follow-up', requiredUnless: { field: 'followup_required', value: 'No' }, options: ['10–14 days', '2–3 weeks', 'As needed'] },
+      { key: 'followup_window', detail: true, label: 'Follow-up window', type: 'select', section: 'Follow-up', requiredUnless: { field: 'followup_required', value: 'No' }, options: ['10–14 days', '2–3 weeks', 'As needed'] },
     ],
   },
 
@@ -275,26 +275,26 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['kitchen', 'garage', 'exterior', 'entry_point', 'harborage', 'evidence', 'treatment_area', 'other'],
     findingsFields: [
-      { key: 'roach_type', label: 'Roach type', type: 'select', section: 'Activity', options: ['Palmetto', 'American', 'Smoky brown', 'Unknown large roach'] },
+      { key: 'roach_type', detail: true, label: 'Roach type', type: 'select', section: 'Activity', options: ['Palmetto', 'American', 'Smoky brown', 'Unknown large roach'] },
       // 'None observed' = the cleared state for revisits (gauge contract).
       { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy'] },
       // Conditionally required: a cleared visit has no truthful location to
       // name. requiredUnless is served in the schema slice so the client
       // pre-submit gate mirrors the server enforcement (flea precedent).
-      { key: 'activity_locations', label: 'Activity locations', type: 'chips', section: 'Activity', requiredUnless: { field: 'activity_level', value: 'None observed' }, options: [
+      { key: 'activity_locations', detail: true, label: 'Activity locations', type: 'chips', section: 'Activity', requiredUnless: { field: 'activity_level', value: 'None observed' }, options: [
         'Kitchen', 'Bathrooms', 'Garage', 'Laundry', 'Lanai', 'Attic',
         'Exterior perimeter', 'Entry doors', 'Mulch / landscape beds', 'Drains',
       ] },
-      { key: 'interior_activity', label: 'Interior activity', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
-      { key: 'exterior_harborage', label: 'Exterior harborage', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
-      { key: 'moisture_issue', label: 'Moisture issue', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
-      { key: 'entry_points_observed', label: 'Entry points observed', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'interior_activity', detail: true, label: 'Interior activity', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'exterior_harborage', detail: true, label: 'Exterior harborage', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'moisture_issue', detail: true, label: 'Moisture issue', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'entry_points_observed', detail: true, label: 'Entry points observed', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
       { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
         'Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment',
         'Attic / void treatment', 'Drain / moisture area treatment', 'Bait placement',
         'Dust application', 'Glue boards placed',
       ] },
-      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'customer_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Keep garage seals tight', 'Reduce moisture near entry points', 'Seal exterior gaps',
         'Trim vegetation from structure', 'Remove debris near foundation',
         'Store firewood away from home',

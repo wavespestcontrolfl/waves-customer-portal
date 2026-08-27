@@ -761,16 +761,12 @@ const REQUIRED_FINDINGS_FIELDS = {
   // followup_window (followup_required = Yes) and palmetto activity_locations
   // (activity_level ≠ 'None observed') are conditionally required in
   // validateTypedFindings instead.
-  german_roach_knockdown: [
-    'activity_level', 'rooms_treated', 'primary_harborage', 'live_roaches_observed',
-    'droppings_egg_cases', 'sanitation_issue', 'moisture_leak_issue', 'prep_status',
-    'treatment_completed', 'monitors_placed', 'followup_required',
-  ],
-  palmetto_roach_knockdown: [
-    'roach_type', 'activity_level', 'interior_activity',
-    'exterior_harborage', 'moisture_issue', 'entry_points_observed',
-    'treatment_completed', 'customer_recommendations', 'followup_needed',
-  ],
+  // Owner ruling 2026-08-27 (live walkthrough): the knockdown cores are
+  // activity + treatment completed + follow-up. The former eleven/nine
+  // required fields made these the slowest closeouts in the fleet; the
+  // rest stay capturable behind "More detail (optional)".
+  german_roach_knockdown: ['activity_level', 'treatment_completed', 'followup_required'],
+  palmetto_roach_knockdown: ['activity_level', 'treatment_completed', 'followup_needed'],
 };
 
 // Next-step chips per type (contract §7). Each chip maps to the
