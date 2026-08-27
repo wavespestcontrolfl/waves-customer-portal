@@ -3461,10 +3461,15 @@ function mergedRangesSpan(ranges, windowStart, windowEnd) {
  *       sheet feeds it — lane, payer, callback / always-free service type,
  *       the live annual_prepay_invoice stamp validated by
  *       annualPrepayCoversVisit (a bare annual_prepay_term_id link is NOT
- *       per-application fee, completion-auto-charge gate. Only kind
+ *       per-application fee, completion-auto-charge gate, and LIVE Auto Pay
+ *       eligibility (customerOnAutopay — pause evaluated against the
+ *       horizon, chargeable-method walk as of now). Only kind
  *       'auto_charge' keeps the warning — that is the one outcome that
  *       charges the saved card at completion; 'invoice' (pay-link),
- *       'payer', 'covered_*', 'prepaid' and 'no_charge' do not.
+ *       'payer', 'covered_*', 'prepaid' and 'no_charge' do not — and only
+ *       when neither the visit's own invoices nor the sibling
+ *       first-application invoice of its estimate/date already suppress
+ *       the completion charge.
  *
  * A term ending inside the window is not covered at the horizon and stays
  * flagged (that card is needed to renew). Fails toward the warning: any
@@ -3580,6 +3585,8 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     // completion predicate with the schedule sheet's inputs.
     const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
     const { resolveForInvoice } = require('./payer');
+    const { customerOnAutopay } = require('./autopay-eligibility');
+    const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
     // Real columns only: the payer is resolved by the payer authority
@@ -3595,7 +3602,11 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       .select(
         'ss.id', 'ss.customer_id', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
+        'ss.source_estimate_id', 'ss.scheduled_date',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
+        'c.autopay_paused_until as customer_autopay_paused_until',
+        'c.autopay_payment_method_id as customer_autopay_payment_method_id',
+        'c.ach_status as customer_ach_status',
         'c.per_application_fee', 'c.payer_id as customer_payer_id',
       );
     for (const v of visits || []) {
@@ -3612,11 +3623,31 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
         scheduledServiceId: v.id, throwOnError: true,
       });
+      // LIVE Auto Pay eligibility, exactly as completion asks it
+      // (customerOnAutopay: enrollment flag + pause + chargeable-method
+      // walk — a paused customer or one with no chargeable method gets a
+      // pay-link, not a card charge), with ONE window adjustment:
+      // customerOnAutopay reads the pause as of NOW, but a pause lapsing
+      // INSIDE [today, horizon] still lets a later completion charge the
+      // card, so only a pause covering the whole window (>= horizon —
+      // the same rule as the retry guard above) counts as inactive here.
+      // failClosed: an eligibility read error propagates to the outer
+      // catch and exempts nobody, instead of reading as "no chargeable
+      // method" and silently widening the exemption.
+      const pausedUntilYmd = dateOnly(v.customer_autopay_paused_until);
+      const pausedThroughWindow = !!(pausedUntilYmd && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntilYmd) && pausedUntilYmd >= horizon);
+      const autopayActive = !pausedThroughWindow && await customerOnAutopay({
+        id: v.customer_id,
+        autopay_enabled: v.autopay_enabled,
+        autopay_paused_until: null,
+        autopay_payment_method_id: v.customer_autopay_payment_method_id ?? null,
+        ach_status: v.customer_ach_status ?? null,
+      }, { db: conn, failClosed: true });
       const lane = resolveBillingLane({ billing_mode: v.billing_mode, waveguard_tier: v.waveguard_tier, monthly_rate: v.monthly_rate });
       const prediction = predictCompletionBilling({
         lane: lane.mode,
         billingMode: v.billing_mode || null,
-        autopayActive: v.autopay_enabled === true,
+        autopayActive,
         estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
         monthlyRate: v.monthly_rate,
         perApplicationFee: v.per_application_fee,
@@ -3646,6 +3677,23 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
       const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
       if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
+      if (!reused) {
+        // No direct invoice on the visit → completion consults the SIBLING
+        // first-application invoice of the same estimate/date
+        // (findFirstApplicationInvoiceForEstimateService, the shared
+        // service completion itself calls): a refunded match PARKS the
+        // completion (manual billing, no charge); a live match is REUSED —
+        // settled (paid/prepaid/processing) means no card charge; a
+        // canceled setup-fee acceptance invoice with no live replacement
+        // also parks (bill both charges by hand). Only "no suppressor at
+        // all" or a live OPEN sibling (which completion can still
+        // auto-charge) keeps the warning.
+        const sibling = await findFirstApplicationInvoiceForEstimateService(v, conn);
+        const siblingStatus = statusOf(sibling.invoice);
+        if (siblingStatus === 'refunded') continue;
+        if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
+        if (!sibling.invoice && sibling.canceledSetupFee) continue;
+      }
       // Only an auto_charge touches the saved card at completion ('invoice'
       // — gate off or a priced callback — goes out as a pay-link).
       covered.delete(customerId);
