@@ -597,6 +597,40 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/row\.window_start = null;\s*\n\s*row\.window_end = null;/);
   });
 
+  test('in-activation linkage keeps the property helpers on the activation connection (no self-deadlock)', () => {
+    // codex #3504 r11: with GATE_CUSTOMER_PROPERTIES on, recordCallProperty
+    // / ensurePrimaryProperty opened their own pool transactions and waited
+    // on the customers row the activation already holds.
+    const props = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-properties.js'), 'utf8');
+    expect(props).toMatch(/const \{ claimFence = null, conn = null \} = opts;/);
+    expect(props).toMatch(/return ensurePrimaryCore\(customerOrId, opts, conn && conn\.isTransaction \? conn : db\);/);
+    expect(props).toMatch(/return conn && conn\.isTransaction \? run\(conn\) : db\.transaction\(run\);/);
+    const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
+    expect(linkageSrc).toMatch(/ensurePrimaryProperty\(customerId, \{ conn: database \}\)/);
+    expect(linkageSrc).toMatch(/source: 'estimate_accept',\s*\n\s*conn: database,/);
+  });
+
+  test('a reused wizard draft drops its stale property_id when the quoted address changes', () => {
+    // codex #3504 r11: linkAcceptedEstimateProperty prioritizes an existing
+    // estimate.property_id, so a re-run for another property would stamp
+    // the next series with the OLD property.
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/const wizardAddressChanged = \(row\) =>/);
+    expect((publicQuote.match(/\.\.\.\(wizardAddressChanged\((lockedEst|lockedDup)\) \? \{ property_id: null \} : \{\}\)/g) || []).length).toBe(2);
+    // Both locked reads carry the address the comparison needs.
+    expect((publicQuote.match(/\.first\('id', 'source', 'status', 'archived_at', 'address'\)/g) || []).length).toBe(2);
+  });
+
+  test('activation sends the new-recurring welcome through the shared candidacy gate, not the paid-tier tagger gate', () => {
+    // codex #3504 r11: the accept path welcomes on new-signup candidacy
+    // alone ("all tiers are included"); the tagger requires a paid tier.
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/isNewRecurringSignupCandidate\(parent\.customer_id, \{ excludeServiceId: parent\.id \}\)/);
+    expect(recoverySrc).toMatch(/entryPoint: 'wizard_series_activation_welcome'/);
+    // Welcome only for an ACTIVATED, live parent.
+    expect(recoverySrc).toMatch(/parentRow\?\.is_recurring\s*\n\s*&& String\(parentRow\.status \|\| ''\) !== 'cancelled'/);
+  });
+
   test('seeded children reserve the CATALOG duration, not the coarse funnel duration', () => {
     // codex #3504 r10: mosquito's funnel books 45min; the cadence catalog
     // row reserves 60 — children seeded at 45 release their slot early.

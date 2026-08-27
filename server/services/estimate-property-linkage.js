@@ -389,7 +389,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // Lazy primary backfill (same contract as the call pipeline): the
     // customer's on-file address takes the primary slot before the quoted
     // address is classified, so a second property never lands as primary.
-    await ensurePrimaryProperty(customerId);
+    // On the caller's connection (codex #3504 r11): the wizard activation
+    // runs this inside a transaction that already holds the customers row.
+    await ensurePrimaryProperty(customerId, { conn: database });
 
     let propertyId = null;
     if (estimate.property_id) {
@@ -531,6 +533,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         occupancyType: 'unknown',
         label: null,
         source: 'estimate_accept',
+        conn: database,
       });
       propertyId = created.propertyId;
       if (!propertyId) {

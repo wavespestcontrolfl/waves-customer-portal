@@ -121,7 +121,12 @@ async function ensurePrimaryProperty(customerOrId, opts = {}) {
   // call_log row inside one transaction spanning the existence check and
   // the insert, so a reclaimed stale worker cannot lazily create the
   // primary from its obsolete extraction. Unfenced callers unchanged.
-  const { claimFence = null } = opts;
+  // opts.conn (codex #3504 r11): a caller already inside a transaction
+  // that holds the customers row (the wizard series activation, via its
+  // setup-fee stamp) must run the core on THAT connection — a fresh pool
+  // transaction here would wait on the row the caller holds and the
+  // caller can't commit while awaiting it (self-deadlock).
+  const { claimFence = null, conn = null } = opts;
   if (claimFence && claimFence.callLogId && claimFence.procToken) {
     return db.transaction(async (trx) => {
       // LOCK ORDER: customers row FIRST, then call_log (codex #3418 r22)
@@ -136,7 +141,7 @@ async function ensurePrimaryProperty(customerOrId, opts = {}) {
       return ensurePrimaryCore(customerOrId, opts, trx);
     });
   }
-  return ensurePrimaryCore(customerOrId, opts, db);
+  return ensurePrimaryCore(customerOrId, opts, conn && conn.isTransaction ? conn : db);
 }
 
 async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, conn = db) {
@@ -206,7 +211,7 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline', claimFence = null }) {
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -222,7 +227,11 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   // branches run in SAVEPOINTS (nested trx) — a failed insert inside a
   // plain transaction would poison it (try/catch in a TXN is not
   // fail-open).
-  return db.transaction(async (trx) => {
+  // Runs on the caller's transaction when given one (codex #3504 r11 —
+  // see ensurePrimaryProperty's opts.conn): the customers FOR UPDATE below
+  // is then a re-lock of a row the caller already holds (no-op), and the
+  // 23505 retry savepoints nest under the caller's transaction as before.
+  const run = async (trx) => {
   await trx('customers').where({ id: customerId }).forUpdate().first('id');
   // Optional processing-claim fence (#3418 r16): a call-pipeline caller
   // passes { callLogId, procToken } so THIS durable insert is conditioned
@@ -314,7 +323,8 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
 
   logger.info(`[customer-properties] recorded ${source} ${isPrimary ? 'primary' : 'secondary'} property ${propertyId} for customer ${customerId} (occupancy=${normalizeOccupancy(occupancyType)})`);
   return { created: true, propertyId };
-  });
+  };
+  return conn && conn.isTransaction ? run(conn) : db.transaction(run);
 }
 
 /**

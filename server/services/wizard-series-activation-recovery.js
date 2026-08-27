@@ -169,6 +169,36 @@ async function runActivationFollowThroughForParent(parent, { database = db } = {
   } catch (err) {
     logger.warn(`[wizard-series-recovery] tagger re-run failed for parent=${parent.id} (non-blocking): ${err.message}`);
   }
+  // Activation-specific welcome (codex #3504 r11): the tagger's welcome
+  // gate requires a PAID tier and rejects auto-derived tier labels, but
+  // the accept path's welcome is gated on new-recurring-signup candidacy
+  // alone ("all tiers are included"). A self-booked per-visit plan gets
+  // no paid tier, so the tagger re-run above can never welcome it — send
+  // through the SAME shared candidacy gate and the SAME idempotent
+  // enqueue (hasWelcomeSequence) every accept path uses.
+  try {
+    const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
+    const parentRow = await database('scheduled_services')
+      .where({ id: parent.id })
+      .first('id', 'customer_id', 'recurring_pattern', 'is_recurring', 'status');
+    if (parentRow?.is_recurring
+      && String(parentRow.status || '') !== 'cancelled'
+      && await isNewRecurringSignupCandidate(parent.customer_id, { excludeServiceId: parent.id })) {
+      const customer = await database('customers')
+        .where({ id: parent.customer_id })
+        .first('id', 'first_name', 'last_name', 'phone');
+      if (customer) {
+        await sendNewRecurringWelcome({
+          customer,
+          scheduledServiceId: parent.id,
+          recurringPattern: parentRow.recurring_pattern || null,
+          entryPoint: 'wizard_series_activation_welcome',
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn(`[wizard-series-recovery] activation welcome failed for parent=${parent.id} (non-blocking): ${err.message}`);
+  }
   // Lead conversion rides the durable follow-through too (codex #3504
   // r10): a worker death after the activation commit but before the
   // route's conversion block would otherwise leave the quote-wizard lead

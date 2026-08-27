@@ -1636,6 +1636,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .where({ source: 'quote_wizard', status: 'draft' })
         .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
         .first();
+      // A refreshed wizard draft whose ADDRESS changed must drop its stale
+      // property_id (codex #3504 r11): the draft row is reused across
+      // re-runs, the accept-time linkage links property_id on activation,
+      // and linkAcceptedEstimateProperty prioritizes an existing
+      // property_id over the address — a re-run for a different property
+      // would otherwise stamp the next series with the OLD property.
+      const wizardAddressChanged = (row) => String(row?.address || '').trim().toLowerCase()
+        !== String(quoteFullAddress || '').trim().toLowerCase();
       const estFields = {
         customer_id: customerId,
         customer_name: `${contactFirstName} ${contactLastName}`,
@@ -1675,7 +1683,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
-            .first('id', 'source', 'status', 'archived_at');
+            .first('id', 'source', 'status', 'archived_at', 'address');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
@@ -1684,7 +1692,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (!consumedBy) return;
           }
           await applySetupFeeQuote(trx);
-          await trx('estimates').where({ id: existingEst.id }).update({ ...estFields, archived_at: null, updated_at: new Date() });
+          await trx('estimates').where({ id: existingEst.id }).update({
+            ...estFields,
+            ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
+            archived_at: null,
+            updated_at: new Date(),
+          });
           draftEstimateId = existingEst.id;
         });
       } else {
@@ -1714,13 +1727,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               const lockedDup = await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId })
                 .forUpdate()
-                .first('id', 'source', 'status', 'archived_at');
+                .first('id', 'source', 'status', 'archived_at', 'address');
               if (lockedDup && lockedDup.source === 'quote_wizard'
                 && lockedDup.status === 'draft' && !lockedDup.archived_at) {
                 await applySetupFeeQuote(trx);
                 const refreshed = await trx('estimates')
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
-                  .update({ ...estFields, updated_at: new Date() });
+                  .update({
+                    ...estFields,
+                    ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
+                    updated_at: new Date(),
+                  });
                 if (refreshed === 1) {
                   draftEstimateId = duplicateBlock.existingEstimateId;
                   logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
