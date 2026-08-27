@@ -740,6 +740,49 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     }
   });
 
+  test('a fix that INTRODUCES a named competitor persists its flagged verdict atomically with the head pin (PR r13 P1)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      // Competitor-FREE original verdict on the run; the FIX's fresh gate
+      // run flags requiresHumanReview.
+      const db = makeDb({
+        autonomous_runs: [{
+          id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1',
+          comparison_table_result: JSON.stringify({ pass: true, findings: [], requiresHumanReview: false }),
+          draft_payload: '{}',
+        }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
+        content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
+      });
+      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+        validateAutonomousRunGates: async () => ({ ok: true, comparisonResult: { pass: true, findings: [], requiresHumanReview: true } }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => ({ action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }),
+          _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      // The flagged verdict and the new head pin landed in ONE update —
+      // merge governance now treats the run as governed.
+      expect(JSON.parse(row.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+      expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('newcommit999aaa');
+    } finally {
+      fg.isEnabled.mockRestore();
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
+  });
+
   // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
   test('frontmatterFixViolation flags any non-whitelisted key change (title/hero path/author/date/added key)', () => {
     const orig = '---\ntitle: Roof Rats\nhero_image: /images/blog/x/hero.webp\nauthor: Adam\npublished: "2026-07-01"\n---\nbody text';

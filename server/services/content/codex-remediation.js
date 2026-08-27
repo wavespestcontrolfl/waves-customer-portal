@@ -1267,7 +1267,11 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       return { ok: false, reason: `pre-publish visibility: ${(visResult && (visResult.error || JSON.stringify((visResult.findings || []).map((f) => f.code)).slice(0, 200))) || 'no result'}` };
     }
 
-    return { ok: true };
+    // comparisonResult rides along so the autonomous caller can persist THIS
+    // fix's verdict atomically with the head re-pin (PR r13 P1): merge
+    // governance reads the run's comparison_table_result, and a fix that
+    // INTRODUCES a named competitor must flip the run to governed.
+    return { ok: true, comparisonResult };
   } catch (err) {
     return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };
   }
@@ -2224,6 +2228,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   } catch (e) {
     logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
   }
+  // The comparison verdict of the LAST successful gate re-run, captured so
+  // onRemediated can persist it atomically with the head pin (PR r13 P1).
+  let lastComparisonVerdict = null;
   return runRemediationForPr({
     guardContext,
     prNumber: pr && pr.number,
@@ -2269,22 +2276,30 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // must wait for a human, never merge unverified).
     onRemediated: run && run.id
       ? async ({ frontmatterChanges, newHead }) => {
-        // Best-effort re-pin: a missing row or unparseable payload SKIPS the
-        // stamp (warn) rather than parking — an unpinned head simply cannot
-        // auto-merge on a governed run (the poller's pin check fails
-        // closed), and overwriting a corrupt payload would destroy data.
+        // Re-pin + verdict persist, ATOMICALLY (PR r13 P1): merge governance
+        // reads comparison_table_result, so a fix that INTRODUCES a named
+        // competitor must land its flagged verdict in the same update as
+        // the head pin — a stale competitor-free verdict would leave the
+        // run ungoverned and skip the kill-switch recheck entirely.
+        // Fail-soft (warn + skip) is allowed ONLY for a competitor-free
+        // verdict: an unpinned competitor-free head merges like any
+        // ordinary post. A FLAGGED verdict that cannot persist THROWS —
+        // runRemediationForPr post-push-parks the PR (fail closed).
         if (newHead) {
+          const flagged = Boolean(lastComparisonVerdict && lastComparisonVerdict.requiresHumanReview === true);
           try {
             const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-            let dp = fresh ? fresh.draft_payload : undefined;
+            if (!fresh) throw new Error('run row missing');
+            let dp = fresh.draft_payload;
             if (typeof dp === 'string') dp = JSON.parse(dp);
-            if (fresh && (dp === null || dp === undefined || typeof dp === 'object')) {
-              const next = (dp && typeof dp === 'object') ? dp : {};
-              next.autopublish_head_sha = newHead;
-              await db('autonomous_runs').where({ id: run.id })
-                .update({ draft_payload: JSON.stringify(next), updated_at: new Date() });
-            }
+            const next = (dp && typeof dp === 'object') ? dp : {};
+            next.autopublish_head_sha = newHead;
+            const update = { draft_payload: JSON.stringify(next), updated_at: new Date() };
+            if (lastComparisonVerdict) update.comparison_table_result = JSON.stringify(lastComparisonVerdict);
+            const stamped = await db('autonomous_runs').where({ id: run.id }).update(update);
+            if (!stamped) throw new Error('update matched no row');
           } catch (e) {
+            if (flagged) throw new Error(`autopublish re-pin/verdict persist failed on a competitor-flagged fix: ${e.message}`);
             logger.warn(`[codex-remediation] autopublish head re-pin skipped for run ${run.id}: ${e.message} — a governed merge of this head will wait for a human`);
           }
         }
@@ -2294,7 +2309,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
-    revalidateFix: (fixedMarkdown) => revalidate(fixedMarkdown, run, deps),
+    revalidateFix: async (fixedMarkdown) => {
+      const r = await revalidate(fixedMarkdown, run, deps);
+      lastComparisonVerdict = (r && r.ok === true && r.comparisonResult) ? r.comparisonResult : null;
+      return r;
+    },
     // Last-instant queue re-check before the branch push (the poller's check
     // runs BEFORE the LLM round; this one closes the window during it).
     prePushCheck: deps.prePushCheck || null,
