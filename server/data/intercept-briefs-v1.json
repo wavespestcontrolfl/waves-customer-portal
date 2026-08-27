@@ -29,7 +29,7 @@
     "Article",
     "FAQPage"
    ],
-   "thesis": "Promote the existing in-wall/Taexx post to cluster anchor.",
+   "thesis": "Promote the existing in-wall/Taexx post (the builder-installed system sold by HomeTeam Pest Defense) to cluster anchor.",
    "outline": [
     "Add internal links to A1/A2/A3 once live (this post becomes cluster anchor)",
     "Update title tag toward 'Taexx / in-wall pest control review' intent",
@@ -43,7 +43,9 @@
    ],
    "internal_links": [],
    "verify_notes": [
-    "Verify all claims still match HomeTeam's current published materials; re-snapshot sources."
+    "Verify all claims still match HomeTeam Pest Defense's current published materials; re-snapshot sources.",
+    "Refer to the vendor by its full allowlisted name 'HomeTeam Pest Defense' on first mention (short form 'HomeTeam' afterward is fine); every statement about HomeTeam Pest Defense or Taexx must be a neutral quote/paraphrase of its own published materials with the pestdefense.com link and explicit attribution in the same sentence — never an evaluative or reliability claim.",
+    "Do NOT emit a <ComparisonTable> anywhere in this post. Any table column that names HomeTeam Pest Defense, Taexx, or a builder-installed system ('Builder's in-wall Taexx system', 'HomeTeam's In-Wall Pest Control') fails the comparison-table gate closed, and a table forces the strict table-scan path. Present coverage (what the system treats vs. what it does not) as headed prose and bullet lists instead."
    ]
   },
   {
@@ -70,12 +72,12 @@
     "Article",
     "FAQPage"
    ],
-   "thesis": "Your builder included a pest control system in your walls. Here's what it actually treats, what it can't touch (drywood termites, subterranean termites, rodents, lawn/turf pests, mosquitoes), and the one thing nobody tells you at closing: it only works with one company's key.",
+   "thesis": "Your builder included a pest control system in your walls. Here's what it actually treats, what it can't touch (drywood termites, subterranean termites, rodents, lawn/turf pests, mosquitoes), and the one thing nobody tells you at closing: the port key is proprietary to HomeTeam Pest Defense, per its own FAQ.",
    "outline": [
     "What Taexx actually is (tubes, exterior port, 10–15 zones — neutral, accurate description)",
     "What it treats reasonably well (wall-void crawling insects) — be fair; credibility requires it",
-    "What it does NOT cover — lead with termites: HomeTeam's own knowledge center states Taexx 'is not a deterrent for termites.' In SWFL that's the headline risk (link Waves drywood/subterranean content)",
-    "The proprietary key: HomeTeam's FAQ states the port box is tamper-resistant, locked, and the key 'is not commercially available' — what that means for your service options (bridge to A2)",
+    "What it does NOT cover — lead with termites: HomeTeam Pest Defense's own knowledge center states Taexx 'is not a deterrent for termites.' In SWFL that's the headline risk (link Waves drywood/subterranean content)",
+    "The proprietary key: HomeTeam Pest Defense's FAQ states the port box is tamper-resistant, locked, and the key 'is not commercially available' — what that means for your service options (bridge to A2)",
     "What a complete first-year protection plan looks like for a new SWFL build (bridge to A3)",
     "FAQ block (5–7 Qs mirroring secondary KWs)"
    ],
@@ -92,7 +94,9 @@
     "/pest-control-lakewood-ranch-fl/"
    ],
    "verify_notes": [
-    "Quote HomeTeam FAQ lines verbatim with quotation marks + link; snapshot must match."
+    "Quote HomeTeam Pest Defense FAQ lines verbatim with quotation marks + link; snapshot must match.",
+    "Refer to the vendor by its full allowlisted name 'HomeTeam Pest Defense' on first mention (short form 'HomeTeam' afterward is fine); every statement about HomeTeam Pest Defense or Taexx must be a neutral quote/paraphrase of its own published materials with the pestdefense.com link and explicit attribution in the same sentence — never an evaluative or reliability claim.",
+    "Do NOT emit a <ComparisonTable> anywhere in this post. Any table column that names HomeTeam Pest Defense, Taexx, or a builder-installed system ('Builder's in-wall Taexx system', 'HomeTeam's In-Wall Pest Control') fails the comparison-table gate closed, and a table forces the strict table-scan path. Present coverage (what the system treats vs. what it does not) as headed prose and bullet lists instead."
    ]
   },
   {
