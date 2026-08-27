@@ -4,7 +4,7 @@
  */
 const migration = require('../models/migrations/20260826000006_rodent_trapping_followup_included');
 
-const { LEGACY_PRICE, NEW_PRICE, LEGACY_DESCRIPTION, NEW_DESCRIPTION } = migration;
+const { LEGACY_PRICE, NEW_PRICE, LEGACY_DESCRIPTION, NEW_DESCRIPTION, LEGACY_INTERNAL_NOTES, NEW_INTERNAL_NOTES } = migration;
 const STATE_KEY = 'migration.20260826000006.state';
 
 function fakeKnex(db) {
@@ -27,7 +27,7 @@ function fakeKnex(db) {
 }
 
 const seedDb = (overrides = {}) => ({
-  services: [{ id: 'svc-fu', service_key: 'rodent_trapping_followup', base_price: LEGACY_PRICE, description: LEGACY_DESCRIPTION, ...overrides }],
+  services: [{ id: 'svc-fu', service_key: 'rodent_trapping_followup', base_price: LEGACY_PRICE, description: LEGACY_DESCRIPTION, internal_notes: LEGACY_INTERNAL_NOTES, ...overrides }],
   system_settings: [],
 });
 const fu = (db) => db.services[0];
@@ -39,9 +39,11 @@ describe('20260826000006 rodent_trapping_followup included at $0', () => {
     await migration.up(fakeKnex(db));
     expect(fu(db).base_price).toBe(NEW_PRICE);
     expect(fu(db).description).toBe(NEW_DESCRIPTION);
+    expect(fu(db).internal_notes).toBe(NEW_INTERNAL_NOTES);
     await migration.down(fakeKnex(db));
     expect(fu(db).base_price).toBe(LEGACY_PRICE);
     expect(fu(db).description).toBe(LEGACY_DESCRIPTION);
+    expect(fu(db).internal_notes).toBe(LEGACY_INTERNAL_NOTES);
     expect(stateRow(db)).toBeUndefined();
   });
 

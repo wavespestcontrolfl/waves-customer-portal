@@ -17,6 +17,9 @@ const LEGACY_PRICE = 95;
 const NEW_PRICE = 0;
 const LEGACY_DESCRIPTION = 'Additional follow-up trap check beyond the 1 included in base trapping service. Use for active infestations requiring extended monitoring.';
 const NEW_DESCRIPTION = 'Included callback/check for the same active trapping job — no charge. The Standard trapping plan includes unlimited callbacks; this row exists so the visit can be scheduled and reported, never billed.';
+// Seeded by 20260428000006 — per-visit billing guidance that no longer applies.
+const LEGACY_INTERNAL_NOTES = 'Per-visit rate. 3-pack available at $245 (saves $40).';
+const NEW_INTERNAL_NOTES = 'Included callback under the Standard trapping plan (unlimited callbacks for the active job). Never billed; no packs.';
 
 async function loadState(knex) {
   if (!(await knex.schema.hasTable('system_settings'))) return null;
@@ -51,6 +54,13 @@ exports.up = async function up(knex) {
     patch.description = NEW_DESCRIPTION;
     state.descriptionChanged = true;
   }
+  // The seeded internal note still told the office this bills per visit
+  // (and sold a 3-pack) — contradictory guidance in the Service Library
+  // once callbacks are always included (uncapped audit P1 on #3521).
+  if (String(row.internal_notes || '') === LEGACY_INTERNAL_NOTES) {
+    patch.internal_notes = NEW_INTERNAL_NOTES;
+    state.notesChanged = true;
+  }
   if (!Object.keys(patch).length) return;
   await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });
   await saveState(knex, { ...state, id: row.id, tag: MIGRATION_TAG });
@@ -69,6 +79,7 @@ exports.down = async function down(knex) {
         : LEGACY_PRICE;
     }
     if (state.descriptionChanged && String(row.description || '') === NEW_DESCRIPTION) patch.description = LEGACY_DESCRIPTION;
+    if (state.notesChanged && String(row.internal_notes || '') === NEW_INTERNAL_NOTES) patch.internal_notes = LEGACY_INTERNAL_NOTES;
     if (Object.keys(patch).length) {
       await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });
     }
@@ -82,3 +93,5 @@ exports.LEGACY_PRICE = LEGACY_PRICE;
 exports.NEW_PRICE = NEW_PRICE;
 exports.LEGACY_DESCRIPTION = LEGACY_DESCRIPTION;
 exports.NEW_DESCRIPTION = NEW_DESCRIPTION;
+exports.LEGACY_INTERNAL_NOTES = LEGACY_INTERNAL_NOTES;
+exports.NEW_INTERNAL_NOTES = NEW_INTERNAL_NOTES;

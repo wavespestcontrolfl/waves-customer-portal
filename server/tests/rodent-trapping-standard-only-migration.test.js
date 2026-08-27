@@ -33,7 +33,7 @@ function seedDb() {
       id: 'pc-trap',
       config_key: 'rodent_trapping',
       name: 'Rodent Trapping',
-      data: { base: 350, standard_price: 350, unlimited_price: 450, upgrade_to_unlimited_price: 125, additional_followup_rate: 125, included_followups: 2, home_size_adjustments: [{ max_sqft: 1200, adjustment: 0 }], lot_adjustments: [{ max_lot_sqft: 10000, adjustment: 0 }], pressure_adjustments: { light: 0 } },
+      data: { base: 350, standard_price: 375, unlimited_price: 450, upgrade_to_unlimited_price: 125, additional_followup_rate: 125, included_followups: 2, home_size_adjustments: [{ max_sqft: 1200, adjustment: 0 }], lot_adjustments: [{ max_lot_sqft: 10000, adjustment: 0 }], pressure_adjustments: { light: 0 } },
     }],
     pricing_config_audit: [],
     pricing_changelog: [],
@@ -49,6 +49,8 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     await migration.up(fakeKnex(db));
     const data = JSON.parse(trapCfg(db).data);
     expect(data.included_followups).toBe('unlimited');
+    // An admin-changed standard_price is pinned back to the $350 directive.
+    expect(data.standard_price).toBe(350);
     expect(data.unlimited_price).toBeUndefined();
     // The ignored adjustment tables are retired too (codex #3521 r8 P2).
     expect(data.home_size_adjustments).toBeUndefined();
@@ -61,6 +63,7 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     const restored = JSON.parse(trapCfg(db).data);
     expect(restored.unlimited_price).toBe(450);
     expect(restored.included_followups).toBe(2);
+    expect(restored.standard_price).toBe(375);
     expect(restored.home_size_adjustments).toEqual([{ max_sqft: 1200, adjustment: 0 }]);
     expect(restored.pressure_adjustments).toEqual({ light: 0 });
     // Not the constant guess — the copy the row really had.

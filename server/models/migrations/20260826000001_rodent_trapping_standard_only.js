@@ -72,11 +72,17 @@ exports.up = async function (knex) {
   const loaded = await loadTrappingRow(knex);
   if (!loaded) return;
   const { data } = loaded;
+  // The flat $350 is the directive, and db-bridge overlays standard_price
+  // onto the pricer — an admin-changed value would keep quoting while the
+  // catalog and client mirror say $350 (uncapped audit P1 on #3521). Pin
+  // it; the prior value rides the audit row for rollback.
+  const STANDARD_PRICE = 350;
   const needsChange = RETIRED_KEYS.some((key) => data[key] != null)
-    || data.included_followups !== 'unlimited';
+    || data.included_followups !== 'unlimited'
+    || Number(data.standard_price) !== STANDARD_PRICE;
   if (!needsChange) return;
 
-  const newData = { ...data, included_followups: 'unlimited' };
+  const newData = { ...data, included_followups: 'unlimited', standard_price: STANDARD_PRICE };
   for (const key of RETIRED_KEYS) delete newData[key];
 
   // Catalog copy still described the two-plan terms (20260526000009) —
@@ -134,6 +140,9 @@ exports.down = async function (knex) {
     }
     if (oldValue && oldValue.included_followups != null) {
       restored.included_followups = oldValue.included_followups;
+    }
+    if (oldValue && oldValue.standard_price != null) {
+      restored.standard_price = oldValue.standard_price;
     }
     await saveTrappingRow(
       knex, loaded.data, restored,
