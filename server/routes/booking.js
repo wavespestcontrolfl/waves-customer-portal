@@ -2904,6 +2904,40 @@ async function createSelfBooking(payload = {}) {
               });
     };
 
+    // Deduped admin bell for a pricing strip, in the SAME transaction as
+    // the strip (codex #3504 r8 hook): a stripped parent is invisible to
+    // the stranded-recovery sweep (payment_method_preference cleared), so
+    // a log-only strip lets the office perform an unbilled visit without
+    // learning the live quote needs conversion. SAVEPOINT-wrapped: the
+    // strip is the money-safety action and must never be voided by a bell
+    // failure — a savepoint failure logs loud and the strip stands.
+    const notifySeriesStripInTx = async (trx, parentId, reason) => {
+      try {
+        await trx.transaction(async (sp) => {
+          const dedupeKey = `wizard-activation-stripped:${parentId}`;
+          await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+          const existingBell = await sp('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id');
+          if (existingBell) return;
+          const created = await require('../services/notification-service').create({
+            recipientType: 'admin',
+            category: 'alert',
+            title: 'Self-booked plan did not activate',
+            body: `A self-booked recurring plan for customer ${custId} could not activate (${reason}). The booked first visit was kept but its per-application pricing was removed — convert the live quote to schedule and bill the plan.`,
+            link: `/admin/customers/${custId}`,
+            bell: true,
+            metadata: { dedupeKey, customer_id: custId, scheduled_service_id: parentId, reason },
+            connection: sp,
+          });
+          if (!created) throw new Error('strip bell insert returned null');
+        });
+      } catch (bellErr) {
+        logger.warn(`[booking:confirm] strip bell failed for ${parentId} (strip stands): ${bellErr.message}`);
+      }
+    };
+
     // Shared activation: series + conflict sweep + fee stamp + draft
     // retirement in ONE transaction, with the parent's billable pricing
     // STRIPPED on drift or failure — the all-or-nothing contract (codex
@@ -3023,8 +3057,10 @@ async function createSelfBooking(payload = {}) {
                 estimated_price: null,
                 payment_method_preference: null,
                 create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (quote changed); office converts from the live quote'"),
                 updated_at: trx.fn.now(),
               });
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the quote changed while the booking was confirming');
             logger.warn(`[booking:confirm] wizard-series plan drifted under lock for ${seriesParentRow.id} — seeding skipped, parent pricing stripped (price-less single visit kept)`);
             return { stale: true };
           }
@@ -3275,8 +3311,10 @@ async function createSelfBooking(payload = {}) {
                 estimated_price: null,
                 payment_method_preference: null,
                 create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (seeding failed); office converts from the live quote'"),
                 updated_at: trx.fn.now(),
               });
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'series seeding failed');
           });
         } catch (stripErr) {
           logger.error(`[booking:confirm] pricing strip after failed seeding ALSO failed for ${seriesParentRow.id}: ${stripErr.message}`);

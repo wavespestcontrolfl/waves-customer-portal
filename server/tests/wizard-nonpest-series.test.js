@@ -375,6 +375,20 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
   });
 
+  test('every pricing strip surfaces a deduped admin bell in the SAME transaction', () => {
+    // codex #3504 r8 hook: a stripped parent is invisible to the recovery
+    // sweep, so a log-only strip lets the office serve an unbilled visit
+    // unaware the live quote needs conversion. Savepoint-wrapped: a bell
+    // failure never voids the strip.
+    expect(booking).toMatch(/notifySeriesStripInTx = async \(trx, parentId, reason\)/);
+    expect(booking).toMatch(/wizard-activation-stripped:\$\{parentId\}/);
+    expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the quote changed while the booking was confirming'\)/);
+    expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'series seeding failed'\)/);
+    expect(booking).toMatch(/strip bell failed for \$\{parentId\} \(strip stands\)/);
+    // Both strip updates carry the office note on the row itself.
+    expect((booking.match(/self-booked plan did not activate \((quote changed|seeding failed)\); office converts from the live quote/g) || []).length).toBe(2);
+  });
+
   test('seeded occurrences run the SHARED tech-blind occupancy guard', () => {
     // codex #3504 r2 P1: a custom tech-scoped predicate missed conflicts
     // with a different technician's visit — the repository backstop is
