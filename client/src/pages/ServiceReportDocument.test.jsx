@@ -187,6 +187,18 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain(safe);
   });
 
+  it('prints a finding-derived recommendation once, not again under What we recommend', () => {
+    const rec = 'Pull mulch back from the slab edge';
+    const data = {
+      ...BASE_DATA,
+      findings: [{ id: 'f1', category: 'observation', severity: 'low', title: 'Ant trailing at the slab', detail: '', recommendation: rec }],
+      recommendations: [rec, 'Keep shrubs trimmed back from the exterior walls'],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent.split(rec).length - 1).toBe(1);
+    expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
+  });
+
   it('does not claim treatment areas on a visit with no applications', () => {
     // the server always builds mapSvg, even for inspection-only visits
     const data = { ...BASE_DATA, applications: [], mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>' };

@@ -10291,9 +10291,24 @@ export function CompletionPanel({
   // station-lane hide only applies while nothing sprayed is recorded
   // (codex inline r5 on #3516). Mirrors the server's
   // isSprayApplicationMethod exclusions (bait / station check / injection).
+  // Product IDENTITY counts too, mirroring the server's
+  // isNonBaitPesticideProduct: a non-bait pesticide (pesticide-class
+  // category, EPA number on the catalog row, or a listed active) is
+  // evidence even under the defaulted station_check the panel assigns to
+  // methodless termite products (codex inline r10). Bait / station /
+  // cartridge / monitor families never count.
+  const isNonBaitPesticideSelection = (p) => {
+    const catalogRow = (products || []).find((row) => String(row.id) === String(p?.productId)) || {};
+    const identity = `${p?.category || ""} ${catalogRow.product_type || ""} ${p?.name || ""}`;
+    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
+    return /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${p?.category || ""} ${catalogRow.product_type || ""}`)
+      || !!String(catalogRow.epa_reg_number || "").trim()
+      || !!String(p?.activeIngredient || "").trim();
+  };
   const sprayEvidenceInForm = selectedProducts.some((p) => {
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
-    return !!method && !["bait_placement", "station_check", "trunk_injection"].includes(method);
+    return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
+      || isNonBaitPesticideSelection(p);
   }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray

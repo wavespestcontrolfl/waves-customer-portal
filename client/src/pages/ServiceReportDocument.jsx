@@ -604,7 +604,15 @@ export default function ServiceReportDocument({ data, token }) {
   // boundary — so the PDF renders it exactly like the web report's "What we
   // recommend" section (codex inline on #3516). ⛔ data.protocol.recommendations
   // stays unrendered: it still folds raw note lines in.
-  (data.recommendations || []).forEach(pushRec);
+  // Finding-derived entries already print inside their "What we found"
+  // bullet — skip them here so a customer never reads the same instruction
+  // twice in one document (codex inline r10).
+  const findingRecommendationSet = new Set(
+    (data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean),
+  );
+  (data.recommendations || [])
+    .filter((rec) => !findingRecommendationSet.has(String(rec || '').trim()))
+    .forEach(pushRec);
   // Lawn visits carry their guidance in the assessment + V2 aftercare
   // instead of typedReport — same section, same voice.
   // Legacy assessment recommendations are the LawnAssessmentCard's content,

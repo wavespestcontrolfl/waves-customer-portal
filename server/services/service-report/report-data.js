@@ -3784,8 +3784,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // (isNonBaitPesticideProduct): bait/station families never count, even
   // with an EPA number — a legacy Trelona/Advance cartridge row is station
   // work, not a spray (codex inline r7/r9).
+  // The client DEFAULTS methodless termite products to station_check and
+  // persists it, so `methodInferred` is false for a freshly completed
+  // Termidor Foam row — inference provenance is lost at persist time.
+  // Product identity therefore decides regardless of the flag; bait /
+  // station families are excluded by the classifier itself, which is what
+  // keeps an explicit station check on a cartridge from counting (codex
+  // inline r10).
   const isInferredPesticideApplication = (app) => app.method === 'station_check'
-    && app.methodInferred !== false
     && isNonBaitPesticideProduct({
       name: app.product?.name,
       category: app.product?.category,
