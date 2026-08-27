@@ -2408,7 +2408,9 @@ describe('completion route wiring (source contracts)', () => {
     const creditSource = fs.readFileSync(path.join(__dirname, '../services/customer-credit.js'), 'utf8');
     expect(creditSource).toMatch(/verifyExtendedCompletionAnchor\(\{/);
     expect(creditSource).toMatch(/skipped: 'anchor_unverifiable'/);
-    expect(source).toMatch(/requireSelfPayScheduledServiceId: svc\.id,\n[\s\S]{0,400}?requireExtendedCompletionAnchor: true,/);
+    expect(source).toMatch(/requireSelfPayScheduledServiceId: svc\.id,\n[\s\S]{0,700}?requireExtendedCompletionAnchor: true,/);
+    // Credit side honors stopped-dunning too (pre-push P0 round 9).
+    expect(source).toMatch(/requireSelfPayScheduledServiceId: svc\.id,\n[\s\S]{0,400}?refuseWhenDunningStopped: true,/);
     // Round 3: existing invoices honor stopped-dunning + a post-credit
     // due-cents ceiling rides beside the subtotal cap; the annual stamp is
     // validated against the LIVE term, never taken at face value.

@@ -11009,6 +11009,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(extendedChargeCandidate && !apptCardOneTimeCharge ? {
             maxAuthorizedSubtotal: extendedLaneAnchor != null ? extendedLaneAnchor : 0,
             requireSelfPayScheduledServiceId: svc.id,
+            // Stopped-dunning honored before credit moves (pre-push P0
+            // round 9) — a stop instruction must not have credit consumed
+            // or the invoice flipped prepaid past the charge guard.
+            refuseWhenDunningStopped: true,
             // The anchor AUTHORITY is re-derived under the credit apply's
             // own locks too (pre-push P0 round 2) — a price drop, mode
             // flip, or coverage stamp racing this window consumes nothing.

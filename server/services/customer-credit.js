@@ -231,7 +231,7 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -246,6 +246,20 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Stopped-dunning honored on the CREDIT side too (pre-push P0 round
+    // 9): "stop collecting this invoice" (disputed bill, check in the
+    // mail) must not have account credit consumed — or the invoice flipped
+    // prepaid — under lock, exactly like chargeInvoiceWithSavedCard's
+    // refuseWhenDunningStopped. Opt-in; fail-closed on a hit.
+    if (refuseWhenDunningStopped) {
+      const seq = await t('invoice_followup_sequences')
+        .where({ invoice_id: invoiceId })
+        .forUpdate()
+        .first('status');
+      if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
+        return { applied: 0, skipped: 'dunning_stopped' };
+      }
+    }
     // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
     // payer assignment updates scheduled_services while a reused invoice
     // keeps payer_id null — the invoice-field check below can't see it.
