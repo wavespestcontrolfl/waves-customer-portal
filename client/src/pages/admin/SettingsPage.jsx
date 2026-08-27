@@ -181,7 +181,7 @@ export default function SettingsPage() {
   const [health, setHealth] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  // ?tab=X deep-links from MobileSettingsPage land on the right tab.
+  // ?tab=X deep-links from the mobile Settings surface land on the right tab.
   const initialTab = VALID_TABS.includes(searchParams.get("tab"))
     ? searchParams.get("tab")
     : "general";
@@ -282,7 +282,7 @@ export default function SettingsPage() {
   // Square-style section index instead of the desktop tab panel.
   // Mobile has ONE settings surface: the Settings tab (/admin/more), which
   // lists these leaves inline. A tab-less /admin/settings on mobile used to
-  // render a second index (MobileSettingsPage) — send it there instead.
+  // render a second index (the since-removed MobileSettingsPage) — send it there instead.
   // Deep links with ?tab= still render the leaf below.
   if (isMobile && !searchParams.get("tab")) return <Navigate to="/admin/more" replace />;
 

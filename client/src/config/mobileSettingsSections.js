@@ -1,7 +1,7 @@
 // Mobile settings index — the leaves the mobile Settings surface lists
 // (/admin/more, the fifth tab). Shared navigation DATA, kept beside
-// adminNavigation.js so the tab's active-state ownership, the page that
-// renders the list, and the legacy MobileSettingsPage all read one source.
+// adminNavigation.js so the tab's active-state ownership and the page that
+// renders the list read one source.
 // Standalone destinations (Invoices, Banking, Communications) also exist as
 // nav rows; ?tab= entries deep-link into SettingsPage tabs.
 export const MOBILE_SETTINGS_SECTIONS = [
