@@ -107,7 +107,9 @@ exports.up = async function (knex) {
   // keys its rollback (pricing keys AND the captured catalog copy) off it.
   await saveTrappingRow(
     knex,
-    { ...data, __service_description: priorServiceDescription },
+    // Prior catalog copy AND prior pricing-row name ride the audit row so
+    // down() restores the real predecessors (codex #3521 r15 P2).
+    { ...data, __service_description: priorServiceDescription, __row_name: loaded.row.name ?? null },
     newData,
     UP_REASON,
     pricingNeedsChange ? STANDARD_ROW_NAME : null
@@ -153,10 +155,16 @@ exports.down = async function (knex) {
     if (oldValue && oldValue.standard_price != null) {
       restored.standard_price = oldValue.standard_price;
     }
+    // Restore the pricing-row name only if up() renamed it (the row still
+    // carries STANDARD_ROW_NAME) and only to the captured predecessor — a
+    // description-only up() never touched the name, so neither does this.
+    const restoreName = loaded.row.name === STANDARD_ROW_NAME && oldValue && typeof oldValue.__row_name === 'string'
+      ? oldValue.__row_name
+      : null;
     await saveTrappingRow(
       knex, loaded.data, restored,
       'Rollback: restore pre-Standard-only rodent trapping plan keys (20260826000001)',
-      'Rodent Trapping'
+      restoreName
     );
   }
   if (await knex.schema.hasTable('services')) {

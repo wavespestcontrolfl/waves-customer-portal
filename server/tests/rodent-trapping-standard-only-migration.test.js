@@ -32,7 +32,7 @@ function seedDb() {
     pricing_config: [{
       id: 'pc-trap',
       config_key: 'rodent_trapping',
-      name: 'Rodent Trapping',
+      name: 'Adam Trapping (custom name)',
       data: { base: 350, standard_price: 375, unlimited_price: 450, upgrade_to_unlimited_price: 125, additional_followup_rate: 125, included_followups: 2, home_size_adjustments: [{ max_sqft: 1200, adjustment: 0 }], lot_adjustments: [{ max_lot_sqft: 10000, adjustment: 0 }], pressure_adjustments: { light: 0 } },
     }],
     pricing_config_audit: [],
@@ -64,6 +64,8 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(restored.unlimited_price).toBe(450);
     expect(restored.included_followups).toBe(2);
     expect(restored.standard_price).toBe(375);
+    // The pricing-row name goes back to its actual predecessor, not a constant.
+    expect(trapCfg(db).name).toBe('Adam Trapping (custom name)');
     expect(restored.home_size_adjustments).toEqual([{ max_sqft: 1200, adjustment: 0 }]);
     expect(restored.pressure_adjustments).toEqual({ light: 0 });
     // Not the constant guess — the copy the row really had.
@@ -86,8 +88,12 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(JSON.parse(trapCfg(db).data)).toEqual({ base: 350, standard_price: 350, included_followups: 'unlimited' });
     expect(trapSvc(db).description).toMatch(/unlimited callbacks\/checks for the same active trapping job/);
     expect(db.pricing_config_audit).toHaveLength(1);
+    // Description-only up() never renamed the pricing row …
+    expect(trapCfg(db).name).toBe('Adam Trapping (custom name)');
     await migration.down(fakeKnex(db));
     expect(trapSvc(db).description).toBe(PRIOR_DESCRIPTION);
+    // … and rollback leaves the name alone too.
+    expect(trapCfg(db).name).toBe('Adam Trapping (custom name)');
   });
 
   test('everything already at target is a true no-op', async () => {

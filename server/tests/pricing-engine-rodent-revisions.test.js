@@ -365,3 +365,29 @@ describe('service credits never zero distinct products that share a key (uncappe
     expect(estimate.summary.oneTimeTotal).toBeGreaterThan(0);
   });
 });
+
+describe('included-section markers survive the legacy mapper (codex #3521 r15 P1)', () => {
+  const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+
+  test('a fully credited V2 exclusion keeps its sections as marked $0 rows in the mapped estimate', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      services: {
+        exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, standardBirdBoxes: 1, meshSoftLF: 20, waiveInspection: true },
+      },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset', presetKey: 'free_rodent_exclusion', catalogName: 'Free Rodent Exclusion',
+        catalogCategory: 'service_specific_credit', discountType: 'free_service', service: 'rodent_exclusion', label: 'Free Rodent Exclusion',
+      }],
+    })));
+    const rows = [...(mapped.oneTime.items || []), ...(mapped.oneTime.specItems || [])]
+      .filter((r) => r.service === 'rodent_exclusion');
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    expect(rows.every((r) => r.serviceSpecificDiscountApplied === true)).toBe(true);
+    expect(rows.every((r) => Number(r.priceAfterDiscount ?? r.price) === 0)).toBe(true);
+    // And the page's normalizer keeps them as Included rows rather than dropping $0 rows.
+    const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+    const normalized = normalizeOneTimeBreakdown({ result: mapped }).items.filter((r) => r.service === 'rodent_exclusion');
+    expect(normalized.length).toBe(rows.length);
+    expect(normalized.every((r) => r.kind === 'included')).toBe(true);
+  });
+});

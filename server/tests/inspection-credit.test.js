@@ -1553,6 +1553,13 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
     const trailWithRate = [...trail, { config_key: 'onetime_recurring_discount', old_value: JSON.stringify({ discount: 0.15 }), new_value: JSON.stringify({ discount: 0.10 }) }];
     const tenOff = { id: 'est-10', estimate_data: { result: { oneTime: { total: 99, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 99 }] } } } };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: tenOff, audit: trailWithRate }), { ...svc, source_estimate_id: 'est-10' })).toBe(110);
+    // Exact-face collision (codex #3521 r15 P1): a $75 net with a 40% perk in
+    // the trail could be a 40%-off $125 — the largest supported face wins.
+    const fortyOff = [...trail, { config_key: 'onetime_recurring_discount', old_value: JSON.stringify({ discount: 0.15 }), new_value: JSON.stringify({ discount: 0.40 }) }];
+    const collide = { id: 'est-12', estimate_data: { result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collide, audit: fortyOff }), { ...svc, source_estimate_id: 'est-12' })).toBe(125);
+    // Without such a rate in history, $75 is simply the $75 face.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collide, audit: trail }), { ...svc, source_estimate_id: 'est-12' })).toBe(75);
     // An unprovable net stands as the face (never inflated by guesswork).
     const odd = { id: 'est-11', estimate_data: { result: { oneTime: { total: 101, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 101 }] } } } };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: odd, audit: trail }), { ...svc, source_estimate_id: 'est-11' })).toBe(101);

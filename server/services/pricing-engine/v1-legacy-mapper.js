@@ -978,6 +978,16 @@ function mapV1ToLegacyShape(v1Result) {
           ? { priceBeforeDiscount: Number(li.priceBeforeDiscount) } : {}),
         ...(Number(li.recurringCustomerDiscountRate) > 0
           ? { recurringCustomerDiscountRate: Number(li.recurringCustomerDiscountRate) } : {}),
+        // Included-row marker survives the specialty branch too: a V2
+        // exclusion section a service credit zeroed must still reach the
+        // customer page / PDF as "Included" instead of being filtered as an
+        // unmarked $0 row (codex #3521 r15 P1).
+        ...(li.serviceSpecificDiscountApplied !== undefined
+          ? { serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied } : {}),
+        ...(li.serviceSpecificDiscounts !== undefined
+          ? { serviceSpecificDiscounts: li.serviceSpecificDiscounts } : {}),
+        ...(li.priceAfterDiscount !== undefined && Number.isFinite(Number(li.priceAfterDiscount))
+          ? { priceAfterDiscount: Number(li.priceAfterDiscount) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,

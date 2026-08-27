@@ -229,19 +229,21 @@ async function soldInspectionAmountForVisit(db, svc) {
             // trail + the legacy $125). A net that IS a known face is a
             // non-member's; otherwise the smallest known face the net could
             // have been discounted from (≥ 50% of it) is the promise.
-            const faces = await knownInspectionFaces(db);
-            if (faces.some((f) => Math.abs(f - netFace) < 0.005)) return round2(netFace);
             // PROVABLE only (uncapped audit P0 on #3521): a face counts when
-            // some perk rate that has ever been configured reproduces the
-            // stored net to the cent (face × (1 − rate) === net). "The
-            // smallest fee above the net" is not proof — an admin-edited
-            // $110 fee in the trail would have claimed a $125 promise. If
-            // more than one face proves out, the largest is honored (never
-            // short a promise); if none does, the net stands.
+            // it IS the net (a non-member's), or when some perk rate that
+            // has ever been configured reproduces the stored net to the
+            // cent (face × (1 − rate) === net). "The smallest fee above the
+            // net" is not proof — an admin-edited $110 fee in the trail
+            // would have claimed a $125 promise. Every combination is
+            // weighed before an exact match is trusted (codex #3521 r15
+            // P1: a $75 net could be a 40%-off $125 when that rate is in
+            // the trail); the largest supported face is honored — never
+            // short a promise. If nothing proves out, the net stands.
+            const faces = await knownInspectionFaces(db);
             const rates = await knownPerkRates(db);
-            const proven = faces.filter((f) => f > netFace
-              && rates.some((r) => Math.abs(round2(f * (1 - r)) - netFace) < 0.005));
-            return round2(proven.length ? Math.max(...proven) : netFace);
+            const supported = faces.filter((f) => Math.abs(f - netFace) < 0.005
+              || (f > netFace && rates.some((r) => Math.abs(round2(f * (1 - r)) - netFace) < 0.005)));
+            return round2(supported.length ? Math.max(...supported) : netFace);
           }
         }
       }
