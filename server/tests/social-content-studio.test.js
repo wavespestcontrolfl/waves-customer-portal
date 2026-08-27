@@ -485,3 +485,117 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(card.verdict).toBe(pair.verdict);
   });
 });
+
+describe('autonomous review-milestone lane', () => {
+  let prevFlag;
+  beforeAll(() => { prevFlag = process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES; });
+  beforeEach(() => { delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES; });
+  afterAll(() => {
+    if (prevFlag === undefined) delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES;
+    else process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES = prevFlag;
+  });
+
+  test('threshold ladder: 50s to 500, 250s to 2000, 500s to 5000, then 1000s', () => {
+    expect(Studio.milestoneThresholdFor(0)).toBeNull();
+    expect(Studio.milestoneThresholdFor(49)).toBeNull();
+    expect(Studio.milestoneThresholdFor(50)).toBe(50);
+    expect(Studio.milestoneThresholdFor(149)).toBe(100);
+    expect(Studio.milestoneThresholdFor(499)).toBe(450);
+    expect(Studio.milestoneThresholdFor(500)).toBe(500);
+    expect(Studio.milestoneThresholdFor(1999)).toBe(1750);
+    expect(Studio.milestoneThresholdFor(2000)).toBe(2000);
+    expect(Studio.milestoneThresholdFor(4999)).toBe(4500);
+    expect(Studio.milestoneThresholdFor(15250)).toBe(15000);
+    expect(Studio.MILESTONE_WINDOW).toBe(30);
+  });
+
+  test('lane is dark by default (flag unset -> no plan, no DB read)', async () => {
+    await expect(Studio.selectAutonomousMilestonePlan(new Date('2026-06-10T16:00:00Z'))).resolves.toBeNull();
+  });
+
+  test('milestone drafts pass the compliance validators, with and without an average', () => {
+    for (const [threshold, average] of [[50, 5], [300, 4.9], [1000, null], [2500, 4.7]]) {
+      const drafts = Studio.buildMilestoneDrafts({ threshold, average });
+      const validation = Studio.validateDrafts(drafts);
+      for (const [platform, result] of Object.entries(validation)) {
+        expect({ threshold, platform, issues: result.issues, valid: result.valid })
+          .toEqual({ threshold, platform, issues: [], valid: true });
+      }
+      const label = threshold.toLocaleString('en-US');
+      expect(drafts.facebook).toContain(`${label} Google reviews`);
+      expect(drafts.gbp).toContain(label);
+      if (average) expect(drafts.gbp).toContain(`${average.toFixed(1)} stars`);
+      else expect(drafts.gbp).not.toContain('Average rating');
+    }
+  });
+
+  test('fleetReviewStats: authoritative Places totals, fail closed on a partial/stale fleet', () => {
+    const now = Date.parse('2026-06-10T16:00:00Z');
+    const fresh = new Date(now - 60 * 60 * 1000).toISOString();
+    const stale = new Date(now - 30 * 60 * 60 * 1000).toISOString();
+    const locs = [{ id: 'sarasota' }, { id: 'venice' }];
+    const row = (location_id, payload, synced_at = fresh) => ({ location_id, review_text: JSON.stringify(payload), synced_at });
+
+    // Complete + fresh: sum of totals, rating WEIGHTED by review count.
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7, totalReviews: 112 })], locs, now))
+      .toEqual({ count: 312, average: 4.8 });
+    // A tiny 5.0 location cannot lift a large 4.0 one (unweighted would say 4.5).
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.0, totalReviews: 300 }), row('venice', { rating: 5.0, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 310, average: 4.0 });
+    // Missing location → null (never a partial total).
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 })], locs, now)).toBeNull();
+    // Stale row → null.
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7, totalReviews: 112 }, stale)], locs, now)).toBeNull();
+    // Corrupt / rating-only payload does not count the location complete.
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), { location_id: 'venice', review_text: '"corrupt"', synced_at: fresh }], locs, now)).toBeNull();
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7 })], locs, now)).toBeNull();
+    // Rows for unconfigured locations are ignored; no ratings → average null, never an invented 5.0.
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 50 }), row('venice', { totalReviews: 10 }), row('retired', { rating: 5, totalReviews: 999 })], locs, now))
+      .toEqual({ count: 60, average: null });
+    // A location WITH reviews but no rating hides the whole average (a partial
+    // "5.0" from the other location would not describe the fleet)...
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 300 }), row('venice', { rating: 5.0, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 310, average: null });
+    // ...while a zero-review location without a rating does not.
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 0 }), row('venice', { rating: 4.6, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 10, average: 4.6 });
+  });
+
+  test('milestoneClaimDisposition: publish → published; nothing attempted → release; attempted failure → retain', () => {
+    const d = Studio.milestoneClaimDisposition;
+    expect(d({ success: true, platforms: [{ platform: 'facebook', success: true }] })).toBe('published');
+    expect(d({ success: false, platforms: [{ platform: 'gbp', success: false, error: 'x' }, { platform: 'instagram', success: true }] })).toBe('published');
+    // Empty channel set (blank SOCIAL_AUTONOMOUS_CHANNELS) → nothing reached a provider.
+    expect(d({ success: false, platforms: [] })).toBe('release');
+    expect(d(undefined)).toBe('release');
+    // Every entry skipped before an external call (paused / disabled / judge).
+    expect(d({ success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] })).toBe('release');
+    expect(d({ success: false, platforms: [{ platform: 'facebook', success: false, skipped: true, error: 'Compliance judge: x' }] })).toBe('release');
+    // Attempted and failed (or lost response) → keep ownership.
+    expect(d({ success: false, platforms: [{ platform: 'facebook', success: false, error: 'ETIMEDOUT' }] })).toBe('retain');
+    expect(d({ success: false, platforms: [{ platform: 'gbp', skipped: 'Disabled' }, { platform: 'facebook', success: false, error: '500' }] })).toBe('retain');
+  });
+
+  test('milestoneDrift blocks a stored plan the current stats no longer support', () => {
+    const plan = { milestone: 300, averageRating: 4.9 };
+    expect(Studio.milestoneDrift(plan, { count: 312, average: 4.9 })).toBeNull();
+    expect(Studio.milestoneDrift(plan, null)).toMatch(/unavailable/);
+    expect(Studio.milestoneDrift(plan, { count: 298, average: 4.9 })).toMatch(/no longer matches/); // reviews removed
+    expect(Studio.milestoneDrift(plan, { count: 330, average: 4.9 })).toMatch(/past the 300 milestone window/);
+    expect(Studio.milestoneDrift(plan, { count: 355, average: 4.9 })).toMatch(/no longer matches/); // next rung
+    expect(Studio.milestoneDrift(plan, { count: 312, average: 4.8 })).toMatch(/average rating changed/);
+    expect(Studio.milestoneDrift({ milestone: 300, averageRating: null }, { count: 312, average: null })).toBeNull();
+  });
+
+  test('planMilestone carries the claim key and a grounded source', () => {
+    const plan = Studio.planMilestone({ threshold: 300, count: 312, average: 4.9, city: 'Venice', channels: ['gbp', 'facebook'] });
+    expect(plan.milestone).toBe(300);
+    expect(plan.angle).toBe('review milestone');
+    expect(plan.topic).toBe('300 Google reviews');
+    expect(Object.keys(plan.preview.drafts).sort()).toEqual(['facebook', 'gbp']);
+    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/reviews/');
+    expect(plan.preview.sources[0].label).toContain('312 Google-reported reviews');
+    const card = Studio.buildMilestoneCardInput(plan);
+    expect(card).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.9 });
+  });
+});

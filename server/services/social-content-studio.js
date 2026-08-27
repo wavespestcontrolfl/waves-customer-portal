@@ -415,6 +415,9 @@ const AUTONOMOUS_FLAGS = {
   // Dark-ship: the "pest showdown" X-vs-Y ID lane is OFF until explicitly
   // enabled (kill switch = unset SOCIAL_AUTONOMOUS_INCLUDE_VERSUS).
   get includeVersus() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_VERSUS', false); },
+  // Dark-ship: review-count milestone celebrations ("300 Google reviews") are
+  // OFF until explicitly enabled (kill switch = unset).
+  get includeMilestones() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES', false); },
   // CLAMPED below the minimum gap between two daily 6:30 AM ET ticks. This is a
   // same-day DEDUPE guard, NOT the schedule (the fixed once-daily cron is). Two
   // consecutive ET ticks are normally 24h apart but only 23h across the
@@ -762,6 +765,18 @@ function buildCampaignCardInput(input = {}, preview = {}) {
   };
 }
 
+function buildMilestoneCardInput(plan = {}) {
+  return {
+    variant: 'milestone',
+    // Company-wide count — no city stamp (plan.city only routes the GBP location).
+    city: null,
+    service: 'Google reviews',
+    count: plan.milestone,
+    averageRating: plan.averageRating,
+    thanks: 'Thank you, Southwest Florida.',
+  };
+}
+
 function buildVersusCardInput(pair = {}, input = {}) {
   return {
     variant: 'versus',
@@ -803,6 +818,10 @@ async function renderCampaignImageUrl(input, preview, platform) {
     `${preview?.inputs?.city || input.city}-${preview?.inputs?.topic || input.topic}`,
     platform
   );
+}
+
+async function renderMilestoneImageUrl(plan, platform) {
+  return uploadSocialCard(buildMilestoneCardInput(plan), `milestone-${plan.milestone}-reviews`, platform);
 }
 
 async function renderVersusImageUrl(pair, input, platform) {
@@ -1059,7 +1078,262 @@ function selectAutonomousVersusPlan(now = new Date()) {
   };
 }
 
+// ── Review-count milestone lane ─────────────────────────────────────────────
+// Celebrates crossing a round Google-review count (the single best-engaging
+// organic format for local service brands). Company-wide count from Google's
+// own per-location totals (see fleetReviewStats); fires ONCE per threshold and
+// only while the count is within MILESTONE_WINDOW of it, so a lane enabled
+// long after a threshold passed never posts a stale "we just hit 250".
+
+const MILESTONE_ANGLE = 'review milestone';
+const MILESTONE_WINDOW = 30;
+
+// Highest ladder rung <= count: every 50 to 500, 250s to 2,000, 500s to
+// 5,000, then every 1,000. Returns null below the first rung.
+function milestoneThresholdFor(count) {
+  const n = Math.floor(Number(count) || 0);
+  if (n < 50) return null;
+  if (n < 500) return Math.floor(n / 50) * 50;
+  if (n < 2000) return Math.floor(n / 250) * 250;
+  if (n < 5000) return Math.floor(n / 500) * 500;
+  return Math.floor(n / 1000) * 1000;
+}
+
+// Authoritative count = Google's own per-location totals, which the Places
+// stats sync stores as one '_stats' pseudo-row per location (review_text =
+// {rating, totalReviews}). Same completeness/freshness rule as the admin
+// dashboard and the BI review tool: EVERY configured location must have a
+// row synced inside 24h with a finite totalReviews, else the snapshot is
+// partial and this returns null — a public milestone claim never falls back
+// to counting synced rows (incomplete, duplicable, may include retired
+// locations). Rating = location ratings WEIGHTED by their review counts —
+// stricter than the dashboard's simple mean, because this number is
+// published: a 10-review 5.0 location must not lift a 300-review 4.6.
+const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+
+function fleetReviewStats(statsRows, locations = WAVES_LOCATIONS, now = Date.now()) {
+  const fresh = {};
+  for (const row of statsRows || []) {
+    const t = new Date(row.synced_at).getTime();
+    if (!(t > 0 && now - t <= STATS_FRESH_MS)) continue;
+    try {
+      const p = JSON.parse(row.review_text);
+      if (p && typeof p === 'object' && Number.isFinite(p.totalReviews)) fresh[row.location_id] = p;
+    } catch { /* unparseable stats payload — location stays incomplete */ }
+  }
+  if (!locations.length || !locations.every((loc) => fresh[loc.id])) return null;
+  let count = 0;
+  let weightedSum = 0;
+  let weight = 0;
+  let ratingComplete = true;
+  for (const loc of locations) {
+    const p = fresh[loc.id];
+    count += p.totalReviews;
+    if (p.totalReviews <= 0) continue; // zero-review location: no rating needed
+    if (Number.isFinite(p.rating) && p.rating > 0) {
+      weightedSum += p.rating * p.totalReviews;
+      weight += p.totalReviews;
+    } else {
+      // Reviews exist but Google gave no rating: the fleet average would
+      // describe only the other locations — publish no average at all.
+      ratingComplete = false;
+    }
+  }
+  if (count <= 0) return null;
+  return { count, average: ratingComplete && weight ? Math.round((weightedSum / weight) * 10) / 10 : null };
+}
+
+async function reviewMilestoneStats() {
+  if (!(await hasTable('google_reviews'))) return null;
+  try {
+    const rows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', WAVES_LOCATIONS.map((loc) => loc.id))
+      .select('location_id', 'review_text', 'synced_at');
+    return fleetReviewStats(rows);
+  } catch {
+    return null;
+  }
+}
+
+// Durable milestone ownership, independent of the run row. Written as
+// 'claimed' under the fleet-stats leases BEFORE the external post and
+// upgraded to 'published' after it — so neither an onFirstPlatformSuccess
+// hook failure nor an audit-update crash that leaves the run 'failed' can
+// let the next tick celebrate the same threshold again. Cleared only when
+// the publish produced ZERO provider successes (nothing is live), so the
+// threshold becomes selectable again for a retry.
+function milestoneStampKey(threshold) {
+  return `social.milestone.celebrated.${threshold}`;
+}
+
+// Insert-ONLY acquisition (never overwrites another run's stamp):
+//   'acquired' — this run now owns the threshold
+//   'owned'    — this run already owns it (a retry of the same run)
+//   'other'    — another run owns it → caller must block
+async function claimMilestone(threshold, runId) {
+  const now = new Date();
+  const value = JSON.stringify({ threshold, runId: runId || null, state: 'claimed', at: now.toISOString() });
+  const inserted = await db('system_settings')
+    .insert({
+      key: milestoneStampKey(threshold),
+      value,
+      category: 'social',
+      description: `Google review milestone ${threshold} celebrated on social`,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict('key')
+    .ignore()
+    .returning('key');
+  if (inserted.length) return 'acquired';
+  const row = await db('system_settings').where({ key: milestoneStampKey(threshold) }).first('value');
+  const parsed = toJson(row?.value, {});
+  return parsed?.runId && runId && parsed.runId === runId ? 'owned' : 'other';
+}
+
+// Upgrade claimed → published, only by the owning run.
+async function markMilestonePublished(threshold, runId) {
+  const key = milestoneStampKey(threshold);
+  const row = await db('system_settings').where({ key }).first('value');
+  const parsed = toJson(row?.value, {});
+  if (!row || (parsed?.runId && runId && parsed.runId !== runId)) return;
+  const now = new Date();
+  await db('system_settings')
+    .where({ key })
+    .update({ value: JSON.stringify({ ...parsed, state: 'published', publishedAt: now.toISOString() }), updated_at: now });
+}
+
+async function clearMilestoneStamp(threshold, runId) {
+  const row = await db('system_settings').where({ key: milestoneStampKey(threshold) }).first('value').catch(() => null);
+  if (!row) return;
+  const parsed = toJson(row.value, {});
+  // Only the owning run may release its own claim.
+  if (parsed?.runId && runId && parsed.runId !== runId) return;
+  await db('system_settings').where({ key: milestoneStampKey(threshold) }).del();
+}
+
+// A threshold is claimed by the durable stamp above (any state — it is the
+// authority for "a post is or may be live"), by a published run, by an
+// approval-queue draft, or by a RECENT in-flight 'started' row. 'started'
+// is bounded: the stamp is written before any provider call, so a stale
+// unstamped 'started' row (process crash between insert and stamp) cannot
+// represent a live post and must not park the threshold until the next rung.
+const MILESTONE_INFLIGHT_MS = 2 * 60 * 60 * 1000;
+
+async function milestoneAlreadyClaimed(threshold) {
+  if (!(await hasTable('social_content_studio_runs'))) return true;
+  // Fail CLOSED: if the stamp can't be read, treat the threshold as claimed —
+  // a missed celebration is recoverable, a duplicate one is not.
+  const stamped = await db('system_settings')
+    .where({ key: milestoneStampKey(threshold) })
+    .first('key')
+    .catch(() => ({ unreadable: true }));
+  if (stamped) return true;
+  const inflightSince = new Date(Date.now() - MILESTONE_INFLIGHT_MS);
+  const row = await db('social_content_studio_runs')
+    .where({ run_type: 'autonomous', angle: MILESTONE_ANGLE })
+    .whereRaw("input->>'milestone' = ?", [String(threshold)])
+    .where((qb) => qb
+      .whereIn('status', ['published', 'draft_created'])
+      .orWhere((q) => q.where('status', 'started').andWhere('started_at', '>', inflightSince)))
+    .first('id');
+  return !!row;
+}
+
+// Copy states only what the snapshot proves: a count and a rating. No
+// claims about who wrote the reviews (residents/homeowners/customers) and
+// no recency ("just passed") — the window bounds the count, not the date.
+function buildMilestoneDrafts({ threshold, average }) {
+  const n = threshold.toLocaleString('en-US');
+  const avgLine = average ? `Average rating: ${average.toFixed(1)} stars. ` : '';
+  return {
+    facebook: `${n} Google reviews. Thank you, Southwest Florida.\n\n${avgLine}We read every one, and they shape how we work.\n\nTo everyone who took a minute to share their experience: thank you.`,
+    instagram: `${n} Google reviews. Thank you, Southwest Florida.\n\n${avgLine}We read every one, and they shape how we work.\n\n#wavespestcontrol #swfl #googlereviews #thankyou`,
+    linkedin: `Waves Pest Control has reached ${n} Google reviews. ${avgLine}A small local team, one visit at a time. Thank you to everyone who took the time to share their experience.`,
+    gbp: `${n} Google reviews and counting. Thank you to everyone in Southwest Florida who took a minute to share their experience. ${avgLine}We read every one.`,
+  };
+}
+
+// Pure plan builder (DB-free) — selection reads stats + claims, then hands
+// off here so the copy/preview shape is unit-testable.
+function planMilestone({ threshold, count, average, city, channels }) {
+  const topic = `${threshold.toLocaleString('en-US')} Google reviews`;
+  const drafts = buildMilestoneDrafts({ threshold, average });
+  return {
+    topic,
+    city,
+    service: 'review proof',
+    angle: MILESTONE_ANGLE,
+    cta: 'read guide',
+    channels,
+    milestone: threshold,
+    reviewCount: count,
+    averageRating: average,
+    preview: {
+      inputs: { topic, city, service: 'review proof', angle: MILESTONE_ANGLE, cta: 'read guide', channels },
+      suggestedLink: 'https://www.wavespestcontrol.com/reviews/',
+      drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
+      validation: validateDrafts(drafts),
+      sources: [{
+        type: 'google_review_count',
+        label: `${count} Google-reported reviews across all locations (fresh Places snapshot)`,
+        detail: average ? `Average star rating ${average.toFixed(1)}; milestone threshold ${threshold}.` : `Milestone threshold ${threshold}.`,
+      }],
+      fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
+    },
+  };
+}
+
+// Why a stored milestone plan may no longer be publishable: the count fell
+// below the rung (reviews removed), advanced past the window (a stale
+// "we just hit 300"), or the average the copy states has drifted. Pure —
+// returns the reason string, or null when the plan still matches reality.
+function milestoneDrift(plan, stats) {
+  if (!stats) return 'review stats unavailable — milestone publish blocked';
+  const threshold = Number(plan?.milestone);
+  if (milestoneThresholdFor(stats.count) !== threshold) {
+    return `review count is now ${stats.count}; the ${threshold} milestone no longer matches — reject this draft so the lane can regenerate`;
+  }
+  if (stats.count - threshold >= MILESTONE_WINDOW) {
+    return `review count (${stats.count}) has moved past the ${threshold} milestone window — reject this draft so the lane can regenerate`;
+  }
+  const stated = plan?.averageRating == null ? null : Number(plan.averageRating);
+  if ((stated ?? null) !== (stats.average ?? null)) {
+    return `average rating changed (${stated ?? 'n/a'} → ${stats.average ?? 'n/a'}) since the copy was written — reject this draft so the lane can regenerate`;
+  }
+  return null;
+}
+
+// Re-read stats immediately before publication (direct run) or approval
+// (draft) — the plan was built earlier and reviews/ratings move.
+async function milestonePublishBlocker(plan) {
+  return milestoneDrift(plan, await reviewMilestoneStats());
+}
+
+async function selectAutonomousMilestonePlan(now = new Date()) {
+  if (!AUTONOMOUS_FLAGS.includeMilestones) return null;
+  const stats = await reviewMilestoneStats();
+  if (!stats) return null;
+  const threshold = milestoneThresholdFor(stats.count);
+  if (!threshold || stats.count - threshold >= MILESTONE_WINDOW) return null;
+  if (await milestoneAlreadyClaimed(threshold)) return null;
+  const { day } = etParts(now); // GBP location rotation only — the copy is company-wide
+  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  return planMilestone({
+    threshold,
+    count: stats.count,
+    average: stats.average,
+    city,
+    channels: AUTONOMOUS_FLAGS.channels,
+  });
+}
+
 async function selectAutonomousPlan(now = new Date()) {
+  // One-shot celebration outranks the recurring lanes on the day it fires.
+  const milestonePlan = await selectAutonomousMilestonePlan(now);
+  if (milestonePlan) return milestonePlan;
+
   const reviewPlan = await selectAutonomousReviewPlan(now);
   if (reviewPlan) return reviewPlan;
 
@@ -1556,6 +1830,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // photo scene can't render a two-pest comparison, so the creative engine is
     // skipped entirely (same "never block, never substitute" posture as GBP).
     const isVersusRun = !isReviewRun && !!plan.versusPair;
+    // Milestone runs are the deterministic number card (same posture as versus).
+    const isMilestoneRun = !isReviewRun && !isVersusRun && !!plan.milestone;
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -1573,7 +1849,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    let creativeEligible = hasNonGbpChannel && !isVersusRun;
+    let creativeEligible = hasNonGbpChannel && !isVersusRun && !isMilestoneRun;
     if (creativeEligible && effectiveMode !== 'draft') {
       creativeEligible = false;
       for (const ch of plan.channels) {
@@ -1620,6 +1896,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         gbpImageUrl,
         variant: 'review',
         templateKey: 'waves_clean_square',
+      });
+    } else if (isMilestoneRun) {
+      imageUrl = await renderMilestoneImageUrl(plan);
+      if (wantsGbp) gbpImageUrl = await renderMilestoneImageUrl(plan, 'gbp');
+      finalPreview = previewWithVisual(preview, {
+        imageUrl,
+        gbpImageUrl,
+        variant: 'milestone',
+        templateKey: 'waves_milestone_square',
       });
     } else if (isVersusRun) {
       imageUrl = await renderVersusImageUrl(plan.versusPair, plan);
@@ -1683,12 +1968,22 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }
     }
 
+    // Milestone counterpart of the liveness gate: the count/average were read
+    // at selection, before render/upload — cheap re-check here; the lease
+    // below re-checks again with the stats sync excluded.
+    if (isMilestoneRun) {
+      const reason = await milestonePublishBlocker(plan);
+      if (reason) {
+        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
+
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
-    // The snapshot gate above rejects cheaply; the lock closes its TOCTOU —
-    // the reconcile cannot stamp the source row between here and the post.
-    const publishOutcome = await publishWithReviewLivenessLock(
-      isReviewRun ? plan.reviewGraphic.googleReviewId : null,
-      () => SocialMediaService.publishToAll({
+    // The snapshot gates above reject cheaply; the locks close their TOCTOU —
+    // the reconcile cannot stamp the source row (review runs) and the stats
+    // sync cannot move the fleet count (milestone runs) between here and the post.
+    const publishFn = () => SocialMediaService.publishToAll({
         title: plan.topic,
         description: plan.service,
         link: finalPreview.suggestedLink,
@@ -1708,12 +2003,23 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         onFirstPlatformSuccess: isReviewRun && !SOCIAL_FLAGS.dryRun
           ? () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)
           : null,
-      }),
-      { rejectConsumed: true },
-    );
+      });
+    const publishOutcome = isMilestoneRun
+      ? await publishWithFleetStatsLease(plan, publishFn, run?.id)
+      : await publishWithReviewLivenessLock(
+        isReviewRun ? plan.reviewGraphic.googleReviewId : null,
+        publishFn,
+        { rejectConsumed: true },
+      );
     if (publishOutcome.blocked) {
-      const reason = publishOutcome.lockBusy
-        ? 'review sync in progress for this location — testimonial publish deferred, retry the run'
+      const reason = publishOutcome.driftReason
+        ? publishOutcome.driftReason
+        : publishOutcome.claimedElsewhere
+        ? 'milestone already claimed by another run — duplicate celebration blocked'
+        : publishOutcome.lockBusy
+        ? (isMilestoneRun
+          ? 'review stats sync in progress — milestone publish deferred, retry the run'
+          : 'review sync in progress for this location — testimonial publish deferred, retry the run')
         : publishOutcome.consumed
           ? 'source Google review was already published as a testimonial — candidate consumed'
           : publishOutcome.missing
@@ -1869,6 +2175,73 @@ const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
 
 const NOOP_RELEASE = async () => {};
 const NOOP_ABANDON = () => {};
+
+// Milestone counterpart of publishWithReviewLivenessLock, same shape as the
+// review lane's release-before-publish design: the fleet snapshot is
+// written by the Places stats sync under runExclusive
+// `gbp-review-sync:<location>`, so EVERY configured location's lease is
+// held (non-blocking try-locks, fixed order → no deadlock) only for the
+// atomic part — the final drift re-check plus writing the durable 'claimed'
+// stamp — and released BEFORE the external provider calls (which have no
+// total deadline; holding four sync leases and pool connections across them
+// would starve review sync fleet-wide). The stamp is what survives: a
+// stats change during the publish itself can only shift the count by the
+// handful of reviews that land in those seconds — the same staleness any
+// published statistic has — and can never produce a second celebration.
+// Any lease contention → { blocked, lockBusy } and the caller retries later.
+async function publishWithFleetStatsLease(plan, publishFn, runId) {
+  const ids = WAVES_LOCATIONS.map((loc) => loc.id).sort();
+  const HELD = Symbol('held');
+  // Dry runs post nothing externally — never write ownership for them.
+  const persistClaim = !SOCIAL_FLAGS.dryRun;
+  const acquire = async (i) => {
+    if (i >= ids.length) {
+      const driftReason = await milestonePublishBlocker(plan);
+      if (driftReason) return { [HELD]: true, blocked: true, driftReason };
+      if (persistClaim && (await claimMilestone(plan.milestone, runId)) === 'other') {
+        return { [HELD]: true, blocked: true, claimedElsewhere: true };
+      }
+      return { [HELD]: true, claimed: true };
+    }
+    return runExclusive(`gbp-review-sync:${ids[i]}`, () => acquire(i + 1), { recordHealth: false });
+  };
+  const gate = await acquire(0);
+  if (!gate || !gate[HELD]) return { blocked: true, lockBusy: true };
+  if (gate.blocked) return { blocked: true, driftReason: gate.driftReason, claimedElsewhere: gate.claimedElsewhere };
+
+  // Leases released — publish. Same { blocked, result, releaseClaim,
+  // abandonClaim } outcome shape the callers already handle.
+  // A thrown publish leaves the 'claimed' stamp in place on purpose: provider
+  // state is unknown, and a duplicate celebration is worse than a missed one.
+  const outcome = await publishWithReviewLivenessLock(null, publishFn);
+  if (!persistClaim) return outcome;
+  const disposition = milestoneClaimDisposition(outcome?.result);
+  if (disposition === 'published') {
+    await markMilestonePublished(plan.milestone, runId).catch((err) => {
+      logger.error(`[studio] milestone ${plan.milestone} published but stamp upgrade failed (claim retained): ${err.message}`);
+    });
+  } else if (disposition === 'release') {
+    await clearMilestoneStamp(plan.milestone, runId).catch(() => {});
+  } else {
+    logger.warn(`[studio] milestone ${plan.milestone} publish reported no success after provider attempts — claim retained (owner review)`);
+  }
+  return outcome;
+}
+
+// What happens to the durable claim after a publish attempt (pure):
+//   'published' — some provider accepted the post → claimed → published
+//   'release'   — NOTHING reached a provider (empty channel set, or every
+//                 entry skipped before an external call: automation
+//                 paused, channel disabled, judge rejection) → the
+//                 threshold is selectable again
+//   'retain'    — a provider was ATTEMPTED and reported failure; a lost
+//                 response may still have gone live, so ownership stays
+function milestoneClaimDisposition(result) {
+  const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
+  if (result?.success || platforms.some((p) => p?.success)) return 'published';
+  if (platforms.every((p) => p?.skipped)) return 'release';
+  return 'retain';
+}
 
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false, allowConsumedByRunId = null } = {}) {
   if (!sourceReviewId) {
@@ -2077,6 +2450,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         return { ok: false, status: 409, error: 'source Google review has been removed from Google — testimonial cannot be published' };
       }
     }
+    // A milestone draft can sit in the queue for days; the stored copy and
+    // card state a count/average that may no longer hold. Re-validate before
+    // publishing (rejecting the draft releases the threshold claim).
+    if (input.milestone) {
+      const reason = await milestonePublishBlocker(input);
+      if (reason) return { ok: false, status: 409, error: reason };
+    }
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
     const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
@@ -2136,8 +2516,17 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // fully-posted run normally finalizes on the attempt that completed it).
     // The liveness gate above is a snapshot; the lock closes its TOCTOU
     // against the reconcile stamping the source review mid-approval.
+    // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
+    // owner of the testimonial — only this run's retry may publish the
+    // remaining channels past its own stamp; every other run is consumed.
+    // Milestone drafts take the fleet-stats lease instead (see
+    // publishWithFleetStatsLease) — the drift re-check and the post happen
+    // with the stats sync excluded.
+    const withPublishLock = (fn) => (input.milestone
+      ? publishWithFleetStatsLease(input, fn, run.id)
+      : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
     const publishOutcome = remainingChannels.length
-      ? await publishWithReviewLivenessLock(sourceReviewId, () => SocialMediaService.publishToAll({
+      ? await withPublishLock(() => SocialMediaService.publishToAll({
         title: run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
         link: preview.suggestedLink,
@@ -2163,17 +2552,20 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         onFirstPlatformSuccess: input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun
           ? () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)
           : null,
-      // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
-      // owner of the testimonial — only this run's retry may publish the
-      // remaining channels past its own stamp; every other run is consumed.
-      }), { rejectConsumed: true, allowConsumedByRunId: run.id })
+      }))
       : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {}, abandonClaim: () => {} };
     if (publishOutcome.blocked) {
       return {
         ok: false,
         status: 409,
-        error: publishOutcome.lockBusy
-          ? 'review sync is in progress for this location — approve again in a moment'
+        error: publishOutcome.driftReason
+          ? publishOutcome.driftReason
+          : publishOutcome.claimedElsewhere
+          ? 'this milestone was already claimed by another run — reject this draft'
+          : publishOutcome.lockBusy
+          ? (input.milestone
+            ? 'review stats sync is in progress — approve again in a moment'
+            : 'review sync is in progress for this location — approve again in a moment')
           : publishOutcome.consumed
             ? 'this review was already published as a testimonial by another run'
             : publishOutcome.missing
@@ -2795,6 +3187,15 @@ module.exports = {
   buildVersusCardInput,
   buildVersusDrafts,
   selectAutonomousVersusPlan,
+  MILESTONE_WINDOW,
+  buildMilestoneCardInput,
+  buildMilestoneDrafts,
+  milestoneThresholdFor,
+  milestoneDrift,
+  milestoneClaimDisposition,
+  fleetReviewStats,
+  planMilestone,
+  selectAutonomousMilestonePlan,
   approveAutonomousRun,
   assessApprovalPublish,
   autonomousStatus,

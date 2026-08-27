@@ -198,3 +198,39 @@ describe('photo card overlays (creative engine)', () => {
     ).rejects.toThrow(/backgroundBase64/);
   });
 });
+
+describe('milestone card', () => {
+  test('renders the review count, star row, average, and thank-you line', () => {
+    const svg = Renderer.renderSocialCardSvg({
+      variant: 'milestone', city: 'Sarasota', count: 1000, averageRating: 4.9, thanks: 'Thank you, Southwest Florida.',
+    });
+    expect(svg).toContain('MILESTONE');
+    expect(svg).toContain('>1,000</text>');
+    expect(svg).toContain('GOOGLE REVIEWS');
+    expect(svg).toContain('4.9 average rating');
+    expect(svg).toContain('Southwest'); // thanks line survives wrapping
+    expect(svg).toContain('#FFC400'); // star fill
+    expect(svg).not.toMatch(/#007f83/i);
+  });
+
+  test('milestone stars depict the real average — fractional fill, never an implied 5.0', () => {
+    const svg = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 300, averageRating: 4.7 });
+    // Four full stars (clip width = full star width 37.2) and one 70% star.
+    expect((svg.match(/width="37.2"/g) || []).length).toBe(4);
+    expect(svg).toContain('width="26"'); // 37.2 * 0.7 = 26.04 → 26
+    expect(svg).toContain('clip-path="url(#star-clip-4)"');
+
+    const low = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 300, averageRating: 3.5 });
+    expect((low.match(/width="37.2"/g) || []).length).toBe(3);
+    expect(low).not.toContain('star-clip-4"><rect'); // fifth star: outline only
+  });
+
+  test('milestone card omits average AND star row when none is supplied; sizes for GBP', () => {
+    const svg = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 250, platform: 'gbp' });
+    expect(svg).toContain('width="1200"');
+    expect(svg).not.toContain('average rating');
+    expect(svg).not.toContain('star-clip');
+    expect(svg).not.toContain('#FFC400');
+    expect(svg).toContain('>250</text>');
+  });
+});
