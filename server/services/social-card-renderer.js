@@ -348,7 +348,49 @@ function renderVersusSvg(input = {}, logoDataUri = null) {
   `;
 }
 
+// Milestone card: a review-count celebration ("300 Google reviews") — the
+// format local service companies get their best organic engagement on. Big
+// number, star row with the real average, and a thank-you line. Deterministic
+// text-only render (GBP-eligible; no AI imagery).
+function renderMilestoneSvg(input = {}, logoDataUri = null) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const count = Math.max(0, Math.round(Number(input.count) || 0));
+  const countLabel = count.toLocaleString('en-US');
+  const avg = Number(input.averageRating);
+  const avgLabel = Number.isFinite(avg) && avg > 0 ? `${avg.toFixed(1)} average rating` : '';
+  const thanks = cleanText(input.thanks, 140) || 'Thank you, Southwest Florida.';
+  const service = cleanText(input.service, 70) || 'Google reviews';
+
+  const { svg: frame, box } = chrome({ W, H, city: input.city, service, logoDataUri });
+  const eyebrowY = box.panelY + 128;
+  const numberSize = Math.round(W * 0.2);
+  const numberY = eyebrowY + 70 + numberSize;
+  const labelSize = Math.round(W * 0.05);
+  const labelY = numberY + Math.round(labelSize * 1.3);
+  const starsY = labelY + Math.round(labelSize * 1.5);
+  const stars = [0, 1, 2, 3, 4].map((i) => (
+    `<path transform="translate(${box.padL + 20 + i * 50} ${starsY})" d="M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z" fill="${COLORS.star}"/>`
+  )).join('');
+  const thanksY = box.panelY + box.panelH - 128;
+  const thanksLines = wrapText(thanks, fitChars(box.padR - box.padL - 200, Math.round(W * 0.032), 0.56), 2);
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${eyebrow('Milestone', box.padL, eyebrowY, COLORS.gold).replace(`fill="${COLORS.white}"`, `fill="${COLORS.blueDeeper}"`)}
+      <text x="${box.padL}" y="${numberY}" font-family="${FONTS.display}" font-size="${numberSize}" font-weight="800" fill="${COLORS.blueDeeper}" letter-spacing="-2">${escapeXml(countLabel)}</text>
+      <text x="${box.padL}" y="${labelY}" font-family="${FONTS.display}" font-size="${labelSize}" font-weight="800" fill="${COLORS.wavesBlue}" letter-spacing="1">GOOGLE REVIEWS</text>
+      ${stars}
+      ${avgLabel ? `<text x="${box.padL + 270}" y="${starsY + 9}" font-family="${FONTS.body}" font-size="${Math.round(W * 0.024)}" font-weight="600" fill="${COLORS.textBody}">${escapeXml(avgLabel)}</text>` : ''}
+      <line x1="${box.padL}" y1="${thanksY - 44}" x2="${box.padR - 180}" y2="${thanksY - 44}" stroke="${COLORS.blueLight}" stroke-width="4"/>
+      ${textBlock(thanksLines, { x: box.padL, y: thanksY, size: Math.round(W * 0.032), weight: 700, fill: COLORS.blueDeeper, family: FONTS.heading, lineHeight: 1.3 })}
+      ${waveMotif(box.padR - 60, thanksY - 8, W / 1080)}
+    </svg>
+  `;
+}
+
 function renderSocialCardSvg(input = {}, logoDataUri = null) {
+  if (input.variant === 'milestone') return renderMilestoneSvg(input, logoDataUri);
   if (input.variant === 'review') return renderReviewSvg(input, logoDataUri);
   if (input.variant === 'blog') return renderBlogSvg(input, logoDataUri);
   if (input.variant === 'versus') return renderVersusSvg(input, logoDataUri);

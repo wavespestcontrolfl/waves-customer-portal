@@ -415,6 +415,9 @@ const AUTONOMOUS_FLAGS = {
   // Dark-ship: the "pest showdown" X-vs-Y ID lane is OFF until explicitly
   // enabled (kill switch = unset SOCIAL_AUTONOMOUS_INCLUDE_VERSUS).
   get includeVersus() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_VERSUS', false); },
+  // Dark-ship: review-count milestone celebrations ("300 Google reviews") are
+  // OFF until explicitly enabled (kill switch = unset).
+  get includeMilestones() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES', false); },
   // CLAMPED below the minimum gap between two daily 6:30 AM ET ticks. This is a
   // same-day DEDUPE guard, NOT the schedule (the fixed once-daily cron is). Two
   // consecutive ET ticks are normally 24h apart but only 23h across the
@@ -762,6 +765,18 @@ function buildCampaignCardInput(input = {}, preview = {}) {
   };
 }
 
+function buildMilestoneCardInput(plan = {}) {
+  return {
+    variant: 'milestone',
+    // Company-wide count — no city stamp (plan.city only routes the GBP location).
+    city: null,
+    service: 'Google reviews',
+    count: plan.milestone,
+    averageRating: plan.averageRating,
+    thanks: 'Thank you, Southwest Florida.',
+  };
+}
+
 function buildVersusCardInput(pair = {}, input = {}) {
   return {
     variant: 'versus',
@@ -803,6 +818,10 @@ async function renderCampaignImageUrl(input, preview, platform) {
     `${preview?.inputs?.city || input.city}-${preview?.inputs?.topic || input.topic}`,
     platform
   );
+}
+
+async function renderMilestoneImageUrl(plan, platform) {
+  return uploadSocialCard(buildMilestoneCardInput(plan), `milestone-${plan.milestone}-reviews`, platform);
 }
 
 async function renderVersusImageUrl(pair, input, platform) {
@@ -1059,7 +1078,120 @@ function selectAutonomousVersusPlan(now = new Date()) {
   };
 }
 
+// ── Review-count milestone lane ─────────────────────────────────────────────
+// Celebrates crossing a round Google-review count (the single best-engaging
+// organic format for local service brands). Company-wide count from the
+// synced google_reviews rows Google still shows; fires ONCE per threshold and
+// only while the count is within MILESTONE_WINDOW of it, so a lane enabled
+// long after a threshold passed never posts a stale "we just hit 250".
+
+const MILESTONE_ANGLE = 'review milestone';
+const MILESTONE_WINDOW = 30;
+
+// Highest ladder rung <= count: every 50 to 500, 250s to 2,000, 500s to
+// 5,000, then every 1,000. Returns null below the first rung.
+function milestoneThresholdFor(count) {
+  const n = Math.floor(Number(count) || 0);
+  if (n < 50) return null;
+  if (n < 500) return Math.floor(n / 50) * 50;
+  if (n < 2000) return Math.floor(n / 250) * 250;
+  if (n < 5000) return Math.floor(n / 500) * 500;
+  return Math.floor(n / 1000) * 1000;
+}
+
+async function reviewMilestoneStats() {
+  if (!(await hasTable('google_reviews'))) return null;
+  try {
+    const row = await db('google_reviews')
+      .whereNull('missing_since')
+      .count({ count: '*' })
+      .avg({ average: 'star_rating' })
+      .first();
+    const count = Number(row?.count) || 0;
+    const average = Number(row?.average);
+    return { count, average: Number.isFinite(average) ? Math.round(average * 10) / 10 : null };
+  } catch {
+    return null;
+  }
+}
+
+// A threshold is claimed by any non-skipped run that carried it — including
+// in-flight 'started' rows and approval-queue drafts — so a crash or a pending
+// draft can't let the next tick mint a duplicate celebration.
+async function milestoneAlreadyClaimed(threshold) {
+  if (!(await hasTable('social_content_studio_runs'))) return true;
+  const row = await db('social_content_studio_runs')
+    .where({ run_type: 'autonomous', angle: MILESTONE_ANGLE })
+    .whereIn('status', ['started', 'published', 'draft_created'])
+    .whereRaw("input->>'milestone' = ?", [String(threshold)])
+    .first('id');
+  return !!row;
+}
+
+function buildMilestoneDrafts({ threshold, average }) {
+  const n = threshold.toLocaleString('en-US');
+  const avgLine = average ? `Average rating: ${average.toFixed(1)} stars. ` : '';
+  return {
+    facebook: `${n} Google reviews. Thank you, Southwest Florida.\n\nEvery one came from a real home we service, written by the people who live there. ${avgLine}We read all of them, and they shape how we work.\n\nTo everyone who took a minute to leave one: thank you.`,
+    instagram: `${n} Google reviews. Thank you, Southwest Florida.\n\nEvery one came from a real home we service, written by the people who live there. ${avgLine}We read all of them, and they shape how we work.\n\n#wavespestcontrol #swfl #googlereviews #thankyou`,
+    linkedin: `Waves Pest Control just passed ${n} Google reviews. ${avgLine}A small local team, one visit and one review at a time. Thank you to the Southwest Florida homeowners who took the time to write them.`,
+    gbp: `${n} Google reviews and counting. Thank you to every Southwest Florida homeowner who took a minute to share their experience. ${avgLine}We read every one.`,
+  };
+}
+
+// Pure plan builder (DB-free) — selection reads stats + claims, then hands
+// off here so the copy/preview shape is unit-testable.
+function planMilestone({ threshold, count, average, city, channels }) {
+  const topic = `${threshold.toLocaleString('en-US')} Google reviews`;
+  const drafts = buildMilestoneDrafts({ threshold, average });
+  return {
+    topic,
+    city,
+    service: 'review proof',
+    angle: MILESTONE_ANGLE,
+    cta: 'read guide',
+    channels,
+    milestone: threshold,
+    reviewCount: count,
+    averageRating: average,
+    preview: {
+      inputs: { topic, city, service: 'review proof', angle: MILESTONE_ANGLE, cta: 'read guide', channels },
+      suggestedLink: 'https://www.wavespestcontrol.com/reviews/',
+      drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
+      validation: validateDrafts(drafts),
+      sources: [{
+        type: 'google_review_count',
+        label: `${count} live Google reviews across all locations`,
+        detail: average ? `Average star rating ${average.toFixed(1)}; milestone threshold ${threshold}.` : `Milestone threshold ${threshold}.`,
+      }],
+      fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
+    },
+  };
+}
+
+async function selectAutonomousMilestonePlan(now = new Date()) {
+  if (!AUTONOMOUS_FLAGS.includeMilestones) return null;
+  const stats = await reviewMilestoneStats();
+  if (!stats) return null;
+  const threshold = milestoneThresholdFor(stats.count);
+  if (!threshold || stats.count - threshold >= MILESTONE_WINDOW) return null;
+  if (await milestoneAlreadyClaimed(threshold)) return null;
+  const { day } = etParts(now); // GBP location rotation only — the copy is company-wide
+  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  return planMilestone({
+    threshold,
+    count: stats.count,
+    average: stats.average,
+    city,
+    channels: AUTONOMOUS_FLAGS.channels,
+  });
+}
+
 async function selectAutonomousPlan(now = new Date()) {
+  // One-shot celebration outranks the recurring lanes on the day it fires.
+  const milestonePlan = await selectAutonomousMilestonePlan(now);
+  if (milestonePlan) return milestonePlan;
+
   const reviewPlan = await selectAutonomousReviewPlan(now);
   if (reviewPlan) return reviewPlan;
 
@@ -1556,6 +1688,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // photo scene can't render a two-pest comparison, so the creative engine is
     // skipped entirely (same "never block, never substitute" posture as GBP).
     const isVersusRun = !isReviewRun && !!plan.versusPair;
+    // Milestone runs are the deterministic number card (same posture as versus).
+    const isMilestoneRun = !isReviewRun && !isVersusRun && !!plan.milestone;
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -1573,7 +1707,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    let creativeEligible = hasNonGbpChannel && !isVersusRun;
+    let creativeEligible = hasNonGbpChannel && !isVersusRun && !isMilestoneRun;
     if (creativeEligible && effectiveMode !== 'draft') {
       creativeEligible = false;
       for (const ch of plan.channels) {
@@ -1620,6 +1754,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         gbpImageUrl,
         variant: 'review',
         templateKey: 'waves_clean_square',
+      });
+    } else if (isMilestoneRun) {
+      imageUrl = await renderMilestoneImageUrl(plan);
+      if (wantsGbp) gbpImageUrl = await renderMilestoneImageUrl(plan, 'gbp');
+      finalPreview = previewWithVisual(preview, {
+        imageUrl,
+        gbpImageUrl,
+        variant: 'milestone',
+        templateKey: 'waves_milestone_square',
       });
     } else if (isVersusRun) {
       imageUrl = await renderVersusImageUrl(plan.versusPair, plan);
@@ -2795,6 +2938,12 @@ module.exports = {
   buildVersusCardInput,
   buildVersusDrafts,
   selectAutonomousVersusPlan,
+  MILESTONE_WINDOW,
+  buildMilestoneCardInput,
+  buildMilestoneDrafts,
+  milestoneThresholdFor,
+  planMilestone,
+  selectAutonomousMilestonePlan,
   approveAutonomousRun,
   assessApprovalPublish,
   autonomousStatus,

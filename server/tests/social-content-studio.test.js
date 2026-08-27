@@ -485,3 +485,59 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(card.verdict).toBe(pair.verdict);
   });
 });
+
+describe('autonomous review-milestone lane', () => {
+  let prevFlag;
+  beforeAll(() => { prevFlag = process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES; });
+  beforeEach(() => { delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES; });
+  afterAll(() => {
+    if (prevFlag === undefined) delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES;
+    else process.env.SOCIAL_AUTONOMOUS_INCLUDE_MILESTONES = prevFlag;
+  });
+
+  test('threshold ladder: 50s to 500, 250s to 2000, 500s to 5000, then 1000s', () => {
+    expect(Studio.milestoneThresholdFor(0)).toBeNull();
+    expect(Studio.milestoneThresholdFor(49)).toBeNull();
+    expect(Studio.milestoneThresholdFor(50)).toBe(50);
+    expect(Studio.milestoneThresholdFor(149)).toBe(100);
+    expect(Studio.milestoneThresholdFor(499)).toBe(450);
+    expect(Studio.milestoneThresholdFor(500)).toBe(500);
+    expect(Studio.milestoneThresholdFor(1999)).toBe(1750);
+    expect(Studio.milestoneThresholdFor(2000)).toBe(2000);
+    expect(Studio.milestoneThresholdFor(4999)).toBe(4500);
+    expect(Studio.milestoneThresholdFor(15250)).toBe(15000);
+    expect(Studio.MILESTONE_WINDOW).toBe(30);
+  });
+
+  test('lane is dark by default (flag unset -> no plan, no DB read)', async () => {
+    await expect(Studio.selectAutonomousMilestonePlan(new Date('2026-06-10T16:00:00Z'))).resolves.toBeNull();
+  });
+
+  test('milestone drafts pass the compliance validators, with and without an average', () => {
+    for (const [threshold, average] of [[50, 5], [300, 4.9], [1000, null], [2500, 4.7]]) {
+      const drafts = Studio.buildMilestoneDrafts({ threshold, average });
+      const validation = Studio.validateDrafts(drafts);
+      for (const [platform, result] of Object.entries(validation)) {
+        expect({ threshold, platform, issues: result.issues, valid: result.valid })
+          .toEqual({ threshold, platform, issues: [], valid: true });
+      }
+      const label = threshold.toLocaleString('en-US');
+      expect(drafts.facebook).toContain(`${label} Google reviews`);
+      expect(drafts.gbp).toContain(label);
+      if (average) expect(drafts.gbp).toContain(`${average.toFixed(1)} stars`);
+      else expect(drafts.gbp).not.toContain('Average rating');
+    }
+  });
+
+  test('planMilestone carries the claim key and a grounded source', () => {
+    const plan = Studio.planMilestone({ threshold: 300, count: 312, average: 4.9, city: 'Venice', channels: ['gbp', 'facebook'] });
+    expect(plan.milestone).toBe(300);
+    expect(plan.angle).toBe('review milestone');
+    expect(plan.topic).toBe('300 Google reviews');
+    expect(Object.keys(plan.preview.drafts).sort()).toEqual(['facebook', 'gbp']);
+    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/reviews/');
+    expect(plan.preview.sources[0].label).toContain('312 live Google reviews');
+    const card = Studio.buildMilestoneCardInput(plan);
+    expect(card).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.9 });
+  });
+});

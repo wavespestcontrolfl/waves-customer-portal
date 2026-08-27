@@ -198,3 +198,25 @@ describe('photo card overlays (creative engine)', () => {
     ).rejects.toThrow(/backgroundBase64/);
   });
 });
+
+describe('milestone card', () => {
+  test('renders the review count, star row, average, and thank-you line', () => {
+    const svg = Renderer.renderSocialCardSvg({
+      variant: 'milestone', city: 'Sarasota', count: 1000, averageRating: 4.9, thanks: 'Thank you, Southwest Florida.',
+    });
+    expect(svg).toContain('MILESTONE');
+    expect(svg).toContain('>1,000</text>');
+    expect(svg).toContain('GOOGLE REVIEWS');
+    expect(svg).toContain('4.9 average rating');
+    expect(svg).toContain('Southwest'); // thanks line survives wrapping
+    expect(svg).toContain('#FFC400'); // star fill
+    expect(svg).not.toMatch(/#007f83/i);
+  });
+
+  test('milestone card omits the average when none is supplied and sizes for GBP', () => {
+    const svg = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 250, platform: 'gbp' });
+    expect(svg).toContain('width="1200"');
+    expect(svg).not.toContain('average rating');
+    expect(svg).toContain('>250</text>');
+  });
+});
