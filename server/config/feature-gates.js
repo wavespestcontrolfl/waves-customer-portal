@@ -1715,11 +1715,16 @@ function gateEnvValue(envName) {
 }
 
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
-// GATE_PEST_STRANDED_RECOVERY): a valid ISO timestamp → Date; unset or
-// unparseable → null (fail closed — an invalid value never enables anything).
+// GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
+// explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
+// → Date; anything else — unset, a bare date, an offset-less local time
+// (Railway would read it as UTC and open the gate hours early), a number,
+// a locale string — → null (fail closed: an ambiguous value never enables
+// anything).
+const STRICT_ISO_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 function gateEnvTimestamp(envName) {
   const raw = String(process.env[envName] || '').trim();
-  if (!raw) return null;
+  if (!raw || !STRICT_ISO_OFFSET_RE.test(raw)) return null;
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d;
 }

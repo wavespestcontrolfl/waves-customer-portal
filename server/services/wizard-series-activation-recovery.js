@@ -186,20 +186,20 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   }
   // Page by keyset until `limit` PROCESSABLE rows were handled or the set
   // is exhausted (codex r3 P1): skipped rows advance the cursor instead of
-  // being re-selected every tick. MAX_PAGES is a runaway guard — a whole
-  // page of skips per tick × 25 is far beyond any real backlog; hitting it
-  // logs loud and the next tick resumes from the top (skips are cheap).
-  const MAX_PAGES = 25;
+  // being re-selected every tick. Deliberately NO page cap (pre-push P1):
+  // the cursor is per-tick, so a cap would re-walk the same skipped pages
+  // every tick and starve newer rows — the skipped set (pre-epoch pest-
+  // family aliases the SQL regex cannot classify) is finite and each page
+  // is a cheap indexed read, so the walk runs to exhaustion like the
+  // follow-through healer's.
   let stripped = 0;
   let examined = 0;
   let processed = 0;
-  let pages = 0;
   let cursor = null;
   let exhausted = false;
-  while (processed < limit && pages < MAX_PAGES && !exhausted) {
+  while (processed < limit && !exhausted) {
     const stranded = await findStrandedParents(database, { olderThanMinutes, limit, cursor });
     if (!stranded.length) break;
-    pages += 1;
     if (stranded.length < limit) exhausted = true;
     for (const parent of stranded) {
     cursor = parent;
@@ -415,9 +415,6 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
       logger.error(`[wizard-series-recovery] strip failed for parent=${parent.id}: ${err.message}`);
     }
     }
-  }
-  if (pages >= MAX_PAGES && !exhausted) {
-    logger.warn(`[wizard-series-recovery] stranded sweep walked ${MAX_PAGES} pages of skipped rows this tick — resuming from the top next tick`);
   }
   return { examined, stripped };
 }

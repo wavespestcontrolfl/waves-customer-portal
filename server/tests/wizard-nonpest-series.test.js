@@ -994,7 +994,15 @@ describe('booking route wiring (source contracts)', () => {
       expect(pestRecoveryEpoch()).toBeNull();
       process.env.GATE_PEST_STRANDED_RECOVERY = 'not-a-date';
       expect(pestRecoveryEpoch()).toBeNull();
+      // STRICT ISO with an explicit offset only (hook P1): a bare date, an
+      // offset-less local time, or a number never opens the gate.
+      for (const bad of ['1', '2026-08-28', '2026-08-28T12:00:00', 'Aug 28 2026', '1756382400000']) {
+        process.env.GATE_PEST_STRANDED_RECOVERY = bad;
+        expect(pestRecoveryEpoch()).toBeNull();
+      }
       process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T12:00:00Z';
+      expect(pestRecoveryEpoch().toISOString()).toBe('2026-08-28T12:00:00.000Z');
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T08:00:00-04:00';
       expect(pestRecoveryEpoch().toISOString()).toBe('2026-08-28T12:00:00.000Z');
     } finally {
       if (saved === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = saved;
@@ -1016,7 +1024,10 @@ describe('booking route wiring (source contracts)', () => {
     // labels the SQL regex cannot classify) never pin the page.
     expect(backfillSrc0).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'estimated_price'\)/);
     const sweepBody = recoverySrc.slice(recoverySrc.indexOf('async function sweepStrandedWizardActivations'), recoverySrc.indexOf('// Post-activation follow-through'));
-    expect(sweepBody).toMatch(/while \(processed < limit && pages < MAX_PAGES && !exhausted\) \{/);
+    // No page cap: the per-tick cursor would otherwise re-walk the same
+    // skipped pages every tick (hook P1).
+    expect(sweepBody).toMatch(/while \(processed < limit && !exhausted\) \{/);
+    expect(sweepBody).not.toMatch(/MAX_PAGES/);
     expect(sweepBody).toMatch(/findStrandedParents\(database, \{ olderThanMinutes, limit, cursor \}\)/);
     expect(recoverySrc).toMatch(/async function findStrandedParents\(database, \{ olderThanMinutes, limit, cursor = null \}\)/);
     const findBody2 = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
