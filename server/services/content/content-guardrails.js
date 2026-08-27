@@ -1838,6 +1838,22 @@ function tenureClaimFinding(text) {
 // backslash-ESCAPED backtick (odd run) cannot OPEN a span.
 const SPAN_RE_SOURCE = '(?<!(?<!\\\\)(?:\\\\\\\\)*\\\\)(?<!`)(`+)(?!`)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \\t\\r\\n]|$))(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:(?:\\*[ \\t]*){3,}|(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,})(?:\\r?\\n|$))[\\s\\S])*?(?<!`)\\1(?!`)';
 
+// A blockquote INTERRUPTS a paragraph (CommonMark: no blank line needed), so
+// a span opened outside a quote — or at a shallower depth — can never pair
+// across a line that DEEPENS the quote context. The reverse (a quoted span
+// continuing onto a shallower or unquoted line) is lazy continuation and
+// stays a single paragraph. Checked as a match guard: the regex cannot see
+// the opening line's depth, so a crossing candidate is simply left unpaired
+// (its content stays visible — fail closed).
+function spanCrossesQuoteBoundary(whole, start, matched) {
+  if (!matched.includes('\n')) return false;
+  const depthOf = (line) => ((line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0].match(/>/g) || []).length;
+  const lineStart = whole.lastIndexOf('\n', start - 1) + 1;
+  const lineEnd = whole.indexOf('\n', start);
+  const openDepth = depthOf(whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd));
+  return matched.split('\n').slice(1).some((l) => depthOf(l) > openDepth);
+}
+
 function blankNonRenderedMarkdown(text) {
   const raw = String(text || '');
   // Pass 1 — comments and <pre> (whole-text, newline-preserving). A
@@ -1847,7 +1863,9 @@ function blankNonRenderedMarkdown(text) {
   const spanIntervals = [];
   const spanScan = new RegExp(SPAN_RE_SOURCE, 'g');
   let sm;
-  while ((sm = spanScan.exec(raw)) !== null) spanIntervals.push([sm.index, sm.index + sm[0].length]);
+  while ((sm = spanScan.exec(raw)) !== null) {
+    if (!spanCrossesQuoteBoundary(raw, sm.index, sm[0])) spanIntervals.push([sm.index, sm.index + sm[0].length]);
+  }
   // …and FENCED regions likewise: a delimiter inside a fence is code. A
   // rough top-level line scan suffices here — pass 3 remains the fence
   // authority for masking.
@@ -1870,8 +1888,24 @@ function blankNonRenderedMarkdown(text) {
     }
     if (openCh) fenceIntervals.push([start, raw.length]);
   }
+  // …and QUOTED ATTRIBUTE VALUES inside HTML tags: a "<!--" inside
+  // `<span title="<!--">` is ordinary attribute text, not a comment opener —
+  // treating it as one would blank live content through to a later "-->".
+  // Tags are matched quote-aware (a quoted value may contain ">").
+  const attrIntervals = [];
+  {
+    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
+    const quoted = /"[^"]*"|'[^']*'/g;
+    let tm;
+    while ((tm = tagScan.exec(raw)) !== null) {
+      let qm;
+      quoted.lastIndex = 0;
+      while ((qm = quoted.exec(tm[0])) !== null) attrIntervals.push([tm.index + qm.index, tm.index + qm.index + qm[0].length]);
+    }
+  }
   const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b)
-    || fenceIntervals.some(([a, b]) => pos >= a && pos < b);
+    || fenceIntervals.some(([a, b]) => pos >= a && pos < b)
+    || attrIntervals.some(([a, b]) => pos >= a && pos < b);
   const afterComments = raw
     .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
@@ -1903,7 +1937,14 @@ function blankNonRenderedMarkdown(text) {
     // is a JS template literal whose VALUE renders — an expression, not a
     // markdown code span. Leave it for the link scanners.
     if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
-    return c.replace(/[^\n]/g, '\u0002');
+    // A span cannot pair across a DEEPENING blockquote line (the quote
+    // interrupts the paragraph) — leave the candidate unpaired; its content
+    // stays visible for the link/table scanners.
+    if (spanCrossesQuoteBoundary(whole, offset, c)) return c;
+    // UNESCAPED pipes survive the mask: GFM recognizes table rows at BLOCK
+    // level, before inline code is parsed, so a pipe inside a code span is
+    // still a live cell separator ("| `a | b` | c |" is a 3-cell header).
+    return c.replace(/[^\n|]/g, '\u0002');
   });
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
   // containers. Opener VALIDITY is judged on the pre-span-mask source line:
@@ -1914,6 +1955,13 @@ function blankNonRenderedMarkdown(text) {
   let fence = null; // { ch, len, depth, listIndent }
   let fenceListIndent = 0; // content column of the current list item (0 = top level)
   let fencePrevBlank = true;
+  // Line indices where THIS pass ends the list via fence geometry (a
+  // dedented fence opener, or content dedented out of a fence's list item).
+  // Pass 4 sees those fence lines BLANKED, so it cannot re-derive the list
+  // end itself — the reset is propagated explicitly (Codex r33: a dedented
+  // fence between "- item" and an indented code sample must not leave the
+  // sample scanned as live list content).
+  const listEndAt = new Set();
   const fenced = spanned.split('\n').map((l, i) => {
     // Blockquote-prefix matching is LIST-RELATIVE (same posture as pass 4):
     // inside a list item the first ">" may sit up to 3 past the item's
@@ -1936,7 +1984,7 @@ function blankNonRenderedMarkdown(text) {
     // fence's list item (code has no lazy continuation) — is outside the
     // block and renders normally.
     if (fence && !blank && (depth < fence.depth || indent < fence.listIndent)) {
-      if (indent < fence.listIndent) fenceListIndent = 0;
+      if (indent < fence.listIndent) { fenceListIndent = 0; listEndAt.add(i); }
       fence = null;
     }
     if (fence) {
@@ -1974,7 +2022,7 @@ function blankNonRenderedMarkdown(text) {
       const srcTail = sourceLines[i].slice((prefix ? prefix[0].length : 0) + markerLen);
       const srcOpen = srcTail.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
-        if (!markerAccepted && depth === 0 && indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
+        if (!markerAccepted && depth === 0 && indent < fenceListIndent) { fenceListIndent = 0; listEndAt.add(i); } // a dedented fence ends the list
         fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? 0 : fenceListIndent };
         return '';
       }
@@ -1985,7 +2033,10 @@ function blankNonRenderedMarkdown(text) {
   let listContext = false;
   let listContentIndent = 0;
   let prevBlank = true;
-  return fenced.split('\n').map((l) => {
+  return fenced.split('\n').map((l, i) => {
+    // A fence-geometry list end recorded by pass 3 (the fence lines it
+    // judged are blanked here, so this pass cannot re-derive it).
+    if (listEndAt.has(i)) listContext = false;
     // Nested markers may carry up to three spaces before the inner ">"
     // ("> " + "  > "); the LAST marker keeps only one optional space so
     // remaining indentation stays content. Blockquote stripping is

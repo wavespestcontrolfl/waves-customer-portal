@@ -283,7 +283,8 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   'bed-bug': /\bbed[ -]?bug/i,
   cockroach: /\b(?:cock)?roach(?:es)?\b/i,
   ant: /\bants?\b/i,
-  spider: /\bspider/i,
+  // Whole word only — "spiderwort" is a lawn WEED, not the spider service.
+  spider: /\bspiders?\b/i,
   flea: /\bfleas?\b/i,
   tick: /\bticks?\b/i,
   wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b/i,
@@ -422,7 +423,11 @@ function extractLinks(body) {
   // literal syntax, not a link. Whitespace is allowed inside the
   // parentheses ("( /contact/ )").
   // Link text may contain ONE level of balanced brackets ("[Get a [Termite] Estimate]").
-  const md = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
+  // The DESTINATION may contain balanced parentheses ("/x(foo)/../contact/"
+  // — CommonMark accepts up to nested balanced pairs; the browser resolves
+  // the full path), so the non-angle arm consumes paren groups atomically
+  // (two levels deep) instead of stopping at the first ")".
+  const md = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\(\s*(<[^<>\n]*>|(?:[^()\s]|\((?:[^()\s]|\([^()\s]*\))*\))+)[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -466,13 +471,16 @@ function extractLinks(body) {
   // CommonMark registers it document-wide after removing the marker.
   // The destination may sit on the NEXT line but never across a blank
   // line ("[cta]:\n\n/contact/" registers nothing).
-  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[([^\]]+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)/gm;
+  // Labels may contain backslash-ESCAPED brackets ("[cta\]]: /contact/") —
+  // CommonMark accepts them; matching is on the raw label text, identical
+  // on the definition and reference sides, so no unescaping is needed.
+  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)/gm;
   while ((m = def.exec(s)) !== null) {
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
   }
   if (defs.size) {
-    const ref = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\[((?:\\[\s\S]|[^\]\\])*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -643,9 +651,11 @@ function hasConversionCta(body, brief = {}) {
   // post's service" on its own.
   return conversionCtaLinks(body).some((link) => {
     if (!link.hasEstimateWording) return false;
-    // A prose REFERENCE ("our termite estimate process") is not an
-    // actionable CTA — it cannot satisfy presence.
-    if (isProseReferenceAnchor(link.anchor)) return false;
+    // Presence requires an ACTIONABLE anchor — a request verb leading it or
+    // an infinitive invitation. A prose reference ("our termite estimate
+    // process") AND a bare noun phrase ("Termite Estimate Process") are
+    // descriptions, not CTAs — neither can satisfy presence.
+    if (!ACTION_VERB_RE.test(link.anchor)) return false;
     if (!allowed) return true;
     const named = effectiveNamed(link, allowed);
     return named.length > 0 && named.every((svc) => allowed.has(svc));

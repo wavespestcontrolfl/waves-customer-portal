@@ -2319,6 +2319,23 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A dedented BLOCKQUOTE interrupts the list too — later 4-space content
     // is indented code.
     expect(guardrails.hasRawMarkdownTable('- item\n> quote\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // GFM parses table rows at BLOCK level, before inline code — a pipe
+    // inside a code span is still a live cell separator ("| `a | b` | c |"
+    // is a 3-cell header).
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n| `a | b` | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |')).toBe(true);
+    // A DEDENTED fence directly under "- item" ends the list — a 4-space
+    // sample after it is indented code again, not live list content.
+    expect(guardrails.hasRawMarkdownTable('- item\n```\ncode\n```\n\n    | A | B |\n    | --- | --- |')).toBe(false);
+    // …while an INDENTED child fence keeps the list open — the item's
+    // 2-space table stays live.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  code\n  ```\n  | A | B |\n  | --- | --- |')).toBe(true);
+    // A "<!--" inside a QUOTED tag attribute is attribute text, not a
+    // comment opener — content through a later "-->" still renders.
+    expect(guardrails.hasRawMarkdownTable('<span title="<!--">x</span>\n\n| A | B |\n| - | - |\n\ntail -->')).toBe(true);
+    // A code span cannot pair across a line that DEEPENS the blockquote
+    // context — the quote interrupts the paragraph, so a quoted table
+    // between the backticks stays visible.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n> | A | B |\n> | - | - |\n> tail `')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

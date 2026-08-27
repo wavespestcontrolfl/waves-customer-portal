@@ -1046,6 +1046,65 @@ describe('seo-completion-gate', () => {
     });
     expect(context.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(context.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // CommonMark accepts BALANCED parentheses in a link destination — the
+    // browser resolves "/x(foo)/../contact/" to /contact/, so the wording-
+    // free CTA is still a conversion link.
+    const balancedParens = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Schedule Service](/x(foo)/../contact/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(balancedParens.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A "<!--" inside a QUOTED tag attribute is attribute text, not a
+    // comment opener — the live CTA before a later "-->" stays visible.
+    const attrComment = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. <span title="<!--">example</span> [Schedule Service](/contact/) and later --> tail.' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(attrComment.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Reference labels accept backslash-escaped brackets on BOTH sides —
+    // "[cta\]]: /contact/" defines the label "[Schedule Service][cta\]]" uses.
+    const escapedLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Schedule Service][cta\\]] today.\n\n[cta\\]]: /contact/' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(escapedLabel.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A code span cannot pair across a line that DEEPENS the blockquote
+    // context — the quote interrupts the paragraph, so its live CTA is
+    // never masked as code.
+    const quoteBoundarySpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Intro \`\n> [Schedule Service](/contact/) \`' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quoteBoundarySpan.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A BARE estimate noun phrase (no determiner, no request verb) is a
+    // description, not an actionable CTA — it cannot satisfy presence, and
+    // it is not forbidden wording either.
+    const bareNounPhrase = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Termite Estimate Process](/contact/) here.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(bareNounPhrase.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    expect(bareNounPhrase.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // "Spiderwort" is a lawn WEED — the spider service matches only the
+    // whole word, so this valid lawn-weed CTA is neither missing nor mixed.
+    const spiderwort = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Weeds. [Get a Spiderwort Weed Control Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'lawn-weed-control' }),
+      shadowMode: true,
+    });
+    expect(spiderwort.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(spiderwort.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {
