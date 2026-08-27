@@ -58,8 +58,16 @@ describe('TypedFindingsSection detail promotion', () => {
     expect(isInsideDrawer(container, 'Contributing conditions')).toBe(true);
   });
 
-  it('leaves the field in the drawer while it is genuinely optional', () => {
+  it('leaves the field in the drawer while it is genuinely optional and empty', () => {
     const { container } = renderSection({ evidence_level: 'None observed' });
     expect(isInsideDrawer(container, 'Activity areas')).toBe(true);
+  });
+
+  it('keeps a populated field visible after its driver flips to the excluded value', () => {
+    // The tech picked areas, then changed evidence to "None observed": the
+    // stale value must stay in view so it can be cleared, not hide in the
+    // drawer and 422 at submit.
+    const { container } = renderSection({ evidence_level: 'None observed', activity_areas: 'Bedroom' });
+    expect(isInsideDrawer(container, 'Activity areas')).toBe(false);
   });
 });

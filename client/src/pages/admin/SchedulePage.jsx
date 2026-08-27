@@ -6909,8 +6909,14 @@ export function TypedFindingsSection({
   // species when activity is found) renders on the primary form, not
   // inside the "optional" drawer, so the tech never fails validation on a
   // field they couldn't see (codex P1 on #3536).
-  const primaryFields = visibleFields.filter((f) => !f.detail || typedFieldRequiredNow(f, values));
-  const detailFields = visibleFields.filter((f) => f.detail && !typedFieldRequiredNow(f, values));
+  // A POPULATED detail field stays primary too: when its driver flips to the
+  // excluded value (flea evidence → "None observed", roach follow-up → "No")
+  // the stale value would otherwise hide in the drawer and still reach the
+  // server's contradiction check as a 422 (codex P1 r2 on #3536).
+  const holdsValue = (f) => String(values?.[f.key] ?? "").trim() !== "";
+  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f);
+  const primaryFields = visibleFields.filter(staysPrimary);
+  const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
     <div key={field.key} style={{ marginBottom: 12 }}>
       {/* Sectioned schemas (rodent trapping): header above the first
