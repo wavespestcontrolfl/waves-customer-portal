@@ -983,10 +983,17 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
 // B6 (owner ruling 2026-08-27): property_preferences.preferred_day has no
 // weekend values in its enum — a customer with ANY weekday preference has
 // said "not weekends", so series generators treat that as skip_weekends
-// unless the caller resolved it explicitly. Fail-OPEN: a lookup error
-// keeps the caller's existing behavior — the preference is an
-// enhancement, and an outage must not change scheduling semantics or
-// block seeding.
+// unless the caller resolved it explicitly.
+//
+// Fail-OPEN is DELIBERATE policy, not an oversight: on a lookup error the
+// caller keeps its pre-B6 behavior. Failing closed would block booking,
+// estimate acceptance, series edits, and auto-extends — customer-facing
+// availability — because an OPTIONAL preference read blipped; a missed
+// weekend shift merely places a visit the customer can move. The miss is
+// not silent either: the external e22 schedule-integrity cron flags every
+// future visit whose weekday contradicts the stored preferred_day in its
+// next daily run (ACT email), so a preference missed during an outage
+// surfaces for repair within a day.
 const WEEKDAY_PREF_VALUES = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday']);
 async function customerPrefersNoWeekends(conn, customerId) {
   if (!conn || !customerId) return false;
