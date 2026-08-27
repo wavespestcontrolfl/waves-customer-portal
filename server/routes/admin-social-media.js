@@ -332,6 +332,50 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /api/admin/social-media/analytics — aggregated analytics
+// On-demand engagement sweep (same code + same lock as the 5:15 AM ET cron)
+// — lets the owner backfill/verify without waiting for the tick. Answers as
+// soon as the lease decision is known and lets the sweep finish in the
+// background: a provider outage can hold a sweep for minutes (posts × 10s
+// calls), past any proxy timeout, and a retried request must never start a
+// second concurrent sweep. 202 = started, 409 = a sweep already holds the lease.
+router.post('/engagement/sync', async (req, res, next) => {
+  try {
+    const { runExclusive } = require('../utils/cron-lock');
+    const { syncRecentEngagement } = require('../services/social-engagement');
+    const days = Number(req.body?.days);
+    const lookbackDays = Number.isFinite(days) && days > 0 ? days : 30;
+
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    // Readiness is signalled by the sweep itself AFTER its preflight (table
+    // check + post query) — a sweep that dies before its first fetch
+    // reaches the rejection handler below and answers 503, not 202.
+    runExclusive('social-engagement-ingest', () => syncRecentEngagement({
+      lookbackDays,
+      onStart: () => markStarted({ ok: true }),
+    }))
+      .then((result) => {
+        if (result?.skipped) markStarted({ ok: false, reason: result.reason });
+        else logger.info(`[social-engagement] manual sweep done: ${JSON.stringify(result)}`);
+      })
+      .catch((err) => {
+        markStarted({ ok: false, reason: 'error', message: err.message });
+        logger.error(`[social-engagement] manual sweep failed: ${err.message}`);
+      });
+
+    const outcome = await started;
+    if (outcome.ok) return res.status(202).json({ started: true, lookbackDays });
+    // Contention is the only "try again" case; a lost DB connection or a
+    // sweep that died before its first fetch is an operational failure.
+    if (outcome.reason === 'lease_held') {
+      return res.status(409).json({ started: false, error: 'an engagement sweep is already running — try again in a few minutes' });
+    }
+    return res.status(503).json({ started: false, error: `engagement sweep could not start (${outcome.reason})` });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/analytics', async (req, res, next) => {
   try {
     // Posts grouped by platform (cap at 2000 most-recent to avoid unbounded scans)
@@ -388,16 +432,37 @@ router.get('/analytics', async (req, res, next) => {
       if (stats.total > maxCount) { maxCount = stats.total; mostActivePlatform = platform; }
     }
 
-    // Top posts (most recent published)
-    const topPosts = posts
-      .filter(p => p.status === 'published')
+    // Top posts: ranked by ingested engagement when the sync has data
+    // (social-engagement.js), else the most recent published (the pre-ingest
+    // behaviour — keeps the tab populated before the flag is on).
+    const publishedPosts = posts.filter(p => p.status === 'published');
+    // engagementByPost already returns {} for a missing table; any other
+    // failure (schema drift, DB outage) propagates to the error handler
+    // rather than masquerading as "no engagement data".
+    const engagement = await require('../services/social-engagement')
+      .engagementByPost(publishedPosts.map(p => p.id));
+    const withEngagement = Object.keys(engagement).length;
+    // Measured posts first (by score), then the unmeasured published posts
+    // (newer than the last sweep, failed fetches, GBP/LinkedIn-only) in
+    // recency order — the list never shrinks below ten just because the
+    // ingest hasn't reached a post.
+    const ranked = withEngagement
+      ? [
+        ...publishedPosts.filter(p => engagement[p.id]).sort((a, b) => engagement[b.id].score - engagement[a.id].score),
+        ...publishedPosts.filter(p => !engagement[p.id]),
+      ]
+      : publishedPosts;
+    const topPosts = ranked
       .slice(0, 10)
       .map(p => ({
         id: p.id,
         title: p.title,
         platforms: p.platforms_posted,
-        publishedAt: p.published_at,
+        // Same fallback the ingest sweep uses: tech-authored audit rows
+        // publish without a published_at stamp.
+        publishedAt: p.published_at || p.created_at,
         sourceUrl: p.source_url,
+        engagement: engagement[p.id] || null,
       }));
 
     const weeklyTrend = Object.values(weeklyBuckets)
@@ -414,6 +479,8 @@ router.get('/analytics', async (req, res, next) => {
         successRate,
         postsPerWeek,
         mostActivePlatform,
+        engagementRanked: withEngagement > 0,
+        engagementSyncedPosts: withEngagement,
       },
     });
   } catch (err) { next(err); }

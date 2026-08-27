@@ -293,7 +293,7 @@ Facebook long-lived page access tokens expire after ~60 days.
 ## Refresh Steps
 1. Go to https://developers.facebook.com/tools/explorer/
 2. Select the Waves Pest Control app
-3. Generate a User Access Token with permissions: pages_manage_posts, pages_read_engagement, pages_show_list
+3. Generate a User Access Token with permissions: pages_manage_posts, pages_read_engagement, pages_show_list, instagram_basic, instagram_manage_insights (the last two are required by the social engagement ingest — Instagram share counts come from Media Insights; without them the sweep logs "synced WITHOUT shares")
 4. Exchange for long-lived token: GET /oauth/access_token?grant_type=fb_exchange_token&client_id={APP_ID}&client_secret={APP_SECRET}&fb_exchange_token={SHORT_TOKEN}
 5. Get Page Access Token: GET /me/accounts?access_token={LONG_LIVED_USER_TOKEN}
 6. Copy the page access token for page ID 110336442031847
@@ -301,7 +301,7 @@ Facebook long-lived page access tokens expire after ~60 days.
 8. Redeploy
 
 ## Instagram Note
-Instagram posting uses the SAME token (FACEBOOK_ACCESS_TOKEN). Refreshing Facebook also fixes Instagram.
+Instagram posting uses the SAME token (FACEBOOK_ACCESS_TOKEN). Refreshing Facebook also fixes Instagram. The engagement ingest (SOCIAL_ENGAGEMENT_SYNC_ENABLED) reads Instagram share counts via Media Insights, which needs instagram_manage_insights on this token — a token generated without it still syncs likes/comments but records shares as not measured and warns in the sweep log.
 The Instagram Business Account ID is 17841465266249854.
 
 ## Monitoring
