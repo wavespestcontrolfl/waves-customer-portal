@@ -54,9 +54,13 @@ function scanWith({ items = [], total = items.length, active = [], existingByUrl
     seo_backlinks: (op, st) => {
       if (op === 'select') return st.nulls.includes('recovery_queued_at') ? owed : active;
       if (op === 'first') {
-        // per-link upsert lookup: where(source_url).where(target_url)
-        const url = st.wheres.find(w => w[0] === 'source_url')?.[1];
-        if (url) return existingByUrl[url] || null;
+        // per-link upsert lookup: CANONICAL source (comparable SQL) + canonical target
+        const srcRaw = st.raws.find(r => /lower\(source_url\)/.test(r[0]));
+        if (srcRaw) {
+          const norm = (u) => String(u).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+          const hit = Object.keys(existingByUrl).find(u => norm(u) === srcRaw[1][0]);
+          return hit ? existingByUrl[hit] : null;
+        }
         // domain-level "still active?" probe
         return stillActiveDomain ? { id: 'other' } : null;
       }
@@ -270,7 +274,7 @@ describe('BacklinkMonitor verified loss detection', () => {
 
   test('DataForSEO reporting a dofollow→nofollow flip records an event and keeps the row active', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: false };
-    const existing = { id: 'bl-1', status: 'active', is_dofollow: true };
+    const existing = { id: 'bl-1', status: 'active', is_dofollow: true, source_url: seen.url_from, target_url: seen.url_to };
     const { updates, events } = scanWith({ items: [seen], active: [activeRow()], existingByUrl: { [seen.url_from]: existing } });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ relChanges: 1, lostCount: 0, missed: 0 }));
@@ -278,9 +282,31 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ event_type: 'rel_changed', detail: JSON.stringify({ from: 'dofollow', to: 'nofollow', source: 'dataforseo' }) })]);
   });
 
+  test('a respelled report (https + trailing slash + utm) UPDATES the canonical row (moved to the new spelling) instead of inserting a twin', async () => {
+    const seen = { url_from: 'https://www.blog.example/post/', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: true };
+    const existing = { id: 'bl-1', status: 'active', is_dofollow: true, source_url: 'http://blog.example/post', target_url: 'https://wavespestcontrol.com/pest-control-sarasota-fl/' };
+    const { updates, events, inserts, increments } = scanWith({ items: [seen], active: [activeRow({ source_url: existing.source_url, target_url: existing.target_url })], existingByUrl: { [existing.source_url]: existing } });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 1, respelled: 1, missed: 0, lostCount: 0 }));
+    expect(inserts).toHaveLength(0);
+    expect(increments).toEqual([]); // the old-spelling active row was SEEN under the canonical key — no miss
+    expect(updates[0]).toEqual({ ids: 'bl-1', patch: expect.objectContaining({ source_url: seen.url_from, target_url: seen.url_to, status: 'active' }) });
+    expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'respelled' })]);
+  });
+
+  test('two legacy rows under one canonical key are both seen by one report; neither is missed', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
+    const b = activeRow({ id: 'b', source_url: 'http://www.blog.example/post/', target_url: 'https://www.wavespestcontrol.com' });
+    const { increments } = scanWith({ items: [seen], active: [a, b], existingByUrl: { [a.source_url]: a } });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ missed: 0 }));
+    expect(increments).toEqual([]);
+  });
+
   test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded) and its recovery prospect closed as live', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: true };
-    const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
+    const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed', source_url: seen.url_from, target_url: seen.url_to };
     const { updates, events, prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ recovered: 1 }));
@@ -432,7 +458,9 @@ describe('lost-link recovery', () => {
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'queued' }] });
     expect(updates[0].where).toEqual({ id: 'p-lost', status: 'lost' }); // conditional reopen
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, attempts: 0, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
-    expect(updates[0].patch).not.toHaveProperty('outreach_attempted_at'); // kept — feeds the trailing-24h send cap
+    // the prior attempt MOVES to quality_signals.prior_outreach_attempted_at so a resend of this row counts as a 2nd attempt against the cap
+    expect(updates[0].patch.outreach_attempted_at).toBeNull();
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/'\{prior_outreach_attempted_at\}', COALESCE\(to_jsonb\(outreach_attempted_at\)/);
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);

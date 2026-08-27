@@ -79,12 +79,15 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap }) {
  * may have reached Gmail) all count, so a timeout can't quietly let the cap be
  * exceeded. Cleared on re-draft. Parameterized so it can run inside the claim txn.
  */
+// A reopened lost-recovery row carries its previous attempt in
+// quality_signals.prior_outreach_attempted_at (lost-link-recovery moves it there
+// so the resend can stamp its own); both timestamps count when in-window.
+const PRIOR_ATTEMPT_SQL = "NULLIF(quality_signals->>'prior_outreach_attempted_at', '')::timestamptz";
 async function dailySendCount(q = db) {
   const since = new Date(Date.now() - 24 * 3600 * 1000);
   const row = await q('seo_link_prospects')
-    .whereNotNull('outreach_attempted_at')
-    .where('outreach_attempted_at', '>=', since)
-    .count('* as c')
+    .whereRaw(`(outreach_attempted_at >= ? OR ${PRIOR_ATTEMPT_SQL} >= ?)`, [since, since])
+    .select(q.raw(`COALESCE(SUM((outreach_attempted_at >= ?)::int + (${PRIOR_ATTEMPT_SQL} >= ?)::int), 0) AS c`, [since, since]))
     .first();
   return parseInt(row && row.c, 10) || 0;
 }

@@ -14,7 +14,7 @@ const Outreach = require('../services/seo/link-prospect-outreach');
 // (the cap-count's nested where/orWhere never has to execute under the mock).
 function chain({ result = [], first, returning } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'orderBy', 'orderByRaw', 'select', 'count']
+  ['where', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'orderBy', 'orderByRaw', 'select', 'count']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);

@@ -121,7 +121,7 @@ describe('BacklinkMonitor snapshots', () => {
       increment: jest.fn(async () => 1),
     };
     const upsert = {
-      where: jest.fn(() => upsert),
+      where: jest.fn(() => upsert), whereRaw: jest.fn(() => upsert), orderByRaw: jest.fn(() => upsert),
       first: jest.fn(async () => null),
       insert: jest.fn(async () => [1]),
     };

@@ -42,7 +42,12 @@ function expectedTargetUrl(prospect) {
   const q = parseQuality(prospect && prospect.quality_signals);
   return q.cited_homepage ? OUR_HOMEPAGE : (prospect && prospect.target_page);
 }
-const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
+// SQL twin of normalizeComparableUrl() for any URL column: scheme/www/trailing
+// slash dropped, lower-cased. Shared with backlink-monitor's link identity.
+function comparableUrlSql(column) {
+  return `regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(${column}), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')`;
+}
+const SOURCE_URL_COMPARABLE_SQL = comparableUrlSql('source_url');
 
 function stripUrl(u) {
   // Also decodes &amp; (hrefs in HTML) and accepts protocol-relative //host/path.
@@ -537,7 +542,7 @@ async function run({ limit = 200 } = {}) {
 
 module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
-  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
+  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL, comparableUrlSql,
   comparableDomain, parseQuality, expectedTargetUrl,
   comparableFirstSeen, placementFloorEt, firstSeenOnOrAfter,
 };

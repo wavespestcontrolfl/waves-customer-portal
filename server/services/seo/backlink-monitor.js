@@ -103,22 +103,45 @@ class BacklinkMonitor {
     const scanComplete = pagesOk && links.length >= totalCount;
     const today = etDateString(now);
 
-    // Build active link map with composite keys BEFORE processing
+    // Link identity is CANONICAL, not the raw spelling: DataForSEO re-reports the
+    // same link as http→https, ±www, ±trailing slash, ±tracking query on our
+    // page. Keyed raw, every respelling inserted a second row while the old one
+    // survived its crawl through the redirect — both active forever, inflating
+    // totals, snapshots and velocity. Source = comparable URL (scheme/www/slash
+    // dropped); target = the same minus query/fragment (our page, utm irrelevant).
+    const { normalizeComparableUrl, comparableUrlSql } = require('./link-prospect-verifier')._test;
+    const canonicalTarget = (u) => normalizeComparableUrl(String(u || '').split('#')[0].split('?')[0]);
+    const linkKey = (source, target) => `${normalizeComparableUrl(source)}::${canonicalTarget(target)}`;
+    const TARGET_CANONICAL_SQL = `regexp_replace(${comparableUrlSql('target_url')}, '[?#].*$', '')`;
+
+    // Build active link map with canonical keys BEFORE processing (a key may
+    // hold several rows — legacy respelled duplicates — all seen together).
     const activeLinks = await db('seo_backlinks')
       .where('status', 'active')
       .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
       .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'miss_count', 'is_dofollow', 'severity', 'link_type');
-    const activeMap = new Map(activeLinks.map(l => [`${l.source_url}::${l.target_url}`, l]));
+    const activeMap = new Map();
+    for (const l of activeLinks) {
+      const k = linkKey(l.source_url, l.target_url);
+      if (!activeMap.has(k)) activeMap.set(k, []);
+      activeMap.get(k).push(l);
+    }
     const seenKeys = new Set();
 
-    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0, unresolvedRecoveries = 0;
+    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0, unresolvedRecoveries = 0, respelled = 0;
 
     for (const link of links) {
       const toxicity = this.scoreToxicity(link);
-      seenKeys.add(`${link.url_from}::${link.url_to}`);
+      seenKeys.add(linkKey(link.url_from, link.url_to));
       const isDofollow = link.dofollow !== false;
 
-      const existing = await db('seo_backlinks').where('source_url', link.url_from).where('target_url', link.url_to).first();
+      // Canonical lookup; an exact-spelling row wins over a respelled twin so a
+      // legacy duplicate pair is never collapsed onto the wrong row here.
+      const existing = await db('seo_backlinks')
+        .whereRaw(`${comparableUrlSql('source_url')} = ?`, [normalizeComparableUrl(link.url_from)])
+        .whereRaw(`${TARGET_CANONICAL_SQL} = ?`, [canonicalTarget(link.url_to)])
+        .orderByRaw('(source_url = ? AND target_url = ?) DESC, last_checked DESC NULLS LAST', [link.url_from, link.url_to])
+        .first();
       const record = {
         source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to,
         anchor_text: link.anchor, domain_rating: link.domain_from_rank,
@@ -141,6 +164,12 @@ class BacklinkMonitor {
         if (relChanged) {
           events.push(['rel_changed', { from: existing.is_dofollow ? 'dofollow' : 'nofollow', to: isDofollow ? 'dofollow' : 'nofollow', source: 'dataforseo' }]);
         }
+        // Same link, new spelling: the row MOVES to the reported spelling (the
+        // patch carries source_url/target_url) and the ledger records it.
+        if (existing.source_url !== link.url_from || existing.target_url !== link.url_to) {
+          respelled++;
+          events.push(['respelled', { from: { source_url: existing.source_url, target_url: existing.target_url }, to: { source_url: link.url_from, target_url: link.url_to } }]);
+        }
         if (wasLost) {
           // The recovery prospect queued for this link (still un-pitched) is now
           // moot. Its closure and the row's lost→active flip (+ ledger row) are
@@ -162,7 +191,7 @@ class BacklinkMonitor {
           recovered++;
           if (relChanged) relChanges++;
         } else if (events.length) {
-          relChanges++;
+          if (relChanged) relChanges++;
           await this.transition(existing.id, patch, events);
         } else {
           await db('seo_backlinks').where('id', existing.id).update(patch);
@@ -183,7 +212,7 @@ class BacklinkMonitor {
     let evaluated = []; // every lost row (new + owed) whose recovery was evaluated this scan
 
     if (scanComplete) {
-      const missing = [...activeMap.keys()].filter(k => !seenKeys.has(k)).map(k => activeMap.get(k)).filter(Boolean);
+      const missing = [...activeMap.keys()].filter(k => !seenKeys.has(k)).flatMap(k => activeMap.get(k) || []);
       missed = missing.length;
       const firstMiss = missing.filter(l => (l.miss_count || 0) + 1 < MISS_THRESHOLD);
       const candidates = missing.filter(l => (l.miss_count || 0) + 1 >= MISS_THRESHOLD);
@@ -324,10 +353,10 @@ class BacklinkMonitor {
       snapshotOk = false; snapshotError = 'scan incomplete — snapshot skipped';
     }
 
-    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
+    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${respelled} respelled, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
     return {
       scanned, newCritical, scanComplete, missed,
-      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, recovered, unresolvedRecoveries,
+      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, respelled, recovered, unresolvedRecoveries,
       lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, recoveryQueued,
       ...(snapshot ? { snapshotOk, snapshotError } : {}),
     };
