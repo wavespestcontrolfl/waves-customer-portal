@@ -72,7 +72,7 @@ describe('resolveWizardSeriesPlan', () => {
     };
     expect(resolveWizardSeriesPlan(soldTree, 'tree_shrub')).toEqual({ pattern: 'every_6_weeks', visits: 9 });
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'booking-pay-at-visit.js'), 'utf8');
-    expect(src).toMatch(/supportsConverterFollowUpSeeding\(picked\.svc, \{\}, pattern\)/);
+    expect(src).toMatch(/supportsConverterFollowUpSeeding\(gateLine, \{\}, pattern\)/);
   });
 
   test('an off-tier mosquito count NEVER falls through to the generic buckets (runtime-config drift)', () => {
@@ -573,7 +573,8 @@ describe('booking route wiring (source contracts)', () => {
     // The FULL stranded predicate re-validates under the lock (codex
     // #3504 r6 hook): status, activation, children, and the live draft.
     expect(recovery).toMatch(/\.forUpdate\(\)/);
-    expect(recovery).toMatch(/\['pending', 'confirmed'\]\.includes\(String\(fresh\.status \|\| ''\)\)/);
+    // r13: every non-cancelled status is recoverable (by status class).
+    expect(recovery).toMatch(/\['cancelled', 'canceled'\]\.includes\(String\(fresh\.status \|\| ''\)\)/);
     expect(recovery).toMatch(/freshChild/);
     expect(recovery).toMatch(/freshDraft/);
     expect(recovery).toMatch(/whereNull\('archived_at'\)/);
@@ -629,6 +630,46 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/entryPoint: 'wizard_series_activation_welcome'/);
     // Welcome only for an ACTIVATED, live parent.
     expect(recoverySrc).toMatch(/parentRow\?\.is_recurring\s*\n\s*&& String\(parentRow\.status \|\| ''\) !== 'cancelled'/);
+  });
+
+  test('the PRODUCTION lawn line (count only as numeric frequency) still passes the shared converter gate', () => {
+    // codex #3504 r13: priceLawnCare emits `frequency: LAWN_TIERS.freq`
+    // and no visitsPerYear/visits; the converter's count vocabulary
+    // excludes frequency, so the gate saw no count and rejected every
+    // lawn plan. The resolver presents its validated count under a
+    // recognized alias.
+    for (const [freq, pattern] of [[6, 'bimonthly'], [9, 'every_6_weeks'], [12, 'monthly']]) {
+      const lawn = {
+        id: `est-lawn-${freq}`, annual_total: 100 * freq, monthly_total: (100 * freq) / 12,
+        estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: (100 * freq) / 12, annual: 100 * freq, perApp: 100, frequency: freq }] } },
+      };
+      expect(resolveWizardSeriesPlan(lawn, 'lawn_care')).toEqual({ pattern, visits: freq });
+    }
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'booking-pay-at-visit.js'), 'utf8');
+    expect(src).toMatch(/const gateLine = \{ \.\.\.picked\.svc, visitsPerYear: picked\.visits \};/);
+  });
+
+  test('the parent is reserved at the program duration when the extended window is clear', () => {
+    // codex #3504 r13: the funnel booked mosquito at 45 while the program
+    // authority is 60 — the first treatment was under-reserved.
+    expect(booking).toMatch(/if \(seededChildDuration > parentDurationNow\) \{/);
+    expect(booking).toMatch(/parentExtensionGuard\(\{\s*\n\s*db: trx,\s*\n\s*date: parentDateStr,\s*\n\s*windowStart: slot_start,\s*\n\s*windowEnd: extendedEnd,\s*\n\s*excludeServiceIds: \[seriesParentRow\.id\],/);
+    expect(booking).toMatch(/update\(\{ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd, updated_at: trx\.fn\.now\(\) \}\)/);
+    expect(booking).toMatch(/self_booked_appointments'\)\s*\n\s*\.where\(\{ id: seriesParentRow\.self_booking_id \}\)\s*\n\s*\.update\(\{ end_time: extendedEnd, duration_minutes: seededChildDuration \}\)/);
+    expect(booking).toMatch(/could not extend to/);
+  });
+
+  test('progressed stranded activations (rescheduled/en_route/completed…) stay recoverable, by status class', () => {
+    // codex #3504 r13: a pending/confirmed-only predicate silently dropped
+    // stranded rows that moved on while still carrying the price.
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/\.whereNotIn\('ss\.status', \['cancelled', 'canceled'\]\)/);
+    expect(recoverySrc).not.toMatch(/whereIn\('ss\.status', \['pending', 'confirmed'\]\)/);
+    expect(recoverySrc).toMatch(/PROGRESSED_TERMINAL_STATES = new Set\(\['completed', 'skipped', 'no_show'\]\)/);
+    // Terminal-but-billed keeps estimated_price (history), clears the
+    // pay-at-visit machinery, bells for the REMAINING program.
+    expect(recoverySrc).toMatch(/\.update\(terminalBilled\s*\n\s*\? \{\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
+    expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
   test('a mixed quote (recurring + specialty/installation add-on) is not self-serve bookable', () => {

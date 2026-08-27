@@ -198,8 +198,15 @@ function resolveWizardSeriesPlan(estimate, serviceKey) {
   // draft drifted into one would bypass those protections. It also brings
   // the per-family data checks (cadence-field disagreement, nutritional/
   // commercial palm, count conflicts) this resolver must match.
+  // Present the validated count under a RECOGNIZED alias for the shared
+  // gate (codex #3504 r13): the lawn pricer emits its visit count only as
+  // numeric `frequency` (LAWN_TIERS freq), which the converter's count
+  // vocabulary deliberately excludes — the gate's lawn branch would read
+  // no count and reject every valid 6/9/12 plan. picked.visits already
+  // passed the agreement + invalid-alias checks, so this adds nothing new.
   const { supportsConverterFollowUpSeeding } = require('./estimate-converter');
-  if (!supportsConverterFollowUpSeeding(picked.svc, {}, pattern)) return null;
+  const gateLine = { ...picked.svc, visitsPerYear: picked.visits };
+  if (!supportsConverterFollowUpSeeding(gateLine, {}, pattern)) return null;
   if (PATTERN_PROMISED_VISITS[pattern] !== picked.visits) return null;
   // Palm: ONLY the two-visit semiannual injection program is a recurring
   // plan (converter doctrine, codex #3504 r5) — the engine also emits

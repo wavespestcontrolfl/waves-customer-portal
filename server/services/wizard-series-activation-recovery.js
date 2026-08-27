@@ -41,7 +41,14 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     .where('ss.payment_method_preference', 'pay_at_visit')
     .where((qb) => qb.where('ss.is_recurring', false).orWhereNull('ss.is_recurring'))
     .whereNull('ss.recurring_parent_id')
-    .whereIn('ss.status', ['pending', 'confirmed'])
+    // EVERY non-cancelled status (codex #3504 r13): a stranded parent can
+    // progress — a customer reschedule marks it 'rescheduled' (and the
+    // rebooker can later restore it to 'confirmed' with the pricing
+    // intact), an outage can let it reach en_route/on_site/completed —
+    // and each of those still carries the first-installment price and a
+    // live draft. Disposition below is by status class; nothing drops out
+    // of recovery silently.
+    .whereNotIn('ss.status', ['cancelled', 'canceled'])
     .where('e.source', 'quote_wizard')
     .where('e.status', 'draft')
     .whereNull('e.archived_at')
@@ -54,8 +61,16 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     })
     .orderBy('ss.created_at', 'asc')
     .limit(limit)
-    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date');
+    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status');
 }
+
+// Terminal-but-billed states: the visit happened (or was skipped/no-showed)
+// and its first-application invoice — if any — already minted from the
+// stamped price. Stripping estimated_price would only rewrite history;
+// the reconcile clears the pay-at-visit machinery so the row leaves the
+// predicate, keeps the price for the record, and bells the office to
+// convert the live draft for the REMAINING program.
+const PROGRESSED_TERMINAL_STATES = new Set(['completed', 'skipped', 'no_show']);
 
 async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, limit = 10 } = {}) {
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
@@ -88,8 +103,9 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
-          || !['pending', 'confirmed'].includes(String(fresh.status || ''))
+          || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
+        const terminalBilled = PROGRESSED_TERMINAL_STATES.has(String(fresh.status || ''));
         const freshChild = await trx('scheduled_services')
           .where({ recurring_parent_id: parent.id })
           .whereNot('status', 'cancelled')
@@ -102,13 +118,20 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         if (!freshDraft) return false;
         await trx('scheduled_services')
           .where({ id: parent.id })
-          .update({
-            estimated_price: null,
-            payment_method_preference: null,
-            create_invoice_on_complete: false,
-            notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'"),
-            updated_at: trx.fn.now(),
-          });
+          .update(terminalBilled
+            ? {
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; office converts the live quote for the remaining program'"),
+                updated_at: trx.fn.now(),
+              }
+            : {
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'"),
+                updated_at: trx.fn.now(),
+              });
         // Bell ATOMIC with the strip (codex #3504 r6 hook): the strip
         // removes the row from every future sweep, so a bell sent
         // best-effort afterwards could silently vanish and the office
@@ -128,7 +151,9 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             recipientType: 'admin',
             category: 'alert',
             title: 'Self-booked plan never activated',
-            body: `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
+            body: terminalBilled
+              ? `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) never activated (worker died mid-request) and that first visit has since been ${fresh.status}. It billed at the quoted first-application price; the quote draft is still live — convert it to schedule and bill the REMAINING program.`
+              : `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
             link: `/admin/customers/${parent.customer_id}`,
             bell: true,
             metadata: {

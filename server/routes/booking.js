@@ -3236,6 +3236,50 @@ async function createSelfBooking(payload = {}) {
               logger.warn(`[booking:confirm] cadence catalog row ${cadenceKey} missing — series ${seriesParentRow.id} stays name-resolved (fail-open)`);
             }
           }
+          // The PARENT is reserved at the program duration too (codex
+          // #3504 r13): the funnel booked/signed the first visit at its
+          // coarse duration (mosquito 45) while the program's authority is
+          // longer (60), so stamping the recurring identity alone left the
+          // first treatment under-reserved. Extend only when the extended
+          // window is CLEAR — we hold the parent's date occupancy lock at
+          // rung 1 and the SHARED tech-blind guard decides — mirroring the
+          // booking row's own end/duration; a clash keeps the signed slot
+          // and notes the row for the office rather than double-booking.
+          const parentDurationNow = Number(seriesParentRow.estimated_duration_minutes) > 0
+            ? Number(seriesParentRow.estimated_duration_minutes)
+            : duration;
+          if (seededChildDuration > parentDurationNow) {
+            const { findConflictingVisits: parentExtensionGuard } = require('../services/scheduling/occupancy');
+            const parentEndMin = timeToMin(slot_start) + seededChildDuration;
+            const extendedEnd = `${String(Math.floor(parentEndMin / 60)).padStart(2, '0')}:${String(parentEndMin % 60).padStart(2, '0')}`;
+            const extensionClashes = await parentExtensionGuard({
+              db: trx,
+              date: parentDateStr,
+              windowStart: slot_start,
+              windowEnd: extendedEnd,
+              excludeServiceIds: [seriesParentRow.id],
+            });
+            if (extensionClashes.length === 0) {
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd, updated_at: trx.fn.now() });
+              if (seriesParentRow.self_booking_id) {
+                await trx('self_booked_appointments')
+                  .where({ id: seriesParentRow.self_booking_id })
+                  .update({ end_time: extendedEnd, duration_minutes: seededChildDuration });
+              }
+              seriesParentRow.estimated_duration_minutes = seededChildDuration;
+              seriesParentRow.window_end = extendedEnd;
+            } else {
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({
+                  notes: trx.raw("COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
+                  updated_at: trx.fn.now(),
+                });
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted`);
+            }
+          }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
             pattern: wizardSeriesPlan.pattern,
             plannedCount: wizardSeriesPlan.visits,
