@@ -1018,6 +1018,25 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
+  test('a refresh brief with a RELATIVE target path still merges when bound (hook r9 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-r1' })],
+      briefs: [{ id: 'brief-r1', action_type: 'refresh_existing_page', target_url: '/pest-control-venice-fl/' }],
+    });
+    greenMergePath();
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/services/pest-control-venice-fl.md' });
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' }]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Pest Control Venice FL\n---\n\nSeasonal service details for Venice homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
   test('a refresh head touching a DIFFERENT (or extra) content file than its resolved target is withheld (PR r6 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     refreshSetup();

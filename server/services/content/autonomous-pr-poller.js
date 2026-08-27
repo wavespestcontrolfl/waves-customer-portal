@@ -984,7 +984,11 @@ async function maybeAutoMerge(run, pr) {
           if (boundOk) {
             // Only THIS target's own hero dir (blog refreshes) may carry
             // asset rows; a services-page refresh touches no image dir.
-            const targetPath = new URL(String(target)).pathname.replace(/^\/+|\/+$/g, '');
+            // Refresh briefs commonly store RELATIVE targets
+            // ("/pest-control-sarasota-fl/") — parse with a base so they
+            // don't throw and strand a bound refresh (hook r9 P1).
+            const targetPath = new URL(String(target), 'https://www.wavespestcontrol.com')
+              .pathname.replace(/^\/+|\/+$/g, '');
             if (targetPath) allowedAssetPrefixes.push(`public/images/blog/${targetPath}/`);
           }
         }
