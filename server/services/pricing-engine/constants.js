@@ -1139,7 +1139,7 @@ const RODENT = {
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {
-      standard: 'Rodent Trapping - Standard: initial setup plus unlimited callbacks/checks for the same active trapping job. Does not include exclusion, sanitation, or warranty.',
+      standard: 'Rodent Trapping - Unlimited callbacks/checks for the same active trapping job. Does not include exclusion, sanitation, or warranty.',
     },
   },
 

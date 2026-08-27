@@ -64,9 +64,13 @@ describe('revised rodent pricing rules', () => {
   test('invoice descriptions use revised trapping copy', () => {
     const standard = priceRodentTrapping(baseInput(), { plan: 'standard' });
 
-    expect(standard.invoiceDescription).toContain('unlimited callbacks/checks');
+    expect(standard.invoiceDescription).toMatch(/unlimited callbacks\/checks/i);
     expect(standard.invoiceDescription).toContain('same active trapping job');
     expect(standard.invoiceDescription).not.toContain('$125');
+    // Owner 2026-08-27: the line reads as the plan's promise, not a recap of
+    // "Standard: initial setup plus …".
+    expect(standard.invoiceDescription).not.toMatch(/initial setup plus/i);
+    expect(standard.invoiceDescription).not.toMatch(/Standard:/);
   });
 
   test('trap-only retainer plans, setup waiver, warranty, and callbacks', () => {

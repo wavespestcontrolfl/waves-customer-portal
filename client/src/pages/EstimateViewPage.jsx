@@ -1643,22 +1643,6 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
   );
 }
 
-function OneTimePriceCard({ oneTimePrice, breakdown }) {
-  return (
-    <div style={estimateCard()}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
-        {fmtMoney(oneTimePrice)}
-        </span>
-        <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
-      </div>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
-        {oneTimePriceCopy(breakdown)}
-      </div>
-    </div>
-  );
-}
-
 // Stable identity for a one-time breakdown row — the exclusion handshake
 // between the embedded per-service rows and the standalone card below.
 // The identity is the FULL row (service + label + amount + quote state),
@@ -5821,20 +5805,15 @@ function EstimateViewPageInner() {
         </>
       );
     }
+    // One-time-only pages lead with the itemized card (owner 2026-08-27):
+    // the big price card repeated the card's own total, so the breakdown
+    // is the headline and the approve CTA follows it. No headlineTotal —
+    // with no price card above, a single-row breakdown must keep its
+    // dollars or the page shows no price at all.
     return (
       <>
-        <OneTimePriceCard
-          oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-          breakdown={pricing.oneTimeBreakdown}
-        />
+        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
-        {/* headlineTotal: a single-item breakdown matching the price card
-            above keeps the service NAME but drops its repeated dollars
-            (owner 2026-07-23). */}
-        <OneTimeBreakdownCard
-          breakdown={pricing.oneTimeBreakdown}
-          headlineTotal={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-        />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
