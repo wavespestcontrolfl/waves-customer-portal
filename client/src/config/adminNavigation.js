@@ -16,7 +16,6 @@ import {
   LayoutDashboard,
   Mail,
   Megaphone,
-  Menu,
   MessageSquare,
   Newspaper,
   Package,
@@ -285,11 +284,16 @@ export const ADMIN_NAV_ITEMS = {
     label: "Settings",
     icon: Settings,
   },
+  // The fifth mobile tab. Routes to the mobile-only index at /admin/more
+  // (the `more` id / route / usage-source key are stable; only what the
+  // user sees changed): the page is titled "Settings" and folds the former
+  // mobile Settings index into it, so the tab reads "Settings" with the
+  // Settings glyph — not a hamburger labelled "More".
   more: {
     id: "more",
     path: "/admin/more",
-    label: "More",
-    icon: Menu,
+    label: "Settings",
+    icon: Settings,
   },
 };
 
@@ -351,10 +355,18 @@ const MOBILE_TAB_IDS = [
 
 const MOBILE_TAB_ID_SET = new Set(MOBILE_TAB_IDS);
 
+// Destinations the mobile index page renders ITSELF rather than as a nav
+// row: `settings` — the page is the mobile Settings surface, so it lists the
+// Settings leaves inline (MOBILE_SETTINGS_SECTIONS) instead of a single
+// "Settings" row pointing at a second index page.
+const MOBILE_INDEX_INLINE_IDS = new Set(["settings"]);
+
 const MOBILE_MORE_SECTION_DEFINITIONS = NAV_SECTION_DEFINITIONS.map(
   ({ section, itemIds }) => ({
     section,
-    itemIds: itemIds.filter((itemId) => !MOBILE_TAB_ID_SET.has(itemId)),
+    itemIds: itemIds.filter(
+      (itemId) => !MOBILE_TAB_ID_SET.has(itemId) && !MOBILE_INDEX_INLINE_IDS.has(itemId),
+    ),
   }),
 ).filter(({ itemIds }) => itemIds.length > 0);
 

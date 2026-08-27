@@ -17,7 +17,10 @@ import { useMemo, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import { Search } from "lucide-react";
 
-const SECTIONS = [
+// Exported: the mobile index page (/admin/more, titled "Settings") renders
+// the SettingsPage deep-link leaves from this same list, so the two mobile
+// settings surfaces can never drift apart.
+export const MOBILE_SETTINGS_SECTIONS = [
   { key: "invoices", label: "Invoices", to: "/admin/invoices", adminOnly: true },
   { key: "payments", label: "Payments", to: "/admin/banking", adminOnly: true },
   {
@@ -78,7 +81,7 @@ export default function MobileSettingsPage() {
   const isAdminRole = outletContext?.user?.role === "admin";
 
   const filtered = useMemo(() => {
-    const visible = SECTIONS.filter((sec) => isAdminRole || !sec.adminOnly);
+    const visible = MOBILE_SETTINGS_SECTIONS.filter((sec) => isAdminRole || !sec.adminOnly);
     const s = q.trim().toLowerCase();
     if (!s) return visible;
     return visible.filter((sec) => sec.label.toLowerCase().includes(s));

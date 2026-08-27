@@ -44,7 +44,7 @@ const SOURCE_LABELS = {
 const EXTRA_LABELS = {
   dispatch: "Dispatch",
   schedule: "Schedule",
-  more: "More",
+  more: "Settings tab",
   leads: "Leads",
   estimates: "Estimates",
 };

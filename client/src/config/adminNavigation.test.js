@@ -83,7 +83,7 @@ describe("admin navigation registry", () => {
         path: "/admin/communications",
         label: "Messages",
       },
-      { id: "more", path: "/admin/more", label: "More" },
+      { id: "more", path: "/admin/more", label: "Settings" },
     ]);
   });
 
@@ -92,7 +92,11 @@ describe("admin navigation registry", () => {
     const mobileIds = [
       ...ADMIN_MOBILE_TABS.filter(({ id }) => id !== "more").map(({ id }) => id),
       ...sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id),
+      // The Settings tab page renders the Settings leaves inline (not as a
+      // nav row) — that IS the mobile route to the `settings` destination.
+      "settings",
     ];
+    expect(sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id)).not.toContain("settings");
 
     expect(new Set(mobileIds)).toEqual(new Set(desktopIds));
     expect(mobileIds).toEqual(expect.arrayContaining(["jobs", "contracts", "payers"]));
