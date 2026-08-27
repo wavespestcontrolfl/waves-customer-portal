@@ -4901,10 +4901,19 @@ export default function Customer360ProfileV2({
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
 
+  // Bumped on every successful profile reload. The properties panel keys its
+  // refetch on this, NOT on the address tuple: the PUT path re-syncs the
+  // primary customer_properties row on PRESENCE of address fields (an
+  // unchanged resave still self-heals a stale mirror), so a tuple-based
+  // signal would leave the panel stale exactly when the server fixed it.
+  const [profileVersion, setProfileVersion] = useState(0);
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`)
       .then((detail) => {
-        if (String(customerIdRef.current) === String(customerId)) setData(detail);
+        if (String(customerIdRef.current) === String(customerId)) {
+          setData(detail);
+          setProfileVersion((v) => v + 1);
+        }
         return detail;
       });
 
@@ -7269,16 +7278,10 @@ export default function Customer360ProfileV2({
                   key={customerId}
                   customerId={customerId}
                   contactRole={c.contactRole}
-                  // A profile-address save syncs the primary customer_properties
-                  // row server-side; the tuple changing tells the panel to refetch
-                  // so it never shows a stale primary beside the refreshed profile.
-                  refreshToken={[
-                    c.address?.line1,
-                    c.address?.line2,
-                    c.address?.city,
-                    c.address?.state,
-                    c.address?.zip,
-                  ].join("|")}
+                  // Every profile reload (any Edit save, address changed or
+                  // not) re-syncs the primary customer_properties row server-side
+                  // — refetch on the reload counter, never on the address tuple.
+                  refreshToken={profileVersion}
                   canEdit
                 />
               )}

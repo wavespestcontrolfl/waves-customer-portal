@@ -3401,7 +3401,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
-      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags', 'billing_mode'],
+      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags', 'billing_mode', 'contact_role'],
+      // The role the profile was BORN with — a sensitive audited field on
+      // updates, so the create event records it too (same reasoning as
+      // billing_mode below).
+      contactRole: normalized.contactRole.value,
       // Initial billing lane + provenance (codex #3271 r2): billing_mode is
       // a sensitive audited field on updates, but the create audit omitted
       // it — once the lane later changed, the lane the customer was BORN in
