@@ -1,4 +1,4 @@
-const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES } = require('../services/customer-properties');
+const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -106,5 +106,23 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([{ address_line1: '100 Main St', city: 'Bradenton' }], { address_line1: '100 Main St', city: 'Sarasota' })).toBe(true);
     expect(isNewAddress([], { address_line1: '12398 Amber Creek Cir' })).toBe(true);
     expect(isNewAddress(null, { address_line1: '1 Main St' })).toBe(true);
+  });
+});
+
+describe('defaultOccupancyForContactRole (lazy primary backfill default)', () => {
+  test('owner / unset → owner_occupied (residential majority)', () => {
+    expect(defaultOccupancyForContactRole('owner')).toBe('owner_occupied');
+    expect(defaultOccupancyForContactRole(null)).toBe('owner_occupied');
+    expect(defaultOccupancyForContactRole(undefined)).toBe('owner_occupied');
+  });
+  test('non-owner roles never assert owner occupancy', () => {
+    expect(defaultOccupancyForContactRole('property_manager')).toBe('rental_investment');
+    expect(defaultOccupancyForContactRole('tenant')).toBe('unknown');
+    expect(defaultOccupancyForContactRole(' TENANT ')).toBe('unknown');
+  });
+  test('every default is a known occupancy type', () => {
+    for (const r of ['owner', 'property_manager', 'tenant', null]) {
+      expect(OCCUPANCY_TYPES).toContain(defaultOccupancyForContactRole(r));
+    }
   });
 });

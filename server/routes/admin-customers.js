@@ -1,4 +1,5 @@
 const express = require('express');
+const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
 const { addETDays } = require('../utils/datetime-et');
@@ -979,6 +980,20 @@ async function latestHealthScoreForCustomer(customerId) {
     });
 }
 
+// PUT /:id fields whose change emits a `customer.update_sensitive` audit
+// event (contact identity, address, money/lane, and the payer/occupant
+// classification — contact_role is as operationally significant as the
+// service_contact*_role slots already listed).
+const SENSITIVE_CUSTOMER_FIELDS = Object.freeze([
+  'email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip',
+  'monthly_rate', 'active', 'pipeline_stage',
+  'service_contact_name', 'service_contact_phone', 'service_contact_email',
+  'service_contact2_name', 'service_contact2_phone', 'service_contact2_email',
+  'service_contact3_name', 'service_contact3_phone', 'service_contact3_email',
+  'service_contact_role', 'service_contact2_role', 'service_contact3_role',
+  'payer_id', 'billing_mode', 'contact_role',
+]);
+
 function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
@@ -1020,6 +1035,7 @@ function mapCustomerListRow(c) {
     id: c.id, firstName: c.first_name, lastName: c.last_name,
     accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
+    contactRole: c.contact_role || null,
     email: c.email, phone: c.phone, city: c.city,
     serviceContactName: c.service_contact_name,
     serviceContactPhone: c.service_contact_phone,
@@ -2352,6 +2368,20 @@ router.get('/:id/cards', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
+// customer_properties column widths (migration 20260629000001). Enforced
+// here so an overlong paste is a 400 naming the field, not a PostgreSQL
+// bounce surfaced as a generic save failure.
+const PROPERTY_FIELD_LIMITS = Object.freeze({
+  address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100,
+});
+function propertyFieldOverLimit(body) {
+  for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
+    const v = body?.[field];
+    if (v !== undefined && v !== null && String(v).length > max) return { field, max };
+  }
+  return null;
+}
+
 // Lazily backfills a primary property for customers created after the migration.
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
@@ -2379,6 +2409,18 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     if (!String(city || '').trim() || !String(zip || '').trim()) {
       return res.status(400).json({ error: 'city and zip are required' });
     }
+    // customer_properties.state is varchar(2) and recordCallProperty stores
+    // `state || 'FL'` — an omitted state would silently persist as Florida.
+    // Require an explicit two-letter code here (reject "Florida" with a real
+    // validation error instead of a PostgreSQL bounce).
+    const stateCode = String(state || '').trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(stateCode)) {
+      return res.status(400).json({ error: 'state is required as a two-letter code' });
+    }
+    const over = propertyFieldOverLimit({ address_line1, address_line2, city, zip, label });
+    if (over) {
+      return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
+    }
     // If this address is the customer's OWN primary that's only PARTIAL on file
     // (same street, missing city/ZIP), complete that primary first — otherwise its
     // partial address_key wouldn't match this full address and recordCallProperty
@@ -2393,7 +2435,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const result = await customerProperties.recordCallProperty({
       customerId: req.params.id,
-      address_line1, address_line2, city, state, zip,
+      address_line1, address_line2, city, state: stateCode, zip,
       occupancyType: occupancy_type,
       label,
       source: 'manual',
@@ -2417,7 +2459,13 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
       }
       updates.occupancy_type = req.body.occupancy_type;
     }
-    if (req.body && req.body.label !== undefined) updates.label = req.body.label || null;
+    if (req.body && req.body.label !== undefined) {
+      const over = propertyFieldOverLimit({ label: req.body.label });
+      if (over) {
+        return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
+      }
+      updates.label = req.body.label || null;
+    }
     if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'nothing to update' });
     updates.updated_at = new Date();
     const n = await db('customer_properties')
@@ -3059,6 +3107,7 @@ router.get('/:id', async (req, res, next) => {
         isPrimaryProfile: !!c.is_primary_profile,
         email: c.email, phone: c.phone, secondaryPhone: c.secondary_phone,
         secondaryContact: c.secondary_contact_name, companyName: c.company_name,
+        contactRole: c.contact_role || null,
         serviceContactName: c.service_contact_name,
         serviceContactPhone: c.service_contact_phone,
         serviceContactEmail: c.service_contact_email,
@@ -3213,7 +3262,7 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/admin/customers — create
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel, contactRole } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
@@ -3237,7 +3286,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       companyName: cleanOptionalText(companyName),
       propertyType: cleanOptionalText(propertyType),
       profileLabel: cleanOptionalText(profileLabel),
+      contactRole: normalizeContactRole(contactRole),
     };
+    if (!normalized.contactRole.ok) return res.status(400).json({ error: 'Invalid contact role' });
     if (!normalized.firstName || !normalized.phone) {
       return res.status(400).json({ error: 'First name and phone required' });
     }
@@ -3327,7 +3378,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         pipeline_stage: normalized.pipelineStage,
         pipeline_stage_changed_at: new Date(),
         assigned_to: req.technicianId,
-        company_name: normalized.companyName, property_type: normalized.propertyType, crm_notes: normalized.notes,
+        company_name: normalized.companyName, property_type: normalized.propertyType, contact_role: normalized.contactRole.value, crm_notes: normalized.notes,
       }).returning('*');
 
       if (Number(normalized.monthlyRate) > 0) {
@@ -3360,7 +3411,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
-      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags', 'billing_mode'],
+      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags', 'billing_mode', 'contact_role'],
+      // The role the profile was BORN with — a sensitive audited field on
+      // updates, so the create event records it too (same reasoning as
+      // billing_mode below).
+      contactRole: normalized.contactRole.value,
       // Initial billing lane + provenance (codex #3271 r2): billing_mode is
       // a sensitive audited field on updates, but the create audit omitted
       // it — once the lane later changed, the lane the customer was BORN in
@@ -3433,11 +3488,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
+    }
+    // contact_role: '' / null clears; anything else must be a known role.
+    const contactRole = req.body.contactRole !== undefined ? normalizeContactRole(req.body.contactRole) : null;
+    if (contactRole && !contactRole.ok) {
+      return res.status(400).json({ error: 'Invalid contact role' });
     }
     // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
     // path below: future pending/confirmed visits with no positive price,
@@ -3566,6 +3626,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
         else if (v === 'billing_mode') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : req.body[k]; }
+        else if (v === 'contact_role') { updates[v] = contactRole.value; }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
@@ -3648,7 +3709,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id', 'billing_mode'];
+      const sensitiveFields = SENSITIVE_CUSTOMER_FIELDS;
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path
@@ -5150,6 +5211,8 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  SENSITIVE_CUSTOMER_FIELDS,
+  PROPERTY_FIELD_LIMITS,
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,

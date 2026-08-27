@@ -86,6 +86,8 @@ import {
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
+import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import {
@@ -4899,10 +4901,19 @@ export default function Customer360ProfileV2({
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
 
+  // Bumped on every successful profile reload. The properties panel keys its
+  // refetch on this, NOT on the address tuple: the PUT path re-syncs the
+  // primary customer_properties row on PRESENCE of address fields (an
+  // unchanged resave still self-heals a stale mirror), so a tuple-based
+  // signal would leave the panel stale exactly when the server fixed it.
+  const [profileVersion, setProfileVersion] = useState(0);
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`)
       .then((detail) => {
-        if (String(customerIdRef.current) === String(customerId)) setData(detail);
+        if (String(customerIdRef.current) === String(customerId)) {
+          setData(detail);
+          setProfileVersion((v) => v + 1);
+        }
         return detail;
       });
 
@@ -5263,6 +5274,7 @@ export default function Customer360ProfileV2({
       monthlyRate: c.monthlyRate ?? "",
       tier: c.tier || "",
       pipelineStage: c.pipelineStage || "new_lead",
+      contactRole: c.contactRole || "",
     });
     setEditErr("");
     setEditOpen(true);
@@ -5618,6 +5630,15 @@ export default function Customer360ProfileV2({
                     {c.profileLabel}
                   </Badge>
                 )}
+                {c.contactRole && c.contactRole !== "owner" && (
+                  <Badge
+                    tone="neutral"
+                    className="normal-case tracking-normal"
+                    title={contactRoleTitle(c.contactRole)}
+                  >
+                    {contactRoleLabel(c.contactRole)}
+                  </Badge>
+                )}
                 <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
                 <StageBadgeV2 stage={c.pipelineStage} />{" "}
               </div>{" "}
@@ -5784,6 +5805,12 @@ export default function Customer360ProfileV2({
                 <button
                   type="button"
                   onClick={() => onAddProperty?.(c)}
+                  // Sibling-PROFILE creation (customer_accounts layer, frozen
+                  // for new data by migration 20260629000001) — a separately
+                  // billed profile on this account. A service address for THIS
+                  // profile is added on the Property tab. Retirement of this
+                  // path is an owner ruling (see PR #3539 thread).
+                  title="Creates a separately billed sibling profile on this account. To add a service address to this profile, use the Property tab."
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Add Property
@@ -5868,6 +5895,15 @@ export default function Customer360ProfileV2({
               {" "}
               <TierBadgeV2 tier={c.tier} />{" "}
               <StageBadgeV2 stage={c.pipelineStage} />{" "}
+              {c.contactRole && c.contactRole !== "owner" && (
+                <Badge
+                  tone="neutral"
+                  className="normal-case tracking-normal"
+                  title={contactRoleTitle(c.contactRole)}
+                >
+                  {contactRoleLabel(c.contactRole)}
+                </Badge>
+              )}
             </div>{" "}
             <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
               {" "}
@@ -7240,6 +7276,22 @@ export default function Customer360ProfileV2({
           {/* PROPERTY */}
           {activeTab === "property" && (
             <div>
+              {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
+                  (it lists every address on the account), so a technician
+                  token would only ever see a 403 card here. */}
+              {isAdmin && (
+                <CustomerPropertiesPanelV2
+                  key={customerId}
+                  customerId={customerId}
+                  contactRole={c.contactRole}
+                  // Every profile reload (any Edit save, address changed or
+                  // not) re-syncs the primary customer_properties row server-side
+                  // — refetch on the reload counter, never on the address tuple.
+                  refreshToken={profileVersion}
+                  onChanged={reloadCustomer}
+                  canEdit
+                />
+              )}
               {(c.satelliteUrl || c.address?.line1) && (
                 <div className="mb-5 rounded-md overflow-hidden border-hairline border-zinc-200 max-h-[200px]">
                   {c.satelliteUrl ? (
@@ -7859,6 +7911,29 @@ export default function Customer360ProfileV2({
               </div>{" "}
               <div>
                 {" "}
+                <label
+                  className="u-label text-ink-secondary block mb-1"
+                  htmlFor="c360-edit-contact-role"
+                >
+                  Contact role
+                </label>{" "}
+                <select
+                  id="c360-edit-contact-role"
+                  value={editForm.contactRole || ""}
+                  onChange={(e) =>
+                    setEditForm((p) => ({ ...p, contactRole: e.target.value }))
+                  }
+                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                >
+                  {CONTACT_ROLE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>{" "}
+              </div>{" "}
+              <div>
+                {" "}
                 <label className="u-label text-ink-secondary block mb-1">
                   Stage
                 </label>{" "}
@@ -7942,6 +8017,7 @@ export default function Customer360ProfileV2({
                             ? null
                             : parseFloat(editForm.monthlyRate),
                         tier: editForm.tier || null,
+                        contactRole: editForm.contactRole || null,
                       };
                       await adminFetch(`/admin/customers/${customerId}`, {
                         method: "PUT",

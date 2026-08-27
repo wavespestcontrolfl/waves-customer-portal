@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 
@@ -98,6 +98,65 @@ describe('Customer360ProfileV2 profile state', () => {
 
     // Captions must describe the new default, not the retired opt-in behavior.
     expect(screen.getAllByText(/On by default/i).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders the service-addresses panel for admins only (technicians never call the requireAdmin properties endpoint)', async () => {
+    const fetchFor = () => vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/properties')) return response({ properties: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+
+    // Technician (beforeEach role): no panel, no properties request.
+    const techFetch = fetchFor();
+    vi.stubGlobal('fetch', techFetch);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    await screen.findByText('Property Details');
+    expect(screen.queryByTestId('customer-properties-panel')).not.toBeInTheDocument();
+    expect(techFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(false);
+    cleanup();
+
+    // Admin: panel renders and loads the list.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const adminFetch = fetchFor();
+    vi.stubGlobal('fetch', adminFetch);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    expect(await screen.findByTestId('customer-properties-panel')).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(true));
+  });
+
+  it('refetches the service-addresses panel after ANY profile save, even with an unchanged address', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const fetchMock = vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/properties')) return response({ properties: [] });
+      if (path.endsWith('/admin/customers/customer-a') && options.method === 'PUT') return response({ success: true });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    await screen.findByTestId('customer-properties-panel');
+    const propertyFetches = () => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/properties')).length;
+    await waitFor(() => expect(propertyFetches()).toBe(1));
+
+    // Edit → Save with nothing changed (address tuple identical).
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    await screen.findByText('Edit customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
+    await waitFor(() => expect(propertyFetches()).toBe(2));
   });
 
   it('flags partially refunded payments in overview Recent Transactions', async () => {
