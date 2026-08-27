@@ -324,6 +324,11 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // Optional dispatcher note appended to the end of the customer text.
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  // Latched once a move has COMMITTED but the sheet stays open to show an
+  // attention-required result (failed stop / un-texted / advisory overlap):
+  // the Move button must not fire a second move — a same-day retry would
+  // re-commit the already-moved visit and text the customer again.
+  const [committed, setCommitted] = useState(false);
   // Custom on-the-hour time — dispatcher-typed instead of a preset pill.
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
   const [customDate, setCustomDate] = useState(todayStr);
@@ -596,13 +601,21 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       // dispatcher it was texted buries the manual follow-up.
       const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
       const notTexted = notify && texted < movedCount;
+      // Stops that moved onto an occupied slot: the move COMMITS (schedule
+      // overlaps are advisory on every staff surface) — say so and keep the
+      // sheet open so the dispatcher eyeballs the day's route.
+      const overlapWarnings = Array.isArray(data.overlapWarnings)
+        ? data.overlapWarnings
+        : (data.results || []).flatMap((r) => (r.ok && Array.isArray(r.warnings) ? r.warnings : []));
+      const overlapCount = overlapWarnings.length;
       const notifyClause = !notify ? ''
         : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
           : texted === 0 ? ', customer NOT texted'
             : `, ${texted}/${movedCount} texted`;
       const summary =
         `Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}`;
-      if (failedCount > 0 || notTexted) {
+      if (failedCount > 0 || notTexted || overlapCount > 0) {
+        setCommitted(movedCount > 0);
         // Partial success (a stop raced to terminal or slot-conflicted) or a
         // silent non-send. The server still returns 200 when at least one
         // moved, so keep the sheet open with the warning instead of silently
@@ -613,10 +626,15 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         const smsClause = notTexted
           ? ' Some customers were NOT texted (no phone or template disabled) — follow up manually.'
           : '';
-        setError(`${summary}.${failClause}${smsClause}`);
+        // The dated warnings themselves (one per clashing occurrence — a
+        // series shift can report several future dates), never a bare count.
+        const overlapClause = overlapCount > 0
+          ? ` ${overlapWarnings.join(' ')} Check the route on ${overlapCount === 1 ? 'that day' : 'those days'}.`
+          : '';
+        setError(`${summary}.${failClause}${smsClause}${overlapClause}`);
         setBusy(false);
       }
-      onDone?.({ summary, movedCount, failedCount, notTexted });
+      onDone?.({ summary, movedCount, failedCount, notTexted, overlapCount, overlapWarnings });
     } catch (err) {
       setError(err.message || 'Quick Move failed');
       setBusy(false);
@@ -934,15 +952,15 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy || noteBlocked || customOverBudget}
+                disabled={!selected || busy || committed || noteBlocked || customOverBudget}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy || noteBlocked || customOverBudget ? 'default' : 'pointer',
-                  opacity: !selected || busy || noteBlocked || customOverBudget ? 0.5 : 1,
+                  cursor: !selected || busy || committed || noteBlocked || customOverBudget ? 'default' : 'pointer',
+                  opacity: !selected || busy || committed || noteBlocked || customOverBudget ? 0.5 : 1,
                 }}
               >
-                {busy ? 'Moving…' : 'Move appointment'}
+                {busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment'}
               </button>
             </div>
           </>
