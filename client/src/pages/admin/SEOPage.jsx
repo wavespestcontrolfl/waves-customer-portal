@@ -1674,6 +1674,14 @@ function RankingsMonitorTab() {
   );
 }
 
+// lost_reason is stamped by the weekly scan only after a crawl of the source page
+// confirmed the link is gone; rows without one predate verified loss tracking.
+const LOST_REASON_LABEL = {
+  page_gone: "page gone (4xx/5xx)",
+  link_removed: "link removed",
+  unreachable: "site unreachable",
+};
+
 function BacklinksTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2026,6 +2034,7 @@ function BacklinksTab() {
                     <th style={thR}>DR</th>
                     <th style={thStyle}>Anchor</th>
                     <th style={thStyle}>Target</th>
+                    <th style={thStyle}>Reason</th>
                     <th style={thStyle}>Lost</th>
                   </tr></thead>
                   <tbody>
@@ -2035,7 +2044,8 @@ function BacklinksTab() {
                         <td style={tdR}>{l.domain_rating || "—"}</td>
                         <td style={{ ...tdStyle, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.anchor_text || "—"}</td>
                         <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.target_url || "—"}</td>
-                        <td style={tdStyle}>{l.updated_at ? new Date(l.updated_at).toLocaleDateString() : "—"}</td>
+                        <td style={tdStyle}>{LOST_REASON_LABEL[l.lost_reason] || (l.lost_reason ? l.lost_reason : "unverified (legacy)")}</td>
+                        <td style={tdStyle}>{(l.lost_at || l.updated_at) ? new Date(l.lost_at || l.updated_at).toLocaleDateString() : "—"}</td>
                       </tr>
                     ))}
                   </tbody>

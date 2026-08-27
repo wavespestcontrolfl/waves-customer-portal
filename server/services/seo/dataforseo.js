@@ -137,7 +137,7 @@ class DataForSEO {
   // caller (verifier, scanCompetitorGaps); the deep-harvest passes false so the
   // scorer can also see nofollow opportunities (plan §4.1 — the prior hard
   // filter made nofollow links invisible).
-  async getBacklinks(target, limit = 1000, { dofollowOnly = true } = {}) {
+  async getBacklinks(target, limit = 1000, { dofollowOnly = true, offset = 0 } = {}) {
     // order_by uses the COMMA format ('rank,desc'); the prior 'rank.desc' (dot)
     // is rejected by DataForSEO with 40501 Invalid Field and silently returned
     // null — which is why scanCompetitorGaps never populated seo_competitor_backlinks.
@@ -145,6 +145,7 @@ class DataForSEO {
     // default one_thousand would store inflated DR in seo_backlinks /
     // seo_competitor_backlinks once this (newly un-broken) call returns data.
     const task = { target, limit, order_by: ['rank,desc'], rank_scale: 'one_hundred' };
+    if (offset) task.offset = offset; // page past the 1000/call cap (result carries total_count)
     if (dofollowOnly) task.filters = ['dofollow', '=', true];
     return this.request('/backlinks/backlinks/live', [task]);
   }

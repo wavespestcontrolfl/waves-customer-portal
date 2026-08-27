@@ -1520,7 +1520,10 @@ function initScheduledJobs() {
     logger.info('Running: Backlink scan');
     try {
       const BacklinkMonitor = require('./seo/backlink-monitor');
-      await BacklinkMonitor.scan();
+      // snapshot:true — the trend/velocity cards read seo_backlink_snapshots;
+      // before this the snapshot only advanced on the manual Scan button or a
+      // GSC import. Taken inside the scan's exclusive section, complete scans only.
+      await BacklinkMonitor.scan({ snapshot: true });
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

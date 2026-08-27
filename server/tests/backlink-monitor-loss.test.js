@@ -1,0 +1,347 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/seo/dataforseo', () => ({ getBacklinks: jest.fn() }));
+
+const db = require('../models/db');
+const dataforseo = require('../services/seo/dataforseo');
+const BacklinkMonitor = require('../services/seo/backlink-monitor');
+
+// Minimal chainable knex stand-in: every builder method returns the builder,
+// terminal ops resolve through the per-table handler with the collected state.
+function makeDb(handlers) {
+  const log = [];
+  db.mockImplementation((table) => {
+    const state = { table, wheres: [], ins: [], raws: [], select: null, op: null, payload: null };
+    const done = (op, payload) => {
+      state.op = op; state.payload = payload; log.push(state);
+      const h = handlers[table];
+      if (!h) throw new Error(`Unexpected table ${table}`);
+      return Promise.resolve(h(op, state));
+    };
+    const b = {
+      where: jest.fn((...a) => { if (typeof a[0] === 'function') a[0](b); else state.wheres.push(a); return b; }),
+      whereIn: jest.fn((col, vals) => { state.ins.push([col, vals]); return b; }),
+      whereNull: jest.fn(() => b), orWhere: jest.fn(() => b),
+      whereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),
+      raw: jest.fn((sql, bind) => ({ __raw: sql, bind })),
+      orderBy: jest.fn(() => b), orderByRaw: jest.fn(() => b), limit: jest.fn(() => b),
+      select: jest.fn((...cols) => { state.select = cols; return done('select'); }),
+      first: jest.fn((...cols) => { state.select = cols; return done('first'); }),
+      insert: jest.fn((p) => done('insert', p)),
+      update: jest.fn((p) => done('update', p)),
+      increment: jest.fn((col, n) => done('increment', { col, n })),
+    };
+    return b;
+  });
+  db.raw = jest.fn((sql, bind) => ({ __raw: sql, bind }));
+  return log;
+}
+const passthrough = (_name, fn) => fn();
+
+const activeRow = (over = {}) => ({
+  id: 'bl-1', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x',
+  source_domain: 'www.blog.example', domain_rating: 45, anchor_text: 'Waves Pest Control',
+  miss_count: 0, is_dofollow: true, severity: 'clean', link_type: null, ...over,
+});
+
+function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false } = {}) {
+  dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [{ items, total_count: total }] }] });
+  const events = [], updates = [], increments = [], inserts = [];
+  makeDb({
+    seo_backlinks: (op, st) => {
+      if (op === 'select') return active;
+      if (op === 'first') {
+        // per-link upsert lookup: where(source_url).where(target_url)
+        const url = st.wheres.find(w => w[0] === 'source_url')?.[1];
+        if (url) return existingByUrl[url] || null;
+        // domain-level "still active?" probe
+        return stillActiveDomain ? { id: 'other' } : null;
+      }
+      if (op === 'update') { updates.push({ ids: st.wheres.find(w => w[0] === 'id')?.[1], patch: st.payload }); return 1; }
+      if (op === 'increment') { increments.push({ ids: st.ins[0]?.[1] || st.wheres.find(w => w[0] === 'id')?.[1], ...st.payload }); return 1; }
+      if (op === 'insert') { inserts.push(st.payload); return [1]; }
+      throw new Error(`unexpected op ${op}`);
+    },
+    seo_backlink_events: (op, st) => { events.push(st.payload); return [1]; },
+  });
+  return { events, updates, increments, inserts };
+}
+
+describe('BacklinkMonitor verified loss detection', () => {
+  beforeEach(() => { db.mockReset(); dataforseo.getBacklinks.mockReset(); });
+
+  test('fetch is no longer dofollow-only; a valid EMPTY result is a complete scan, a missing result aborts', async () => {
+    const { increments } = scanWith({ items: [], total: 0, active: [activeRow()] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 0, scanComplete: true, missed: 1, lostCount: 0 }));
+    expect(increments).toEqual([{ ids: ['bl-1'], col: 'miss_count', n: 1 }]);
+    expect(dataforseo.getBacklinks).toHaveBeenCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false, offset: 0 });
+
+    dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [null] }] });
+    await expect(BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() })).resolves.toEqual({ scanned: 0, scanComplete: false });
+  });
+
+  test('pages past 1000 by offset until total_count is reached', async () => {
+    const mk = (i) => ({ url_from: `https://s${i}.example/a`, url_to: 'https://wavespestcontrol.com/', domain_from: `s${i}.example`, domain_from_rank: 1, dofollow: true });
+    const page1 = Array.from({ length: 1000 }, (_, i) => mk(i));
+    const page2 = [mk(1000), mk(1001)];
+    dataforseo.getBacklinks.mockImplementation(async (_t, _l, { offset }) => ({ tasks: [{ result: [{ items: offset ? page2 : page1, total_count: 1002 }] }] }));
+    makeDb({ seo_backlinks: (op) => (op === 'select' ? [] : op === 'first' ? null : [1]) });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 1002, scanComplete: true }));
+    expect(dataforseo.getBacklinks).toHaveBeenCalledTimes(2);
+    expect(dataforseo.getBacklinks).toHaveBeenLastCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false, offset: 1000 });
+  });
+
+  test('scan is single-flight through the cron advisory lock', async () => {
+    const exclusive = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
+    await expect(BacklinkMonitor.scan({ exclusive })).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(exclusive).toHaveBeenCalledWith('backlink-scan', expect.any(Function), { recordHealth: false });
+    expect(dataforseo.getBacklinks).not.toHaveBeenCalled();
+  });
+
+  test('snapshot:true snapshots only after a complete scan, inside the exclusive section', async () => {
+    const order = [];
+    const exclusive = jest.fn(async (_n, fn) => { order.push('lock'); const r = await fn(); order.push('unlock'); return r; });
+    const spy = jest.spyOn(BacklinkMonitor, 'takeSnapshot').mockImplementation(async () => { order.push('snapshot'); });
+    scanWith({ items: [], total: 0, active: [] });
+    await BacklinkMonitor.scan({ exclusive, snapshot: true, crawlFn: jest.fn() });
+    expect(order).toEqual(['lock', 'snapshot', 'unlock']);
+
+    // partial scan (API said 1500 but only 1000 came back on a short page) → no snapshot
+    spy.mockClear();
+    dataforseo.getBacklinks.mockResolvedValueOnce({ tasks: [{ result: [{ items: [], total_count: 1500 }] }] });
+    const r = await BacklinkMonitor.scan({ exclusive, snapshot: true, crawlFn: jest.fn() });
+    expect(r.scanComplete).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('first miss only increments miss_count — nothing is marked lost', async () => {
+    const crawl = jest.fn();
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const { updates, increments, events } = scanWith({ items: [seen], active: [activeRow()] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl });
+    expect(r).toEqual(expect.objectContaining({ scanComplete: true, missed: 1, lostCount: 0 }));
+    expect(increments).toEqual([{ ids: ['bl-1'], col: 'miss_count', n: 1 }]);
+    expect(updates.filter(u => u.patch.status === 'lost')).toHaveLength(0);
+    expect(crawl).not.toHaveBeenCalled();
+    expect(events).toHaveLength(0);
+  });
+
+  test('second miss + crawl finds no link → lost with reason, event, domain-level alert and recovery', async () => {
+    const crawl = jest.fn(async () => ({ found: false, status: 200 }));
+    const recovery = jest.fn(async () => ({ queued: 1 }));
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const { updates, events } = scanWith({ items: [seen], active: [activeRow({ miss_count: 1 })] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: recovery, now: new Date('2026-08-30T07:30:00Z') });
+
+    // crawl gets the target WITHOUT the query string so utm-tagged links still match
+    expect(crawl).toHaveBeenCalledWith('https://blog.example/post', 'https://wavespestcontrol.com/pest-control-sarasota-fl/');
+    const lost = updates.find(u => u.patch.status === 'lost');
+    expect(lost.ids).toBe('bl-1');
+    expect(lost.patch).toEqual(expect.objectContaining({ lost_reason: 'link_removed', miss_count: 2 }));
+    expect(lost.patch.lost_at).toEqual(new Date('2026-08-30T07:30:00Z'));
+    expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'lost' })]);
+    expect(r).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, recoveryQueued: 1 }));
+    expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'blog.example', lost_reason: 'link_removed', domain_rating: 45, alertable: true })]);
+  });
+
+  test('crawl still finds the link → survives (index churn), counter reset, no loss', async () => {
+    const crawl = jest.fn(async () => ({ found: true, isDofollow: true, status: 200 }));
+    const recovery = jest.fn();
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const { updates, events } = scanWith({ items: [seen], active: [activeRow({ miss_count: 1 })] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: recovery });
+    expect(r).toEqual(expect.objectContaining({ lostCount: 0, verifiedLive: 1 }));
+    expect(updates.find(u => u.ids === 'bl-1').patch).toEqual(expect.objectContaining({ miss_count: 0 }));
+    expect(updates.filter(u => u.patch.status === 'lost')).toHaveLength(0);
+    expect(events).toEqual([expect.objectContaining({ event_type: 'verify_survived' })]);
+    expect(recovery).not.toHaveBeenCalled();
+  });
+
+  test('crawl finds the link but nofollow → rel_changed event, not a loss', async () => {
+    const crawl = jest.fn(async () => ({ found: true, isDofollow: false, status: 200 }));
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const { updates, events } = scanWith({ items: [seen], active: [activeRow({ miss_count: 1 })] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl });
+    expect(r).toEqual(expect.objectContaining({ lostCount: 0, relChanges: 1 }));
+    expect(updates.find(u => u.ids === 'bl-1').patch).toEqual(expect.objectContaining({ is_dofollow: false, miss_count: 0 }));
+    expect(events.map(e => e.event_type)).toEqual(['rel_changed', 'verify_survived']);
+  });
+
+  test('DataForSEO reporting a dofollow→nofollow flip records an event and keeps the row active', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: false };
+    const existing = { id: 'bl-1', status: 'active', is_dofollow: true };
+    const { updates, events } = scanWith({ items: [seen], active: [activeRow()], existingByUrl: { [seen.url_from]: existing } });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ relChanges: 1, lostCount: 0, missed: 0 }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'active', is_dofollow: false, miss_count: 0 }));
+    expect(events).toEqual([expect.objectContaining({ event_type: 'rel_changed', detail: JSON.stringify({ from: 'dofollow', to: 'nofollow', source: 'dataforseo' }) })]);
+  });
+
+  test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded)', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
+    const { updates, events } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ recovered: 1 }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'active', lost_at: null, lost_reason: null, miss_count: 0 }));
+    expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-9', event_type: 'recovered' })]);
+  });
+
+  test('domain-level rollup: directory / low-DR / owned / still-linking domains are not alertable', async () => {
+    makeDb({ seo_backlinks: (op) => (op === 'first' ? null : []) });
+    const out = await BacklinkMonitor.domainLevelLosses([
+      { id: 'own', source_domain: 'www.veniceflpestcontrol.com', source_url: 'https://www.veniceflpestcontrol.com/rainy-season/', domain_rating: 45, severity: 'clean', lost_reason: 'page_gone' },
+      { id: 'a', source_domain: 'www.good.example', source_url: 'https://good.example/resources', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
+      { id: 'b', source_domain: 'dir.example', source_url: 'https://dir.example/directory/pest', domain_rating: 60, severity: 'clean', lost_reason: 'link_removed' },
+      { id: 'c', source_domain: 'small.example', source_url: 'https://small.example/x', domain_rating: 12, severity: 'clean', lost_reason: 'link_removed' },
+      { id: 'd', source_domain: 'flaky.example', source_url: 'https://flaky.example/x', domain_rating: 70, severity: 'clean', lost_reason: 'unreachable' },
+      { id: 'e', source_domain: 'spam.example', source_url: 'https://spam.example/x', domain_rating: 70, severity: 'critical', lost_reason: 'link_removed' },
+    ]);
+    expect(out.map(d => [d.domain, d.alertable])).toEqual([
+      ['veniceflpestcontrol.com', false], ['good.example', true], ['dir.example', false], ['small.example', false], ['flaky.example', false], ['spam.example', false],
+    ]);
+
+    makeDb({ seo_backlinks: (op) => (op === 'first' ? { id: 'still' } : []) });
+    const still = await BacklinkMonitor.domainLevelLosses([
+      { id: 'a', source_domain: 'good.example', source_url: 'https://good.example/p2', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
+    ]);
+    expect(still).toEqual([]); // another page on the domain still links us → not a domain loss
+  });
+
+  test('verifyLoss maps HTTP outcomes to reasons and gives unreachable hosts a longer window', async () => {
+    const link = { source_url: 'https://x.example/p', target_url: 'https://wavespestcontrol.com/', miss_count: 1 };
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 404 }) })).resolves.toEqual({ outcome: 'lost', reason: 'page_gone', status: 404 });
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 200 }) })).resolves.toEqual({ outcome: 'lost', reason: 'link_removed', status: 200 });
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 410 }) })).resolves.toEqual({ outcome: 'lost', reason: 'page_gone', status: 410 });
+    // a 2xx whose body was cut short cannot prove the link is gone
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 200, truncated: true }) })).resolves.toEqual({ outcome: 'unverified', status: 200, error: 'truncated_body' });
+    // bot blocks, throttling and outages prove nothing
+    for (const status of [403, 429, 500, 503]) {
+      await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status }) })).resolves.toEqual({ outcome: 'unverified', status, error: `http_${status}` });
+    }
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 0, blocked: true, error: 'blocked_host' }) })).resolves.toEqual({ outcome: 'unverified', status: null, error: 'blocked_host' });
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, error: 'ECONNREFUSED' }) })).resolves.toEqual({ outcome: 'unverified', status: null, error: 'ECONNREFUSED' });
+    await expect(BacklinkMonitor.verifyLoss({ ...link, miss_count: 3 }, { crawlFn: async () => { throw new Error('timeout'); } })).resolves.toEqual({ outcome: 'lost', reason: 'unreachable', status: null, error: 'timeout' });
+    await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: true, isDofollow: false, status: 200 }) })).resolves.toEqual({ outcome: 'live', isDofollow: false, status: 200 });
+  });
+});
+
+describe('lost-link recovery', () => {
+  const recovery = require('../services/seo/lost-link-recovery');
+  beforeEach(() => db.mockReset());
+
+  const loss = { domain: 'blog.example', backlink_id: 'bl-1', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_rating: 45, anchor_text: 'Waves Pest Control', link_type: 'editorial', lost_reason: 'link_removed', alertable: true };
+
+  test('queues a high-priority lost_recovery prospect with the scorer contact', async () => {
+    const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', score: 80, tier: 1, relevance_0_100: 70, lead_value_tier: 1, is_local_swfl: true, contact: { contact_email: 'ed@blog.example', contact_url: null }, gate: { ok: true, lane: 'outreach' } }]) };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 1, skipped: 0 }));
+    expect(inserts[0]).toEqual(expect.objectContaining({
+      target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/',
+      link_type: 'resource', priority: 'high', source: 'lost_recovery', source_ref: 'bl-1', owner: 'backlink_monitor',
+      contact_email: 'ed@blog.example', domain_rating: 45, anchor_planned: 'Waves Pest Control',
+    }));
+    expect(JSON.parse(inserts[0].quality_signals)).toEqual(expect.objectContaining({ lost_recovery: true, lost_reason: 'link_removed' }));
+  });
+
+  test('skips in-flight / rejected board rows and domains the scorer classifies as signup-lane', async () => {
+    const inserts = [];
+    const rows = { 'dup.example': { id: 'p', status: 'prospect' }, 'no.example': { id: 'r', status: 'rejected' } };
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return rows[st.wheres[0][0].target_domain] || null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'directory', gate: { ok: true, lane: 'signup' } }]) };
+    const r = await recovery.queueLostDomains([{ ...loss, domain: 'dup.example' }, { ...loss, domain: 'no.example' }, { ...loss, domain: 'dir.example' }], { scorer });
+    expect(r.queued).toBe(0);
+    expect(r.skipped).toBe(3);
+    expect(inserts).toHaveLength(0);
+    expect(scorer.scoreCandidates).toHaveBeenCalledTimes(1); // board hits never spend a scoring call
+  });
+
+  test('a prospect the outbound verifier moved to lost is REOPENED, not duplicated', async () => {
+    const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: 'placed via signup' }; if (op === 'update') { updates.push({ where: st.wheres[0][0], patch: st.payload }); return 1; } if (op === 'insert') throw new Error('must not insert'); } });
+    const scorer = { scoreCandidates: jest.fn() };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }] });
+    expect(updates[0].where).toEqual({ id: 'p-lost' });
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
+    expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
+    expect(scorer.scoreCandidates).not.toHaveBeenCalled();
+  });
+
+  test('fail-soft fallback link_type is coerced to a worker-claimable type', async () => {
+    const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => { throw new Error('down'); }), CLAIMABLE_LINK_TYPES: new Set(['editorial', 'resource']) };
+    await recovery.queueLostDomains([{ ...loss, link_type: 'unknown' }], { scorer });
+    expect(inserts[0].link_type).toBe('resource');
+  });
+
+  test('applies the same contactability gate as create_link_prospects', async () => {
+    const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'editorial', gate: { ok: false, lane: 'outreach', reason: 'no contact path' } }]) };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'no contact path' }] });
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('scorer failure is fail-soft: the row is still queued with what the monitor knows', async () => {
+    const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => { throw new Error('anthropic down'); }) };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r.queued).toBe(1);
+    expect(inserts[0]).toEqual(expect.objectContaining({ link_type: 'editorial', contact_email: null, score: null }));
+  });
+});
+
+describe('crawlForLink goes through the SSRF-pinned fetcher', () => {
+  const verifier = require('../services/seo/link-prospect-verifier');
+
+  test('returns status + rel from a fetched page and never follows into a blocked host', async () => {
+    const html = '<p><a href="https://www.wavespestcontrol.com/pest-control-sarasota-fl/?utm=x" rel="sponsored">Waves</a></p>';
+    const fetchPageFn = jest.fn(async () => ({ status: 200, html, blocked: false, error: null }));
+    await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/pest-control-sarasota-fl/', { fetchPageFn }))
+      .resolves.toEqual({ found: true, isDofollow: false, anchorText: 'Waves', status: 200, blocked: false, truncated: false, error: null });
+    expect(fetchPageFn).toHaveBeenCalledWith('https://blog.example/p', { timeoutMs: 12000 });
+
+    const blocked = jest.fn(async () => ({ status: 0, html: null, blocked: true, truncated: false, error: 'blocked_host' }));
+    await expect(verifier.crawlForLink('http://169.254.169.254/latest', 'https://wavespestcontrol.com/', { fetchPageFn: blocked }))
+      .resolves.toEqual({ found: false, status: 0, blocked: true, truncated: false, error: 'blocked_host' });
+
+    const gone = jest.fn(async () => ({ status: 404, html: null, blocked: false, truncated: false, error: null }));
+    await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: gone }))
+      .resolves.toEqual({ found: false, status: 404, blocked: false, truncated: false, error: null });
+
+    // empty-but-truncated 2xx keeps the truncation flag so verifyLoss stays 'unverified'
+    const emptyCut = jest.fn(async () => ({ status: 200, html: '', blocked: false, truncated: true, error: null }));
+    await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn: emptyCut }))
+      .resolves.toEqual({ found: false, status: 200, blocked: false, truncated: true, error: null });
+  });
+
+  test('contact-finder.fetchPage refuses private hosts before any network call and revalidates redirects', async () => {
+    const { fetchPage } = require('../services/seo/contact-finder');
+    const fetchFn = jest.fn();
+    await expect(fetchPage('http://127.0.0.1/admin', { fetchFn, resolveHostFn: async () => true })).resolves.toEqual(expect.objectContaining({ blocked: true, html: null }));
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // public → 302 → private: the second hop is blocked, nothing fetched from it
+    fetchFn.mockResolvedValueOnce({ status: 302, ok: false, headers: { get: () => 'http://10.0.0.5/secret' }, text: async () => '' });
+    const r = await fetchPage('https://public.example/x', { fetchFn, resolveHostFn: async (h) => h === 'public.example' });
+    expect(r).toEqual(expect.objectContaining({ blocked: true }));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    fetchFn.mockResolvedValueOnce({ status: 404, ok: false, headers: { get: () => null }, text: async () => '' });
+    await expect(fetchPage('https://public.example/gone', { fetchFn, resolveHostFn: async () => true })).resolves.toEqual({ status: 404, html: null, blocked: false, truncated: false, error: null });
+
+    // a fetcher that reports a cut body surfaces truncated:true
+    fetchFn.mockResolvedValueOnce({ status: 200, ok: true, complete: false, headers: { get: () => null }, text: async () => '<html>partial' });
+    await expect(fetchPage('https://public.example/big', { fetchFn, resolveHostFn: async () => true })).resolves.toEqual(expect.objectContaining({ status: 200, truncated: true, html: '<html>partial' }));
+  });
+});

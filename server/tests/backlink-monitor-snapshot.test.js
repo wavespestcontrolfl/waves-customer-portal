@@ -71,8 +71,12 @@ describe('BacklinkMonitor snapshots', () => {
   });
 
   test('DataForSEO loss detection excludes GSC-discovered backlinks', async () => {
+    // One unrelated live link so the scan is non-empty and "complete"; the
+    // DataForSEO-sourced active row is absent and gets its first miss counted.
     dataforseo.getBacklinks.mockResolvedValue({
-      tasks: [{ result: [{ items: [], total_count: 0 }] }],
+      tasks: [{ result: [{ items: [
+        { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true },
+      ], total_count: 1 }] }],
     });
     const sourceFilter = {
       whereNull: jest.fn(() => sourceFilter),
@@ -94,25 +98,34 @@ describe('BacklinkMonitor snapshots', () => {
         },
       ]),
     };
-    const lostUpdate = {
-      whereIn: jest.fn(() => lostUpdate),
-      update: jest.fn(async () => 1),
+    const missUpdate = {
+      whereIn: jest.fn(() => missUpdate),
+      increment: jest.fn(async () => 1),
+    };
+    const upsert = {
+      where: jest.fn(() => upsert),
+      first: jest.fn(async () => null),
+      insert: jest.fn(async () => [1]),
     };
 
     db.mockImplementation((table) => {
       if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
       if (activeQuery.where.mock.calls.length === 0) return activeQuery;
-      return lostUpdate;
+      if (upsert.first.mock.calls.length === 0 || upsert.insert.mock.calls.length === 0) return upsert;
+      return missUpdate;
     });
 
-    const result = await BacklinkMonitor.scan();
+    const result = await BacklinkMonitor.scan({ exclusive: (_n, fn) => fn(), crawlFn: jest.fn() });
 
     expect(result).toEqual(expect.objectContaining({
       scanComplete: true,
-      lostCount: 1,
+      missed: 1,
+      lostCount: 0,
     }));
     expect(sourceFilter.whereNull).toHaveBeenCalledWith('discovery_source');
     expect(sourceFilter.orWhere).toHaveBeenCalledWith('discovery_source', 'dataforseo');
-    expect(lostUpdate.whereIn).toHaveBeenCalledWith('id', ['dataforseo-link']);
+    // the DataForSEO row is the only loss candidate — first miss counted, not lost
+    expect(missUpdate.whereIn).toHaveBeenCalledWith('id', ['dataforseo-link']);
+    expect(missUpdate.increment).toHaveBeenCalledWith('miss_count', 1);
   });
 });

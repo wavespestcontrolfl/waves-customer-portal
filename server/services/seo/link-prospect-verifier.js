@@ -297,41 +297,42 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
   return false;
 }
 
-// Best-effort crawl: does live_url contain an <a> to wavespestcontrol.com, and is it dofollow?
-async function crawlForLink(liveUrl, targetPage) {
-  let to = null;
-  try {
-    const expectedTarget = normalizeComparableUrl(targetPage);
-    if (!expectedTarget) return { found: false };
-    const controller = new AbortController();
-    to = setTimeout(() => controller.abort(), 12000);
-    const res = await fetch(liveUrl, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': 'WavesBacklinkVerifier/1.0 (+https://wavespestcontrol.com)' },
-    });
-    if (!res.ok) return { found: false };
-    const html = await res.text();
-
-    // Find anchor tags whose href points at the intended Waves target page.
-    const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
-    let m;
-    while ((m = anchorRe.exec(html)) !== null) {
-      const href = normalizeComparableUrl(m[2]);
-      if (!matchesTargetUrl(href, expectedTarget)) continue;
-      const attrs = `${m[1]} ${m[3]}`;
-      const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
-      const rel = relMatch ? relMatch[1].toLowerCase() : '';
-      const isDofollow = !/\bnofollow\b|\bugc\b|\bsponsored\b/.test(rel);
-      const anchorText = m[4].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
-      return { found: true, isDofollow, anchorText: anchorText || null };
-    }
-    return { found: false };
-  } catch (err) {
-    return { found: false, error: err.message };
-  } finally {
-    if (to) clearTimeout(to);
+// Pure: find the first <a> in html pointing at the intended Waves target page.
+function findLinkInHtml(html, targetPage) {
+  const expectedTarget = normalizeComparableUrl(targetPage);
+  if (!expectedTarget || typeof html !== 'string') return { found: false };
+  const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const href = normalizeComparableUrl(m[2]);
+    if (!matchesTargetUrl(href, expectedTarget)) continue;
+    const attrs = `${m[1]} ${m[3]}`;
+    const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
+    const rel = relMatch ? relMatch[1].toLowerCase() : '';
+    const isDofollow = !/\bnofollow\b|\bugc\b|\bsponsored\b/.test(rel);
+    const anchorText = m[4].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    return { found: true, isDofollow, anchorText: anchorText || null };
   }
+  return { found: false };
+}
+
+// Best-effort crawl: does liveUrl contain an <a> to wavespestcontrol.com, and is it
+// dofollow? Goes through contact-finder's SSRF-pinned fetcher (private-IP lookup
+// guard + per-hop redirect revalidation): live_url / source_url values come from
+// operators, Hermes and DataForSEO — never trust them with a plain fetch.
+// Returns { found, isDofollow?, anchorText?, status, blocked, truncated, error } so
+// callers can tell a page that is gone (4xx) from a page that dropped the link
+// (2xx, complete body, not found); a truncated body never proves absence.
+async function crawlForLink(liveUrl, targetPage, { fetchPageFn } = {}) {
+  const expectedTarget = normalizeComparableUrl(targetPage);
+  if (!expectedTarget) return { found: false, status: 0, blocked: false, truncated: false, error: 'no_target' };
+  const fetchPage = fetchPageFn || require('./contact-finder').fetchPage;
+  const page = await fetchPage(liveUrl, { timeoutMs: 12000 });
+  if (!page || !page.html) {
+    // An empty 2xx body that was cut short is still a truncated page, not proof of absence.
+    return { found: false, status: page ? page.status : 0, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated), error: page ? page.error : 'fetch_failed' };
+  }
+  return { ...findLinkInHtml(page.html, targetPage), status: page.status, blocked: false, truncated: !!page.truncated, error: null };
 }
 
 // Apply a live transition + fire indexing for a confirmed link. `discoveredUrl`
@@ -454,7 +455,7 @@ async function run({ limit = 200 } = {}) {
   return { checked: prospects.length, live, lost, pending };
 }
 
-module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
   comparableDomain, parseQuality, expectedTargetUrl,
