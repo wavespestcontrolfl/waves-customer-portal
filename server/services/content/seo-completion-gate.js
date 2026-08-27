@@ -351,7 +351,10 @@ function conversionCtaLinks(body) {
   const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
   let m;
   while ((m = conversionLink.exec(s)) !== null) {
-    const anchor = m[1];
+    // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
+    // must be read as "Request a Quote", not evade the gate on a leading
+    // asterisk.
+    const anchor = m[1].replace(/[*_~`]/g, '').trim();
     out.push({
       anchor,
       hasEstimateWording: /(estimat|quot)/i.test(anchor),
@@ -403,8 +406,10 @@ function badCtaAnchor(body, brief = {}) {
 // wording is the forbidden CTA shape, wherever it points.
 const FORBIDDEN_CTA_ANCHOR_RE = /\[((?:request|book|schedule|get)[^\]]{0,40}?inspection[^\]]{0,20})\]\(/i;
 function forbiddenCtaAnchor(body) {
-  const m = String(body || '').match(FORBIDDEN_CTA_ANCHOR_RE);
-  return m ? m[1] : null;
+  // Bold/italic/code decoration inside the anchor must not hide the
+  // wording — strip it before matching.
+  const m = String(body || '').replace(/[*_~`]/g, '').match(FORBIDDEN_CTA_ANCHOR_RE);
+  return m ? m[1].trim() : null;
 }
 
 function faqRequired(brief = {}) {

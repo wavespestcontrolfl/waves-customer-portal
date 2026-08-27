@@ -280,6 +280,17 @@ describe('seo-completion-gate', () => {
     expect(rodent.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('markdown decoration cannot hide a forbidden CTA anchor', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n[**Schedule Service**](/contact/) or [_Request an Inspection_](/contact/).`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+  });
+
   test('an inspection-request anchor emits exactly one forbidden-wording finding', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
