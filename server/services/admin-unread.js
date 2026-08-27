@@ -181,32 +181,56 @@ async function computeUnreadCount({ adminUserId, role } = {}) {
 // never break on infrastructure.
 const BADGE_LOCK_NS = 'waves-badge:';
 
+// In-process serialization FIRST, before any pool connection is reserved:
+// at most ONE badge transaction per admin exists per process, so
+// advisory-lock waiters cannot pile up pool connections while the lock
+// holder needs a second connection for the unread queries — under a
+// burst that pile-up could exhaust the pool and stall unrelated DB work
+// (codex #3541 round 7). The advisory lock inside remains the
+// cross-replica authority. Map stays tiny: one entry per staff user.
+const badgeSections = new Map();
+function serializePerAdmin(key, task) {
+  const tail = badgeSections.get(key) || Promise.resolve();
+  const run = tail.then(task, task);
+  badgeSections.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
 async function withBadgeOrderingStamp(adminUserId, fn) {
-  try {
-    if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
-    return await db.transaction(async (trx) => {
-      // pg_advisory_xact_lock blocks until acquired and releases on
-      // commit/rollback — no leak risk. Scoped per admin so different
-      // admins' snapshots never contend.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${adminUserId ?? ''}`]);
-      let result;
-      try {
-        result = await fn();
-      } catch (err) {
-        err.badgeComputeError = true; // fn's own failure — never retried below
-        throw err;
-      }
-      const { rows } = await trx.raw(
-        'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS ms',
-      );
-      const ms = Number(rows?.[0]?.ms);
-      return { ...result, at: Number.isFinite(ms) ? ms : Date.now() };
-    });
-  } catch (err) {
-    if (err && err.badgeComputeError) throw err;
-    logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
-    return { ...(await fn()), at: Date.now() };
-  }
+  const key = String(adminUserId ?? '');
+  return serializePerAdmin(key, async () => {
+    try {
+      if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
+      return await db.transaction(async (trx) => {
+        // pg_advisory_xact_lock blocks until acquired and releases on
+        // commit/rollback — no leak risk. Scoped per admin so different
+        // admins' snapshots never contend.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${key}`]);
+        let result;
+        try {
+          result = await fn();
+        } catch (err) {
+          err.badgeComputeError = true; // fn's own failure — never retried below
+          throw err;
+        }
+        // Microsecond DB-clock token: consecutive serialized sections are
+        // separated by at least a DB round-trip (≫1µs), so tokens are
+        // strictly increasing in section order — a pre-read push snapshot
+        // and the read stamp that follows it can never draw equal tokens
+        // (codex round 7). Epoch µs stays well inside Number precision.
+        const { rows } = await trx.raw(
+          'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint AS us',
+        );
+        const us = Number(rows?.[0]?.us);
+        return { ...result, at: Number.isFinite(us) ? us : Date.now() * 1000 };
+      });
+    } catch (err) {
+      if (err && err.badgeComputeError) throw err;
+      // Same µs unit as the locked path so a fallback stamp still competes.
+      logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
+      return { ...(await fn()), at: Date.now() * 1000 };
+    }
+  });
 }
 
 // Returns { count, at }: the unread snapshot plus its ordering stamp,
