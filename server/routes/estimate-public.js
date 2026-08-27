@@ -13629,11 +13629,14 @@ function oneTimeItemsForRender(estResult, estData) {
   try { normalized = normalizeOneTimeBreakdown(estData).items || []; } catch { normalized = []; }
   // The normalizer also emits the pooled manual one-time discount as a
   // negative `manual_discount` row. The SSR card subtracts
-  // manualDiscount.oneTimeAmount itself, so carrying that row through
-  // would net the discount TWICE ($500 − $100 stored as $400 rendering a
-  // $300 total while accept charges $400 — pre-push P0 on #3521). Drop
-  // discount-kind rows here; charge/included/quote rows carry through.
-  return normalized.filter((row) => row && row.kind !== 'discount').map((row) => ({
+  // manualDiscount.oneTimeAmount itself, so carrying THAT row through
+  // would net the discount twice ($500 − $100 stored as $400 rendering a
+  // $300 total while accept charges $400 — pre-push P0 on #3521). Only
+  // the manual-discount row is dropped: every other adjustment row (an
+  // engine/member discount that reconciles the rows to the stored total)
+  // must carry through, or the page shows the gross while accept charges
+  // the net (uncapped audit P0 on #3521).
+  return normalized.filter((row) => row && String(row.service || '') !== 'manual_discount').map((row) => ({
     service: row.service || null,
     name: row.label,
     label: row.label,

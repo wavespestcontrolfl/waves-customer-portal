@@ -8138,3 +8138,25 @@ describe('engine-backed SSR fallback nets a manual one-time discount ONCE (pre-p
     expect(html).not.toMatch(/<tr><td>WaveGuard Member Discount<div class="sub">one-time<\/div><\/td><td[^>]*>−\$108\.00<\/td><\/tr>.*<tr><td>WaveGuard Member Discount/s);
   });
 });
+
+describe('engine-backed SSR fallback keeps NON-manual adjustment rows (uncapped audit P0 on #3521)', () => {
+  test('a $720 line stored as a $612 total with no manual discount renders $612, never the $720 gross', () => {
+    const html = renderPage('engine-backed-adjustment-token', {
+      id: 'estimate-engine-adjustment',
+      status: 'sent',
+      customerName: 'Adjustment Customer',
+      address: '13 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 612,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 }],
+        oneTime: { total: 612 },
+      },
+    });
+    expect(html).toContain('$612.00');
+    expect(html).not.toMatch(/<strong>Total<\/strong><\/td><td[^>]*><strong>\$720\.00/);
+  });
+});
