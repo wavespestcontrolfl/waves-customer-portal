@@ -7261,11 +7261,17 @@ export default function Customer360ProfileV2({
           {/* PROPERTY */}
           {activeTab === "property" && (
             <div>
-              <CustomerPropertiesPanelV2
-                customerId={customerId}
-                contactRole={c.contactRole}
-                canEdit={isAdmin}
-              />
+              {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
+                  (it lists every address on the account), so a technician
+                  token would only ever see a 403 card here. */}
+              {isAdmin && (
+                <CustomerPropertiesPanelV2
+                  key={customerId}
+                  customerId={customerId}
+                  contactRole={c.contactRole}
+                  canEdit
+                />
+              )}
               {(c.satelliteUrl || c.address?.line1) && (
                 <div className="mb-5 rounded-md overflow-hidden border-hairline border-zinc-200 max-h-[200px]">
                   {c.satelliteUrl ? (

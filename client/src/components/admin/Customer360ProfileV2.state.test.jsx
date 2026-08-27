@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 
@@ -98,6 +98,38 @@ describe('Customer360ProfileV2 profile state', () => {
 
     // Captions must describe the new default, not the retired opt-in behavior.
     expect(screen.getAllByText(/On by default/i).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders the service-addresses panel for admins only (technicians never call the requireAdmin properties endpoint)', async () => {
+    const fetchFor = () => vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/properties')) return response({ properties: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+
+    // Technician (beforeEach role): no panel, no properties request.
+    const techFetch = fetchFor();
+    vi.stubGlobal('fetch', techFetch);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    await screen.findByText('Property Details');
+    expect(screen.queryByTestId('customer-properties-panel')).not.toBeInTheDocument();
+    expect(techFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(false);
+    cleanup();
+
+    // Admin: panel renders and loads the list.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const adminFetch = fetchFor();
+    vi.stubGlobal('fetch', adminFetch);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    expect(await screen.findByTestId('customer-properties-panel')).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(true));
   });
 
   it('flags partially refunded payments in overview Recent Transactions', async () => {
