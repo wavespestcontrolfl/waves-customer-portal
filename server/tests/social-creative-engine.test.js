@@ -54,12 +54,14 @@ describe('CREATIVE_FLAGS', () => {
     expect(Engine.CREATIVE_FLAGS.variantCount).toBe(3);
   });
 
-  test('provider chain is Gemini-image-first by default, env-overridable', () => {
+  test('provider chain leads with gpt-image-2 (blog-engine parity), env-overridable', () => {
     delete process.env.SOCIAL_IMAGE_PROVIDER;
     expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_DEFAULT_CHAIN);
-    expect(Engine.SOCIAL_DEFAULT_CHAIN.startsWith('gemini-image-best')).toBe(true);
-    process.env.SOCIAL_IMAGE_PROVIDER = 'gpt-image-2';
-    expect(Engine.CREATIVE_FLAGS.chain).toBe('gpt-image-2');
+    expect(Engine.SOCIAL_DEFAULT_CHAIN.startsWith('gpt-image-2')).toBe(true);
+    // Nano Banana line stays the immediate fallback for provider resilience.
+    expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')[1]).toBe('gemini-image-best');
+    process.env.SOCIAL_IMAGE_PROVIDER = 'gemini-image-best';
+    expect(Engine.CREATIVE_FLAGS.chain).toBe('gemini-image-best');
   });
 });
 

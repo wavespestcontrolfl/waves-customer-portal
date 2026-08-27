@@ -14,6 +14,7 @@ jest.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: jest.fn((params) => params),
 }));
 jest.mock('sharp', () => jest.fn(() => ({
+  rotate: jest.fn().mockReturnThis(),
   jpeg: jest.fn().mockReturnThis(),
   toBuffer: jest.fn().mockResolvedValue(Buffer.from('jpeg-bytes')),
 })));
