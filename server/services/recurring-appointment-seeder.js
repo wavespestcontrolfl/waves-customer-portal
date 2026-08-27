@@ -976,6 +976,40 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
   }
 }
 
+// Blackout set over the whole seeding horizon (generous 15 months covers
+// every planned-count/pattern combination) — the sync builder nudges any
+// follow-up off a blocked date. Fail-open helper.
+async function seedingBlackoutDates(parent, opts = {}) {
+  try {
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
+    return await getBlackoutDates(
+      baseDate,
+      etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
+    );
+  } catch { return null; /* fail open */ }
+}
+
+// The dates a seedFollowUpsForParent call with the SAME opts would insert —
+// plain reads + the deterministic builder, no locks taken and nothing
+// written. Lets a caller acquire the per-date occupancy locks (rung 1 of
+// the scheduling/occupancy.js ordering contract) BEFORE its comms/row
+// locks; the caller must re-verify the actual seeded dates stayed inside
+// this plan (a concurrent series write between plan and seed can shift
+// them) and fail closed on drift (codex #3504 r3 hook).
+async function planFollowUpSeedDates(conn, parent, opts = {}) {
+  const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
+  if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) return [];
+  const columns = opts.columns || await scheduledServiceColumns(conn);
+  const existingDates = await existingSeriesDates(conn, parent, columns);
+  const blackoutDates = await seedingBlackoutDates(parent, opts);
+  return [...new Set(
+    buildRecurringFollowUpRows(parent, { ...opts, pattern, existingDates, blackoutDates })
+      .map((row) => dateOnly(row.scheduled_date))
+      .filter(Boolean),
+  )];
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -988,18 +1022,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   });
 
   const existingDates = await existingSeriesDates(conn, parent, columns);
-  // Owner blackout days over the whole seeding horizon (generous 15 months
-  // covers every planned-count/pattern combination) — the sync builder
-  // nudges any follow-up off a blocked date. Fail-open helper.
-  let blackoutDates = null;
-  try {
-    const { getBlackoutDates } = require('./scheduling/blackout-dates');
-    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
-    blackoutDates = await getBlackoutDates(
-      baseDate,
-      etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
-    );
-  } catch { /* fail open */ }
+  const blackoutDates = await seedingBlackoutDates(parent, opts);
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
@@ -1075,6 +1098,7 @@ module.exports = {
   normalizeRecurringPattern,
   patternFromVisitsPerYear,
   plannedVisitCountForPattern,
+  planFollowUpSeedDates,
   seedFollowUpsForParent,
   serviceKeyFor,
   shiftPastWeekend,

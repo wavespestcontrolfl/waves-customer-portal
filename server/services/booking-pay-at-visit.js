@@ -44,7 +44,18 @@ function resolveVisitsPerYear(s) {
   // activate the wrong cadence — fail closed instead. (`visits` is read at
   // all because engine mosquito lines carry ONLY it — the gap that
   // silently kept mosquito out of per-application pricing.)
-  const numericCounts = [s.visitsPerYear, s.visits, s.frequency]
+  // Alias vocabulary mirrors the converter's visitCountAliasValues (plus
+  // numeric `frequency`): palm lines carry cadence ONLY as appsPerYear, so
+  // a narrower list here silently excluded palm from series pricing while
+  // conversion still recognized it (codex #3504 r3). A fractional count
+  // (fungal palm 0.5/yr) matches no promised pattern and fails closed.
+  const numericCounts = [
+    s.visitsPerYear, s.visits_per_year,
+    s.appsPerYear, s.apps_per_year,
+    s.visits, s.apps,
+    s.treatmentsPerYear, s.treatments_per_year,
+    s.frequency,
+  ]
     .map((v) => Number(v))
     .filter((v) => Number.isFinite(v) && v > 0);
   if (numericCounts.length > 0) {

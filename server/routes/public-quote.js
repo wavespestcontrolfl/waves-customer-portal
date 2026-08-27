@@ -1568,6 +1568,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the mirrored estimate can render per-application pricing.
             perVisit: item.perVisit ?? null,
             visits: item.visits ?? null,
+            // Palm-injection lines carry cadence ONLY as appsPerYear (the
+            // palm pricer emits no visits/frequency) — dropping it here
+            // left the mirrored draft cadence-less, so a palm-only handoff
+            // could never resolve a series plan (codex #3504 r3).
+            appsPerYear: item.appsPerYear ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
             // Recurring foam carries an operator-chosen cadence + tier labor
             // duration; keep them so the accept/render/booking paths present the

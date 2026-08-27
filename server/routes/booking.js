@@ -2234,6 +2234,17 @@ async function createSelfBooking(payload = {}) {
               // real tree/shrub series later. Server-owned constant — the
               // client's quoted_service_label is never echoed.
               resolvedServiceType = 'Palm Injections';
+            } else if (wizardPlanKey === 'termite_bait') {
+              // Same persist-what-was-QUOTED rule for the aliased termite
+              // funnel: its generic label is 'Termite Inspection', which
+              // appointment-tagger classifies as wdo_inspection — every
+              // seeded bait-station child would inherit inspection/WDO
+              // automation instead of the bait workflow (codex #3504 r3).
+              // Server-owned constant; still serviceKeyFor-family
+              // 'termite_bait' for the duplicate guard and the under-lock
+              // re-resolution ('monitoring' also keeps the tagger off the
+              // termite_treatment bucket).
+              resolvedServiceType = 'Termite Bait Monitoring';
             }
           }
         }
@@ -2899,6 +2910,25 @@ async function createSelfBooking(payload = {}) {
     const activateWizardSeries = async (seriesParentRow) => {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
+          // per-date occupancy locks precede every other lock, and taking
+          // them after the comms/row locks below can deadlock with normal
+          // scheduling writers; codex #3504 r3 hook). The dates this plan
+          // will seed are pre-computed with the seeder's own deterministic
+          // planner (plain reads, nothing locked or written), plus the
+          // parent's own date; the actual seeded dates are re-verified
+          // against this locked set after seeding and any drift aborts the
+          // transaction (fail-safe strip, never an unordered lock).
+          const plannedSeedDates = await RecurringAppointmentSeeder.planFollowUpSeedDates(trx, seriesParentRow, {
+            pattern: wizardSeriesPlan.pattern,
+            plannedCount: wizardSeriesPlan.visits,
+            skipWeekends: true,
+            weekendShift: 'forward',
+          });
+          const { acquireOccupancyLocks } = require('../services/scheduling/occupancy');
+          const lockedSeedDates = [...new Set([slotDateStr, ...plannedSeedDates])].filter(Boolean).sort();
+          await acquireOccupancyLocks(trx, lockedSeedDates);
+          const lockedSeedDateSet = new Set(lockedSeedDates);
           await lockCustomerComms(trx, custId);
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
@@ -3012,21 +3042,27 @@ async function createSelfBooking(payload = {}) {
           // follow-up KEEPS its date but drops its technician and flags
           // itself for office placement — never a silent double-booking,
           // never a silently shrunken plan.
-          // Per-date occupancy advisory locks (sorted) before the clash
-          // sweep, mirroring the booking transaction's date-wide locking
-          // contract. Lock ORDER differs from the main booking trx (which
-          // takes occupancy before comms) because seeded dates only exist
-          // after seeding — a rare cross-order deadlock aborts one
-          // transaction, which the outer catch turns into the fail-safe
-          // pricing strip, never a silent double-booking.
-          const { acquireOccupancyLock } = require('../services/availability');
+          // The per-date occupancy locks were taken at rung 1 above from
+          // the pre-computed plan. Every ACTUAL seeded date must fall
+          // inside that locked set — a concurrent series write between
+          // plan and seed can shift the builder's dates onto days this
+          // transaction never locked, and sweeping an unlocked date would
+          // race other scheduling writers. Abort instead (rollback + the
+          // outer catch's fail-safe strip); never acquire a date lock
+          // after the comms/row locks (codex #3504 r3 hook).
+          // findConflictingVisits comes from scheduling/occupancy — its
+          // exporting module: availability.js only imports the lock
+          // helpers and does not re-export them (codex #3504 r3).
+          const { findConflictingVisits } = require('../services/scheduling/occupancy');
           const seededDates = [...new Set((seedResult?.insertedRows || [])
             .map((r) => (typeof r?.scheduled_date === 'string'
               ? r.scheduled_date.slice(0, 10)
               : (r?.scheduled_date instanceof Date ? r.scheduled_date.toISOString().slice(0, 10) : null)))
             .filter(Boolean))].sort();
-          for (const d of seededDates) await acquireOccupancyLock(trx, d);
-          const { findConflictingVisits } = require('../services/scheduling/occupancy');
+          const unplannedDate = seededDates.find((d) => !lockedSeedDateSet.has(d));
+          if (unplannedDate) {
+            throw new Error(`seeded follow-up date ${unplannedDate} fell outside the pre-locked plan — aborting activation`);
+          }
           const seededRows = seedResult?.insertedRows || [];
           // Exclude the series' own rows (parent + every seeded sibling) —
           // the guard's documented batch-sweep semantics; siblings land on
@@ -3080,17 +3116,32 @@ async function createSelfBooking(payload = {}) {
         logger.error(`[booking:confirm] wizard-series seeding failed for ${seriesParentRow.id} (${wizardSeriesPlan.pattern}): ${err.message}`);
         // The rolled-back transaction took the series, stamp, and archive
         // with it — the committed parent must not stay billable for a plan
-        // that never activated (codex #3504 P0). Best-effort strip; if even
-        // this fails the loud error above is the ops breadcrumb.
+        // that never activated (codex #3504 P0). The strip runs under the
+        // comms lock with an is_recurring re-check (codex #3504 r3 hook
+        // P0): after THIS attempt rolls back, a waiting crash-retry replay
+        // can activate the same parent — a bare unconditional strip would
+        // then race it and remove the activated parent's first-visit price
+        // while its billable children survive (the series underbills the
+        // quoted annual). is_recurring is set only inside a committed
+        // activation, so under the lock it cleanly separates the two.
+        // Best-effort; if even this fails the loud error above is the ops
+        // breadcrumb.
         try {
-          await db('scheduled_services')
-            .where({ id: seriesParentRow.id })
-            .update({
-              estimated_price: null,
-              payment_method_preference: null,
-              create_invoice_on_complete: false,
-              updated_at: new Date(),
-            });
+          await db.transaction(async (trx) => {
+            await lockCustomerComms(trx, custId);
+            const freshParent = await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .first('id', 'is_recurring');
+            if (!freshParent || freshParent.is_recurring) return;
+            await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                updated_at: trx.fn.now(),
+              });
+          });
         } catch (stripErr) {
           logger.error(`[booking:confirm] pricing strip after failed seeding ALSO failed for ${seriesParentRow.id}: ${stripErr.message}`);
         }
@@ -3143,7 +3194,21 @@ async function createSelfBooking(payload = {}) {
             .where({ id: pricing_estimate_id, source: 'quote_wizard', status: 'draft' })
             .whereNull('archived_at')
             .first('id');
-          if (replayParent
+          // Bind the replay activation to THIS quote's own parent: the
+          // replay lookup matches customer+date+start only, so a SECOND
+          // live wizard quote confirming the same slot can be handed the
+          // other quote's parent — activating this closure's plan on it
+          // would seed this quote's cadence/price under that parent's
+          // label and first-visit price (codex #3504 r3). Every parent
+          // this flow mints carries the pricing draft's id (stamped at
+          // INSERT via source_estimate_id, re-stamped by the fee paths),
+          // so a mismatch here is never a genuine crash-retry.
+          const replayParentIsOwn = replayParent
+            && replayParent.source_estimate_id
+            && String(replayParent.source_estimate_id) === String(pricing_estimate_id)
+            && RecurringAppointmentSeeder.serviceKeyFor({ service_type: replayParent.service_type })
+              === RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          if (replayParentIsOwn
             && replayParent.payment_method_preference === 'pay_at_visit'
             && draftStillLive
             && !hasChildren) {

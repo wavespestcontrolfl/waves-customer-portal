@@ -77,7 +77,10 @@ describe('resolveWizardSeriesPlan', () => {
 // Palm-only quotes ride the tree_shrub funnel service for availability while
 // quoting Palm Injections (public-quote's bookingServiceId mapping) — the
 // plan family must follow the trusted estimate's own line (codex #3504 r2).
-function palmEstimate({ visits = 2, frequency = 'semiannual', monthly = 50, annual = 600 } = {}) {
+// Production palm shape (codex #3504 r3): the palm pricer emits cadence ONLY
+// as appsPerYear (+ perVisit, no name/visits/frequency) — the fixture must
+// not invent `visits` or it masks exactly the alias gap the resolver had.
+function palmEstimate({ appsPerYear = 2, monthly = 50, annual = 600 } = {}) {
   return {
     id: 'est-palm-1',
     annual_total: annual,
@@ -86,12 +89,10 @@ function palmEstimate({ visits = 2, frequency = 'semiannual', monthly = 50, annu
       engineResult: {
         lineItems: [{
           service: 'palm_injection',
-          name: 'Palm Injections',
           monthly,
           annual,
-          perVisit: annual / visits,
-          visits,
-          frequency,
+          perVisit: annual / appsPerYear,
+          appsPerYear,
         }],
       },
     },
@@ -127,6 +128,64 @@ describe('wizardPlanServiceKey (palm identity through the tree_shrub funnel)', (
     // The signed key alone still refuses — the identity preservation is
     // what makes palm reachable at all.
     expect(resolveWizardSeriesPlan(palmEstimate(), 'tree_shrub')).toBeNull();
+  });
+
+  test('a fractional palm cadence (fungal 0.5/yr) fails closed', () => {
+    expect(resolveWizardSeriesPlan(
+      palmEstimate({ appsPerYear: 0.5, annual: 100, monthly: 100 / 12 }),
+      wizardPlanServiceKey(palmEstimate({ appsPerYear: 0.5 }), 'tree_shrub'),
+    )).toBeNull();
+  });
+
+  test('the wizard mirror persists appsPerYear (the palm line’s only cadence field)', () => {
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/appsPerYear: item\.appsPerYear \?\? null,/);
+  });
+});
+
+// The aliased termite funnel labels its bookings 'Termite Inspection', which
+// appointment-tagger routes into wdo_inspection automation — a seeded bait
+// series must persist the quoted bait identity instead (codex #3504 r3).
+describe('termite bait through the aliased termite funnel', () => {
+  const termiteEstimate = () => ({
+    id: 'est-tb-1',
+    annual_total: 420,
+    monthly_total: 35,
+    estimate_data: {
+      engineResult: {
+        lineItems: [{
+          service: 'termite_bait',
+          monthly: 35,
+          annual: 420,
+          perApp: 105,
+          visitsPerYear: 4,
+        }],
+      },
+    },
+  });
+
+  test('a termite-bait quote resolves a quarterly 4-visit plan', () => {
+    expect(resolveWizardSeriesPlan(termiteEstimate(), 'termite_bait'))
+      .toEqual({ pattern: 'quarterly', visits: 4 });
+  });
+
+  test('a planned bait series persists the bait label, not the inspection funnel label', () => {
+    expect(booking).toMatch(/wizardPlanKey === 'termite_bait'[\s\S]{0,800}resolvedServiceType = 'Termite Bait Monitoring';/);
+    // The override must stay inside the resolved-plan branch: a genuine
+    // one-off termite inspection booking keeps its funnel label.
+    const planBranch = booking.indexOf('if (wizardSeriesPlan) {');
+    const termiteOverride = booking.indexOf("resolvedServiceType = 'Termite Bait Monitoring'");
+    expect(planBranch).toBeGreaterThan(0);
+    expect(termiteOverride).toBeGreaterThan(planBranch);
+  });
+
+  test('the bait label keeps the termite_bait family and escapes the WDO tagger bucket', () => {
+    const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+    expect(serviceKeyFor({ service_type: 'Termite Bait Monitoring' })).toBe('termite_bait');
+    expect(serviceKeyFor({ service_type: 'Termite Inspection' })).toBe('termite_bait');
+    const label = 'termite bait monitoring';
+    expect(label.includes('termite inspection')).toBe(false); // wdo_inspection trigger
+    expect(label.includes('monitor')).toBe(true); // termite_treatment exclusion
   });
 });
 
@@ -177,6 +236,15 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/whereNull\('archived_at'\)/);
   });
 
+  test('replay activation binds to THIS quote’s parent (estimate id + service family), never a rival quote’s row', () => {
+    // codex #3504 r3: the replay lookup matches customer+date+start only —
+    // a second live quote at the same slot must not activate its plan on
+    // the other quote's parent.
+    expect(booking).toMatch(/String\(replayParent\.source_estimate_id\) === String\(pricing_estimate_id\)/);
+    expect(booking).toMatch(/serviceKeyFor\(\{ service_type: replayParent\.service_type \}\)\s*\n\s*=== RecurringAppointmentSeeder\.serviceKeyFor\(\{ service_type: resolvedServiceType \}\)/);
+    expect(booking).toMatch(/replayParentIsOwn\s*\n\s*&& replayParent\.payment_method_preference === 'pay_at_visit'/);
+  });
+
   test('a drifted plan strips the parent pricing atomically with the skip', () => {
     expect(booking).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
   });
@@ -188,6 +256,43 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/require\('\.\.\/services\/scheduling\/occupancy'\)/);
     expect(booking).toMatch(/findConflictingVisits\(\{\s*\n\s*db: trx,/);
     expect(booking).toMatch(/office to place/);
+  });
+
+  test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {
+    // codex #3504 r3 hook P1: date locks after comms/row locks violate the
+    // scheduling/occupancy.js ordering contract and can deadlock with
+    // normal scheduling writers.
+    expect(booking).toMatch(/planFollowUpSeedDates\(trx, seriesParentRow, \{\s*\n\s*pattern: wizardSeriesPlan\.pattern,/);
+    expect(booking).toMatch(/acquireOccupancyLocks\(trx, lockedSeedDates\)/);
+    const activationAt = booking.indexOf('const activateWizardSeries = async');
+    const rung1At = booking.indexOf('await acquireOccupancyLocks(trx, lockedSeedDates)');
+    const commsAt = booking.indexOf('await lockCustomerComms(trx, custId);', activationAt);
+    expect(activationAt).toBeGreaterThan(0);
+    expect(rung1At).toBeGreaterThan(activationAt);
+    expect(commsAt).toBeGreaterThan(rung1At);
+    // A seeded date outside the pre-locked plan aborts rather than locking
+    // out of order.
+    expect(booking).toMatch(/!lockedSeedDateSet\.has\(d\)/);
+    expect(booking).toMatch(/fell outside the pre-locked plan/);
+    expect(typeof require('../services/recurring-appointment-seeder').planFollowUpSeedDates).toBe('function');
+  });
+
+  test('the failure-cleanup strip re-checks is_recurring under the comms lock (never strips a rival activation)', () => {
+    // codex #3504 r3 hook P0: after this attempt rolls back, a waiting
+    // replay can activate the same parent — an unconditional strip would
+    // race it and underbill the series.
+    expect(booking).toMatch(/wizard-series seeding failed[\s\S]{0,1800}lockCustomerComms\(trx, custId\);[\s\S]{0,600}first\('id', 'is_recurring'\)[\s\S]{0,300}if \(!freshParent \|\| freshParent\.is_recurring\) return;/);
+  });
+
+  test('the seeding sweep takes the occupancy lock from its EXPORTING module', () => {
+    // codex #3504 r3 P1: availability.js imports acquireOccupancyLock but
+    // does not re-export it — destructuring it from there is undefined and
+    // the first lock call throws, stripping every plan's pricing. Assert
+    // the real export exists and no booking require pulls it from
+    // availability.
+    expect(booking).toMatch(/\{ acquireOccupancyLock, findConflictingVisits \} = require\('\.\.\/services\/scheduling\/occupancy'\)/);
+    expect(booking).not.toMatch(/acquireOccupancyLock[^\n]*require\('\.\.\/services\/availability'\)/);
+    expect(typeof require('../services/scheduling/occupancy').acquireOccupancyLock).toBe('function');
   });
 
   test('fee-exempt seeded bookings still correlate the parent and retire the draft', () => {
