@@ -595,8 +595,14 @@ router.post('/backlinks/scan', requireAdmin, async (req, res, next) => {
     // Snapshot rides inside the scan's exclusive section and only after a
     // complete scan (a lock-skipped or partial scan must not stamp the day).
     const result = await BacklinkMonitor.scan({ snapshot: true });
-    // A failed/skipped snapshot is not a successful scan-and-snapshot.
-    res.status(result && result.snapshotOk === false ? 500 : 200).json(result);
+    // Honest status: 409 when another scan holds the lock, 502 when DataForSEO
+    // returned nothing / an incomplete set (loss detection skipped), 500 when
+    // the snapshot failed. Only a complete scan + snapshot is a 200.
+    const status = !result || result.skipped ? 409
+      : !result.scanComplete ? 502
+      : result.snapshotOk === false ? 500
+      : 200;
+    res.status(status).json(result);
   } catch (err) { next(err); }
 });
 
