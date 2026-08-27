@@ -2989,7 +2989,8 @@ async function createSelfBooking(payload = {}) {
             .where({ id: seriesParentRow.id })
             .forUpdate()
             .first('id', 'is_recurring', 'status', 'payment_method_preference',
-              'estimated_price', 'create_invoice_on_complete', 'source_estimate_id');
+              'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
+              'scheduled_date', 'window_start', 'window_end', 'technician_id');
           if (lockedParent && lockedParent.is_recurring) {
             return { alreadyActivated: true };
           }
@@ -3009,6 +3010,42 @@ async function createSelfBooking(payload = {}) {
             || Number(lockedParent.estimated_price) !== Number(visitPrice)
             || String(lockedParent.source_estimate_id || '') !== String(pricing_estimate_id)) {
             logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} no longer matches its priced state under lock (stripped/cancelled concurrently) — activation skipped`);
+            return { stale: true };
+          }
+          // Placement must be unchanged too (codex #3504 r9): a reschedule
+          // that commits between the booking transaction and this row lock
+          // leaves status/pricing intact, but seeding from the stale
+          // in-memory parent would anchor every child (and the pre-locked
+          // occupancy plan) to the OLD date/window — the activated cadence
+          // detaches from the visit that actually happens. Any move =
+          // drift: strip (with the office note + bell) and let the office
+          // convert from the live draft around the placement they chose.
+          const lockedDateStr = typeof lockedParent.scheduled_date === 'string'
+            ? lockedParent.scheduled_date.slice(0, 10)
+            : (lockedParent.scheduled_date instanceof Date
+              ? lockedParent.scheduled_date.toISOString().slice(0, 10)
+              : String(lockedParent.scheduled_date || '').slice(0, 10));
+          const parentDateStr = typeof seriesParentRow.scheduled_date === 'string'
+            ? seriesParentRow.scheduled_date.slice(0, 10)
+            : (seriesParentRow.scheduled_date instanceof Date
+              ? seriesParentRow.scheduled_date.toISOString().slice(0, 10)
+              : String(seriesParentRow.scheduled_date || '').slice(0, 10));
+          const timeKey = (v) => String(v || '').slice(0, 5);
+          if (lockedDateStr !== parentDateStr
+            || timeKey(lockedParent.window_start) !== timeKey(seriesParentRow.window_start)
+            || timeKey(lockedParent.window_end) !== timeKey(seriesParentRow.window_end)
+            || String(lockedParent.technician_id || '') !== String(seriesParentRow.technician_id || '')) {
+            await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (visit was moved before the plan started); office converts from the live quote'"),
+                updated_at: trx.fn.now(),
+              });
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the first visit was moved before the plan activated');
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} placement changed before activation (date/window/technician) — pricing stripped, plan not seeded`);
             return { stale: true };
           }
           // Re-resolve the plan and price against the LOCKED draft (codex
@@ -3101,6 +3138,12 @@ async function createSelfBooking(payload = {}) {
                 create_invoice_on_complete: false,
                 updated_at: trx.fn.now(),
               });
+            // Duplicate-kept strips ring the SAME deduped bell as the
+            // drift/failure strips (codex #3504 r9): the stripped row is
+            // invisible to the recovery sweep, and the activity-log entry
+            // alone is passive — the office must decide whether this extra
+            // visit rides the existing series or gets billed another way.
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the customer already has an active series for this service');
             await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
             return { kept: matches[0] };
           }
@@ -3323,49 +3366,21 @@ async function createSelfBooking(payload = {}) {
       }
     };
 
-    // Post-activation follow-through (codex #3504 r6) — everything here
-    // keys off state that only exists once the activation committed, and
-    // all of it is best-effort: a miss never voids the activated series.
+    // Post-activation follow-through (codex #3504 r6) — property stamping
+    // (the accept path's linkAcceptedEstimateProperty), tier sync ahead of
+    // the tagger/welcome re-run. Everything keys off state that only
+    // exists once the activation committed; every step is idempotent and
+    // individually best-effort. The logic lives in the RECOVERY SERVICE
+    // (codex #3504 r9): the in-request call is the fast path, and the
+    // 10-minute heal sweep re-runs it for recently activated parents so a
+    // worker death here can never permanently lose the property stamps.
     const runWizardActivationFollowThrough = async (parentRowId) => {
-      // Secondary-property stamping — the SAME shared mechanism the
-      // estimate accept path runs post-commit. It stamps every visit
-      // correlated to the draft (parent + seeded children all carry
-      // source_estimate_id), no-ops when the quoted address IS the
-      // customer's primary, and never throws by contract; without it a
-      // second-property plan's whole year of visits dispatches to the
-      // primary address (estimate-property-linkage.js wrong-property
-      // doctrine).
-      try {
-        const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
-        await linkAcceptedEstimateProperty({ estimateId: pricing_estimate_id, customerId: custId });
-      } catch (err) {
-        logger.warn(`[booking:confirm] post-activation property linkage failed for ${parentRowId} (non-blocking): ${err.message}`);
-      }
-      // Tier sync BEFORE the tagger re-run: the welcome gate reads
-      // customers.waveguard_tier, and the seeder's own deferred sync is a
-      // post-commit race — the sync is idempotent/convergent, so running
-      // it inline only guarantees ordering.
-      try {
-        const { syncCustomerWaveGuardPlanFromScheduledServices } = require('../services/self-booking-plan-sync');
-        await db.transaction(async (trx) => {
-          await syncCustomerWaveGuardPlanFromScheduledServices({ database: trx, customerId: custId });
-        });
-      } catch (err) {
-        logger.warn(`[booking:confirm] post-activation tier sync failed for ${parentRowId} (non-blocking): ${err.message}`);
-      }
-      // Re-run the tagger now that the parent IS recurring and tiered: the
-      // booking-time run read is_recurring=false, so the shared
-      // new-recurring welcome gate could never pass for an activated
-      // wizard plan (codex #3504 r6). Tagging is an idempotent update,
-      // prep flows carry their own dedupe, and the welcome is the SAME
-      // deduplicated path every accept flow uses (idempotent via
-      // sendNewRecurringWelcome, still suppressed for label-only tiers).
-      try {
-        const AppointmentTagger = require('../services/appointment-tagger');
-        await AppointmentTagger.onServiceScheduled(parentRowId);
-      } catch (err) {
-        logger.warn(`[booking:confirm] post-activation tagger re-run failed for ${parentRowId} (non-blocking): ${err.message}`);
-      }
+      const { runActivationFollowThroughForParent } = require('../services/wizard-series-activation-recovery');
+      await runActivationFollowThroughForParent({
+        id: parentRowId,
+        customer_id: custId,
+        source_estimate_id: pricing_estimate_id,
+      });
     };
 
     if (txResult.existing) {

@@ -26,12 +26,15 @@ const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Only look at bookings old enough that no in-flight request is still
-// racing toward its own activation, and young enough to be this deploy
-// era's work (older strays predate the feature).
+// racing toward its own activation. Deliberately NO upper age bound
+// (codex #3504 r9 P2): the recovery guarantee must survive an extended
+// sweep outage — a stranded row that ages past a window would stay
+// invoiceable forever. The predicate itself is the era marker: only rows
+// with pay-at-visit pricing, a self-booking link, and a LIVE quote_wizard
+// draft can match, and none of those exist before this feature family.
 const DEFAULT_OLDER_THAN_MINUTES = 15;
-const DEFAULT_YOUNGER_THAN_DAYS = 7;
 
-async function findStrandedParents(database, { olderThanMinutes, youngerThanDays, limit }) {
+async function findStrandedParents(database, { olderThanMinutes, limit }) {
   return database('scheduled_services as ss')
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereNotNull('ss.self_booking_id')
@@ -43,7 +46,6 @@ async function findStrandedParents(database, { olderThanMinutes, youngerThanDays
     .where('e.status', 'draft')
     .whereNull('e.archived_at')
     .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
-    .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
     .whereNotExists(function child() {
       this.select(1)
         .from('scheduled_services as c')
@@ -55,8 +57,8 @@ async function findStrandedParents(database, { olderThanMinutes, youngerThanDays
     .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date');
 }
 
-async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, youngerThanDays = DEFAULT_YOUNGER_THAN_DAYS, limit = 10 } = {}) {
-  const stranded = await findStrandedParents(database, { olderThanMinutes, youngerThanDays, limit });
+async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, limit = 10 } = {}) {
+  const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
   let stripped = 0;
   for (const parent of stranded) {
     try {
@@ -144,4 +146,75 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   return { examined: stranded.length, stripped };
 }
 
-module.exports = { sweepStrandedWizardActivations, findStrandedParents };
+// Post-activation follow-through — property stamping, tier sync, and the
+// tagger/welcome re-run — shared by the confirm route (in-request) and the
+// heal sweep below. Every step is idempotent and individually best-effort:
+// linkage stamps only unstamped rows and never throws by contract, the
+// tier sync converges, and the tagger/welcome path dedupes.
+async function runActivationFollowThroughForParent(parent, { database = db } = {}) {
+  if (!parent?.id || !parent?.customer_id) return;
+  if (parent.source_estimate_id) {
+    try {
+      const { linkAcceptedEstimateProperty } = require('./estimate-property-linkage');
+      await linkAcceptedEstimateProperty({
+        estimateId: parent.source_estimate_id,
+        customerId: parent.customer_id,
+        database,
+      });
+    } catch (err) {
+      logger.warn(`[wizard-series-recovery] property linkage failed for parent=${parent.id} (non-blocking): ${err.message}`);
+    }
+  }
+  try {
+    const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
+    await database.transaction(async (trx) => {
+      await syncCustomerWaveGuardPlanFromScheduledServices({ database: trx, customerId: parent.customer_id });
+    });
+  } catch (err) {
+    logger.warn(`[wizard-series-recovery] tier sync failed for parent=${parent.id} (non-blocking): ${err.message}`);
+  }
+  try {
+    await require('./appointment-tagger').onServiceScheduled(parent.id);
+  } catch (err) {
+    logger.warn(`[wizard-series-recovery] tagger re-run failed for parent=${parent.id} (non-blocking): ${err.message}`);
+  }
+}
+
+// Durable follow-through recovery (codex #3504 r9): a worker can die AFTER
+// the activation commits but before the in-request follow-through runs —
+// the draft is archived and the parent recurring, so neither the stranded
+// sweep nor a customer-driven replay reliably repairs it, and a
+// secondary-property series could dispatch to the primary address forever.
+// Every recently-activated self-booked wizard parent gets the idempotent
+// follow-through re-run; re-running a healthy one is a no-op by design.
+// The 7-day window here is generous coverage for a seconds-wide crash
+// window (unlike the stranded strip above, nothing billable rides on it).
+async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, limit = 10 } = {}) {
+  const parents = await database('scheduled_services as ss')
+    .join('estimates as e', 'e.id', 'ss.source_estimate_id')
+    .whereNotNull('ss.self_booking_id')
+    .where('ss.is_recurring', true)
+    .whereNull('ss.recurring_parent_id')
+    .whereNotIn('ss.status', ['cancelled'])
+    .where('e.source', 'quote_wizard')
+    .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
+    .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
+    .orderBy('ss.created_at', 'desc')
+    .limit(limit)
+    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
+  for (const parent of parents) {
+    try {
+      await runActivationFollowThroughForParent(parent, { database });
+    } catch (err) {
+      logger.warn(`[wizard-series-recovery] follow-through heal failed for parent=${parent.id} (retried next sweep): ${err.message}`);
+    }
+  }
+  return { healed: parents.length };
+}
+
+module.exports = {
+  sweepStrandedWizardActivations,
+  findStrandedParents,
+  runActivationFollowThroughForParent,
+  healActivatedFollowThroughs,
+};

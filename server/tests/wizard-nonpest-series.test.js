@@ -298,7 +298,7 @@ describe('booking route wiring (source contracts)', () => {
     // application. Any mismatch = stale, no seed, no write.
     // FOR UPDATE (codex #3504 r7): cancellation writers don't take the
     // comms lock, so the parent row lock is what serializes them.
-    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id'\)/);
+    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',\s*\n\s*'scheduled_date', 'window_start', 'window_end', 'technician_id'\)/);
     expect(booking).toMatch(/lockedParent\.payment_method_preference !== 'pay_at_visit'\s*\n\s*\|\| lockedParent\.create_invoice_on_complete !== true\s*\n\s*\|\| Number\(lockedParent\.estimated_price\) !== Number\(visitPrice\)/);
     expect(booking).toMatch(/no longer matches its priced state under lock/);
     // The correlation is stamped SERVER-SIDE from the verified pricing
@@ -384,9 +384,34 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/wizard-activation-stripped:\$\{parentId\}/);
     expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the quote changed while the booking was confirming'\)/);
     expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'series seeding failed'\)/);
+    // r9: the duplicate-kept and moved-placement strips ring it too.
+    expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the customer already has an active series for this service'\)/);
+    expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the first visit was moved before the plan activated'\)/);
     expect(booking).toMatch(/strip bell failed for \$\{parentId\} \(strip stands\)/);
-    // Both strip updates carry the office note on the row itself.
-    expect((booking.match(/self-booked plan did not activate \((quote changed|seeding failed)\); office converts from the live quote/g) || []).length).toBe(2);
+    // The drift/failure/moved strips carry the office note on the row.
+    expect((booking.match(/self-booked plan did not activate \((quote changed|seeding failed|visit was moved before the plan started)\); office converts from the live quote/g) || []).length).toBe(3);
+  });
+
+  test('a rescheduled parent (date/window/technician moved before activation) fails closed with strip + bell', () => {
+    // codex #3504 r9: seeding from the stale in-memory parent would anchor
+    // every child and the pre-locked occupancy plan to the OLD placement.
+    expect(booking).toMatch(/'scheduled_date', 'window_start', 'window_end', 'technician_id'\)/);
+    expect(booking).toMatch(/lockedDateStr !== parentDateStr\s*\n\s*\|\| timeKey\(lockedParent\.window_start\) !== timeKey\(seriesParentRow\.window_start\)/);
+    expect(booking).toMatch(/placement changed before activation/);
+  });
+
+  test('the follow-through heal sweep durably re-runs it for recently activated parents', () => {
+    // codex #3504 r9: a worker death after the activation commit loses the
+    // in-request follow-through with no other recovery path.
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/async function healActivatedFollowThroughs/);
+    expect(recoverySrc).toMatch(/where\('ss\.is_recurring', true\)/);
+    expect(typeof require('../services/wizard-series-activation-recovery').healActivatedFollowThroughs).toBe('function');
+    const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    expect(indexSrc).toMatch(/healActivatedFollowThroughs\(\{ limit: 10 \}\)/);
+    // The stranded-strip predicate keeps NO upper age bound (r9 P2): an
+    // outage must never expire an unrecovered billable row.
+    expect(recoverySrc).not.toMatch(/youngerThanDays[\s\S]{0,400}findStrandedParents/);
   });
 
   test('seeded occurrences run the SHARED tech-blind occupancy guard', () => {
@@ -479,11 +504,13 @@ describe('booking route wiring (source contracts)', () => {
   });
 
   test('activation runs the shared post-activation follow-through (property stamp, tier sync, tagger/welcome re-run)', () => {
-    // codex #3504 r6: property_id/service_address stamping and the
-    // new-recurring welcome both key off post-activation state.
-    expect(booking).toMatch(/linkAcceptedEstimateProperty\(\{ estimateId: pricing_estimate_id, customerId: custId \}\)/);
-    expect(booking).toMatch(/syncCustomerWaveGuardPlanFromScheduledServices\(\{ database: trx, customerId: custId \}\)/);
-    expect(booking).toMatch(/runWizardActivationFollowThrough = async \(parentRowId\)[\s\S]{0,3000}AppointmentTagger\.onServiceScheduled\(parentRowId\)/);
+    // codex #3504 r6+r9: the logic lives in the recovery SERVICE (the heal
+    // sweep re-runs it durably); the route delegates with the trusted ids.
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/linkAcceptedEstimateProperty\(\{\s*\n\s*estimateId: parent\.source_estimate_id,\s*\n\s*customerId: parent\.customer_id,/);
+    expect(recoverySrc).toMatch(/syncCustomerWaveGuardPlanFromScheduledServices\(\{ database: trx, customerId: parent\.customer_id \}\)/);
+    expect(recoverySrc).toMatch(/onServiceScheduled\(parent\.id\)/);
+    expect(booking).toMatch(/runActivationFollowThroughForParent\(\{\s*\n\s*id: parentRowId,\s*\n\s*customer_id: custId,\s*\n\s*source_estimate_id: pricing_estimate_id,/);
     // Both activation completions run it AWAITED — primary and replay —
     // and alreadyActivated retries heal a lost follow-through (codex
     // #3504 r6 hook: unawaited, a worker exit lost the property stamps
