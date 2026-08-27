@@ -295,7 +295,10 @@ const PEST_VERSUS_PAIRS = [
     key: 'chinch_bug_vs_drought_stress',
     service: 'lawn care',
     left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches spread outward', 'Grass pulls up with no resistance'] },
-    right: { name: 'Drought Stress', points: ['Even across the whole lawn', 'Blades fold; footprints linger', 'Grass stays firmly rooted'] },
+    // "Dry spots where sprinklers miss" mirrors the lawn report's moisture
+    // guidance (uneven coverage shows as localized dry patches) — drought is
+    // NOT reliably lawn-wide, so coverage is the check, not distribution.
+    right: { name: 'Drought Stress', points: ['Dry spots where sprinklers miss', 'Blades fold; footprints linger', 'Grass stays firmly rooted'] },
     verdict: 'The pull test settles it: chinch-damaged grass lifts right out.',
   },
   {
@@ -1012,7 +1015,9 @@ function buildVersusDrafts(pair, city) {
     facebook: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Not sure which one you have? A quick inspection settles it.`,
     instagram: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Which one have you seen around the house?\n\n${hashtags({ topic: `${leftName} vs ${rightName}`, city, service: pair.service })}`,
     linkedin: `Correct pest ID changes the response. ${leftName} vs ${rightName}: ${pair.verdict} ${leftLine} ${rightLine} Waves turns local pest pressure and service data into practical homeowner guidance.`,
-    gbp: `${city} homeowners: ${leftName.toLowerCase()} or ${rightName.toLowerCase()}? ${pair.verdict} ${leftLine} ${ctaText('book inspection')}.`,
+    // Both pests' facts: GBP can publish text-only (media retry path), so the
+    // post must stand as a comparison without the card.
+    gbp: `${city} homeowners: ${leftName.toLowerCase()} or ${rightName.toLowerCase()}? ${pair.verdict} ${leftLine} ${rightLine} ${ctaText('book inspection')}.`,
   };
 }
 
@@ -1039,7 +1044,9 @@ function selectAutonomousVersusPlan(now = new Date()) {
     versusPair: pair,
     preview: {
       inputs: { topic, city, service: pair.service, angle: 'pest showdown', cta: 'book inspection', channels },
-      suggestedLink: 'https://www.wavespestcontrol.com/blog/',
+      // CTA is "schedule an inspection" — the link (Facebook + GBP LEARN_MORE)
+      // must land on the booking flow, not the blog index.
+      suggestedLink: 'https://www.wavespestcontrol.com/book/',
       drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
       validation: validateDrafts(drafts),
       sources: [{

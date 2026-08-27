@@ -456,6 +456,8 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(plan.topic).toBe(`${plan.versusPair.left.name} vs ${plan.versusPair.right.name}`);
     expect(plan.preview.drafts.gbp).toContain(plan.city);
     expect(plan.preview.drafts.gbp).not.toMatch(/\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+    // "Schedule an inspection" CTA → the booking flow, never the blog index.
+    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
   });
 
   test('every pair in the bank produces drafts that pass the compliance validators', () => {
@@ -468,6 +470,9 @@ describe('autonomous versus lane (pest showdown)', () => {
       }
       expect(drafts.facebook).toContain(pair.left.name);
       expect(drafts.facebook).toContain(pair.right.name);
+      // GBP may publish text-only (media retry), so BOTH pests' facts must be in the copy.
+      expect(drafts.gbp).toContain(`${pair.left.name}: `);
+      expect(drafts.gbp).toContain(`${pair.right.name}: `);
       expect(drafts.instagram).toContain('#wavespestcontrol');
     }
   });
