@@ -1831,10 +1831,26 @@ function tenureClaimFinding(text) {
 // live content). Blockquote prefixes are stripped; newlines are preserved
 // so line-based scanners stay aligned. Single source for the table scanner
 // below AND the completion gate's CTA-link extraction.
+// Inline code-SPAN matcher, shared by pass 1 (a comment delimiter inside a
+// span is code, not a comment opener) and pass 2 (span masking). A span
+// never crosses a BLANK line, an ATX heading, or a THEMATIC BREAK — each
+// interrupts the paragraph, so inline code cannot continue across it. A
+// backslash-ESCAPED backtick (odd run) cannot OPEN a span.
+const SPAN_RE_SOURCE = '(?<!(?<!\\\\)(?:\\\\\\\\)*\\\\)(?<!`)(`+)(?!`)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \\t\\r\\n]|$))(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:(?:\\*[ \\t]*){3,}|(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,})(?:\\r?\\n|$))[\\s\\S])*?(?<!`)\\1(?!`)';
+
 function blankNonRenderedMarkdown(text) {
-  // Pass 1 — comments and <pre> (whole-text, newline-preserving).
-  const afterComments = String(text || '')
-    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c) => c.replace(/[^\n]/g, ''));
+  const raw = String(text || '');
+  // Pass 1 — comments and <pre> (whole-text, newline-preserving). A
+  // delimiter that sits INSIDE an inline code span renders as code
+  // (`\u0060<!--\u0060 … \u0060-->\u0060`), so span intervals are computed on the raw
+  // text first and such matches are left for the span pass.
+  const spanIntervals = [];
+  const spanScan = new RegExp(SPAN_RE_SOURCE, 'g');
+  let sm;
+  while ((sm = spanScan.exec(raw)) !== null) spanIntervals.push([sm.index, sm.index + sm[0].length]);
+  const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b);
+  const afterComments = raw
+    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
   // lines), masked BEFORE fences so a span opened after prose can close at a
   // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
@@ -1852,7 +1868,7 @@ function blankNonRenderedMarkdown(text) {
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
   // A span also stops at an ATX HEADING line — a heading starts a new
   // block and can never lazily continue the previous paragraph.
-  const spanned = afterComments.replace(/(?<!(?<!\\)(?:\\\\)*\\)(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)(?!\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \t\r\n]|$))[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
+  const spanned = afterComments.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);

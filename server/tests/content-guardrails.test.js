@@ -2286,6 +2286,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // An interrupting heading ends the list even without a blank line —
     // later 4-space content is indented code again.
     expect(guardrails.hasRawMarkdownTable('- item\n# Heading\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // A span never crosses a THEMATIC BREAK either.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n***\n| A | B |\n| - | - |\ntail `')).toBe(true);
+    // Comment delimiters INSIDE code spans are code — the content between
+    // them still renders.
+    expect(guardrails.hasRawMarkdownTable('Use `<!--` to open.\n\n| A | B |\n| - | - |\n\nAnd `-->` closes.')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

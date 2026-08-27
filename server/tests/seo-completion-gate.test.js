@@ -804,6 +804,38 @@ describe('seo-completion-gate', () => {
     });
     expect(protectYourLawn.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // Reserve-style verbs make an anchor ACTIONABLE (no prose exemption).
+    const reserveProse = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[our booking page to reserve service](/contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(reserveProse.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A prose REFERENCE with estimate wording cannot satisfy CTA presence.
+    const proseEstimate = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere.\n\nRead [our termite estimate process](/pest-control-calculator/) guide.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(proseEstimate.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    expect(proseEstimate.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Comment delimiters inside code spans do not hide the link between
+    // them, and spans stop at thematic breaks.
+    const spanComment = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nUse \`<!--\` then [Schedule Service](/contact/) then \`-->\` done.` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(spanComment.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const breakBoundary = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nIntro \`\n***\n[Schedule Service](/contact/) tail \`` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(breakBoundary.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     // A span cannot cross an ATX heading — the heading's live link is judged.
     const headingBoundary = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n> \`sample\n# [Schedule Service](/contact/) \`` }),

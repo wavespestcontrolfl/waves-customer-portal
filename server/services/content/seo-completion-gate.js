@@ -339,7 +339,9 @@ function allowedAnchorServices(briefService) {
 // Service", "Click here") must carry estimate/quote wording; prose
 // references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
 const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
-const ACTION_VERB_RE = /\b(?:request|schedule|book|get|call|click|start|claim|arrange|visit|open|tap|reach|talk|see|view|learn)\b/i;
+// Derived from the SHARED request-verb set (plus contact/navigation verbs)
+// — parallel partial verb lists drifted apart across rounds.
+const ACTION_VERB_RE = new RegExp(`\\b(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)\\b`, 'i');
 function isProseReferenceAnchor(anchor) {
   return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
 }
@@ -627,6 +629,9 @@ function hasConversionCta(body, brief = {}) {
   // post's service" on its own.
   return conversionCtaLinks(body).some((link) => {
     if (!link.hasEstimateWording) return false;
+    // A prose REFERENCE ("our termite estimate process") is not an
+    // actionable CTA — it cannot satisfy presence.
+    if (isProseReferenceAnchor(link.anchor)) return false;
     if (!allowed) return true;
     const named = effectiveNamed(link, allowed);
     return named.length > 0 && named.every((svc) => allowed.has(svc));
