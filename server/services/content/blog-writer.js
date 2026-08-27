@@ -3,6 +3,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { CITIES } = require('./scoring-config');
 const { _internals: uniq } = require('./uniqueness-gate');
+const topicGate = require('./topic-targeting-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 const { dispatchWithFallback } = require('../llm/call');
 
@@ -533,6 +534,11 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       const tag = normalizeTag(raw.tag);
       const keyword = String(raw.keyword || '').trim();
       const slug = slugify(raw.slug || raw.title);
+
+      // Owner rulings 2026-08-27: an idea built around an out-of-footprint
+      // geo or statewide-only framing is rejected outright (same classifier
+      // as the runner's topic-targeting gate and the GSC miner).
+      if (topicGate.geoBlockReason(`${raw.title} ${keyword}`)) { rejected++; continue; }
 
       // Exact-dupe guards (covers short titles the shingle test can't).
       if (keyword && existingKeywords.has(keyword.toLowerCase())) { rejected++; continue; }

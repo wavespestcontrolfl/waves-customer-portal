@@ -30,9 +30,21 @@ function makeDbMock() {
   return dbMock;
 }
 
+// The pre-draft topic-targeting gate (step 2d) needs the live blog corpus
+// for its entity-ownership check and fails CLOSED on an empty/unavailable
+// corpus — stub one benign post so new_supporting_blog runs reach drafting.
+const STUB_CORPUS = [{
+  path: 'src/content/blog/pest-control/seasonal-ant-pressure.md',
+  url: '/pest-control/seasonal-ant-pressure/',
+  body: '---\ntitle: Seasonal Ant Pressure in SWFL\nslug: /pest-control/seasonal-ant-pressure/\nprimary_keyword: seasonal ant pressure\n---\n\n## Why ants surge\n',
+}];
+
 function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, dbMock = makeDbMock() }) {
   jest.resetModules();
   jest.doMock('../models/db', () => dbMock);
+  jest.doMock('../services/content/internal-link-planner', () => ({
+    loadAstroCorpusFromGitHub: jest.fn().mockResolvedValue(STUB_CORPUS),
+  }));
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   jest.doMock('../services/content/opportunity-queue', () => queue);
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);

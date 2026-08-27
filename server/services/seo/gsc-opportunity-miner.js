@@ -73,6 +73,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
+const { geoBlockReason } = require('../content/topic-targeting-gate');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
   require('../content/scoring-config');
 // The SAME list-shape grammar the brief-builder's listicle overlay uses —
@@ -371,6 +372,13 @@ function impressionsBoost(impressions) {
  */
 function actionForOpportunity(opp) {
   const action = baseActionForOpportunity(opp);
+  // Owner ruling 2026-08-27: blog demand built around an out-of-footprint
+  // geo ("wdo inspection tampa") never becomes a blog — same classifier the
+  // runner's topic-targeting gate applies, demoted here before it ever costs
+  // a claim. Statewide demand ("kinds of ants in florida") stays: the writer
+  // localizes it and the post-draft framing check judges the title. Page
+  // actions are untouched (a city-service page is footprint-anchored).
+  if (action === 'new_supporting_blog' && geoBlockReason(opp.query, { allowStatewide: true })) return 'do_not_publish';
   if (action === 'new_supporting_blog' && isTransactionalQuery(opp.query)) {
     // City+service transactional demand is legitimate PAGE demand — route it
     // to the city-service lane instead of dropping it (mirrors the other

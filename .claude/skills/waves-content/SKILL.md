@@ -50,6 +50,22 @@ this skill.
   lane). Near-me terms are INTENTIONAL on service/city pages — including the
   ~2,000-char city-page metaTitles; never "fix" those.
 - **No door-to-door sales content.** Ever.
+- **Blog topic targeting (owner rulings 2026-08-27, after astro #476 Tampa /
+  #490 second-Taexx / #491 "… in Florida"):** a NEW supporting blog may not be
+  built around (1) an out-of-footprint geo in its keyword/title/slug —
+  educational mentions are fine, targeting Tampa demand is not; (2)
+  statewide-only framing — "… in Florida"/"FL" with no served city or SWFL
+  anchor is too broad (localize or drop the qualifier; bare statewide GSC
+  demand is fine, the writer localizes it); (3) an entity a live post already
+  owns — one entity, one post; grow it as a REFRESH of the owner, never a
+  sibling (the in-wall post owns "Taexx"). Enforced deterministically by
+  `topic-targeting-gate.js`: runner step 2d pre-draft (silent skip
+  `topic_targeting:<CODE>`, corpus-unavailable → review), post-draft framing
+  check on the writer's own title/slug (one redraft, then skip), GSC miner
+  (out-of-area demand → `do_not_publish`), idea lane. Ownership = a token from
+  the primary keyword that ≤3 live posts carry in their targeting fields and
+  the owner carries ≥3×, same category. Persisted per run in
+  `autonomous_runs.topic_targeting_result`.
 - **No fumigation, insulation, or wildlife-trapping content** (rodent stays
   core).
 - **No bulk FAQ frontmatter expansion** on the remaining service spoke pages.
