@@ -146,6 +146,21 @@ describe('abandoned sibling PI — setup (release) mode', () => {
     expect(mockCancel.mock.invocationCallOrder[0]).toBeLessThan(invoiceUpdate.mock.invocationCallOrder[0]);
   });
 
+  test('reports each released PI id to onAbandonedReleased BEFORE the transactional stamp clear (never on preview or failed cancel)', async () => {
+    const onAbandonedReleased = jest.fn();
+    await PayCombined.combinedEligibleSiblings(anchor(), { releaseAbandonedPaymentIntents: true, onAbandonedReleased });
+    expect(onAbandonedReleased).toHaveBeenCalledWith(DEAD_PI);
+    expect(onAbandonedReleased.mock.invocationCallOrder[0]).toBeLessThan(invoiceUpdate.mock.invocationCallOrder[0]);
+
+    onAbandonedReleased.mockClear();
+    await PayCombined.combinedEligibleSiblings(anchor(), { onAbandonedReleased });
+    expect(onAbandonedReleased).not.toHaveBeenCalled();
+
+    mockCancel.mockRejectedValueOnce(new Error('nope'));
+    await PayCombined.combinedEligibleSiblings(anchor(), { releaseAbandonedPaymentIntents: true, onAbandonedReleased });
+    expect(onAbandonedReleased).not.toHaveBeenCalled();
+  });
+
   test('an already-canceled PI skips the Stripe cancel but still finishes the stamp cleanup', async () => {
     mockRetrieve.mockResolvedValue(deadPi({ status: 'canceled' }));
     const out = await PayCombined.combinedEligibleSiblings(anchor(), { releaseAbandonedPaymentIntents: true });

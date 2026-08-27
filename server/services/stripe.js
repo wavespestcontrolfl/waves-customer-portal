@@ -3319,6 +3319,10 @@ const StripeService = {
     // window where Stripe already carries a new amount/allocation the DB may
     // yet refuse (codex r5 P1). The catch cancels the PI when set.
     let mutatedReusedPiId = null;
+    // Abandoned sibling PIs canceled at Stripe during this setup. Their stamp
+    // clears ride the transaction; a rollback would re-bind the siblings to
+    // a canceled PI, so the catch re-clears them durably.
+    const releasedSiblingPiIds = [];
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -3555,6 +3559,7 @@ const StripeService = {
             // instead of staying invisible forever (the GET preview already
             // lists it under the same verdict).
             releaseAbandonedPaymentIntents: true,
+            onAbandonedReleased: (piId) => releasedSiblingPiIds.push(piId),
           });
           if (siblings?.length) {
             combinedAllocation = PayCombined.buildAllocation(lockedInvoice, siblings);
@@ -3950,6 +3955,18 @@ const StripeService = {
       // clear every stamp, and unbind the anchor so the next setup mints
       // fresh. Runs for 409s too — a staleBalance refusal is exactly the
       // rolled-back-after-update case.
+      // Abandoned sibling PIs were canceled at Stripe inside the rolled-back
+      // transaction — the cancel stuck, the stamp clear did not. Re-clear
+      // outside the transaction so no sibling stays bound to a canceled PI
+      // (a bound row is edit-locked and, until the next setup triage,
+      // invisible to the combined flow again).
+      for (const piId of releasedSiblingPiIds) {
+        try {
+          await require('./pay-combined').clearPaymentIntentStamps(db, piId);
+        } catch (clearErr) {
+          logger.error(`[stripe] FAILED to clear stamps for canceled sibling PI ${piId} after rolled-back setup for invoice ${invoiceId}: ${clearErr.message} — sibling stays bound to a canceled PI until its next setup triage`);
+        }
+      }
       if (mutatedReusedPiId) {
         try {
           await stripe.paymentIntents.cancel(mutatedReusedPiId);

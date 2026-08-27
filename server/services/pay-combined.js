@@ -111,7 +111,7 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null } = {}) {
   try {
     if (!isEnabled('payIncludeBalance')) return null;
     if (!anchorInvoice?.customer_id) return null;
@@ -211,6 +211,11 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
             const StripeService = require('./stripe');
             await StripeService.cancelPaymentIntent(bound);
           }
+          // The Stripe cancel above is irreversible; this stamp clear is
+          // transactional. Report the id so the caller can re-clear stamps
+          // OUTSIDE its transaction if it later rolls back — otherwise the
+          // sibling would come back bound to a canceled PI.
+          if (typeof onAbandonedReleased === 'function') onAbandonedReleased(bound);
           await clearPaymentIntentStamps(database, bound);
           inv.stripe_payment_intent_id = null;
           logger.info(`[pay-combined] released abandoned PI ${bound} (${deadPi.status}) on sibling ${inv.invoice_number} for combined charge with ${anchorInvoice.invoice_number}`);
