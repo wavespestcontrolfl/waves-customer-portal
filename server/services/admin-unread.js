@@ -59,9 +59,20 @@ async function liveAlertNotifications(adminUserId, trx = null) {
 
   // Pull the most-recent dismissal per alert for this admin within the
   // active window. DISTINCT ON keeps one row per alert_id (the freshest).
+  //
+  // With a section transaction, each probe runs in a SAVEPOINT (knex
+  // nested transaction): the pre-migration dismissed_members probe below
+  // is EXPECTED to fail on an unmigrated database, and a failed statement
+  // otherwise aborts the whole section transaction — turning the
+  // advertised rollout tolerance into a guaranteed error on every
+  // follow-up query (codex round 12). Without trx this is the plain
+  // pool query it always was.
+  const dismissalQuery = (sql, params) => (trx
+    ? trx.transaction((sp) => sp.raw(sql, params))
+    : db.raw(sql, params));
   let dismissals = [];
   try {
-    dismissals = await (trx || db).raw(
+    dismissals = await dismissalQuery(
       `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_members, dismissed_at
        FROM dashboard_alert_dismissed
        WHERE admin_user_id = ?
@@ -77,7 +88,7 @@ async function liveAlertNotifications(adminUserId, trx = null) {
       // alerts — a write-side fallback alone would record rows this read
       // then fails to load, and the bell badge would bounce back anyway.
       try {
-        dismissals = await (trx || db).raw(
+        dismissals = await dismissalQuery(
           `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
            FROM dashboard_alert_dismissed
            WHERE admin_user_id = ?
@@ -217,6 +228,11 @@ function serializeBadgeSection(task) {
 async function runBadgeSection(key, fn) {
   return db.transaction(async (trx) => {
     await trx.raw("SET LOCAL lock_timeout = '2500ms'");
+    // Statement deadline (codex round 12): a hung count query must error
+    // and roll this transaction back — releasing its pool connection —
+    // rather than keep the connection parked after the queued chain's 5s
+    // cap has already advanced past this section.
+    await trx.raw("SET LOCAL statement_timeout = '4000ms'");
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${key}`]);
     let result;
     try {
@@ -293,6 +309,15 @@ async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandon
 // fan-out only); opts.abandoned lets a queued caller that already gave
 // up cancel the task before it starts.
 async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
+  // Pre-warm the shared alert memo BEFORE the section reserves its
+  // transaction (codex round 12): a cold computeDashboardAlerts run
+  // borrows pool connections, and it must not do so while we already
+  // hold one — inside the section the 30s-memoized call then returns
+  // the warmed snapshot without touching the pool. Failure is fine:
+  // liveAlertNotifications already degrades to an empty overlay.
+  if (role === 'admin' && !isBellPolicyEnabled()) {
+    try { await computeDashboardAlerts(); } catch { /* section degrades to empty overlay */ }
+  }
   return withBadgeOrderingStamp(adminUserId, async (trx) => ({
     count: await computeUnreadCount({ adminUserId, role }, trx),
   }), opts);
