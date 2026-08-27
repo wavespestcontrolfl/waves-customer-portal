@@ -45,7 +45,8 @@ function expectedTargetUrl(prospect) {
 const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 
 function stripUrl(u) {
-  return String(u || '').trim().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+  // Also decodes &amp; (hrefs in HTML) and accepts protocol-relative //host/path.
+  return String(u || '').trim().replace(/&amp;/gi, '&').replace(/^https?:\/\//, '').replace(/^\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
 }
 
 function normalizeComparableUrl(u) {
@@ -323,17 +324,22 @@ function classifyPageBody(html, contentType) {
 function findLinkInHtml(html, targetPage, { exact = false } = {}) {
   const expectedTarget = normalizeComparableUrl(targetPage);
   if (!expectedTarget || typeof html !== 'string') return { found: false };
-  const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+  // href may be double-quoted, single-quoted or unquoted; absolute, protocol-
+  // relative (//host/…) or entity-encoded. Any <a> whose href mentions our
+  // host is a candidate; the target match decides.
+  const anchorRe = /<a\b([^>]*?)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))([^>]*)>([\s\S]*?)<\/a>/gi;
   const matches = exact ? matchesExactTargetUrl : matchesTargetUrl;
   let m;
   while ((m = anchorRe.exec(html)) !== null) {
-    const href = normalizeComparableUrl(m[2]);
+    const rawHref = m[2] ?? m[3] ?? m[4] ?? '';
+    if (!/wavespestcontrol\.com/i.test(rawHref)) continue;
+    const href = normalizeComparableUrl(rawHref);
     if (!matches(href, expectedTarget)) continue;
-    const attrs = `${m[1]} ${m[3]}`;
-    const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
-    const rel = relMatch ? relMatch[1].toLowerCase() : '';
+    const attrs = `${m[1]} ${m[5]}`;
+    const relMatch = /\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(attrs);
+    const rel = relMatch ? String(relMatch[1] ?? relMatch[2] ?? relMatch[3] ?? '').toLowerCase() : '';
     const isDofollow = !/\bnofollow\b|\bugc\b|\bsponsored\b/.test(rel);
-    const anchorText = m[4].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    const anchorText = m[6].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
     return { found: true, isDofollow, anchorText: anchorText || null };
   }
   return { found: false };

@@ -66,6 +66,7 @@ describe('BacklinkMonitor snapshots', () => {
     expect(snapshotWrites).toHaveLength(1);
     // the baseline is the previous DAY's snapshot, never a same-day row about to be merged over
     expect(db.mock.results.map(r => r.value).find(b => b.where && b.orderBy && b.first).where).toHaveBeenCalledWith('snapshot_date', '<', expect.any(String));
+    expect(snapshotWrites[0].updated_at).toBeInstanceOf(Date); // merged re-takes advance the next baseline
     expect(snapshotWrites[0]).toEqual(expect.objectContaining({
       total_backlinks: 3,
       dofollow_count: 1,

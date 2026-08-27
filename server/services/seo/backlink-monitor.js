@@ -474,14 +474,18 @@ class BacklinkMonitor {
     const prev = await db('seo_backlink_snapshots').where('snapshot_date', '<', today).orderBy('snapshot_date', 'desc').first();
     const prevDomains = prev ? new Set() : new Set(); // simplified
 
+    // updated_at advances on every (same-day) re-take so the NEXT day's baseline
+    // is the last execution time — otherwise a loss found by an afternoon
+    // manual scan is counted by the merged row AND again by tomorrow's.
     await db('seo_backlink_snapshots').insert({
       snapshot_date: today,
+      updated_at: new Date(),
       total_backlinks: all.length,
       total_referring_domains: domains.size,
       new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen >= (prev.snapshot_date || today)).length : all.length,
       lost_backlinks_since_last: prev
         ? await db('seo_backlinks').where('status', 'lost')
-            .where('lost_at', '>=', prev.created_at || prev.snapshot_date)
+            .where('lost_at', '>=', prev.updated_at || prev.created_at || prev.snapshot_date)
             .count('id as count').first().then(r => parseInt(r?.count) || 0)
         : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,

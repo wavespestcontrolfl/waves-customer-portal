@@ -387,6 +387,7 @@ describe('lost-link recovery', () => {
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'queued' }] });
     expect(updates[0].where).toEqual({ id: 'p-lost', status: 'lost' }); // conditional reopen
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, attempts: 0, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
+    expect(updates[0].patch).not.toHaveProperty('outreach_attempted_at'); // kept — feeds the trailing-24h send cap
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
@@ -504,6 +505,14 @@ describe('crawlForLink goes through the SSRF-pinned fetcher', () => {
     const fetchPageFn = jest.fn(async () => ({ status: 200, html: '<html><title>Attention Required! | Cloudflare</title></html>', blocked: false, truncated: false, contentType: 'text/html', error: null }));
     await expect(verifier.crawlForLink('https://blog.example/p', 'https://wavespestcontrol.com/', { fetchPageFn }))
       .resolves.toEqual({ found: false, status: 200, blocked: false, truncated: false, unverifiable: 'challenge', error: null });
+  });
+
+  test('href parsing covers unquoted, single-quoted, protocol-relative and entity-encoded links', () => {
+    const t = 'https://wavespestcontrol.com/pest-control-sarasota-fl/';
+    expect(verifier.findLinkInHtml('<a href=https://wavespestcontrol.com/pest-control-sarasota-fl/>x</a>', t, { exact: true })).toEqual(expect.objectContaining({ found: true, isDofollow: true }));
+    expect(verifier.findLinkInHtml("<a class='c' href='//www.wavespestcontrol.com/pest-control-sarasota-fl' rel=nofollow>x</a>", t, { exact: true })).toEqual(expect.objectContaining({ found: true, isDofollow: false }));
+    expect(verifier.findLinkInHtml('<a href="https://wavespestcontrol.com/pest-control-sarasota-fl/?a=1&amp;b=2" REL="sponsored noopener">x</a>', t, { exact: true })).toEqual(expect.objectContaining({ found: true, isDofollow: false }));
+    expect(verifier.findLinkInHtml('<a href="https://other.example/">no</a><a href=https://wavespestcontrol.com/other/>x</a>', t, { exact: true })).toEqual({ found: false });
   });
 
   test('exact mode refuses a descendant-path link as proof the lost link survives', () => {
