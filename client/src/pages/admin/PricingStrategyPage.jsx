@@ -125,8 +125,7 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
       navGridClassName: "grid-cols-2 md:grid-cols-5",
     });
     return () => onSecondaryNav(null);
-    // `tabs` is rebuilt every render; its keys are what matter.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `tabs` is rebuilt every render; its keys (tabsSignature) are what matter.
   }, [hubOwnsHeader, onSecondaryNav, tab, tabsSignature]);
 
   return (

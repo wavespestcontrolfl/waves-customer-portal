@@ -51,7 +51,8 @@ describe("ContractsPage", () => {
 
     expect(screen.getByRole("heading", { level: 1, name: "Contracts" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Templates" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("navigation", { name: "Template category" })).toBeInTheDocument();
+    // The lazy tab page registers its filters in an effect after it mounts.
+    await screen.findByRole("navigation", { name: "Template category" });
     expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-current", "page");
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(mockRefresh).toHaveBeenCalled();
