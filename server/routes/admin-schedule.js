@@ -6508,14 +6508,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
       const serviceKey = context.serviceKey || null;
       const serviceCategory = context.serviceCategory || null;
-      const customerRef = await db('scheduled_services').where({ id: req.params.id }).first('customer_id');
-      const customerRow = customerRef?.customer_id
-        ? await db('customers').where({ id: customerRef.customer_id }).first()
+      const visitRow = await db('scheduled_services').where({ id: req.params.id })
+        .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
+      const customerRow = visitRow?.customer_id
+        ? await db('customers').where({ id: visitRow.customer_id }).first()
         : null;
+      // Same membership-sale context buildAppointmentPricing passes on create
+      // (pre-push Codex P1): a save that makes this visit recurring WaveGuard
+      // coverage IS the membership sale, so a member-tier requirement must
+      // see it before the tier sync stamps the customer row. Evaluated on
+      // the EDITED state — posted values, then the pending `updates`, then
+      // the stored row.
+      const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
+      const effectiveServiceRecord = effectiveServiceId
+        ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
+        : null;
+      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+        isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
+        isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
+        serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
+        serviceRecord: effectiveServiceRecord,
+        customer: customerRow,
+        scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
+      });
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKey || null,
         serviceCategory: serviceCategory || null,
+        recurringMembershipBooking,
       });
       if (failures.length) {
         throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
