@@ -3079,6 +3079,8 @@ router.get('/', async (req, res, next) => {
             waveguardTier: s.waveguard_tier,
             monthlyRate: s.monthly_rate,
             billingMode: s.billing_mode || null,
+            prepaidMethod: s.prepaid_method || null,
+            annualCoverageValidated,
           }),
         }) || predictCompletionBilling({
           lane: lane.mode,
@@ -3611,6 +3613,8 @@ router.get('/week', async (req, res, next) => {
               waveguardTier: s.waveguard_tier,
               monthlyRate: s.monthly_rate,
               billingMode: s.billing_mode || null,
+              prepaidMethod: s.prepaid_method || null,
+              annualCoverageValidated,
             }),
           }) || predictCompletionBilling({
             lane: lane.mode,

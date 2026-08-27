@@ -11334,6 +11334,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // appt-card lane itself owns has apptCardOneTimeCharge=true
             // and never sets this.
             requireNoAppointmentCardLane: extendedAutopayCharge,
+            // The locked invoice must still be THIS visit's bill (pre-push
+            // P0 round 8) — the shared verdict checks it too; this is the
+            // charge service's own assertion under the same locks.
+            ...(extendedAutopayCharge ? { requireInvoiceScheduledServiceBinding: true } : {}),
             // The extended lane's cap AUTHORITY is re-derived and
             // re-asserted under the charge's own customer/visit/invoice
             // locks (pre-push P0): a billing-mode flip into

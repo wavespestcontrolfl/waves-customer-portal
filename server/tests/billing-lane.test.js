@@ -428,7 +428,7 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
   };
   const member = { id: 'c1', billing_mode: 'monthly_membership', monthly_rate: 33.33, waveguard_tier: 'Silver' };
   const visit = { id: 's1', customer_id: 'c1', status: 'completed', is_recurring: false, estimated_price: 90.55, is_callback: false, prepaid_method: null };
-  const invoiceAt = (subtotal) => ({ subtotal, total: subtotal, discount_amount: 0 });
+  const invoiceAt = (subtotal) => ({ subtotal, total: subtotal, discount_amount: 0, scheduled_service_id: 's1' });
 
   test('priced one-off member invoice at the visit price verifies with that anchor', async () => {
     await expect(verifyExtendedCompletionAnchor({
@@ -486,6 +486,12 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
     await expect(verifyExtendedCompletionAnchor({
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, service_type: 'Pest Control Re-Service' }, lockedInvoice: invoiceAt(90.55),
     })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
+  });
+  test('an invoice rebound to another visit refuses under the lock (invoice_unbound)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit,
+      lockedInvoice: { subtotal: 90.55, total: 90.55, discount_amount: 0, scheduled_service_id: 'OTHER' },
+    })).resolves.toEqual({ ok: false, reason: 'invoice_unbound' });
   });
   test('a visit that is no longer completed refuses under the lock (cancel/reschedule race)', async () => {
     await expect(verifyExtendedCompletionAnchor({
@@ -552,6 +558,11 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({ ...base, isRecurring: true, estimatedPrice: null, invoice: { subtotal: 33.33, total: 33.33 } })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_visit', estimatedPrice: null })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, invoice: { subtotal: 150, total: 160, discount_amount: 0 } })).toBe(false);
+  });
+  test('a stamped annual visit demotes unless the stamp was VALIDATED stale', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice' })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false })).toBe(true);
   });
   test('per-application attached invoices stay a charge promise (their own rail collects)', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);

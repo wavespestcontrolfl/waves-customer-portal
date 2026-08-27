@@ -327,6 +327,15 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   if (String(lockedSvc.status || '') !== 'completed') {
     return { ok: false, reason: 'visit_not_completed' };
   }
+  // The locked invoice must still be THIS visit's bill (pre-push P0 round
+  // 8): a concurrent rebind to another of the customer's visits would
+  // otherwise charge (or consume credit against) the wrong invoice under
+  // this visit's authorization. Both movers get this through the shared
+  // verdict; the charge additionally asserts
+  // requireInvoiceScheduledServiceBinding under its own lock.
+  if (String(lockedInvoice.scheduled_service_id || '') !== String(lockedSvc.id)) {
+    return { ok: false, reason: 'invoice_unbound' };
+  }
   // Callbacks / re-treats and always-free service types never auto-charge
   // (manual-audit P0) — revalidated under the lock so a visit re-typed or
   // re-flagged after the route's admission check refuses too.
@@ -412,8 +421,15 @@ function attachedInvoiceAutoChargeLikely({
   waveguardTier,
   monthlyRate,
   billingMode,
+  prepaidMethod = null,
+  annualCoverageValidated = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
+  // A stamped annual-prepay visit demotes unless the stamp was VALIDATED
+  // stale (pre-push P1 round 8) — completion settles/voids the covered
+  // invoice, and an unverifiable stamp refuses the charge anyway.
+  if (String(prepaidMethod || '') === ANNUAL_PREPAY_PREPAID_METHOD
+    && annualCoverageValidated !== false) return false;
   if (billingMode === 'per_application') return true;
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   if (membershipDuesCoverVisit({
