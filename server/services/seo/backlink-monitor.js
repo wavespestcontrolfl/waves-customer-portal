@@ -115,7 +115,8 @@ class BacklinkMonitor {
     // Query/fragment stripped FIRST, then the comparable normalization (which
     // ends with the trailing-slash strip) — the same order as canonicalTarget(),
     // so '/page/?utm=x' is '/page' on both sides.
-    const TARGET_CANONICAL_SQL = comparableUrlSql("regexp_replace(target_url, '[?#].*$', '')");
+    // `\?` = a literal question mark to knex.raw (a bare `?` is a binding slot).
+    const TARGET_CANONICAL_SQL = comparableUrlSql("regexp_replace(target_url, '[\\?#].*$', '')");
 
     // Build active link map with canonical keys BEFORE processing (a key may
     // hold several rows — legacy respelled duplicates — all seen together).

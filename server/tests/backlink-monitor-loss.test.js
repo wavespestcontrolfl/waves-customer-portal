@@ -304,7 +304,15 @@ describe('BacklinkMonitor verified loss detection', () => {
     const tgt = raws.find(r => /target_url/.test(r[0]));
     expect(tgt[1]).toEqual(['wavespestcontrol.com/page']); // JS side: query gone, slash gone
     // SQL side: the innermost expression is the query strip; the outermost is the trailing-slash strip
-    expect(tgt[0]).toMatch(/^regexp_replace\(.*regexp_replace\(target_url, '\[\?#\]\.\*\$', ''\).*'\/\+\$', ''\) = \?$/);
+    expect(tgt[0]).toMatch(/^regexp_replace\(.*regexp_replace\(target_url, '\[\\\?#\]\.\*\$', ''\).*'\/\+\$', ''\) = \?$/);
+    // and it COMPILES through real knex with exactly one binding — the regex '?' must be
+    // escaped (\?) or knex reads it as a second placeholder and every scan throws
+    const knex = require('knex')({ client: 'pg' });
+    for (const [sql, bind] of raws.filter(r => /source_url|target_url/.test(r[0]))) {
+      const compiled = knex('seo_backlinks').whereRaw(sql, bind).toSQL().toNative();
+      expect(compiled.bindings).toEqual(bind);
+      if (/target_url/.test(sql)) expect(compiled.sql).toContain("[?#]"); // the escape is consumed by knex, the regex reaches pg intact
+    }
   });
 
   test('two legacy rows under one canonical key are both seen by one report; neither is missed', async () => {
