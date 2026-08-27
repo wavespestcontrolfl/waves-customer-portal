@@ -425,6 +425,21 @@ Return JSON: {
     count = Math.min(Math.max(Number.parseInt(count, 10) || 20, 1), 50);
 
     const existing = await db('blog_posts').select('title', 'keyword', 'tag', 'slug', 'city');
+
+    // Owner rulings 2026-08-27: every idea is judged by the same
+    // topic-targeting gate as the runner (geo on title/keyword/slug, entity
+    // ownership against the LIVE post corpus). Loaded before any LLM spend
+    // and fail-closed — no verifiable corpus, no ideas this run.
+    let topicIndex;
+    try {
+      const corpus = await require('./internal-link-planner').loadAstroCorpusFromGitHub({ collections: ['blog'] });
+      if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+      topicIndex = topicGate.indexCorpus(corpus);
+    } catch (err) {
+      logger.warn(`Blog idea generation held: live blog corpus unavailable for the topic-targeting gate (${err.message})`);
+      return [];
+    }
+
     const voice = await this.getVoiceConfig().catch(() => null);
     const demand = await this.getDemandSignals(25);
 
@@ -536,9 +551,13 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       const slug = slugify(raw.slug || raw.title);
 
       // Owner rulings 2026-08-27: an idea built around an out-of-footprint
-      // geo or statewide-only framing is rejected outright (same classifier
-      // as the runner's topic-targeting gate and the GSC miner).
-      if (topicGate.geoBlockReason(`${raw.title} ${keyword}`)) { rejected++; continue; }
+      // geo, statewide-only framing (an idea IS a title — judged strictly),
+      // or an entity a live post already owns is rejected outright.
+      const topic = topicGate.evaluate(
+        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug },
+        { index: topicIndex }
+      );
+      if (!topic.ok) { rejected++; continue; }
 
       // Exact-dupe guards (covers short titles the shingle test can't).
       if (keyword && existingKeywords.has(keyword.toLowerCase())) { rejected++; continue; }

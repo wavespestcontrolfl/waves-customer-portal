@@ -217,3 +217,37 @@ describe('corpus parsing', () => {
     expect(gate.indexCorpus([null, { path: 'x' }, { body: 42 }]).posts).toHaveLength(0);
   });
 });
+
+describe('entity rarity is judged within the candidate category', () => {
+  const post = (url, title, extra = '') => ({ url, body: `---\ntitle: ${title}\nslug: ${url}\nprimary_keyword: ${title.toLowerCase()}\n---\n${extra}` });
+  // "bait" is common across the whole corpus (4 posts) but only ONE termite
+  // post is built around it — a global count hides that owner.
+  const corpus = [
+    post('/termite/termite-bond/', 'Termite Bait Stations and the Bond', '## How bait stations work\n## When bait beats liquid\n'),
+    post('/pest-control/ant-bait-basics/', 'Ant Bait Basics'),
+    post('/pest-control/roach-bait-gel/', 'Roach Bait Gel Explained'),
+    post('/pest-control/rodent-bait-safety/', 'Rodent Bait Safety With Pets'),
+  ];
+
+  test('same-category owner is found even when the token is common corpus-wide', () => {
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'bait station cost', service: 'termite' }, { corpus });
+    expect(r.ok).toBe(false);
+    expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
+    expect(r.findings[0].owners).toEqual(['/termite/termite-bond/']);
+  });
+
+  test('unknown candidate category falls back to corpus-wide rarity (conservative pool, global frequency)', () => {
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'bait station cost' }, { corpus });
+    expect(r.ok).toBe(true);
+    expect(r.entity_owners).toEqual([]);
+  });
+
+  test('index caches one frequency table per category', () => {
+    const index = gate.indexCorpus(corpus);
+    const a = gate._internals.dfForCategory(index, 'termite');
+    const b = gate._internals.dfForCategory(index, 'termite');
+    expect(a).toBe(b);
+    expect(a.get('bait')).toBe(1);
+    expect(index.df.get('bait')).toBe(4);
+  });
+});

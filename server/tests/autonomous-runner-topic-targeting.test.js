@@ -48,6 +48,13 @@ function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn(
   jest.resetModules();
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  // A pending-review park schedules the owner notification via setImmediate;
+  // the real module's require would land after Jest teardown. No-op it and
+  // drain the immediate in afterEach (same harness as autonomous-runner.test).
+  jest.doMock('../services/content/email-approvals', () => ({
+    notifyParkedRun: jest.fn().mockResolvedValue(undefined),
+    _internals: { draftPreview: jest.fn().mockReturnValue('') },
+  }));
   jest.doMock('../services/content/opportunity-queue', () => queue);
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
@@ -96,7 +103,10 @@ beforeEach(() => {
   process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
   process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
 });
-afterEach(() => {
+afterEach(async () => {
+  // Drain the runner's setImmediate-scheduled notification before Jest
+  // tears the environment down.
+  await new Promise((resolve) => { setImmediate(resolve); });
   delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
   delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
 });

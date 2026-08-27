@@ -308,7 +308,6 @@ function entityTokens(text) {
  */
 function indexCorpus(corpus = []) {
   const posts = [];
-  const df = new Map();
   for (const item of corpus) {
     if (!item || typeof item.body !== 'string') continue;
     const fields = parseTargetingFields(item.body);
@@ -316,10 +315,32 @@ function indexCorpus(corpus = []) {
     for (const tok of tokenize(targetingText(fields))) counts.set(tok, (counts.get(tok) || 0) + 1);
     const url = normalizeSlug(item.url || fields.slug);
     const category = String(fields.category || categoryFromSlug(url) || '').toLowerCase() || null;
-    posts.push({ url, title: fields.title, path: item.path || null, category, counts });
-    for (const tok of counts.keys()) df.set(tok, (df.get(tok) || 0) + 1);
+    posts.push({ url, title: fields.title, path: item.path || item.file || null, category, counts });
   }
-  return { posts, df };
+  return { posts, df: documentFrequency(posts), dfByCategory: new Map() };
+}
+
+function documentFrequency(posts) {
+  const df = new Map();
+  for (const post of posts) for (const tok of post.counts.keys()) df.set(tok, (df.get(tok) || 0) + 1);
+  return df;
+}
+
+// Posts a candidate in `category` is compared against: same category, plus
+// posts whose category is unknown (conservative). Unknown candidate category
+// → every post.
+function compatiblePosts(idx, category) {
+  return category ? idx.posts.filter((p) => !p.category || p.category === category) : idx.posts;
+}
+
+// Rarity is judged over the SAME post set ownership is judged over. A global
+// count would let a token common across categories ("bait" in termite AND
+// pest posts) hide the one same-category post that owns it.
+function dfForCategory(idx, category) {
+  if (!category) return idx.df;
+  if (!idx.dfByCategory) idx.dfByCategory = new Map();
+  if (!idx.dfByCategory.has(category)) idx.dfByCategory.set(category, documentFrequency(compatiblePosts(idx, category)));
+  return idx.dfByCategory.get(category);
 }
 
 /**
@@ -357,16 +378,17 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // → compare against all (conservative).
   const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   const owners = new Map();
+  const pool = compatiblePosts(idx, category);
+  const df = dfForCategory(idx, category);
   // Entities come from the PRIMARY keyword only — titles carry framing words
   // ("actual", "fail", "explained") that are not what the post targets.
   const tokens = entityTokens(query);
   for (const tok of tokens) {
-    const n = idx.df.get(tok) || 0;
+    const n = df.get(tok) || 0;
     if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;
-    for (const post of idx.posts) {
+    for (const post of pool) {
       if ((post.counts.get(tok) || 0) < OWNER_MIN_OCCURRENCES) continue;
       if (selfUrl && post.url === selfUrl) continue;
-      if (category && post.category && post.category !== category) continue;
       const key = post.url || post.path || post.title;
       const entry = owners.get(key) || { url: post.url, title: post.title, entities: [] };
       entry.entities.push(tok);
@@ -398,4 +420,4 @@ module.exports = {
   RARE_ENTITY_DF_MAX,
   OWNER_MIN_OCCURRENCES,
 };
-module.exports._internals = { parseTargetingFields, targetingText, entityTokens, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
