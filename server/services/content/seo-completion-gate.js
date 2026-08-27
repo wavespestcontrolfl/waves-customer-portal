@@ -423,6 +423,18 @@ function extractLinks(body) {
   return links;
 }
 
+// Anchor text as RENDERED: HTML character references decoded (through the
+// guardrails' fail-closed decoder), markdown decoration stripped,
+// whitespace collapsed.
+function plainAnchor(raw) {
+  const { decodeEntitiesForScan } = require('./content-guardrails');
+  return decodeEntitiesForScan(String(raw || ''))
+    .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (m, n) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[n.toLowerCase()])
+    .replace(/[*_~`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function conversionCtaLinks(body) {
   const out = [];
   for (const link of extractLinks(body)) {
@@ -430,11 +442,11 @@ function conversionCtaLinks(body) {
     // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.
-    const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
+    const anchor = plainAnchor(link.anchor);
     // Service names count only in the estimate/quote SUBJECT — the words up
     // to and including the estimate/quote keyword. Trailing context ("…for
     // Your Lawn", "…on your property") is not a service declaration.
-    const kw = anchor.match(/(estimat|quot)\w*/i);
+    const kw = anchor.match(/\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i);
     const termsIn = (text) => Object.entries(CTA_ANCHOR_SERVICE_TERMS)
       .filter(([, re]) => re.test(text))
       .map(([svc]) => svc);
@@ -465,7 +477,7 @@ function conversionCtaLinks(body) {
       // Coordinated subjects ("Termite and Pool Cleaning Quote") must be
       // service-bearing in EVERY part — a part naming no known service is an
       // unrecognized service, not harmless filler.
-      const parts = subject.split(/\s+(?:and|&|or|\/|,)\s+/i);
+      const parts = subject.split(/\s*,\s*|\s+(?:and|&|or|\/)\s+/i);
       if (parts.length > 1) {
         // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
         // not separate services; an unlisted noun ("Pool Cleaning") is.
@@ -481,7 +493,7 @@ function conversionCtaLinks(body) {
     if (/\blawn[- ]pest/i.test(subject)) named = named.filter((svc) => svc !== 'pest');
     out.push({
       anchor,
-      hasEstimateWording: /(estimat|quot)/i.test(anchor),
+      hasEstimateWording: Boolean(kw),
       named,
       contextNamed,
     });
@@ -564,7 +576,7 @@ function forbiddenCtaAnchor(body) {
   // at service pages, not conversion paths) whose decoration-stripped anchor
   // is inspection-request wording.
   for (const link of extractLinks(body)) {
-    const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
+    const anchor = plainAnchor(link.anchor);
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;
   }
   return null;

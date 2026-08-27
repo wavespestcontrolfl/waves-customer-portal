@@ -545,6 +545,27 @@ describe('seo-completion-gate', () => {
     });
     expect(resource.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    const entity = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Request an Insp&#101;ction](/pest-library/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(entity.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    const comma = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite, Pool Cleaning Quote](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(comma.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    const substring = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Learn About Termite Risks That Are Underestimated](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(substring.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),
       brief: baseBrief({ service: 'mosquito-control' }),

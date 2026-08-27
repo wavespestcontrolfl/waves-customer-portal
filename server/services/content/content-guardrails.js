@@ -1832,8 +1832,9 @@ function tenureClaimFinding(text) {
 // so line-based scanners stay aligned. Single source for the table scanner
 // below AND the completion gate's CTA-link extraction.
 function blankNonRenderedMarkdown(text) {
+  // Raw <pre> blocks are preformatted text — masked like fenced code.
   const raw = String(text || '')
-    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}/g, (c) => c.replace(/[^\n]/g, ''))
+    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''))
     .split('\n');
   let fence = null; // { ch, len }
   let listContext = false;
@@ -4073,6 +4074,9 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  // entity decoder (fail-closed, sentinel for control chars) — consumed by
+  // seo-completion-gate so CTA anchors are classified as RENDERED text.
+  decodeEntitiesForScan,
   // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
   // to read absolute Waves URLs as the site-relative paths they are.
   hubHostSet,
