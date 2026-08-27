@@ -57,8 +57,10 @@ export default function PricingHubPage() {
       {/* One header card for the whole hub: area tabs on the first row; the
           active area (Logic & Margins) hands its own section tabs up for the
           second row instead of stacking a second header. */}
-      <div className="max-w-[1300px] mx-auto">
-        <AdminCommandHeader
+      {/* Width goes on the header itself (its sticky box must stay a direct
+          child of the element that also contains the area content). */}
+      <AdminCommandHeader
+          className="max-w-[1300px] mx-auto"
           title="Pricing"
           icon={Calculator}
           sections={visibleAreas}
@@ -72,13 +74,14 @@ export default function PricingHubPage() {
           onSecondaryChange={secondary?.onChange}
           secondaryAriaLabel={secondary?.ariaLabel}
           secondaryNavGridClassName={secondary?.navGridClassName}
-        />
-      </div>
+      />
 
       {activeArea === "logic" && (
         <PricingLogicPage embedded onSecondaryNav={setSecondary} />
       )}
-      {activeArea === "strategy" && <PricingStrategyPage embedded />}
+      {activeArea === "strategy" && (
+        <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
+      )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
     </div>
   );
