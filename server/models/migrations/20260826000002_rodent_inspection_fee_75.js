@@ -48,6 +48,25 @@ async function saveInspectionRow(knex, oldData, newData, reason) {
   }
 }
 
+
+// Audit rows persist across up/down cycles: a later no-op reapplication
+// must NOT consume provenance from an earlier cycle and restore values this
+// application never changed (codex #3521 r20 P2, mirroring
+// 20260724130000's pattern). Only an UP row with a HIGHER id than the most
+// recent matching ROLLBACK row belongs to the current cycle.
+async function latestUncancelledUp(knex, configKey) {
+  const lastDown = await knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG })
+    .whereLike('reason', 'Rollback:%')
+    .orderBy('id', 'desc')
+    .first('id');
+  const query = knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
+    .orderBy('id', 'desc');
+  if (lastDown?.id != null) query.where('id', '>', lastDown.id);
+  return query.first();
+}
+
 exports.up = async function (knex) {
   const loaded = await loadInspectionRow(knex);
   if (!loaded) return;
@@ -55,8 +74,10 @@ exports.up = async function (knex) {
   // Each config row is judged on its own: a primary row an admin already
   // set to $75 must not stop the legacy mirror (or the changelog) from
   // being brought in line (uncapped audit P1 on #3521).
+  let anyChange = false;
   if (Number(data.fee) !== NEW_FEE) {
     await saveInspectionRow(knex, data, { ...data, fee: NEW_FEE }, UP_REASON);
+    anyChange = true;
   }
 
   // The legacy exclusion config row mirrors the fee for the admin panel
@@ -78,10 +99,14 @@ exports.up = async function (knex) {
           reason: UP_REASON,
         });
       }
+      anyChange = true;
     }
   }
 
-  if (await knex.schema.hasTable('pricing_changelog')) {
+  // The changelog entry belongs to an application that changed something —
+  // a fully current pair of rows must not mint one that a rollback of a
+  // later cycle would then have nothing to pair with.
+  if (anyChange && await knex.schema.hasTable('pricing_changelog')) {
     const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
     if (!existing) {
       await knex('pricing_changelog').insert({
@@ -99,10 +124,7 @@ exports.down = async function (knex) {
   // Only restore the fee this migration's up() replaced — keyed off the
   // audit row, mirroring 20260611000003's ownership pattern.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
-  const ownUp = await knex('pricing_config_audit')
-    .where({ config_key: 'rodent_inspection', changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .orderBy('id', 'desc')
-    .first();
+  const ownUp = await latestUncancelledUp(knex, 'rodent_inspection');
   // Each audit rolls back on its own: a mirror-only up() (primary already
   // $75) has no primary audit, and must still restore the mirror and drop
   // the changelog (uncapped audit P1 on #3521).
@@ -116,10 +138,7 @@ exports.down = async function (knex) {
       );
     }
   }
-  const exOwnUp = await knex('pricing_config_audit')
-    .where({ config_key: 'onetime_exclusion', changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .orderBy('id', 'desc')
-    .first();
+  const exOwnUp = await latestUncancelledUp(knex, 'onetime_exclusion');
   if (exOwnUp) {
     const exRow = await knex('pricing_config').where({ config_key: 'onetime_exclusion' }).first();
     const exOld = typeof exOwnUp.old_value === 'string' ? JSON.parse(exOwnUp.old_value) : exOwnUp.old_value;
@@ -132,10 +151,20 @@ exports.down = async function (knex) {
             data: JSON.stringify({ ...exData, inspection: exOld.inspection }),
             updated_at: knex.fn.now(),
           });
+        // Close the mirror's cycle so a later no-op up() cannot consume this
+        // UP row again.
+        await knex('pricing_config_audit').insert({
+          config_key: 'onetime_exclusion',
+          old_value: JSON.stringify(exData),
+          new_value: JSON.stringify({ ...exData, inspection: exOld.inspection }),
+          changed_by: MIGRATION_TAG,
+          reason: 'Rollback: restore prior legacy exclusion inspect fee (20260826000002)',
+        });
       }
     }
   }
-  if (await knex.schema.hasTable('pricing_changelog')) {
+  // The changelog entry is removed only when THIS cycle changed something.
+  if ((ownUp || exOwnUp) && await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
   }
 };

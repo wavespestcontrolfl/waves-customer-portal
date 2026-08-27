@@ -73,6 +73,25 @@ async function saveTrappingRow(knex, oldData, newData, reason, name) {
   }
 }
 
+
+// Audit rows persist across up/down cycles: a later no-op reapplication
+// must NOT consume provenance from an earlier cycle and restore values this
+// application never changed (codex #3521 r20 P2, mirroring
+// 20260724130000's pattern). Only an UP row with a HIGHER id than the most
+// recent matching ROLLBACK row belongs to the current cycle.
+async function latestUncancelledUp(knex, configKey) {
+  const lastDown = await knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG })
+    .whereLike('reason', 'Rollback:%')
+    .orderBy('id', 'desc')
+    .first('id');
+  const query = knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
+    .orderBy('id', 'desc');
+  if (lastDown?.id != null) query.where('id', '>', lastDown.id);
+  return query.first();
+}
+
 exports.up = async function (knex) {
   const loaded = await loadTrappingRow(knex);
   if (!loaded) return;
@@ -135,10 +154,7 @@ exports.down = async function (knex) {
   // Only restore what this migration's up() changed — keyed off the audit
   // row, mirroring 20260611000003's ownership pattern.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
-  const ownUp = await knex('pricing_config_audit')
-    .where({ config_key: 'rodent_trapping', changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .orderBy('id', 'desc')
-    .first();
+  const ownUp = await latestUncancelledUp(knex, 'rodent_trapping');
   if (!ownUp) return;
 
   const loaded = await loadTrappingRow(knex);

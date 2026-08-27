@@ -9,9 +9,17 @@ function fakeKnex(db) {
   const knex = (table) => {
     const filters = [];
     const rowsNow = () => db[table] || [];
-    const match = (r) => filters.every((cond) => Object.entries(cond).every(([k, v]) => r[k] === v));
+    const match = (r) => filters.every((cond) => {
+      if (cond.__op) { const [col, op, val] = cond.__op; return op === '>' ? Number(r[col]) > Number(val) : r[col] === val; }
+      if (cond.__like) { const [col, pat] = cond.__like; return String(r[col] || '').startsWith(String(pat).replace(/%$/, '')); }
+      return Object.entries(cond).every(([k, v]) => r[k] === v);
+    });
     const q = {
-      where(a, b) { filters.push(typeof a === 'string' ? { [a]: b } : a); return q; },
+      where(a, b, c) {
+        if (typeof a === 'string' && c !== undefined) { filters.push({ __op: [a, b, c] }); return q; }
+        filters.push(typeof a === 'string' ? { [a]: b } : a); return q;
+      },
+      whereLike(col, pattern) { filters.push({ __like: [col, pattern] }); return q; },
       orderBy() { return q; },
       first: async () => { const rows = rowsNow().filter(match); const hit = rows[rows.length - 1]; return hit ? { ...hit } : undefined; },
       update: async (patch) => { const hits = rowsNow().filter(match); hits.forEach((r) => Object.assign(r, patch)); return hits.length; },
@@ -123,5 +131,23 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     await migration.up(fakeKnex(db));
     expect(db.pricing_config_audit).toHaveLength(0);
     expect(db.pricing_changelog).toHaveLength(0);
+  });
+
+  test('a no-op reapplication after a rollback never consumes the earlier cycle\'s audit row', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    expect(JSON.parse(trapCfg(db).data).unlimited_price).toBe(450);
+    // Everything now made current by hand; the re-run is a no-op.
+    trapCfg(db).data = { included_followups: 'unlimited', emergency_multiplier: 1.2 };
+    trapSvc(db).description = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+    // Cycle 1's retired keys must NOT come back onto a row this cycle never
+    // touched (the no-op cycle never rewrote the row, so data is still the
+    // object the test set).
+    const after = typeof trapCfg(db).data === 'string' ? JSON.parse(trapCfg(db).data) : trapCfg(db).data;
+    expect(after.unlimited_price).toBeUndefined();
+    expect(after.included_followups).toBe('unlimited');
   });
 });

@@ -9,9 +9,17 @@ function fakeKnex(db) {
   const knex = (table) => {
     const filters = [];
     const rowsNow = () => db[table] || [];
-    const match = (r) => filters.every((cond) => Object.entries(cond).every(([k, v]) => r[k] === v));
+    const match = (r) => filters.every((cond) => {
+      if (cond.__op) { const [col, op, val] = cond.__op; return op === '>' ? Number(r[col]) > Number(val) : r[col] === val; }
+      if (cond.__like) { const [col, pat] = cond.__like; return String(r[col] || '').startsWith(String(pat).replace(/%$/, '')); }
+      return Object.entries(cond).every(([k, v]) => r[k] === v);
+    });
     const q = {
-      where(a, b) { filters.push(typeof a === 'string' ? { [a]: b } : a); return q; },
+      where(a, b, c) {
+        if (typeof a === 'string' && c !== undefined) { filters.push({ __op: [a, b, c] }); return q; }
+        filters.push(typeof a === 'string' ? { [a]: b } : a); return q;
+      },
+      whereLike(col, pattern) { filters.push({ __like: [col, pattern] }); return q; },
       orderBy() { return q; },
       first: async () => { const rows = rowsNow().filter(match); const hit = rows[rows.length - 1]; return hit ? { ...hit } : undefined; },
       update: async (patch) => { const hits = rowsNow().filter(match); hits.forEach((r) => Object.assign(r, patch)); return hits.length; },
@@ -66,5 +74,21 @@ describe('20260826000002 rodent inspection fee $75', () => {
     const db = seedDb({ fee: 75, exclusionInspection: 75 });
     await migration.up(fakeKnex(db));
     expect(db.pricing_config_audit).toHaveLength(0);
+  });
+
+  test('a no-op reapplication after a rollback never consumes the earlier cycle\'s audit row', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));     // 125 → 75 (cycle 1)
+    await migration.down(fakeKnex(db));   // back to 125, Rollback rows written
+    expect(dataOf(db, 'rodent_inspection').fee).toBe(125);
+    // Admin now sets both rows to $75 by hand, then the migration re-runs as a no-op.
+    db.pricing_config[0].data = { fee: 75, creditable_within_days: 14, waive_if_approved_total_over: 995 };
+    db.pricing_config[1].data = { inspection: 75, simple: 45 };
+    await migration.up(fakeKnex(db));
+    expect(db.pricing_changelog).toHaveLength(0);
+    // Rolling THAT back must not resurrect cycle 1's $125.
+    await migration.down(fakeKnex(db));
+    expect(dataOf(db, 'rodent_inspection').fee).toBe(75);
+    expect(dataOf(db, 'onetime_exclusion').inspection).toBe(75);
   });
 });
