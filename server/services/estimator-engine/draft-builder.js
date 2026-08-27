@@ -155,7 +155,7 @@ function knownEnrichedValue(value) {
 
 // Trust predicate lives in one place — the customer-facing pricing
 // assistant applies the same rule (services/lookup-confidence.js).
-const { lookupBedAreaIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { lookupBedAreaIsTrustworthy, lookupTurfEstimateIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
@@ -310,6 +310,27 @@ function buildEngineInput({
     // its 2,000 default), both of which carry their own review markers.
     ...(!isCommercial && lookupBedAreaIsTrustworthy(lookupEnriched)
       ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
+      : {}),
+    // The lookup's turf estimate — the engine's own turf source when no
+    // operator/profile measurement exists (measuredTurfSf and lawnSqFt still
+    // win inside computeTurfArea, so a saved treated-lawn area beats this).
+    // Without it the agent path priced lawn from the lot heuristic even when
+    // the lookup had measured the turf, and the customer estimate showed a
+    // lot-based guess as the treatable area (owner report 2026-08-27). Same
+    // trust predicate as the customer-facing pricing path; provenance rides
+    // along so computeTurfArea grades a county-prior seed (LOW +
+    // field-verify) or a parcel-clamped vision figure honestly instead of
+    // treating either as a satellite measurement. countyTurfCeilingSf is
+    // deliberately NOT forwarded: its validity is tied to the lookup's own
+    // dims (countyCeilingStillValid on the admin path), and the arbitrated
+    // facts here can differ — the engine's lot-based plausible max still
+    // clamps.
+    ...(!isCommercial && lookupTurfEstimateIsTrustworthy(lookupEnriched)
+      ? {
+        estimatedTurfSf: Number(lookupEnriched.estimatedTurfSf),
+        turfSource: lookupEnriched.turfSource || null,
+        turfCappedToParcel: lookupEnriched.turfCappedToParcel === true,
+      }
       : {}),
     // The lookup's estimatedPalmCount is deliberately NOT forwarded here.
     // property.palmCount is read by BOTH the T&S reserve and
