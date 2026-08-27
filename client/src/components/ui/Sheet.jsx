@@ -22,7 +22,8 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50"
+      // z-[100] clears the admin shell's fixed mobile header (90) and tab bar (95).
+      className="fixed inset-0 z-[100]"
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel}

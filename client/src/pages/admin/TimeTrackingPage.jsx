@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
+import { createPortal } from "react-dom";
 import {
   BarChart3,
   CheckCircle2,
@@ -1526,6 +1528,8 @@ function EntriesTab({ showToast }) {
 }
 
 function EditEntryModal({ entry, onClose, onSave }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [form, setForm] = useState({
     id: entry.id,
     clock_in: etDatetimeLocalValue(entry.clock_in),
@@ -1535,7 +1539,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
     edit_reason: "",
   });
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -1548,13 +1552,33 @@ function EditEntryModal({ entry, onClose, onSave }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 20,
+        padding: isMobile ? 0 : 20,
       }}
       onClick={onClose}
     >
       {" "}
       <div
-        style={{ ...sCard, maxWidth: 500, width: "100%" }}
+        style={{
+          ...sCard,
+          maxWidth: 500,
+          width: "100%",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                marginBottom: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(20px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(20px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1740,7 +1764,8 @@ function EditEntryModal({ entry, onClose, onSave }) {
           </div>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3175,6 +3200,8 @@ export function TeamTab({ showToast }) {
 // (or $35 fallback shown explicitly so an admin can spot a missing
 // pay_rate config), OT at 1.5×.
 function EarningsModal({ tech, onClose, showToast }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [thisWeek, setThisWeek] = useState(null);
   const [lastWeek, setLastWeek] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3223,7 +3250,7 @@ function EarningsModal({ tech, onClose, showToast }) {
     };
   }, [tech.id]);
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3234,7 +3261,7 @@ function EarningsModal({ tech, onClose, showToast }) {
         alignItems: "center",
         justifyContent: "center",
         zIndex: 200,
-        padding: 16,
+        padding: isMobile ? 0 : 16,
       }}
     >
       {" "}
@@ -3248,6 +3275,21 @@ function EarningsModal({ tech, onClose, showToast }) {
           maxWidth: 520,
           width: "100%",
           boxShadow: "0 16px 48px rgba(0,0,0,0.25)",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -3314,7 +3356,8 @@ function EarningsModal({ tech, onClose, showToast }) {
           </div>
         )}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

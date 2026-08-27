@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import {
   BarChart3,
   DollarSign,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminUser } from "../../lib/adminAuth";
+import useIsMobile from "../../hooks/useIsMobile";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` + `purple` fold to zinc-900. Semantic green/amber/red preserved.
@@ -242,6 +244,7 @@ const REFERRALS_LEAF_BY_KEY = Object.fromEntries(
 );
 
 export default function ReferralsPageV2() {
+  const isMobile = useIsMobile();
   const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
@@ -1588,7 +1591,7 @@ export default function ReferralsPageV2() {
         </div>
       )}
       {/* CONVERT MODAL */}
-      {convertModal && (
+      {convertModal && createPortal(
         <div
           style={{
             position: "fixed",
@@ -1598,7 +1601,7 @@ export default function ReferralsPageV2() {
             alignItems: "center",
             justifyContent: "center",
             zIndex: 999,
-          }}
+              }}
           onClick={() => setConvertModal(null)}
         >
           {" "}
@@ -1609,6 +1612,21 @@ export default function ReferralsPageV2() {
               padding: 28,
               width: 420,
               border: `1px solid ${D.border}`,
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+                  }
+                : {}),
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1734,10 +1752,11 @@ export default function ReferralsPageV2() {
               </div>{" "}
             </div>{" "}
           </div>{" "}
-        </div>
+        </div>,
+        document.body,
       )}
       {/* ENROLL MODAL */}
-      {enrollModal && (
+      {enrollModal && createPortal(
         <div
           style={{
             position: "fixed",
@@ -1747,7 +1766,7 @@ export default function ReferralsPageV2() {
             alignItems: "center",
             justifyContent: "center",
             zIndex: 999,
-          }}
+              }}
           onClick={() => setEnrollModal(false)}
         >
           {" "}
@@ -1758,6 +1777,21 @@ export default function ReferralsPageV2() {
               padding: 28,
               width: 400,
               border: `1px solid ${D.border}`,
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+                  }
+                : {}),
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1824,7 +1858,8 @@ export default function ReferralsPageV2() {
               Cancel
             </button>{" "}
           </div>{" "}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

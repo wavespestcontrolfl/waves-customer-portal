@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import { Ban, Inbox, Mail, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -128,6 +130,7 @@ function timeAgo(dateStr) {
 }
 
 export default function EmailPage() {
+  const isMobile = useIsMobile();
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [emails, setEmails] = useState([]);
@@ -1532,7 +1535,8 @@ export default function EmailPage() {
         </>
       )}
       {/* Compose modal — opened by + New Email */}
-      {showCompose && (
+      {showCompose &&
+        createPortal(
         <div
           onClick={() => !composeSending && setShowCompose(false)}
           style={{
@@ -1543,7 +1547,7 @@ export default function EmailPage() {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 16,
+            padding: isMobile ? 0 : 16,
           }}
         >
           {" "}
@@ -1557,6 +1561,21 @@ export default function EmailPage() {
               maxWidth: 560,
               padding: 20,
               boxShadow: "0 12px 40px rgba(0,0,0,0.18)",
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(20px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(20px + env(safe-area-inset-right, 0px))",
+                  }
+                : {}),
             }}
           >
             {" "}
@@ -1843,8 +1862,9 @@ export default function EmailPage() {
               </button>{" "}
             </div>{" "}
           </div>{" "}
-        </div>
-      )}
+        </div>,
+        document.body,
+        )}
     </div>
   );
 }

@@ -32,6 +32,7 @@
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
@@ -1153,6 +1154,8 @@ const EDIT_FALLBACK_SERVICES = [
 ];
 
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -4167,7 +4170,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 20,
+            padding: isMobile ? 0 : 20,
           }}
         >
           {" "}
@@ -4180,6 +4183,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               maxWidth: 460,
               width: "100%",
               border: `1px solid ${D.inputBorder}`,
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
+                  }
+                : {}),
             }}
           >
             {" "}
@@ -4287,6 +4305,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
 export function ProtocolPanel({ service, onClose }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   // Monochrome admin V2 palette — shadows the module-level D inside this panel
   // so the Service Protocol flyout matches the zinc admin shell instead of the
   // warmer legacy slate/teal/amber accents.
@@ -4479,7 +4499,7 @@ export function ProtocolPanel({ service, onClose }) {
     dormant: "#A1A1AA",
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -4495,6 +4515,15 @@ export function ProtocolPanel({ service, onClose }) {
         display: "flex",
         flexDirection: "column",
         boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
+        ...(isMobile
+          ? {
+              height: "100dvh",
+              boxSizing: "border-box",
+              paddingBottom: "env(safe-area-inset-bottom, 0px)",
+              paddingLeft: "env(safe-area-inset-left, 0px)",
+              paddingRight: "env(safe-area-inset-right, 0px)",
+            }
+          : {}),
       }}
     >
       {/* Header */}
@@ -5817,11 +5846,14 @@ export function ProtocolPanel({ service, onClose }) {
           </>
         )}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 export function RescheduleModal({ service, onClose, onRescheduled }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState("customer_request");
   const [notes, setNotes] = useState("");
@@ -6058,7 +6090,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     boxSizing: "border-box",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -6069,7 +6101,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 20,
+        padding: isMobile ? 0 : 20,
       }}
     >
       {" "}
@@ -6084,6 +6116,21 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           border: `1px solid ${D.border}`,
           maxHeight: "80vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -6373,7 +6420,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           Cancel
         </button>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import { getAdminUser } from "../../lib/adminAuth";
 
 // Pricing writes are admin-only server-side (requireAdmin on every mutating
@@ -496,6 +498,7 @@ function ChangelogTab() {
 
 // ── Proposals Tab ──
 function ProposalsTab() {
+  const isMobile = useIsMobile();
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("pending");
@@ -909,18 +912,19 @@ function ProposalsTab() {
           </table>{" "}
         </div>
       )}
-      {selected && (
+      {selected &&
+        createPortal(
         <div
           onClick={() => !submitting && setSelected(null)}
           style={{
             position: "fixed",
             inset: 0,
             background: "rgba(15,23,42,0.6)",
-            zIndex: 50,
+            zIndex: 1000,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 20,
+            padding: isMobile ? 0 : 20,
           }}
         >
           {" "}
@@ -935,6 +939,21 @@ function ProposalsTab() {
               width: "100%",
               maxHeight: "90vh",
               overflowY: "auto",
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
+                  }
+                : {}),
             }}
           >
             {" "}
@@ -1188,8 +1207,9 @@ function ProposalsTab() {
               )}
             </div>{" "}
           </div>{" "}
-        </div>
-      )}
+        </div>,
+        document.body,
+        )}
     </div>
   );
 }

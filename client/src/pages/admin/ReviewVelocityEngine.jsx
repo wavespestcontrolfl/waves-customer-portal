@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
+import { createPortal } from "react-dom";
 import { Phone, MessageSquare } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -2010,6 +2012,8 @@ function CustomerDrawer({
   startSequence: startSequenceFn,
   sequencesEnabled,
 }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [msg, setMsg] = useState("");
   const [selectedTpl, setSelectedTpl] = useState("");
   const [sending, setSending] = useState(false);
@@ -2089,7 +2093,7 @@ function CustomerDrawer({
     ? TEMPLATES.filter((t) => t.sentiment === c.sentiment || t.sentiment === "neutral")
     : TEMPLATES;
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -2102,6 +2106,19 @@ function CustomerDrawer({
         zIndex: 150,
         overflowY: "auto",
         boxShadow: "-8px 0 32px rgba(0,0,0,.1)",
+        ...(isMobile
+          ? {
+              width: "100%",
+              maxWidth: "100%",
+              height: "100dvh",
+              borderLeft: "none",
+              boxSizing: "border-box",
+              paddingTop: "env(safe-area-inset-top, 0px)",
+              paddingBottom: "env(safe-area-inset-bottom, 0px)",
+              paddingLeft: "env(safe-area-inset-left, 0px)",
+              paddingRight: "env(safe-area-inset-right, 0px)",
+            }
+          : {}),
       }}
     >
       {/* Header */}
@@ -2463,7 +2480,8 @@ function CustomerDrawer({
           </div>{" "}
         </DrawerSection>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2500,6 +2518,8 @@ function BatchModal({
   setSelectedIds,
   sendReviewRequest,
 }) {
+  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
+  const isMobile = useIsMobile(640);
   const [sending, setSending] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 
@@ -2530,7 +2550,7 @@ function BatchModal({
     onClose();
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -2554,6 +2574,22 @@ function BatchModal({
           minWidth: 440,
           maxWidth: 560,
           boxShadow: "0 24px 64px rgba(0,0,0,.12)",
+          ...(isMobile
+            ? {
+                width: "100%",
+                minWidth: 0,
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -2611,6 +2647,7 @@ function BatchModal({
           </Btn>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -92,6 +94,7 @@ function Card({ children, style }) {
 // Q&A MODAL
 // =========================================================================
 function QAModal({ onClose }) {
+  const isMobile = useIsMobile();
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -110,7 +113,7 @@ function QAModal({ onClose }) {
     setResult((prev) => ({ ...prev, filedBack: true }));
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -120,7 +123,7 @@ function QAModal({ onClose }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 20,
+        padding: isMobile ? 0 : 20,
       }}
     >
       {" "}
@@ -134,6 +137,21 @@ function QAModal({ onClose }) {
           maxHeight: "80vh",
           overflow: "auto",
           border: `1px solid ${D.border}`,
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -273,7 +291,8 @@ function QAModal({ onClose }) {
           </div>
         )}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

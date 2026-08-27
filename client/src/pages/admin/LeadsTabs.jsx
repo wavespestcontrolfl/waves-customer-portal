@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
+import { createPortal } from "react-dom";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -524,7 +525,8 @@ function Input({ label, value, onChange, type, placeholder, style, options }) {
 }
 
 function Modal({ title, onClose, children }) {
-  return (
+  const isMobile = useIsMobile();
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
@@ -542,6 +544,7 @@ function Modal({ title, onClose, children }) {
         paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
         paddingBottom: "max(16px, env(safe-area-inset-bottom, 0px))",
         paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
+        ...(isMobile ? { padding: 0 } : {}),
       }}
       onClick={onClose}
     >
@@ -559,6 +562,21 @@ function Modal({ title, onClose, children }) {
           overflowY: "auto",
           boxSizing: "border-box",
           overscrollBehavior: "contain",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -597,7 +615,8 @@ function Modal({ title, onClose, children }) {
         </div>
         {children}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

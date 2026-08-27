@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import {
   Activity,
   BarChart3,
@@ -2860,6 +2862,7 @@ function OutreachApprovals({ canRun, onChange }) {
 // Compose / edit a one-to-one outreach draft (M3b). Saving never sends — an admin
 // approves + sends from the approvals view.
 function OutreachDraftModal({ prospect, onClose, onSaved }) {
+  const isMobile = useIsMobile();
   const [to, setTo] = useState(prospect.outreach_to_email || "");
   const [subject, setSubject] = useState(prospect.outreach_subject || "");
   const [body, setBody] = useState(prospect.outreach_body || "");
@@ -2876,9 +2879,9 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
 
   const field = { width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text, boxSizing: "border-box" };
 
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+  return createPortal(
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(20px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))", paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))", paddingRight: "calc(20px + env(safe-area-inset-right, 0px))" } : {}) }}>
         <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
         <div style={{ fontSize: 11, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
         <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Recipient email</label>
@@ -2893,7 +2896,8 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
           <button onClick={save} disabled={busy || !to || !subject || !body} style={outreachBtn(D.teal, true, busy)}>{busy ? "Saving…" : "Save draft"}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

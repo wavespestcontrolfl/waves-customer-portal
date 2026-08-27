@@ -2708,6 +2708,21 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
           // tab bar - keep the last controls above it.
           paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         <div
@@ -3043,6 +3058,21 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           // tab bar - keep the last controls above it.
           paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -3343,6 +3373,21 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         <div
@@ -3653,6 +3698,21 @@ function RecordPaymentModal({
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -4073,6 +4133,21 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         <div
@@ -4359,6 +4434,21 @@ function PaymentPlanModal({
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
+              }
+            : {}),
         }}
       >
         <div
