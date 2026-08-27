@@ -162,7 +162,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
           .forUpdate()
-          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id');
+          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at');
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
@@ -179,11 +179,24 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const freshDraft = await trx('estimates')
           .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
           .whereNull('archived_at')
-          .first('id');
+          .first('id', 'updated_at');
         const draftLive = !!freshDraft;
-        const draftNote = draftLive
-          ? ''
-          : ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.';
+        // The draft PROVABLY still represents THIS parent only if it has
+        // not been touched since the booking committed (codex #3504 r22
+        // P0): /calculate reuses and rewrites the same row for the
+        // customer's next quote and bumps updated_at, while the booking
+        // transaction never writes the draft — so a draft whose updated_at
+        // trails the parent's created_at (2-minute clock tolerance) is the
+        // quote this visit was booked from; a later updated_at is a NEWER
+        // quote with its own live self-book link, which must survive.
+        const draftRepresentsParent = draftLive
+          && fresh.created_at
+          && new Date(freshDraft.updated_at).getTime() <= new Date(fresh.created_at).getTime() + 2 * 60 * 1000;
+        const draftNote = !draftLive
+          ? ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.'
+          : (draftRepresentsParent
+            ? ''
+            : ' NOTE: the customer re-ran the quote AFTER this booking, so the live quote is a NEWER quote (its booking link was left intact) — bill this visit on its own and treat that quote as new business, not as the remainder of this program.');
         const who = `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)})`;
         const byDisposition = {
           // Both completed dispositions RETIRE the public handoff (codex
@@ -198,17 +211,17 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           completed_billed: {
             retireHandoff: true,
             patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
-            bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program.`,
+            bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. ${draftRepresentsParent ? "The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program." : 'Convert for the REMAINING program from the office.'}`,
           },
           completed_refunded: {
             retireHandoff: true,
             patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed and its application invoice was REFUNDED — do not re-bill until the refund is final; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
-            bell: `${who} never activated (worker died mid-request). That first visit has since been completed and its application invoice was REFUNDED — do NOT bill the application again until the refund is final (a failed refund restores the original invoice). The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — when the refund settles, unarchive it and convert to schedule and bill the REMAINING program.`,
+            bell: `${who} never activated (worker died mid-request). That first visit has since been completed and its application invoice was REFUNDED — do NOT bill the application again until the refund is final (a failed refund restores the original invoice). ${draftRepresentsParent ? "The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — when the refund settles, unarchive it and convert to schedule and bill the REMAINING program." : 'When the refund settles, convert for the REMAINING program from the office.'}`,
           },
           completed_unbilled: {
             retireHandoff: true,
             patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed but carries NO invoice — office bills it at the quoted first-application price; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
-            bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit). The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program.`,
+            bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit). ${draftRepresentsParent ? "The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program." : 'Convert for the REMAINING program from the office.'}`,
           },
           terminal_unbilled: {
             patch: STRIP_PATCH(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, pricing stripped; office converts the live quote for the FULL program`),
@@ -222,7 +235,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         await trx('scheduled_services')
           .where({ id: parent.id })
           .update(byDisposition.patch);
-        if (byDisposition.retireHandoff) {
+        if (byDisposition.retireHandoff && draftRepresentsParent) {
           await trx('estimates')
             .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
             .whereNull('archived_at')

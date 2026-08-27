@@ -3580,8 +3580,21 @@ async function createSelfBooking(payload = {}) {
               .where({ id: seriesParentRow.id })
               .first('id', 'is_recurring');
             if (!freshParent || freshParent.is_recurring) return;
-            await trx('scheduled_services')
-              .where({ id: seriesParentRow.id })
+            // Strip ONLY the exact priced state this activation minted
+            // (codex #3504 r22): between the rollback and this lock an
+            // admin reprice, a completion, or another writer can
+            // legitimately change the row — the conditional update
+            // re-checks the same predicate the activation's locked-parent
+            // check uses, so an edited/performed visit is never blanked.
+            const stripped = await trx('scheduled_services')
+              .where({
+                id: seriesParentRow.id,
+                payment_method_preference: 'pay_at_visit',
+                create_invoice_on_complete: true,
+                source_estimate_id: pricing_estimate_id,
+              })
+              .whereIn('status', ['pending', 'confirmed'])
+              .where('estimated_price', visitPrice)
               .update({
                 estimated_price: null,
                 payment_method_preference: null,
@@ -3589,6 +3602,10 @@ async function createSelfBooking(payload = {}) {
                 notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (seeding failed); office converts from the live quote'"),
                 updated_at: trx.fn.now(),
               });
+            if (!stripped) {
+              logger.warn(`[booking:confirm] failure-cleanup strip skipped for ${seriesParentRow.id} — priced state changed under lock (edited/completed concurrently)`);
+              return;
+            }
             await notifySeriesStripInTx(trx, seriesParentRow.id, 'series seeding failed');
           });
         } catch (stripErr) {
@@ -3680,6 +3697,9 @@ async function createSelfBooking(payload = {}) {
             && draftStillLive
             && !hasChildren) {
             const replayActivation = await activateWizardSeries(replayParent);
+            // The replay response serializes the ORIGINAL booking row
+            // (codex #3504 r22): echo an extended reservation here too.
+            if (replayActivation?.parentExtension) Object.assign(txResult.existing, replayActivation.parentExtension);
             // Reminder rows for the replay-activated series (codex #3504
             // r5 hook): this path returns before the main registration
             // loop, so without this the parent (if the first request died

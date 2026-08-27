@@ -744,6 +744,22 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r22: handoff retires only for a draft proven to be THIS booking\'s; replay echoes extension; cleanup strip is priced-state conditional', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    // P0: a reused draft (updated_at after the booking) is a NEWER quote —
+    // never archived by an older parent's reconcile.
+    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& fresh\.created_at\s*\n\s*&& new Date\(freshDraft\.updated_at\)\.getTime\(\) <= new Date\(fresh\.created_at\)\.getTime\(\) \+ 2 \* 60 \* 1000;/);
+    expect(recoverySrc).toMatch(/\.first\('id', 'updated_at'\);/);
+    expect(recoverySrc).toMatch(/'created_at'\);/);
+    expect(recoverySrc).toMatch(/its booking link was left intact/);
+    expect((recoverySrc.match(/\$\{draftRepresentsParent \? "The quote draft has been ARCHIVED/g) || []).length).toBe(3);
+    // replay response patch
+    expect(booking).toMatch(/if \(replayActivation\?\.parentExtension\) Object\.assign\(txResult\.existing, replayActivation\.parentExtension\);/);
+    // cleanup strip: conditional on the exact priced state
+    expect(booking).toMatch(/const stripped = await trx\('scheduled_services'\)\s*\n\s*\.where\(\{\s*\n\s*id: seriesParentRow\.id,\s*\n\s*payment_method_preference: 'pay_at_visit',\s*\n\s*create_invoice_on_complete: true,\s*\n\s*source_estimate_id: pricing_estimate_id,\s*\n\s*\}\)\s*\n\s*\.whereIn\('status', \['pending', 'confirmed'\]\)\s*\n\s*\.where\('estimated_price', visitPrice\)/);
+    expect(booking).toMatch(/if \(!stripped\) \{[\s\S]{0,300}return;\s*\n\s*\}\s*\n\s*await notifySeriesStripInTx\(trx, seriesParentRow\.id, 'series seeding failed'\);/);
+  });
+
   test('r21: overdue reschedule placeholders stay active; extended reservation is echoed on the response', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
     expect(seeder).toMatch(/\.where\(function activeBound\(\) \{\s*\n\s*this\.where\('scheduled_date', '>=', etDateString\(\)\)\.orWhere\('status', 'rescheduled'\);/);
@@ -779,7 +795,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/completed_billed: \{\s*\n\s*retireHandoff: true,/);
     expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*retireHandoff: true,/);
     expect(recoverySrc).not.toMatch(/terminal_unbilled: \{\s*\n\s*retireHandoff: true,/);
-    expect(recoverySrc).toMatch(/if \(byDisposition\.retireHandoff\) \{\s*\n\s*await trx\('estimates'\)\s*\n\s*\.where\(\{ id: parent\.source_estimate_id, source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)\s*\n\s*\.update\(\{ archived_at: trx\.fn\.now\(\)/);
+    expect(recoverySrc).toMatch(/if \(byDisposition\.retireHandoff && draftRepresentsParent\) \{\s*\n\s*await trx\('estimates'\)\s*\n\s*\.where\(\{ id: parent\.source_estimate_id, source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)\s*\n\s*\.update\(\{ archived_at: trx\.fn\.now\(\)/);
     // #4 an unscoped linkage on a wizard-sourced estimate never touches
     // self-booked rows (activation-owned, stamped with explicit ids).
     const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
