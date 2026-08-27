@@ -288,7 +288,9 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   flea: /\bfleas?\b/i,
   tick: /\bticks?\b/i,
   wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b/i,
-  wdo: /\bwdo\b|wood[- ]destroying/i,
+  // WDI (wood-destroying insect) is the established inspection-report
+  // acronym alongside WDO — both name this service in CTA wording.
+  wdo: /\bwd[oi]\b|wood[- ]destroying/i,
   // Lawn specialties (established brief service IDs) — their own terms name
   // the lawn family. Fertilization is lawn wording only when not the
   // tree/shrub/palm treatment ("Deep Root Fertilization").
@@ -414,20 +416,6 @@ function renderedText(body) {
 function extractLinks(body) {
   const s = renderedText(body);
   const links = [];
-  // `(?<!!)` — a Markdown image `![alt](src)` is not a link.
-  // (?<!(?<!\\)!) — an UNESCAPED "!" means image syntax; "\\![link]" is a
-  // literal "!" followed by a real link.
-  // Escape parity: "!" preceded by an EVEN run of backslashes (incl. zero)
-  // is a live image marker; an odd run escapes it. The "[" itself is a live
-  // link opener only under an EVEN backslash run — "\\[text](url)" renders
-  // literal syntax, not a link. Whitespace is allowed inside the
-  // parentheses ("( /contact/ )").
-  // Link text may contain ONE level of balanced brackets ("[Get a [Termite] Estimate]").
-  // The DESTINATION may contain balanced parentheses ("/x(foo)/../contact/"
-  // — CommonMark accepts up to nested balanced pairs; the browser resolves
-  // the full path), so the non-angle arm consumes paren groups atomically
-  // (two levels deep) instead of stopping at the first ")".
-  const md = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\(\s*(<[^<>\n]*>|(?:[^()\s]|\((?:[^()\s]|\([^()\s]*\))*\))+)[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -459,8 +447,8 @@ function extractLinks(body) {
     }
     return raw;
   };
-  while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[2]) });
-  // Reference-style links: [text][ref] / [text][] with a [ref]: /url definition.
+  // Reference definitions are registered FIRST so the single link walk
+  // below can resolve full and shortcut references as it goes.
   // CommonMark label matching is case-insensitive with internal whitespace
   // collapsed — normalize both the definition and the reference the same way.
   const label = (l) => String(l || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -479,21 +467,67 @@ function extractLinks(body) {
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
   }
-  if (defs.size) {
-    const ref = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\[((?:\\[\s\S]|[^\]\\])*)\]/g;
-    while ((m = ref.exec(s)) !== null) {
-      const href = defs.get(label(m[2] || m[1]));
-      if (href) links.push({ anchor: m[1], href });
+  // Markdown links — inline, full-reference, and shortcut-reference — in one
+  // procedural walk. Link TEXT is matched with a balanced-bracket scan, so
+  // it supports the renderer's FULL nesting depth ("[Schedule [Our
+  // [Trusted] Service]]"), which no fixed-depth regex can. Escape parity
+  // carries over from the regex forms: an odd backslash run before "[" (or
+  // before the "!" of image syntax) makes it literal; "\\[text](url)" (even
+  // run) is a live link.
+  const oddEscaped = (str, i) => {
+    let n = 0;
+    while (i - 1 - n >= 0 && str[i - 1 - n] === '\\') n += 1;
+    return n % 2 === 1;
+  };
+  const balancedLabelEnd = (str, open) => {
+    let depth = 0;
+    for (let i = open; i < str.length; i += 1) {
+      const ch = str[i];
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '[') depth += 1;
+      else if (ch === ']') { depth -= 1; if (depth === 0) return i; }
     }
-    // Shortcut references: a bare `[Label]` whose label has a definition and
-    // that is not itself an inline/full reference or the definition line.
-    // (?<![\]!]) — skip the label half of a full reference (`[text][label]`)
-    // and image syntax; (?![\[(:]) — skip inline/full references and definitions.
-    const shortcut = /(?<!\])(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\]\\])+)\](?![\[(:])/g;
-    while ((m = shortcut.exec(s)) !== null) {
-      const href = defs.get(label(m[1]));
-      if (href) links.push({ anchor: m[1], href });
+    return -1;
+  };
+  // The inline DESTINATION may contain balanced parentheses
+  // ("/x(foo)/../contact/" — CommonMark accepts nested balanced pairs; the
+  // browser resolves the full path), so the non-angle arm consumes paren
+  // groups atomically (two levels deep) instead of stopping at the first
+  // ")". Whitespace is allowed inside the parentheses ("( /contact/ )").
+  const inlineDest = /^\(\s*(<[^<>\n]*>|(?:[^()\s]|\((?:[^()\s]|\([^()\s]*\))*\))+)[^)]*\)/;
+  const refLabel = /^\[((?:\\[\s\S]|[^\]\\])*)\]/;
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] !== '[' || oddEscaped(s, i)) continue;
+    // An UNESCAPED "!" directly before means image syntax `![alt](src)` —
+    // not a link; "\\![link]" is a literal "!" followed by a real link.
+    if (s[i - 1] === '!' && !oddEscaped(s, i - 1)) continue;
+    const end = balancedLabelEnd(s, i);
+    if (end === -1) continue;
+    const text = s.slice(i + 1, end);
+    if (!text) { i = end; continue; }
+    const rest = s.slice(end + 1);
+    const inline = rest.match(inlineDest);
+    if (inline) {
+      links.push({ anchor: text, href: dest(inline[1]) });
+      i = end + inline[0].length;
+      continue;
     }
+    // A following "(" without a parseable destination, or a ":" (this is a
+    // definition line, registered above), is never a shortcut reference.
+    if (rest[0] === '(' || rest[0] === ':') { i = end; continue; }
+    const full = rest.match(refLabel);
+    if (full) {
+      // Full reference `[text][label]` (an empty label collapses to text).
+      const href = defs.get(label(full[1] || text));
+      if (href) links.push({ anchor: text, href });
+      i = end + full[0].length;
+      continue;
+    }
+    if (rest[0] === '[') { i = end; continue; }
+    // Shortcut reference: a bare `[Label]` whose label has a definition.
+    const href = defs.get(label(text));
+    if (href) links.push({ anchor: text, href });
+    i = end;
   }
   // Quoted OR unquoted href (`<a href=/contact/>` is legal HTML).
   // Quoted, unquoted, or literal JSX string-expression href — quote OR
@@ -710,19 +744,44 @@ function forbiddenCtaAnchor(body) {
   return null;
 }
 
-// Brief-INDEPENDENT CTA violations — inspection-request anchors and
-// wording-free actionable conversion anchors — shared with
-// content-guardrails so EVERY blog publish lane (manual publish-astro,
-// legacy BlogWriter, refresh) enforces the owner rule 2026-08-27. The
-// brief-aware service-tying checks stay in this gate, where a brief exists.
-function collectForbiddenCtaAnchors(body) {
+// CTA violations shared with content-guardrails so EVERY blog publish lane
+// (manual publish-astro, legacy BlogWriter, refresh) enforces the owner
+// rule 2026-08-27: the brief-INDEPENDENT half (inspection-request anchors
+// and wording-free actionable conversion anchors) always runs; the
+// SERVICE-TYING half runs whenever the caller knows the post's service —
+// refresh and legacy lanes hold it on the post row, not a brief, so a
+// termite refresh adding "[Request a Lawn Care Quote]" parks there too.
+// Legacy rows may carry the topic on several fields (category + tag), so
+// every resolvable candidate WIDENS the allowed set (the union) — a
+// coarse category must not constrain away the row's more specific topic.
+function collectForbiddenCtaAnchors(body, { service = null } = {}) {
   const out = [];
+  let allowed = null;
+  for (const candidate of [].concat(service ?? []).filter(Boolean)) {
+    let resolved = null;
+    try { resolved = ctaBriefService(candidate); } catch (err) { resolved = null; }
+    // Unresolvable candidates (a non-service category like "seasonal")
+    // carry no CTA vocabulary — they widen nothing.
+    if (!resolved || !(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
+    allowed = allowed || new Set();
+    for (const svc of allowedAnchorServices(resolved)) allowed.add(svc);
+  }
   for (const link of extractLinks(body)) {
     const anchor = plainAnchor(link.anchor);
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) { out.push(anchor); continue; }
     if (!isConversionPath(link.href)) continue;
     const kw = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i.test(anchor);
     if (!kw && !isProseReferenceAnchor(anchor)) out.push(anchor);
+  }
+  if (allowed) {
+    // Same posture as badCtaAnchor: EVERY estimate/quote conversion anchor
+    // must positively name an allowed service — a wrong-service or fully
+    // generic anchor is flagged even when a valid CTA exists elsewhere.
+    for (const link of conversionCtaLinks(body)) {
+      if (!link.hasEstimateWording) continue;
+      const named = effectiveNamed(link, allowed);
+      if (named.length === 0 || !named.every((svc) => allowed.has(svc))) out.push(link.anchor);
+    }
   }
   return out;
 }

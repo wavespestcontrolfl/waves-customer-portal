@@ -1105,6 +1105,43 @@ describe('seo-completion-gate', () => {
     });
     expect(spiderwort.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(spiderwort.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A code span cannot pair across a LIST-ITEM opener either — the bullet
+    // interrupts the paragraph, so the item's live CTA is never masked.
+    const listBoundarySpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Intro \`\n- [Schedule Service](/contact/) \`' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(listBoundarySpan.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A quote-scoped fence ends when its QUOTE ends — a top-level comment
+    // after it is stripped, so its hidden link can never satisfy presence.
+    const quoteFenceComment = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '> ~~~\n> example\n<!--\n[Get My Free Pest Control Estimate](/contact/)\n-->' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quoteFenceComment.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Link text supports the renderer's FULL bracket-nesting depth — a
+    // deeply nested wording-free CTA is still extracted and flagged.
+    const deepNest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Act. [Schedule [Our [Trusted] Service]](/contact/) now.' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(deepNest.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // WDI is the established inspection-report acronym alongside WDO — it
+    // names the termite-family service in CTA wording.
+    const wdi = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Request a WDI Estimate](/contact/) now.' }),
+      brief: baseBrief({ service: 'wdo' }),
+      shadowMode: true,
+    });
+    expect(wdi.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(wdi.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

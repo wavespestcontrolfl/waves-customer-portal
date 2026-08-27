@@ -2208,6 +2208,22 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // ADDITIONS are still flagged.
     expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old [Schedule Service](/contact/) text.' })).toBe(false);
     expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+    // SERVICE-TYING half arms when the lane knows the post's service: a
+    // wrong-service estimate anchor parks a refresh (the completion gate
+    // never sees refreshes), a right-service one stays clean, and the
+    // grandfather covers anchors the live prior body already carried.
+    const termite = 'S. [Get My Free Termite Estimate](/contact/) and [Request a Lawn Care Quote](/contact/).';
+    expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+    expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: termite })).toBe(false);
+    expect(ev('S. [Get My Free Termite Estimate](/contact/) now.', { service: 'termite-control' })).toBe(false);
+    // Multi-candidate services (legacy rows: category + tag) UNION their
+    // vocabularies — a rodent tag is not constrained by the coarse pest
+    // category.
+    expect(ev('R. [Get a Rodent Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(false);
+    expect(ev('R. [Get a Lawn Care Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(true);
+    // An unresolvable service value (a non-service category) arms nothing —
+    // brief-independent behavior only.
+    expect(ev('S. [Get a Lawn Care Quote](/contact/) now.', { service: 'seasonal' })).toBe(false);
   });
 
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
@@ -2336,6 +2352,16 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // context — the quote interrupts the paragraph, so a quoted table
     // between the backticks stays visible.
     expect(guardrails.hasRawMarkdownTable('Intro `\n> | A | B |\n> | - | - |\n> tail `')).toBe(true);
+    // …nor across a LIST-ITEM opener — the bullet interrupts the paragraph,
+    // so the item's table (marker-stripped header) stays visible.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n- | A | B |\n  | - | - |\ntail `')).toBe(true);
+    // A quote-scoped fence ends with its QUOTE in the comment pre-scan too —
+    // a top-level comment after the quote is stripped, not treated as fenced.
+    expect(guardrails.hasRawMarkdownTable('> ~~~\n> x\n<!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // An ESCAPED pipe inside a code span is cell CONTENT even at block
+    // level — "| `a \| b` | c |" is a 2-cell header, no match for a 3-cell
+    // delimiter.
+    expect(guardrails.hasRawMarkdownTable('H.\n\n| `a \\| b` | c |\n| --- | --- | --- |')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

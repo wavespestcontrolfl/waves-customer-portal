@@ -1838,20 +1838,31 @@ function tenureClaimFinding(text) {
 // backslash-ESCAPED backtick (odd run) cannot OPEN a span.
 const SPAN_RE_SOURCE = '(?<!(?<!\\\\)(?:\\\\\\\\)*\\\\)(?<!`)(`+)(?!`)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \\t\\r\\n]|$))(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:(?:\\*[ \\t]*){3,}|(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,})(?:\\r?\\n|$))[\\s\\S])*?(?<!`)\\1(?!`)';
 
-// A blockquote INTERRUPTS a paragraph (CommonMark: no blank line needed), so
-// a span opened outside a quote — or at a shallower depth — can never pair
-// across a line that DEEPENS the quote context. The reverse (a quoted span
-// continuing onto a shallower or unquoted line) is lazy continuation and
-// stays a single paragraph. Checked as a match guard: the regex cannot see
-// the opening line's depth, so a crossing candidate is simply left unpaired
-// (its content stays visible — fail closed).
-function spanCrossesQuoteBoundary(whole, start, matched) {
+// Container openers INTERRUPT a paragraph (CommonMark: no blank line
+// needed), so a span can never pair across a line that DEEPENS the quote
+// context, or across a LIST-ITEM opener (a bullet item, or an ordered item
+// numbered 1 — the only ordered form that can interrupt — with non-blank
+// content). The reverse (a quoted span continuing onto a shallower or
+// unquoted line) is lazy continuation and stays a single paragraph.
+// Checked as a match guard: the regex cannot see the opening line's depth,
+// so a crossing candidate is simply left unpaired (its content stays
+// visible — fail closed).
+function spanCrossesBlockBoundary(whole, start, matched) {
   if (!matched.includes('\n')) return false;
-  const depthOf = (line) => ((line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0].match(/>/g) || []).length;
+  const prefixOf = (line) => (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
   const lineStart = whole.lastIndexOf('\n', start - 1) + 1;
   const lineEnd = whole.indexOf('\n', start);
-  const openDepth = depthOf(whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd));
-  return matched.split('\n').slice(1).some((l) => depthOf(l) > openDepth);
+  const openDepth = (prefixOf(whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)).match(/>/g) || []).length;
+  return matched.split('\n').slice(1).some((l) => {
+    const prefix = prefixOf(l);
+    if ((prefix.match(/>/g) || []).length > openDepth) return true;
+    const content = l.slice(prefix.length);
+    // A marker whose content is only pipes/colons/dashes ("- | -") is a
+    // table DELIMITER row shape, not a list interrupt — the table scanner
+    // owns those lines at block level.
+    return /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(content)
+      && !/^ {0,3}(?:[-*+]|1[.)])[ \t]+[|:\- \t]+$/.test(content);
+  });
 }
 
 function blankNonRenderedMarkdown(text) {
@@ -1864,25 +1875,44 @@ function blankNonRenderedMarkdown(text) {
   const spanScan = new RegExp(SPAN_RE_SOURCE, 'g');
   let sm;
   while ((sm = spanScan.exec(raw)) !== null) {
-    if (!spanCrossesQuoteBoundary(raw, sm.index, sm[0])) spanIntervals.push([sm.index, sm.index + sm[0].length]);
+    if (!spanCrossesBlockBoundary(raw, sm.index, sm[0])) spanIntervals.push([sm.index, sm.index + sm[0].length]);
   }
   // …and FENCED regions likewise: a delimiter inside a fence is code. A
-  // rough top-level line scan suffices here — pass 3 remains the fence
-  // authority for masking.
+  // rough line scan suffices here — pass 3 remains the fence authority for
+  // masking — but its intervals still END with their container (same
+  // posture as pass 3): a fence opened inside a blockquote or list item
+  // stops at a non-blank line outside that container, so a comment AFTER
+  // the container is stripped, never treated as fenced.
   const fenceIntervals = [];
   {
-    let pos = 0; let openCh = null; let openLen = 0; let start = 0;
+    let pos = 0; let openCh = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
     for (const line of raw.split('\n')) {
-      const strippedLine = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '');
+      const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
+      const depth = (quotePrefix.match(/>/g) || []).length;
+      // The prefix consumes leading spaces even with NO ">" markers — only
+      // strip it when it actually carries quote depth, so list-content
+      // indentation survives the container-exit comparison below.
+      const strippedLine = depth > 0 ? line.slice(quotePrefix.length) : line;
+      const blank = strippedLine.trim() === '';
+      const indent = (strippedLine.match(/^ */) || [''])[0].length;
+      if (openCh && !blank && (depth < openDepth || indent < openListIndent)) {
+        fenceIntervals.push([start, Math.max(start, pos - 1)]);
+        openCh = null;
+      }
       if (openCh) {
         const close = strippedLine.match(/^ *(`{3,}|~{3,})\s*$/);
         if (close && close[1][0] === openCh && close[1].length >= openLen) { fenceIntervals.push([start, pos + line.length]); openCh = null; }
       } else {
         // A fence may open DIRECTLY as list-item content ("- ~~~html").
-        const afterMarker = strippedLine.replace(/^ *(?:[-*+]|\d+[.)])\s+/, '');
+        const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+        const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
         const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
-          || (afterMarker !== strippedLine ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
-        if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) { openCh = opener[1][0]; openLen = opener[1].length; start = pos; }
+          || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
+        if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+          openCh = opener[1][0]; openLen = opener[1].length; start = pos;
+          openDepth = depth;
+          openListIndent = marker && depth === 0 ? marker[0].length : 0;
+        }
       }
       pos += line.length + 1;
     }
@@ -1937,14 +1967,17 @@ function blankNonRenderedMarkdown(text) {
     // is a JS template literal whose VALUE renders — an expression, not a
     // markdown code span. Leave it for the link scanners.
     if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
-    // A span cannot pair across a DEEPENING blockquote line (the quote
-    // interrupts the paragraph) — leave the candidate unpaired; its content
-    // stays visible for the link/table scanners.
-    if (spanCrossesQuoteBoundary(whole, offset, c)) return c;
+    // A span cannot pair across a DEEPENING blockquote line or a LIST-ITEM
+    // opener (both interrupt the paragraph) — leave the candidate unpaired;
+    // its content stays visible for the link/table scanners.
+    if (spanCrossesBlockBoundary(whole, offset, c)) return c;
     // UNESCAPED pipes survive the mask: GFM recognizes table rows at BLOCK
     // level, before inline code is parsed, so a pipe inside a code span is
     // still a live cell separator ("| `a | b` | c |" is a 3-cell header).
-    return c.replace(/[^\n|]/g, '\u0002');
+    // A pipe's preceding BACKSLASH RUN survives with it — "\\|" is escaped
+    // cell CONTENT even inside code (splitCells applies the same parity),
+    // so "| `a \\| b` | c |" stays a 2-cell header, not a 3-cell one.
+    return c.replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
   });
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
   // containers. Opener VALIDITY is judged on the pre-span-mask source line:
@@ -2162,15 +2195,18 @@ function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false
   return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
 }
 
-// CTA-wording hard rule (owner 2026-08-27), brief-INDEPENDENT half —
-// inspection-request anchors and wording-free actionable conversion
-// anchors — enforced HERE so every blog publish lane (manual
-// /blog/:id/publish-astro, legacy BlogWriter, refresh) carries it; the
-// brief-aware service-tying checks live in seo-completion-gate (lazy
-// require: that module requires this one at load). Refresh drafts
-// GRANDFATHER anchors the live prior body already carried — content-
-// compared, same posture as the raw-table grandfather.
-function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+// CTA-wording hard rule (owner 2026-08-27) — enforced HERE so every blog
+// publish lane (manual /blog/:id/publish-astro, legacy BlogWriter,
+// refresh) carries it, via seo-completion-gate's shared collector (lazy
+// require: that module requires this one at load). The brief-independent
+// half (inspection-request anchors, wording-free actionable conversion
+// anchors) always runs; passing the post's `service` also runs the
+// SERVICE-TYING half (estimate/quote anchors must name the post's own
+// service), so a wrong-service CTA parks on the lanes the completion gate
+// never sees. Refresh drafts GRANDFATHER anchors the live prior body
+// already carried — content-compared, same posture as the raw-table
+// grandfather.
+function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null, service = null } = {}) {
   if (!targetIsBlog) return null;
   try {
     const { collectForbiddenCtaAnchors } = require('./seo-completion-gate');
@@ -2178,15 +2214,15 @@ function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = fa
     // neutralizes the gate — skip. A require/evaluation FAILURE falls to the
     // catch below and routes to review (fail closed).
     if (typeof collectForbiddenCtaAnchors !== 'function') return null;
-    const current = collectForbiddenCtaAnchors(String(body || ''));
+    const current = collectForbiddenCtaAnchors(String(body || ''), { service });
     if (current.length === 0) return null;
     const prior = new Map();
     if (isRefresh) {
-      for (const a of collectForbiddenCtaAnchors(String(priorBody || ''))) prior.set(a, (prior.get(a) || 0) + 1);
+      for (const a of collectForbiddenCtaAnchors(String(priorBody || ''), { service })) prior.set(a, (prior.get(a) || 0) + 1);
     }
     for (const a of current) {
       const n = prior.get(a) || 0;
-      if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
+      if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording tied to the post's service, and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
       prior.set(a, n - 1);
     }
     return null;
@@ -4280,9 +4316,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // rule 2026-08-27). Body-only (a pipe table can't ship in a meta), with
     // the standard refresh grandfather.
     rawMarkdownTableFinding(body, { targetIsBlog, isRefresh, priorBody }),
-    // CTA-wording hard rule, brief-independent half — every blog lane, with
-    // the standard refresh grandfather (see forbiddenCtaWordingFinding).
-    forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody }),
+    // CTA-wording hard rule — every blog lane, with the standard refresh
+    // grandfather; the post's service (when the lane knows it) arms the
+    // service-tying half too (see forbiddenCtaWordingFinding).
+    forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody, service }),
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
