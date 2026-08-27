@@ -46,9 +46,6 @@ function formFromInitialValues(initialValues = null) {
     pipelineStage: initialValues?.pipelineStage || "new_lead",
     tags: Array.isArray(initialValues?.tags) ? initialValues.tags : [],
     notes: initialValues?.notes || "",
-    // Add-Property origin: the server pins the attach to this profile's
-    // account when the phone matches several accounts.
-    attachToCustomerId: initialValues?.attachToCustomerId || "",
   };
 }
 
@@ -130,7 +127,6 @@ export default function MobileNewCustomerSheet({
           pipelineStage: form.pipelineStage,
           tags: form.tags,
           notes: form.notes.trim() || undefined,
-          attachToCustomerId: form.attachToCustomerId || undefined,
           ...extraFlags,
         }),
       });

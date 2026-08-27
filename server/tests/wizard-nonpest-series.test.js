@@ -807,7 +807,10 @@ describe('booking route wiring (source contracts)', () => {
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);
-    expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
+    // (Pest lane: the reconciled-column read + in-transaction kept guard now
+    // sit between the generation-column read and the INSERT.)
+    expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const hasReconciledColumn = await trx\.schema\.hasColumn\('scheduled_services', 'wizard_recovery_reconciled_at'\);/);
+    expect(booking).toMatch(/const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
     const migration = require('../models/migrations/20260827000001_source_estimate_generation');
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
@@ -848,7 +851,12 @@ describe('booking route wiring (source contracts)', () => {
     // #1 customer row FOR UPDATE precedes the recurring-series advisory
     // (converter order: customers → series advisory).
     expect(booking).toMatch(/const bookedCustomerRow = await trx\('customers'\)\s*\n\s*\.where\(\{ id: custId \}\)\s*\n\s*\.forUpdate\(\)/);
-    expect(booking.indexOf("const bookedCustomerRow = await trx('customers')")).toBeLessThan(booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {'));
+    // The activation's OWN guard call (the pest lane added an earlier one
+    // inside the booking transaction) follows the customer row lock.
+    const bookedCustomerRowAt = booking.indexOf("const bookedCustomerRow = await trx('customers')");
+    const activationGuardAt = booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', bookedCustomerRowAt);
+    expect(bookedCustomerRowAt).toBeGreaterThan(0);
+    expect(activationGuardAt).toBeGreaterThan(bookedCustomerRowAt);
     // #2 the healer requires the activation-archived draft, never
     // is_recurring alone (same rule as the request path, r18).
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
@@ -974,13 +982,132 @@ describe('booking route wiring (source contracts)', () => {
     expect(wizardDraftSelfServeBookable(base({ recurringAnnual: 900, oneTimeTotal: 0, installationTotal: 500 }))).toBe(false);
   });
 
-  test('the recovery sweep never touches the PEST funnel (duplicate-kept pest visits stay billable by design)', () => {
+  test('the recovery sweep covers the PEST funnel; a duplicate-kept pest one-off is marked reconciled at kept-time (owner ruling 2026-08-27)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control' \|\| \/\\bpest\\b\/i\.test\(String\(parent\.service_type \|\| ''\)\)\) continue;/);
-    // r17: the exclusion ALSO lives in the bounded query, before the LIMIT —
-    // permanently-eligible pest rows must never pin the oldest-first page.
-    const findBody = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
-    expect(findBody).toMatch(/whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\)/);
+    // Pest is admitted only from the owner-set epoch (GATE_PEST_STRANDED_RECOVERY,
+    // ISO timestamp set AFTER the rollout completes — codex r2 P1: old
+    // instances can book an unmarked kept visit during the Railway overlap).
+    const { pestRecoveryEpoch } = require('../services/wizard-series-activation-recovery');
+    const saved = process.env.GATE_PEST_STRANDED_RECOVERY;
+    try {
+      delete process.env.GATE_PEST_STRANDED_RECOVERY;
+      expect(pestRecoveryEpoch()).toBeNull();
+      process.env.GATE_PEST_STRANDED_RECOVERY = 'not-a-date';
+      expect(pestRecoveryEpoch()).toBeNull();
+      // STRICT ISO with an explicit offset only (hook P1): a bare date, an
+      // offset-less local time, or a number never opens the gate.
+      // r4 P2: calendar-invalid values fail closed instead of normalising.
+      for (const bad of ['1', '2026-08-28', '2026-08-28T12:00:00', 'Aug 28 2026', '1756382400000', '2026-02-30T12:00:00Z', '2026-13-01T00:00:00Z', '2026-08-28T24:00:00Z', '2026-08-28T12:60:00Z']) {
+        process.env.GATE_PEST_STRANDED_RECOVERY = bad;
+        expect(pestRecoveryEpoch()).toBeNull();
+      }
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T12:00:00Z';
+      expect(pestRecoveryEpoch().toISOString()).toBe('2026-08-28T12:00:00.000Z');
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T08:00:00-04:00';
+      expect(pestRecoveryEpoch().toISOString()).toBe('2026-08-28T12:00:00.000Z');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = saved;
+    }
+    // Registered in the canonical gate registry (hook P1): read via
+    // feature-gates gateEnvTimestamp, listed for status/inspection.
+    expect(recoverySrc).toMatch(/require\('\.\.\/config\/feature-gates'\)\.gateEnvTimestamp\('GATE_PEST_STRANDED_RECOVERY'\)/);
+    expect(recoverySrc).not.toMatch(/process\.env\.GATE_PEST_STRANDED_RECOVERY/);
+    const gatesSrc = fs.readFileSync(path.join(__dirname, '..', 'config', 'feature-gates.js'), 'utf8');
+    expect(gatesSrc).toMatch(/pestStrandedRecovery: gateEnvTimestamp\('GATE_PEST_STRANDED_RECOVERY'\) != null,/);
+    expect(gatesSrc).toMatch(/GATE_PEST_STRANDED_RECOVERY=<ISO timestamp>/);
+    expect(typeof require('../config/feature-gates').gateEnvTimestamp).toBe('function');
+    // r4 P1: the module must LOAD with the gate set (the gates object calls
+    // gateEnvTimestamp at module init — a TDZ here crashed boot).
+    const savedGate = process.env.GATE_PEST_STRANDED_RECOVERY;
+    try {
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T14:00:00Z';
+      let loaded;
+      jest.isolateModules(() => { loaded = require('../config/feature-gates'); });
+      expect(loaded.gates.pestStrandedRecovery).toBe(true);
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-02-30T12:00:00Z';
+      jest.isolateModules(() => { loaded = require('../config/feature-gates'); });
+      expect(loaded.gates.pestStrandedRecovery).toBe(false);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = savedGate;
+    }
+    expect(recoverySrc).toMatch(/qb\.whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\);\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(epoch\) qb\.orWhere\('ss\.created_at', '>=', epoch\);/);
+    expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control'\) \{\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(!epoch \|\| !parent\.created_at \|\| new Date\(parent\.created_at\) < epoch\) continue;/);
+    const backfillSrc0 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    expect((backfillSrc0.match(/primary_line_price IS NULL OR p\.primary_line_price <= 0/g) || []).length).toBe(2);
+    // r3: operator-reconciled series (explicit estimated_price override) are
+    // not flagged; the sweep pages by keyset so loop-skipped rows (pest
+    // labels the SQL regex cannot classify) never pin the page.
+    expect(backfillSrc0).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'estimated_price'\)/);
+    const sweepBody = recoverySrc.slice(recoverySrc.indexOf('async function sweepStrandedWizardActivations'), recoverySrc.indexOf('// Post-activation follow-through'));
+    // No page cap: the per-tick cursor would otherwise re-walk the same
+    // skipped pages every tick (hook P1).
+    expect(sweepBody).toMatch(/while \(processed < limit && !exhausted\) \{/);
+    expect(sweepBody).not.toMatch(/MAX_PAGES/);
+    expect(sweepBody).toMatch(/findStrandedParents\(database, \{ olderThanMinutes, limit, cursor \}\)/);
+    expect(recoverySrc).toMatch(/async function findStrandedParents\(database, \{ olderThanMinutes, limit, cursor = null \}\)/);
+    const findBody2 = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
+    expect(findBody2).toMatch(/whereRaw\('\(ss\.created_at, ss\.id\) > \(\?, \?\)', \[cursor\.created_at, cursor\.id\]\)/);
+    // The locked re-validation re-reads the marker and refuses a stamped row.
+    expect(recoverySrc).toMatch(/'source_estimate_generation', 'wizard_recovery_reconciled_at'\);/);
+    expect(recoverySrc).toMatch(/\|\| fresh\.wizard_recovery_reconciled_at\s*\n\s*\|\| \['cancelled', 'canceled'\]/);
+    // Pre-deploy pest one-offs are backfilled with the marker.
+    const backfill = require('../models/migrations/20260827000002_pest_recovery_backfill');
+    expect(typeof backfill.up).toBe('function');
+    expect(typeof backfill.down).toBe('function');
+    const backfillSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    expect(backfillSrc).toMatch(/hasColumn\('scheduled_services', 'wizard_recovery_reconciled_at'\)/);
+    expect(backfillSrc).toMatch(/whereRaw\("COALESCE\(ss\.service_type, ''\) ~\* '\\\\ypest\\\\y'"\)/);
+    expect(backfillSrc).toMatch(/whereNotExists\(function child\(\)/);
+    // Pest prices as the fixed quarterly-4 plan for the minted-amount proof.
+    expect(recoverySrc).toMatch(/const planVisits = family === 'pest_control' \? 4 : resolveWizardSeriesPlan\(freshDraft, planKey\)\?\.visits;/);
+    // The kept branch stamps the durable marker so the sweep can tell a
+    // deliberate one-off from a crash.
+    expect(booking).toMatch(/if \(matches\.length > 0\) \{\s*\n[\s\S]{0,900}wizard_recovery_reconciled_at: trx\.fn\.now\(\),[\s\S]{0,400}return \{ kept: matches\[0\] \};/);
+    // Pest seeds a FIXED 4-visit plan, never Ongoing.
+    expect(booking).toMatch(/pattern: 'quarterly',\s*\n\s*plannedCount: 4,[\s\S]{0,2200}recurringOngoing: false,\s*\n\s*\}\);/);
+    // Auto-extend templates off the per-visit amount for anchored splits.
+    const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(schedule).toMatch(/async function resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\)/);
+    expect(schedule).toMatch(/const extensionPriceParent = await resolveSeriesExtensionPriceTemplate\(conn, parentId, parent\);\s*\n\s*applyStoredVisitFinancials\(nextData, cols, extensionPriceParent,/);
+    // Every extension writer (auto-extend, top-up, plan-ending extend and
+    // convert) templates off the resolver — never the raw parent.
+    expect((schedule.match(/applyStoredVisitFinancials\((?:data|nextData), cols, extensionPriceParent,/g) || []).length).toBe(4);
+    expect(schedule).not.toMatch(/applyStoredVisitFinancials\(data, cols, parent,/);
+    // Explicit provenance only — never inferred from child prices.
+    expect(schedule).toMatch(/raw\.anchored_split_per_visit/);
+    expect(schedule).not.toMatch(/if \(diff >= 1\) return parent;/);
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/anchored_split_per_visit: Math\.round\(Number\(opts\.estimatedPrice\) \* 100\) \/ 100/);
+    // Duplicate-kept is decided INSIDE the booking transaction and the
+    // marker is born with the row; the post-commit seeding is skipped.
+    expect(booking).toMatch(/if \(shouldSeedQuarterlyPestFollowUps && !callbackVisit && hasReconciledColumn\) \{\s*\n\s*await trx\('customers'\)\.where\(\{ id: custId \}\)\.forUpdate\(\)\.first\('id'\);/);
+    expect(booking).toMatch(/\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),/);
+    expect(booking).toMatch(/if \(shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking\) \{/);
+    expect(booking.indexOf('const shouldSeedQuarterlyPestFollowUps =')).toBeLessThan(booking.indexOf('let txResult;'));
+    const backfillSrc2 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    // Cent-exact re-derivation from the stored annual + fixed 4-visit
+    // plan — never a price-pattern inference.
+    expect(backfillSrc2).toMatch(/FLOOR\(annual_cents \/ 4\) AS quotient_cents/);
+    expect(backfillSrc2).toMatch(/annual_cents - 3 \* FLOOR\(annual_cents \/ 4\) AS first_cents/);
+    expect(backfillSrc2).toMatch(/WHERE s\.parent_cents = s\.first_cents/);
+    // The three EARLIEST seeded follow-ups prove the split (lifetime child
+    // count irrelevant); unproven Ongoing series are surfaced, not stamped.
+    expect(backfillSrc2).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY c\.recurring_parent_id ORDER BY c\.scheduled_date ASC/);
+    expect(backfillSrc2).toMatch(/JOIN seeded c ON c\.parent_id = s\.parent_id AND c\.rn <= 3/);
+    expect(backfillSrc2).toMatch(/HAVING COUNT\(\*\) = 3/);
+    expect(backfillSrc2).toMatch(/jsonb_exists\(p\.recurring_template_overrides, 'anchored_split_per_visit'\)/);
+    expect(backfillSrc2).not.toMatch(/recurring_template_overrides \? 'anchored_split_per_visit'/);
+    expect(backfillSrc2).toMatch(/dedupeKey: 'pest-renewal-price-unverified-20260827'/);
+    expect(backfillSrc2).toMatch(/RENEWAL PRICE UNVERIFIED/);
+    // The edit lane's merge carries the provenance key across service-only
+    // edits and drops it on an explicit price edit; the resolver yields to
+    // an explicit price override.
+    expect(schedule).toMatch(/const PROVENANCE_OVERRIDE_KEYS = new Set\(\['anchored_split_per_visit'\]\);/);
+    expect(schedule).toMatch(/const priceEdit = entries\.some\(\(\[key\]\) => key === 'estimated_price'\);\s*\n\s*const merged = \{ \.\.\.\(priceEdit \? \{\} : provenance\), \.\.\.existing \};/);
+    expect(schedule).toMatch(/if \(raw\.estimated_price !== undefined && raw\.estimated_price !== null\) return parent;/);
+    expect(backfillSrc2).toMatch(/BOOL_AND\(c\.estimated_price IS NOT NULL AND ROUND\(c\.estimated_price \* 100\) = s\.quotient_cents\)/);
+    expect(backfillSrc2).not.toMatch(/< 1\s*\n/);
+    expect(backfillSrc2).toMatch(/anchored_split_per_visit/);
   });
 
   test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
