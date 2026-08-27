@@ -15,7 +15,8 @@
 
 import { useMemo, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Search, Settings as SettingsIcon } from "lucide-react";
+import AdminCommandHeader from "./AdminCommandHeader";
 
 const SECTIONS = [
   { key: "invoices", label: "Invoices", to: "/admin/invoices", adminOnly: true },
@@ -87,21 +88,7 @@ export default function MobileSettingsPage() {
   return (
     <div className="md:hidden">
       {/* Heading */}
-      <div
-        className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-        style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-      >
-        <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-          <div className="flex items-center px-4 py-3">
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-            >
-              Settings
-            </h1>
-          </div>
-        </div>
-      </div>
+      <AdminCommandHeader title="Settings" icon={SettingsIcon} />
       {/* Search pill */}
       <div
         className="flex items-center gap-3 rounded-full border-hairline border-zinc-200 bg-white"
