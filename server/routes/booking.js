@@ -2234,18 +2234,10 @@ async function createSelfBooking(payload = {}) {
               // real tree/shrub series later. Server-owned constant — the
               // client's quoted_service_label is never echoed.
               resolvedServiceType = 'Palm Injections';
-            } else if (wizardPlanKey === 'termite_bait') {
-              // Same persist-what-was-QUOTED rule for the aliased termite
-              // funnel: its generic label is 'Termite Inspection', which
-              // appointment-tagger classifies as wdo_inspection — every
-              // seeded bait-station child would inherit inspection/WDO
-              // automation instead of the bait workflow (codex #3504 r3).
-              // Server-owned constant; still serviceKeyFor-family
-              // 'termite_bait' for the duplicate guard and the under-lock
-              // re-resolution ('monitoring' also keeps the tagger off the
-              // termite_treatment bucket).
-              resolvedServiceType = 'Termite Bait Monitoring';
             }
+            // (Termite/rodent bait never reach here: the resolver's
+            // seedable-family allowlist fails them closed to today's
+            // single-visit office-converted behavior — codex #3504 r5.)
           }
         }
         const priced = pricingTrusted
@@ -3157,6 +3149,12 @@ async function createSelfBooking(payload = {}) {
                   notes: trx.raw("COALESCE(notes, '') || ' — auto-seeded follow-up: time conflicts with an existing visit; office to place'"),
                   updated_at: trx.fn.now(),
                 });
+              // Patch the RETURNED row too: insertedRows feeds the
+              // reminder-registration loop, which must see this visit as
+              // windowless and register the pre-closed placeholder — not
+              // arm 72/24h reminders for the demoted time (codex #3504 r5).
+              row.window_start = null;
+              row.window_end = null;
             }
           }
           if (setupFeeHandoffEligible) {
@@ -3528,12 +3526,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
     if (duplicateSeriesKept) {
-      logger.warn(`[booking:confirm] Skipped quarterly follow-up seeding for booking ${serviceRow.id} — customer ${custId} already has an active recurring series (series ${duplicateSeriesKept.id}); existing series kept`);
+      // Cadence-neutral wording (codex #3504 r5 P2): this block also fires
+      // for non-pest wizard plans (monthly/seasonal mosquito, every-6-weeks
+      // lawn/tree, semiannual palm) — "quarterly" would misreport what was
+      // actually skipped in the ops log and the customer activity audit.
+      logger.warn(`[booking:confirm] Skipped recurring follow-up seeding for booking ${serviceRow.id} — customer ${custId} already has an active recurring series (series ${duplicateSeriesKept.id}); existing series kept`);
       try {
         await db('activity_log').insert({
           customer_id: custId,
           action: 'recurring_series_skipped',
-          description: `Self-booking on ${slotDateStr}: existing recurring series kept (${duplicateSeriesKept.service_type}, series #${duplicateSeriesKept.id}${duplicateSeriesKept.next_upcoming_date ? `, next visit ${duplicateSeriesKept.next_upcoming_date}` : ''}) — no second quarterly series was seeded. The booked visit itself is unchanged.`,
+          description: `Self-booking on ${slotDateStr}: existing recurring series kept (${duplicateSeriesKept.service_type}, series #${duplicateSeriesKept.id}${duplicateSeriesKept.next_upcoming_date ? `, next visit ${duplicateSeriesKept.next_upcoming_date}` : ''}) — no second recurring series was seeded. The booked visit itself is unchanged.`,
         });
       } catch (noteErr) {
         logger.warn(`[booking:confirm] duplicate-series skip note failed: ${noteErr.message}`);
@@ -3566,7 +3568,15 @@ async function createSelfBooking(payload = {}) {
               : row.scheduled_date instanceof Date
                 ? row.scheduled_date.toISOString().slice(0, 10)
                 : String(row.scheduled_date || '').slice(0, 10));
-        const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
+        // A follow-up demoted to the windowless placeholder (conflict
+        // sweep) registers PRE-CLOSED at the canonical 08:00 slot — the
+        // office has not chosen its time, so falling back to the parent's
+        // slot_start would arm 72/24h reminders for a time nobody picked
+        // (codex #3504 r5; see registerAppointment's closeReminderWindows).
+        const isWindowlessFollowUp = row.id !== serviceRow.id && !row.window_start;
+        const windowStart = isWindowlessFollowUp
+          ? '08:00'
+          : String(row.window_start || slot_start || '08:00').slice(0, 5);
         // The primary visit confirms through the shared appointment_confirmation
         // flow (prefs/channel-aware, email fallback, reschedule link) — the
         // bespoke self_booking_confirmation template was retired 2026-07-06.
@@ -3577,7 +3587,10 @@ async function createSelfBooking(payload = {}) {
           `${scheduledDate}T${windowStart}`,
           row.service_type || resolvedServiceType,
           row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
-          { sendConfirmation: row.id === serviceRow.id },
+          {
+            sendConfirmation: row.id === serviceRow.id,
+            ...(isWindowlessFollowUp ? { closeReminderWindows: true } : {}),
+          },
         );
       }
     } catch (err) {

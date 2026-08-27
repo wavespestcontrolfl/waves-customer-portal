@@ -137,16 +137,43 @@ describe('wizardPlanServiceKey (palm identity through the tree_shrub funnel)', (
     )).toBeNull();
   });
 
+  test('ONLY the two-visit semiannual palm program activates — annual (1/yr) stays one-time lane', () => {
+    // codex #3504 r5: conversion deliberately keeps 1-application palm
+    // work out of the recurring lane; activating it would stamp the
+    // semiannual catalog identity onto a program that is not it.
+    const annualPalm = palmEstimate({ appsPerYear: 1, annual: 300, monthly: 25 });
+    expect(resolveWizardSeriesPlan(annualPalm, wizardPlanServiceKey(annualPalm, 'tree_shrub'))).toBeNull();
+  });
+
+  test('a populated-but-invalid count alias fails the whole row closed (shared converter validation)', () => {
+    // codex #3504 r5: { visitsPerYear: 6, visits: 0 } is malformed data,
+    // not an absent count — the converter's visitCountFieldsInvalid gate
+    // rejects it, and this resolver must match that contract.
+    const est = {
+      id: 'est-bad-1',
+      annual_total: 720,
+      monthly_total: 60,
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'mosquito', name: 'WaveGuard Mosquito', monthly: 60, annual: 720, perVisit: 60, visitsPerYear: 12, visits: 0 }],
+        },
+      },
+    };
+    expect(resolveWizardSeriesPlan(est, 'mosquito')).toBeNull();
+  });
+
   test('the wizard mirror persists appsPerYear (the palm line’s only cadence field)', () => {
     const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
     expect(publicQuote).toMatch(/appsPerYear: item\.appsPerYear \?\? null,/);
   });
 });
 
-// The aliased termite funnel labels its bookings 'Termite Inspection', which
-// appointment-tagger routes into wdo_inspection automation — a seeded bait
-// series must persist the quoted bait identity instead (codex #3504 r3).
-describe('termite bait through the aliased termite funnel', () => {
+// Termite/rodent bait are deliberately OUTSIDE the wizard-seedable families
+// (codex #3504 r5): activating them needs converter accept machinery this
+// route must not re-implement (termite program agreement, station
+// install/rental riders, catalog 180-min durations). They fail closed to
+// today's single-visit office-converted behavior.
+describe('seedable-family allowlist (termite/rodent excluded)', () => {
   const termiteEstimate = () => ({
     id: 'est-tb-1',
     annual_total: 420,
@@ -164,28 +191,27 @@ describe('termite bait through the aliased termite funnel', () => {
     },
   });
 
-  test('a termite-bait quote resolves a quarterly 4-visit plan', () => {
-    expect(resolveWizardSeriesPlan(termiteEstimate(), 'termite_bait'))
-      .toEqual({ pattern: 'quarterly', visits: 4 });
+  test('a termite-bait quote resolves NO wizard plan — office converts through the accept path', () => {
+    expect(resolveWizardSeriesPlan(termiteEstimate(), 'termite_bait')).toBeNull();
   });
 
-  test('a planned bait series persists the bait label, not the inspection funnel label', () => {
-    expect(booking).toMatch(/wizardPlanKey === 'termite_bait'[\s\S]{0,800}resolvedServiceType = 'Termite Bait Monitoring';/);
-    // The override must stay inside the resolved-plan branch: a genuine
-    // one-off termite inspection booking keeps its funnel label.
-    const planBranch = booking.indexOf('if (wizardSeriesPlan) {');
-    const termiteOverride = booking.indexOf("resolvedServiceType = 'Termite Bait Monitoring'");
-    expect(planBranch).toBeGreaterThan(0);
-    expect(termiteOverride).toBeGreaterThan(planBranch);
+  test('rodent_bait is not seedable either', () => {
+    const rodent = {
+      id: 'est-rb-1',
+      annual_total: 360,
+      monthly_total: 30,
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'rodent_bait', monthly: 30, annual: 360, perApp: 60, visitsPerYear: 6 }],
+        },
+      },
+    };
+    expect(resolveWizardSeriesPlan(rodent, 'rodent_bait')).toBeNull();
   });
 
-  test('the bait label keeps the termite_bait family and escapes the WDO tagger bucket', () => {
-    const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
-    expect(serviceKeyFor({ service_type: 'Termite Bait Monitoring' })).toBe('termite_bait');
-    expect(serviceKeyFor({ service_type: 'Termite Inspection' })).toBe('termite_bait');
-    const label = 'termite bait monitoring';
-    expect(label.includes('termite inspection')).toBe(false); // wdo_inspection trigger
-    expect(label.includes('monitor')).toBe(true); // termite_treatment exclusion
+  test('the allowlist is exactly the four converter-independent families', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'booking-pay-at-visit.js'), 'utf8');
+    expect(src).toMatch(/WIZARD_SEEDABLE_FAMILIES = new Set\(\['mosquito', 'lawn_care', 'tree_shrub', 'palm_injection'\]\)/);
   });
 });
 
@@ -329,6 +355,23 @@ describe('booking route wiring (source contracts)', () => {
     // codex #3504 r4: clearing only the technician left the row occupying
     // the slot in the tech-blind model.
     expect(booking).toMatch(/technician_id: null,\s*\n\s*window_start: null,\s*\n\s*window_end: null,\s*\n\s*notes: trx\.raw[\s\S]{0,200}office to place/);
+    // ...and the RETURNED row is patched too, so the reminder loop sees it
+    // windowless (codex #3504 r5).
+    expect(booking).toMatch(/row\.window_start = null;\s*\n\s*row\.window_end = null;/);
+  });
+
+  test('windowless follow-ups register PRE-CLOSED reminder placeholders, never armed 72/24h sends for an unchosen time', () => {
+    // codex #3504 r5: the registration loop's slot_start fallback would
+    // otherwise arm reminders at the parent's time for a visit the office
+    // has not placed.
+    expect(booking).toMatch(/isWindowlessFollowUp = row\.id !== serviceRow\.id && !row\.window_start/);
+    expect(booking).toMatch(/isWindowlessFollowUp \? \{ closeReminderWindows: true \} : \{\}/);
+  });
+
+  test('the duplicate-series skip log is cadence-neutral (non-pest plans are not quarterly)', () => {
+    expect(booking).toMatch(/Skipped recurring follow-up seeding for booking/);
+    expect(booking).toMatch(/no second recurring series was seeded/);
+    expect(booking).not.toMatch(/no second quarterly series was seeded/);
   });
 
   test('wizard series seed as FIXED-length plans, never Ongoing (auto-extend would rebill the remainder price)', () => {

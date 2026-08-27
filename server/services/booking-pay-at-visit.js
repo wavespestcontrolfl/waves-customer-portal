@@ -44,16 +44,19 @@ function resolveVisitsPerYear(s) {
   // activate the wrong cadence — fail closed instead. (`visits` is read at
   // all because engine mosquito lines carry ONLY it — the gap that
   // silently kept mosquito out of per-application pricing.)
-  // Alias vocabulary mirrors the converter's visitCountAliasValues (plus
-  // numeric `frequency`): palm lines carry cadence ONLY as appsPerYear, so
-  // a narrower list here silently excluded palm from series pricing while
-  // conversion still recognized it (codex #3504 r3). A fractional count
-  // (fungal palm 0.5/yr) matches no promised pattern and fails closed.
+  // The converter's SHARED count vocabulary + validation (codex #3504 r3 +
+  // r5): palm lines carry cadence ONLY as appsPerYear, and a POPULATED
+  // count alias that is not a positive number ({ visitsPerYear: 6,
+  // visits: 0 }) is malformed data, not an absent count — silently
+  // dropping it could activate a cadence the row does not cleanly state.
+  // Same fail-closed contract conversion applies to the same rows.
+  // A fractional count (fungal palm 0.5/yr) matches no promised pattern
+  // and fails closed. `frequency` stays outside the shared vocabulary
+  // (it is legitimately a pattern STRING) but a numeric one must agree.
+  const { visitCountAliasValues, visitCountFieldsConflict, visitCountFieldsInvalid } = require('./estimate-converter');
+  if (visitCountFieldsInvalid(s) || visitCountFieldsConflict(s)) return null;
   const numericCounts = [
-    s.visitsPerYear, s.visits_per_year,
-    s.appsPerYear, s.apps_per_year,
-    s.visits, s.apps,
-    s.treatmentsPerYear, s.treatments_per_year,
+    ...visitCountAliasValues(s),
     s.frequency,
   ]
     .map((v) => Number(v))
@@ -147,7 +150,21 @@ const PATTERN_PROMISED_VISITS = {
 // pattern and visit count agree. Drives non-pest funnel series seeding
 // (owner GO 2026-08-26); every ambiguity = null = today's single-visit
 // office-scheduled behavior.
+// Families the wizard self-book path may ACTIVATE a series for. Termite
+// and rodent bait are deliberately EXCLUDED (codex #3504 r5): their
+// activation is inseparable from converter accept machinery this route
+// must not re-implement — the signable termite program agreement
+// (maybeCreateTermiteProgramAgreement keys off accepted estimates),
+// station install/ownership stamping, the termite_station_rental billing
+// rider folded into bait pricing, and the catalog's own visit durations
+// (termite_bait reserves 180min; the coarse funnel books 90). Those
+// quotes fail closed to today's behavior: a single office-scheduled
+// visit, with the office converting the draft through the accept path
+// where all of that already runs.
+const WIZARD_SEEDABLE_FAMILIES = new Set(['mosquito', 'lawn_care', 'tree_shrub', 'palm_injection']);
+
 function resolveWizardSeriesPlan(estimate, serviceKey) {
+  if (!WIZARD_SEEDABLE_FAMILIES.has(serviceKey)) return null;
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   if (!picked || !serviceKey) return null;
   if (serviceKeyOf(picked.svc) !== serviceKey) return null;
@@ -169,6 +186,13 @@ function resolveWizardSeriesPlan(estimate, serviceKey) {
   }
   if (!pattern) return null;
   if (PATTERN_PROMISED_VISITS[pattern] !== picked.visits) return null;
+  // Palm: ONLY the two-visit semiannual injection program is a recurring
+  // plan (converter doctrine, codex #3504 r5) — the engine also emits
+  // appsPerYear 1 (annual preventative) and fractional fungal shapes,
+  // which conversion deliberately keeps in the one-time lane; activating
+  // them would mark the visit recurring and stamp the semiannual catalog
+  // identity onto a program that is not it.
+  if (serviceKey === 'palm_injection' && !(pattern === 'semiannual' && picked.visits === 2)) return null;
   return { pattern, visits: picked.visits };
 }
 

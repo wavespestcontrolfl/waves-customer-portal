@@ -6242,6 +6242,9 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 
 module.exports = EstimateConverter;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
+module.exports.visitCountAliasValues = visitCountAliasValues;
+module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
+module.exports.visitCountFieldsInvalid = visitCountFieldsInvalid;
 module.exports.findGrassTypeDeep = findGrassTypeDeep;
 module.exports.grassTypeToPersist = grassTypeToPersist;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
