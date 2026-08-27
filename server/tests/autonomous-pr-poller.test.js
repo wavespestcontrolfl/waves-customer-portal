@@ -153,11 +153,15 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
           if (q._filters.opportunity_id !== undefined) return Promise.resolve(briefs.find((r) => r.opportunity_id === q._filters.opportunity_id) || null);
           return Promise.resolve(null);
         }
-        // by-id lookup (head gate's human-approval read) — defaults to an
-        // unapproved row; the newer-sibling lookup in queueRowParkedState
-        // filters by opportunity_id instead.
+        // by-id lookup (the publisher-head-pin gate's fresh read) —
+        // defaults to an UNGOVERNED row (competitor-free verdict, no pin,
+        // no approval, no brief) so unrelated merge tests keep the
+        // pre-existing auto-merge behavior; the newer-sibling lookup in
+        // queueRowParkedState filters by opportunity_id instead.
         if (table === 'autonomous_runs' && q._filters.id !== undefined) {
-          return Promise.resolve(runFirst !== undefined ? runFirst : { trust_build_approved_at: null });
+          return Promise.resolve(runFirst !== undefined ? runFirst : {
+            comparison_table_result: null, draft_payload: null, trust_build_approved_at: null, brief_id: null,
+          });
         }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
@@ -208,13 +212,6 @@ beforeEach(() => {
   // exercise the awaiting_production_deploy gate.
   pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
   pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-  // Default: the PR's head carries one competitor-free blog file at the
-  // path the run's CANONICAL routes to (the head gate binds the file to the
-  // run's expected draft path), so the pre-merge named-competitor head gate
-  // (which runs the REAL comparison gate against these contents) passes for
-  // the unrelated merge tests.
-  gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.mdx', status: 'added' }]);
-  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
 });
 
 afterEach(() => {
@@ -701,55 +698,76 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     publisher.assertCodexReviewClear.mockResolvedValue(true);
   }
 
-  test('named-competitor head: auto-merge WITHHELD when autopublish eligibility is not (or no longer) met', async () => {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // Publisher-head pin (owner directive 2026-08-26, PR #3508 r12 redesign):
+  // a named-competitor-governed run auto-merges ONLY when pr.head.sha is a
+  // commit the publisher produced (draft_payload.autopublish_head_sha) or a
+  // human approved (trust_build_approved_head_sha) — any foreign push waits
+  // for a human. Intercept-class runs additionally re-check the scoped
+  // eligibility (raw brief marker + both gates) at the last instant.
+  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true }, briefId = 'brief-1' } = {}) {
+    return {
+      comparison_table_result: verdict,
+      draft_payload: JSON.stringify({
+        ...(pin ? { autopublish_head_sha: pin } : {}),
+        ...(approvedSha ? { trust_build_approved_head_sha: approvedSha } : {}),
+      }),
+      trust_build_approved_at: approvedAt,
+      brief_id: briefId,
+    };
+  }
+  const INTERCEPT_BRIEFS = [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept: true } }];
+
+  function withGatesOn(fn) {
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    return fn().finally(() => fg.isEnabled.mockRestore());
+  }
+
+  test('governed run: publisher-pinned head + eligibility → auto-merges', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      const res = await poller.pollPending();
-      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
-      expect(gh.mergePr).not.toHaveBeenCalled();
-    } finally { gate.evaluate.mockRestore(); }
-  });
-
-  test('head gate fails CLOSED when a blog file at the head is unreadable (no merge)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.getFile.mockResolvedValue(null);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('head gate fails CLOSED when a new-blog head carries NO file under src/content/blog (no merge)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/pages/about.astro', status: 'modified' }]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a HUMAN-APPROVED named-competitor run auto-merges ONLY while the head equals the approved SHA (PR r1 + r7 P1s)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      setupDb({
-        pending: [makeRun()],
-        runFirst: {
-          trust_build_approved_at: '2026-08-26T12:00:00Z',
-          draft_payload: JSON.stringify({ trust_build_approved_head_sha: 'HEADSHA1' }),
-        },
-      });
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
       greenMergePath();
       gh.mergePr.mockResolvedValue({ merged: true });
       indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
@@ -759,254 +777,81 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
       expect(gh.mergePr).toHaveBeenCalledTimes(1);
       expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
-    } finally { gate.evaluate.mockRestore(); }
+    });
   });
 
-  test('an approval for an EARLIER head does not cover a new push — withheld (PR r7 P1)', async () => {
+  test('governed run: a FOREIGN head (pin mismatch) is withheld even with eligibility (PR r12)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      setupDb({
-        pending: [makeRun()],
-        runFirst: {
-          trust_build_approved_at: '2026-08-26T12:00:00Z',
-          draft_payload: JSON.stringify({ trust_build_approved_head_sha: 'oldapprovedsha' }),
-        },
-      });
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ pin: 'publishersha' }) });
       greenMergePath();
 
       const res = await poller.pollPending();
 
-      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
       expect(gh.mergePr).not.toHaveBeenCalled();
-    } finally { gate.evaluate.mockRestore(); }
+    });
   });
 
-  test('publisher-owned targeting drift on a bound head (canonical changed, slug intact) is withheld (PR r7 P1)', async () => {
+  test('governed run with NO pin at all is withheld (legacy/unstamped rows never auto-merge)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://spoke-site.example/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a refresh head that ADDS a frozen key (robots: noindex) is withheld — full frozen-field compare (PR r9 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Better Title\nrobots: noindex\n---\n\nRefreshed body.' }
-      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nLive base copy.' }));
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a refresh head editing ONLY the editable meta fields merges (title/meta are the publisher contract)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Better Venice Pest Title\nslug: /x/\n---\n\nRefreshed body.' }
-      : { content: '---\ntitle: Pest Control Venice FL\nslug: /x/\n---\n\nLive base copy.' }));
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res = await poller.pollPending();
-
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-  });
-
-  test('a refresh PR carrying ANY asset row is withheld — publishRefresh emits markdown only (PR r9 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' },
-      { filename: 'public/images/blog/pest-control-venice-fl/hero.webp', status: 'modified' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test("a new-blog asset RENAME or DELETION is withheld even inside the post's own dir (PR r9 P1)", async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'public/images/blog/blog/test-post/hero.webp', status: 'removed' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test("a run with NO brief_id is never made eligible by the opportunity's LATEST intercept brief (PR r11 P1)", async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const fg = require('../config/feature-gates');
-    const realIsEnabled = fg.isEnabled;
-    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
-      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      setupDb({
-        // No brief_id on the run — a later intercept brief for the SAME
-        // opportunity exists but must not authorize this PR.
-        pending: [makeRun()],
-        briefs: [{ id: 'brief-late', opportunity_id: 'opp-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
-      });
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ pin: null }) });
       greenMergePath();
 
       const res = await poller.pollPending();
 
-      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
       expect(gh.mergePr).not.toHaveBeenCalled();
-    } finally {
-      fg.isEnabled.mockRestore();
-      gate.evaluate.mockRestore();
-    }
+    });
   });
 
-  test('a changed refresh head ADDING a freshness field the base lacked is withheld (PR r11 P2)', async () => {
+  test('governed run: pinned head but a kill switch is OFF → withheld (revoke works on open PRs)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Pest Control Venice FL\nupdated: "2026-08-27"\n---\n\nNew body text.' }
-      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nOld body text.' }));
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
+    greenMergePath();
 
     const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
-  test('a changed refresh head moving an ALREADY-PRESENT freshness field forward merges (publisher contract)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-08-27"\n---\n\nNew body text.' }
-      : { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-05-01"\n---\n\nOld body text.' }));
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res = await poller.pollPending();
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-  });
-
-  test('a refresh head rewriting a SERVICES-page metaTitle is withheld — frozen on non-blog targets (PR r10 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\nmetaTitle: Rewritten Near-Me Title\n---\n\nBody.' }
-      : { content: '---\nmetaTitle: Original Protected Long Title\n---\n\nBody.' }));
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a refresh head bumping modified with NO body/meta change is withheld (PR r10 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-08-27"\n---\n\nSame body.' }
-      : { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-05-01"\n---\n\nSame body.' }));
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test("a legacy BLOG refresh whose head carries the publisher's OWN backfill (page_type→post_type) merges (PR r10 P1)", async () => {
+  test('HUMAN-APPROVED head merges without eligibility while it matches; a later push is withheld (PR r1+r7)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({
-      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-r1' })],
-      briefs: [{ id: 'brief-r1', action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/blog/test-post/' }],
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: null, briefId: null, approvedAt: '2026-08-27T04:00:00Z', approvedSha: 'HEADSHA1' }),
     });
     greenMergePath();
-    publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/blog/blog/test-post.md' });
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.md', status: 'modified' }]);
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Test Post\nslug: /blog/test-post/\npost_type: seasonal\nservice_areas_tag:\n  - Venice\n---\n\nRefreshed body text.' }
-      : { content: '---\ntitle: Test Post\nslug: /blog/test-post/\npage_type: seasonal\nservice_areas_tag:\n  - Venice\n---\n\nOld body text.' }));
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
 
     const res = await poller.pollPending();
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
-  });
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
 
-  test('a FLAT departed file whose base slug routes elsewhere is withheld; a same-route one passes (PR r10 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/test-post.md' },
-    ]);
-    // Base copy of the departed flat file routes to a DIFFERENT category.
-    gh.getFile.mockImplementation(async (path, ref) => (path === 'src/content/blog/test-post.md'
-      ? { content: '---\ntitle: Other Post\nslug: /lawn-care/test-post/\n---\n\nUnrelated lawn post.' }
-      : { content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' }));
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-
-    // Same-route flat departure (its base slug routes here) passes.
+    // Same approval, moved head → withheld.
     jest.clearAllMocks();
     pagesPoll.liveUrlResponds.mockResolvedValue(true);
     pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
     pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-    setupDb({ pending: [makeRun()] });
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: null, briefId: null, approvedAt: '2026-08-27T04:00:00Z', approvedSha: 'olderapprovedsha' }),
+    });
     greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/test-post.md' },
-    ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
 
     const res2 = await poller.pollPending();
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
-  });
-
-  test('a refresh head that rewrites the frozen target slug/canonical is withheld (PR r7 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    // Base (main) copy vs head copy differ on a frozen field.
-    gh.getFile.mockImplementation(async (path, ref) => (ref
-      ? { content: '---\ntitle: Pest Control Venice FL\ncanonical: https://elsewhere.example/x/\n---\n\nRewritten head.' }
-      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nLive base copy.' }));
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(res2.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
-  test('a LEGACY FLAT blog file at the canonical leaf passes the path binding when its slug routes to the canonical (PR r1 P1)', async () => {
+  test('an UNGOVERNED run (competitor-free verdict, no intercept brief, no approval) keeps the ordinary auto-merge', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
     greenMergePath();
-    // CANONICAL routes to /blog/test-post/ — the flat legacy file keeps the
-    // leaf at the blog root and routes by frontmatter slug, which must match.
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -1017,352 +862,15 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
   });
 
-  test('a NESTED file whose FRONTMATTER slug routes elsewhere is withheld too (PR r4 P1)', async () => {
+  test('an UNREADABLE run row on a governed lane fails closed (no merge)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
+    setupDb({ pending: [makeRun()], runFirst: null });
     greenMergePath();
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /lawn-care/other-route/\n---\n\nContent routed away from the expected path.' });
 
     const res = await poller.pollPending();
 
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
     expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a REMOVED unrelated blog file withholds the merge; a same-route .md migration counterpart does not (PR r4 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/content/blog/pest-control/unrelated-post.md', status: 'removed' },
-    ]);
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-
-    // Same-route .md→.mdx migration counterpart is legitimate.
-    jest.clearAllMocks();
-    pagesPoll.liveUrlResponds.mockResolvedValue(true);
-    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
-    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/content/blog/blog/test-post.md', status: 'removed' },
-    ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res2 = await poller.pollPending();
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
-  });
-
-  test('a RENAME from an unrelated blog path withholds; a same-route .md→.mdx migration rename merges (PR r5 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    // GitHub reports a rename as ONE row: filename = destination,
-    // previous_filename = deleted source (no separate 'removed' row).
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/pest-control/unrelated-source.mdx' },
-    ]);
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-
-    // Same-route migration rename is legitimate.
-    jest.clearAllMocks();
-    pagesPoll.liveUrlResponds.mockResolvedValue(true);
-    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
-    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/blog/test-post.md' },
-    ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res2 = await poller.pollPending();
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
-  });
-
-  test('a new-blog PR touching a NON-blog content file is withheld (out of the run authorization)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a new-blog PR touching a NON-content file (.astro/js/config) is withheld; its own hero asset is allowed (hook r8 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/pages/pest-control-venice-fl.astro', status: 'modified' },
-    ]);
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-
-    // The publisher's own hero asset rides fine.
-    jest.clearAllMocks();
-    pagesPoll.liveUrlResponds.mockResolvedValue(true);
-    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
-    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      // The publisher keys the hero dir by the post's route slug.
-      { filename: 'public/images/blog/blog/test-post/hero.webp', status: 'added' },
-    ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res2 = await poller.pollPending();
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
-  });
-
-  test("a new-blog PR touching ANOTHER post's hero asset is withheld — assets bind to the run's own post dir (PR r7 P1)", async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'public/images/blog/pest-control/unrelated-post/hero.webp', status: 'removed' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a new-blog PR DELETING a non-blog content file is withheld too (hook r7 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'removed' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a flat file whose FRONTMATTER slug routes elsewhere is withheld — filename alone never binds (PR r2 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /lawn-care/test-post/\n---\n\nUnrelated content routed to a different category.' });
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a possibly-TRUNCATED PR file inventory (3,000 rows) withholds the merge (PR r1 P2)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue(Array.from({ length: 3000 }, (_, i) => ({ filename: `src/pages/f${i}.astro`, status: 'modified' })));
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a SECOND blog file on the head withholds the merge — one brief authorizes one file (hook r10 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
-      { filename: 'src/content/blog/pest-control/smuggled-extra.mdx', status: 'added' },
-    ]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a blog file at a path the run canonical does not route to withholds the merge (hook r10 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/pest-control/other-post.mdx', status: 'added' }]);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  function refreshSetup() {
-    setupDb({
-      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-r1' })],
-      briefs: [{ id: 'brief-r1', action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/' }],
-    });
-    greenMergePath();
-    publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/services/pest-control-venice-fl.md' });
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' }]);
-  }
-
-  test('a refresh head touching a services page IS evaluated — competitor-flagged content is withheld (refresh is never autopublish-eligible: PR r5+r6 P1s)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      const res = await poller.pollPending();
-      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
-      expect(gh.mergePr).not.toHaveBeenCalled();
-    } finally { gate.evaluate.mockRestore(); }
-  });
-
-  test('a refresh head whose competitor-free content file IS the resolved target merges normally', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Pest Control Venice FL\n---\n\nSeasonal service details for Venice homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res = await poller.pollPending();
-
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-  });
-
-  test('a refresh brief with a RELATIVE target path still merges when bound (hook r9 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({
-      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-r1' })],
-      briefs: [{ id: 'brief-r1', action_type: 'refresh_existing_page', target_url: '/pest-control-venice-fl/' }],
-    });
-    greenMergePath();
-    publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/services/pest-control-venice-fl.md' });
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' }]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Pest Control Venice FL\n---\n\nSeasonal service details for Venice homes.' });
-    gh.mergePr.mockResolvedValue({ merged: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-    const res = await poller.pollPending();
-
-    expect(gh.mergePr).toHaveBeenCalledTimes(1);
-  });
-
-  test('a refresh head touching a DIFFERENT (or extra) content file than its resolved target is withheld (PR r6 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.listPrFiles.mockResolvedValue([
-      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' },
-      { filename: 'src/content/services/pest-control-sarasota-fl.md', status: 'modified' },
-    ]);
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a refresh head with ZERO content files is withheld — no longer treated as clean (PR r6 P1)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    refreshSetup();
-    gh.listPrFiles.mockResolvedValue([{ filename: 'src/pages/about.astro', status: 'modified' }]);
-
-    const res = await poller.pollPending();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('head gate fails CLOSED when the PR files cannot be listed (no merge)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    gh.listPrFiles.mockRejectedValue(new Error('gh unavailable'));
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('a head whose comparison gate FAILS outright is withheld even with eligibility (no merge)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
-    greenMergePath();
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({
-      pass: false,
-      findings: [{ severity: 'P0', code: 'COMPARISON_DISPARAGEMENT' }],
-      requiresHumanReview: false,
-    });
-    try {
-      const res = await poller.pollPending();
-      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
-      expect(gh.mergePr).not.toHaveBeenCalled();
-    } finally { gate.evaluate.mockRestore(); }
-  });
-
-  test('named-competitor head: auto-merge proceeds when the TRUE-intercept marker and both gates hold at merge time', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const fg = require('../config/feature-gates');
-    const realIsEnabled = fg.isEnabled;
-    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
-      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
-    const gate = require('../services/content/comparison-table-gate');
-    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
-    try {
-      setupDb({
-        pending: [makeRun({ brief_id: 'brief-1' })],
-        briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept: true } }],
-      });
-      greenMergePath();
-      gh.mergePr.mockResolvedValue({ merged: true });
-      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-      publisher.planInternalLinksForTarget.mockResolvedValue(null);
-
-      const res = await poller.pollPending();
-
-      expect(gh.mergePr).toHaveBeenCalledTimes(1);
-      // The gate judged the CURRENT head's file, fetched at pr.head.sha.
-      expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/blog/test-post.mdx', 'headsha1');
-      expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
-    } finally {
-      fg.isEnabled.mockRestore();
-      gate.evaluate.mockRestore();
-    }
   });
 
   test('flag on + green head build but Codex NOT clear: no merge', async () => {

@@ -857,446 +857,93 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
-  // 3.5 Named-competitor merge gate (owner directive 2026-08-26): re-run the
-  //    deterministic comparison gate against the CURRENT HEAD's blog files —
-  //    not a stored verdict, which is unbound to the head and could be stale
-  //    after a remediation/human push (hook r7 P1). Fail-closed throughout:
-  //    an unlistable PR, unreadable/unparseable file, or thrown gate
-  //    withholds the merge. A head that FAILS the gate outright is withheld
-  //    (a deterministic competitor finding reached a green build); a PASSING
-  //    head that names competitors (requiresHumanReview) merges only while
-  //    the scoped autopublish eligibility (TRUE-intercept marker on the
-  //    reviewed brief + BOTH named-competitor gates) holds RIGHT NOW — so
+  // 3.5 Publisher-head pin — the named-competitor merge gate (owner
+  //    directive 2026-08-26; PR #3508 r12 redesign). Instead of re-deriving
+  //    the publisher's entire output function against the current head
+  //    (file sets, routes, frontmatter, freshness — an approach that could
+  //    never provably equal the publisher), the gate enforces ONE
+  //    invariant: an unattended merge on a named-competitor-governed run is
+  //    allowed only when pr.head.sha IS a commit the publisher produced —
+  //    the original publish commit (draft_payload.autopublish_head_sha,
+  //    stamped from the publisher's own commit response) or the head a
+  //    HUMAN approved (trust_build_approved_head_sha). Codex remediation
+  //    re-pins to its fix commit after its own gate pipeline vets it. Every
+  //    pinned head therefore already passed the runner's or remediation's
+  //    full gates (comparison gate + scoped eligibility included) on
+  //    EXACTLY this content; any foreign push — human or agent — waits for
+  //    a human merge. The kill switch stays live: for intercept-class runs
+  //    the scoped eligibility (raw persisted brief marker + BOTH
+  //    named-competitor gates) is re-checked at this last instant, so
   //    unsetting GATE_NAMED_COMPETITOR_AUTOPUBLISH (or
-  //    GATE_NAMED_COMPETITOR_COMPARISON) during the build/Codex window stops
-  //    an already-open competitor PR from publishing.
-  let comparisonRequiresReview = true;
-  let comparisonBlocked = true;
-  try {
-    const prFiles = await gh.listPrFiles(pr.number);
-    // A non-array or a result at the endpoint's 3,000-file cap may be
-    // TRUNCATED — an unevaluated blog file could hide in the omitted pages
-    // (PR review P2). Throw → catch → withheld.
-    if (!Array.isArray(prFiles) || prFiles.length >= 3000) {
-      throw new Error('PR file inventory unavailable or possibly truncated');
-    }
-    // ALL live content markdown on the head — refresh runs legitimately
-    // target non-blog files (src/content/services/*.md etc.), and their
-    // competitor content must be judged the same way (PR r5 P1: an
-    // intercept refresh of a services page previously cleared both flags
-    // unevaluated).
-    const contentFiles = prFiles.filter((f) => (
-      /^src\/content\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
-    const blogFiles = contentFiles.filter((f) => /^src\/content\/blog\//.test(String(f?.filename || '')));
-    // Populated by the new-blog binding below: the EXACT hero files the
-    // publisher can emit for THIS run's post (hero.<ext> in its route-keyed
-    // dir — publishOrUpdatePage commits at most that one generated asset;
-    // publishRefresh writes ONLY its markdown target, so the refresh lane
-    // allows no asset rows at all). Anything else under the image tree —
-    // other filenames, renames, deletions — is not publisher output and
-    // withholds (PR r7/r9 P1s).
-    let allowedAssetRe = null;
-    // Bind the run's single-brief authorization to its OWN generated file
-    // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
-    // blog file, and its path must be the one the run's canonical routes to
-    // (src/content/blog{pathname}.mdx|.md) — otherwise an extra blog file
-    // smuggled onto an eligible intercept PR would ride that brief's
-    // competitor authorization. Unparseable payload/canonical fails closed.
-    // Every file's frontmatter slug is additionally verified against this
-    // expected route inside the loop below (PR r2/r4 P1s: Astro routes blog
-    // entries by frontmatter, so a filename alone — nested OR flat — never
-    // binds; a bound-looking file whose slug routes elsewhere would merge
-    // unrelated content under the brief's authorization).
-    let boundExpectedPath = null;
-    // Publisher-owned targeting fields the head must still carry: for a
-    // new-blog run, the STAMPED draft's canonical/domains/tracking (PR r7
-    // P1: a head that keeps the slug but redirects canonical or fans
-    // domains out to an unauthorized site must withhold); for a refresh,
-    // the LIVE target's own frozen frontmatter fetched from main.
-    let boundTargetingWant = null;
-    let boundTargetingKeys = [];
-    // Strict mode (refresh): every key compares, absent-vs-present is drift.
-    // Non-strict (new blog): keys the stamped draft omits are skipped.
-    let boundTargetingStrict = false;
-    // Raw base content of the refresh target (main), so the loop can tell
-    // whether the head actually changed the body (the publisher bumps
-    // modified/updated only alongside a real body/meta change — PR r10 P1).
-    let boundTargetingBaseContent = null;
-    // Canonical value comparison: key-sorted object stringify, so a
-    // remediation-re-emitted mapping with different YAML key order is NOT
-    // drift (PR r10 P2 — same semantics as frontmatterFixViolation's
-    // canonValue).
-    const canonVal = (v) => {
-      const sort = (x) => (x && typeof x === 'object' && !Array.isArray(x)
-        ? Object.keys(x).sort().reduce((o, k) => { o[k] = sort(x[k]); return o; }, {})
-        : (Array.isArray(x) ? x.map(sort) : x));
-      return JSON.stringify(sort(v ?? null));
-    };
-    if (run.action_type === 'new_supporting_blog') {
-      let boundOk = false;
-      try {
-        // A new-blog PR commits exactly its own post — any OTHER content
-        // markdown (a services page, another post) is out of this run's
-        // authorization and withholds.
-        if (blogFiles.length === 1 && contentFiles.length === 1) {
-          let dp = run.draft_payload;
-          if (typeof dp === 'string') dp = JSON.parse(dp);
-          const canon = dp?.frontmatter?.canonical;
-          const expectedPath = new URL(String(canon)).pathname.replace(/\/?$/, '/');
-          const leaf = expectedPath.replace(/\/$/, '').split('/').pop();
-          const fileRoute = (name) => `${String(name).replace(/^src\/content\/blog/, '').replace(/\.(md|mdx)$/, '')}/`;
-          // The nested category path is canonical, but the publisher also
-          // updates a LEGACY FLAT file in place (src/content/blog/{leaf}.mdx
-          // routing by frontmatter slug) when the existing post lives there —
-          // accept that leaf too (PR review P1), subject to the slug check
-          // in the loop below.
-          const routeMatches = (name) => fileRoute(name) === expectedPath
-            || (Boolean(leaf) && fileRoute(name) === `/${leaf}/`);
-          // Content rows LEAVING the tree — ANY src/content markdown, not
-          // just the blog subtree (hook r7 P1: a services-page deletion must
-          // not ride this PR either) — are legitimate only as the expected
-          // post's own same-route .md↔.mdx migration counterpart (PR r4
-          // P1). GitHub reports a RENAME as one row whose previous_filename
-          // is the deleted source (no separate 'removed' row) — treat every
-          // previous_filename as a removal too (PR r5 P1: renaming an
-          // unrelated post into the expected route would otherwise delete
-          // the source unevaluated).
-          const departing = [
-            ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
-            ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
-          ].filter((name) => /^src\/content\/.+\.(md|mdx)$/.test(String(name || '')));
-          let departingOk = true;
-          for (const name of departing) {
-            if (!/^src\/content\/blog\//.test(String(name || '')) || !routeMatches(name)) { departingOk = false; break; }
-            // A FLAT-leaf departure routes by its FRONTMATTER slug, not its
-            // filename — verify the deleted file's BASE (main) copy actually
-            // routed to the expected path, or a same-leaf file from another
-            // category would be deleted under this PR's authorization
-            // (PR r10 P1). Nested departures are path==slug by the astro
-            // guardrail. Unreadable base fails closed.
-            if (fileRoute(name) !== expectedPath) {
-              const fmModB = require('../content-astro/frontmatter');
-              const baseGone = await gh.getFile(name);
-              if (!baseGone || typeof baseGone.content !== 'string' || !baseGone.content.trim()) { departingOk = false; break; }
-              const goneSlug = String(((fmModB.parse(baseGone.content) || {}).data || {}).slug || '');
-              const goneSlugPath = `/${goneSlug.replace(/^\/+|\/+$/g, '')}/`;
-              if (!goneSlug.trim() || goneSlugPath !== expectedPath) { departingOk = false; break; }
-            }
-          }
-          if (departingOk && routeMatches(blogFiles[0].filename)) {
-            boundOk = true;
-            boundExpectedPath = expectedPath;
-            // The publisher keys this post's image dir by its route slug —
-            // nested and (legacy flat) leaf forms both allowed. Image files
-            // only, directly in the post's OWN directory: today the
-            // publisher emits hero.<ext>, and the engine's ≥3-images-per-
-            // post rule (owner directive 2026-08-27; the companion
-            // image-pipeline PR) adds body images to this same directory —
-            // this dir-scoped allowance is that deliberate contract, while
-            // renames/deletions and any path outside the post's own dir
-            // still withhold (PR r9 P1).
-            const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const trimmed = expectedPath.replace(/^\/+|\/+$/g, '');
-            const dirs = [trimmed, leaf].filter(Boolean).map(esc);
-            if (dirs.length) {
-              allowedAssetRe = new RegExp(`^public/images/blog/(${dirs.join('|')})/[A-Za-z0-9._-]+\\.(webp|png|jpg)$`);
-            }
-            // Targeting fields present on the stamped draft must survive on
-            // the head verbatim.
-            boundTargetingWant = (dp && dp.frontmatter) || null;
-            boundTargetingKeys = ['canonical', 'domains', 'tracking'];
-          }
-        }
-      } catch (_) { boundOk = false; }
-      if (!boundOk) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR blog files (or removals) do not match the run's single expected draft route — PR left open for a human decision`);
-        return { pending: true, reason: 'named_competitor_head_gate_failed' };
-      }
-    } else if (run.action_type === 'refresh_existing_page') {
-      // A refresh PR is bound to its ONE reviewed target file (PR r6 P1):
-      // the live changed content set must be exactly the Astro source the
-      // brief's target resolves to, and no other content file may leave the
-      // tree — otherwise a changed head could delete/move the intended page
-      // or merge unrelated content under the refresh brief's authorization.
-      // Resolution or lookup failure fails closed (withheld; the 2-min tick
-      // retries transient hiccups).
-      let boundOk = false;
-      try {
-        const publisher = require('../content-astro/astro-publisher');
-        const runner = require('./autonomous-runner');
-        const brief = await runner._loadReviewedBrief(run);
-        const target = brief?.target_url || brief?.page_url || null;
-        const resolved = (target && typeof publisher.resolveExistingAstroFileForTarget === 'function')
-          ? await publisher.resolveExistingAstroFileForTarget(target)
-          : null;
-        const expected = resolved?.path || null;
-        if (expected) {
-          const departing = [
-            ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
-            ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
-          ].filter((name) => /^src\/content\/.+\.(md|mdx)$/.test(String(name || '')));
-          boundOk = contentFiles.length === 1
-            && contentFiles[0].filename === expected
-            && departing.every((name) => name === expected);
-          if (boundOk) {
-            // publishRefresh FREEZES the target: it starts from the live
-            // frontmatter and edits ONLY the four editable meta fields (its
-            // REFRESH_EDITABLE_META_FIELDS contract), bumping freshness
-            // programmatically — so EVERY other head frontmatter key must
-            // equal the LIVE target's own copy on main, and no frozen key
-            // may be added or removed (PR r7 + r9 P1s: slug/canonical were
-            // covered, but robots/schema/tracking-key rewrites were not).
-            // Unreadable base fails closed.
-            const fmMod = require('../content-astro/frontmatter');
-            const baseFile = await gh.getFile(expected);
-            if (!baseFile || typeof baseFile.content !== 'string' || !baseFile.content.trim()) {
-              boundOk = false;
-            } else {
-              boundTargetingWant = (fmMod.parse(baseFile.content) || {}).data || {};
-              boundTargetingBaseContent = baseFile.content;
-              // A legacy BLOG target gets the publisher's own deterministic
-              // backfill (post_type mapped from page_type, page_type
-              // consumed, service_areas_tag) — normalize the BASE
-              // expectation the same way so those publisher-generated
-              // changes never read as frozen-field drift (PR r10 P1).
-              // Backfill failure leaves the raw base (stricter: withholds).
-              if (/^src\/content\/blog\//.test(expected)) {
-                try {
-                  const normalized = JSON.parse(JSON.stringify(boundTargetingWant));
-                  publisher._internals.backfillLegacyBlogRequiredFields(normalized, brief || {});
-                  boundTargetingWant = normalized;
-                } catch (_) { /* keep raw base */ }
-              }
-              boundTargetingStrict = true;
-            }
-          }
-        }
-      } catch (_) { boundOk = false; }
-      if (!boundOk) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: refresh PR content files do not match the reviewed target's Astro source — PR left open for a human decision`);
-        return { pending: true, reason: 'named_competitor_head_gate_failed' };
-      }
-    }
-    // EVERY row on a bound lane must be in the publisher's expected output
-    // set (PR r6/r7/r9 P1s): the content markdown judged by the binding +
-    // comparison checks, or the ONE hero file the publisher can emit for
-    // this post (added/modified only — the publisher never renames or
-    // deletes assets; publishRefresh emits no assets at all, so refresh
-    // heads allow none). Any other row (.astro pages, JS modules, config,
-    // shared assets, other filenames under the image tree) is outside the
-    // single brief's authorization and withholds: a green build +
-    // Codex-clear review must not let it ride an unattended merge.
-    if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
-      const contentMd = (n) => /^src\/content\/.+\.(md|mdx)$/.test(n);
-      const unexpected = prFiles.find((f) => {
-        const name = String(f?.filename || '');
-        const prev = String(f?.previous_filename || '');
-        if (contentMd(name) && (!prev || contentMd(prev))) return false;
-        if (allowedAssetRe && allowedAssetRe.test(name) && !prev && f.status !== 'removed') return false;
-        return true;
-      });
-      if (unexpected) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR touches a file outside the publisher's expected output set (${unexpected.filename}) — PR left open for a human decision`);
-        return { pending: true, reason: 'named_competitor_head_gate_failed' };
-      }
-    }
-    if (contentFiles.length) {
-      const fmMod = require('../content-astro/frontmatter');
-      const comparisonMod = require('./comparison-table-gate');
-      const runner = require('./autonomous-runner');
-      let namedEnabled = false;
-      try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
-      // Operator authorization context — same inputs the runner's gate run
-      // used. Load failures leave it empty, which only makes the gate
-      // STRICTER (operator-authorized mentions read as unauthorized → fail
-      // → withheld).
-      let opText = '';
-      try {
-        const opp = run.opportunity_id ? await db('opportunity_queue').where('id', run.opportunity_id).first() : null;
-        const brief = await runner._loadReviewedBrief(run);
-        opText = runner._internals.operatorBriefTextForComparisonGate(opp, brief) || '';
-      } catch (_) { opText = ''; }
-      comparisonRequiresReview = false;
-      comparisonBlocked = false;
-      for (const f of contentFiles) {
-        const file = await gh.getFile(f.filename, pr.head?.sha);
-        // An unreadable file (404/null content) must WITHHOLD, not evaluate
-        // as an empty — clean — draft (hook r8 P1).
-        if (!file || typeof file.content !== 'string' || !file.content.trim()) { comparisonBlocked = true; break; }
-        const parsed = fmMod.parse(file.content);
-        // Astro routes blog entries by FRONTMATTER slug — nested and flat
-        // alike, the fetched file's slug must route to the run's expected
-        // path, or the binding above was satisfied by filename alone
-        // (PR r2 + r4 P1s). Missing/foreign slug fails closed.
-        if (boundExpectedPath && /^src\/content\/blog\//.test(String(f.filename || ''))) {
-          const rawSlug = String((parsed && parsed.data && parsed.data.slug) || '');
-          const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
-          if (!rawSlug.trim() || slugPath !== boundExpectedPath) { comparisonBlocked = true; break; }
-        }
-        // Publisher-owned frontmatter drift (PR r7 + r9 P1s). New-blog lane:
-        // the stamped draft's canonical/domains/tracking must survive on the
-        // head verbatim. Refresh lane (strict): EVERY key except the
-        // publisher's editable meta fields + the programmatic freshness bump
-        // must equal the live target's copy — added, removed, or changed
-        // frozen keys (robots, schema, tracking keys, hero refs, …) all
-        // withhold.
-        if (boundTargetingWant) {
-          const headFm = (parsed && parsed.data) || {};
-          let drift = false;
-          if (boundTargetingStrict) {
-            // Mirror publishRefresh's EXACT contract (PR r10 P1): the four
-            // REFRESH_EDITABLE_META_FIELDS may change ONLY when the live
-            // page already carries them; metaTitle stays FROZEN on non-blog
-            // targets (protected service metaTitles); modified/updated may
-            // move only alongside a real body/permitted-meta change; every
-            // other key must equal the (backfill-normalized) base.
-            const EDITABLE_META = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
-            const isBlogFile = /^src\/content\/blog\//.test(String(f.filename || ''));
-            const baseParsed = fmMod.parse(String(boundTargetingBaseContent || ''));
-            const bodyChanged = String(parsed?.content || '').trim() !== String(baseParsed?.content || '').trim();
-            let metaChanged = false;
-            const keys = new Set([...Object.keys(boundTargetingWant), ...Object.keys(headFm)]);
-            for (const k of keys) {
-              if (EDITABLE_META.includes(k)) {
-                const frozen = (k === 'metaTitle' && !isBlogFile) || boundTargetingWant[k] === undefined;
-                if (frozen) {
-                  if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
-                  continue;
-                }
-                // publishRefresh only ever WRITES a non-empty trimmed string
-                // over an existing editable key — it never removes one and
-                // never emits a non-string (hook r12 P1). Anything else on
-                // the head is not publisher output.
-                const got = headFm[k];
-                if (typeof got !== 'string' || !got.trim() || got !== got.trim()) { drift = true; break; }
-                if (canonVal(boundTargetingWant[k]) !== canonVal(got)) metaChanged = true;
-                continue;
-              }
-              if (k === 'modified' || k === 'updated') continue; // re-checked below
-              if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
-            }
-            // Freshness fields mirror the publisher's EXACT mutation (PR
-            // r11 P2 + r13 P1): with no body/meta change both must be
-            // untouched. With a change, publishRefresh bumps exactly the
-            // field the live page uses — `modified` if present, else
-            // `updated` — so the SELECTED field must move forward (real
-            // date, never before the base, never past tomorrow) or already
-            // sit within the same-day no-op window, the OTHER field must be
-            // untouched, and neither may be added or removed.
-            if (!drift) {
-              const selected = boundTargetingWant.modified !== undefined
-                ? 'modified'
-                : (boundTargetingWant.updated !== undefined ? 'updated' : null);
-              for (const k of ['modified', 'updated']) {
-                const want = boundTargetingWant[k];
-                const got = headFm[k];
-                if (!bodyChanged && !metaChanged) {
-                  if (canonVal(want) !== canonVal(got)) { drift = true; break; }
-                  continue;
-                }
-                if ((want === undefined) !== (got === undefined)) { drift = true; break; }
-                if (want === undefined) continue;
-                if (k !== selected) {
-                  if (canonVal(want) !== canonVal(got)) { drift = true; break; }
-                  continue;
-                }
-                if (canonVal(want) !== canonVal(got)) {
-                  const b = Date.parse(String(want));
-                  const h = Date.parse(String(got));
-                  if (!Number.isFinite(h) || (Number.isFinite(b) && h < b) || h > Date.now() + 86400000) { drift = true; break; }
-                } else {
-                  // Unchanged selected field is publisher output only as a
-                  // same-day no-op — the base stamp must be recent (48h
-                  // covers a publish-day stamp merged overnight).
-                  const b = Date.parse(String(want));
-                  if (!Number.isFinite(b) || (Date.now() - b) > 172800000) { drift = true; break; }
-                }
-              }
-            }
-          } else {
-            for (const k of boundTargetingKeys) {
-              if (boundTargetingWant[k] === undefined) continue;
-              if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
-            }
-          }
-          if (drift) { comparisonBlocked = true; break; }
-        }
-        const verdict = comparisonMod.evaluate(
-          { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
-          { namedCompetitorEnabled: namedEnabled, operatorBriefText: opText },
-        );
-        if (!verdict || verdict.pass !== true) { comparisonBlocked = true; break; }
-        if (verdict.requiresHumanReview === true) comparisonRequiresReview = true;
-      }
-    } else if (run.action_type !== 'new_supporting_blog') {
-      // No content markdown in the PR at all and not the blog lane: nothing
-      // for the comparison gate to judge. A new_supporting_blog head with NO
-      // content file keeps the fail-closed default instead — its generated
-      // file was deleted or moved out of the gated tree (hook r8 P1), which
-      // is never a state this lane should auto-merge.
-      comparisonRequiresReview = false;
-      comparisonBlocked = false;
-    }
-  } catch (_) { comparisonRequiresReview = true; comparisonBlocked = true; }
-  if (comparisonBlocked) {
-    logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: current-head comparison gate failed or was unreadable — PR left open for a human decision`);
-    return { pending: true, reason: 'named_competitor_head_gate_failed' };
-  }
-  if (comparisonRequiresReview) {
-    let eligible = false;
-    // A HUMAN-APPROVED named-competitor run (approve-autonomous-run.js →
-    // _approveNamedCompetitorLocked) carries trust_build_approved_at and is
-    // parked at astro_pr_pending_merge precisely for this poller to merge —
-    // that approval IS the sign-off, independent of the scoped autopublish
-    // eligibility (PR review P1: non-intercept approvals must keep working).
-    // The approval binds to the HEAD the operator approved (PR r7 P1): the
-    // approve path stamps draft_payload.trust_build_approved_head_sha from
-    // the PR it opened, and a later push (even comparison-gate-clean copy)
-    // invalidates it — missing or mismatched SHA falls through to the
-    // scoped check. Fresh read; a failed read also falls through.
+  //    GATE_NAMED_COMPETITOR_COMPARISON) stops an already-open PR.
+  //    Ordinary (non-competitor, non-intercept, non-approved) runs keep the
+  //    pre-existing green-build + Codex-clear auto-merge unchanged.
+  if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
+    let verdictFlagged = true; // fail closed until a valid verdict is read
+    let approvedShaOk = false;
+    let pinnedShaOk = false;
+    let interceptClass = false;
+    let approvedAt = null;
+    let rawBrief = null;
     try {
-      const freshRun = await db('autonomous_runs').where('id', run.id).first('trust_build_approved_at', 'draft_payload');
-      if (freshRun && freshRun.trust_build_approved_at) {
-        let dp = freshRun.draft_payload;
+      const fresh = await db('autonomous_runs').where('id', run.id)
+        .first('comparison_table_result', 'draft_payload', 'trust_build_approved_at', 'brief_id');
+      if (fresh) {
+        let ctr = fresh.comparison_table_result;
+        if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
+        // A stored NULL verdict is a valid competitor-free read; missing
+        // row/unparseable stays flagged (fail closed).
+        if (ctr !== undefined) verdictFlagged = Boolean(ctr && ctr.requiresHumanReview === true);
+        let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
-        const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
         const headSha = String(pr.head?.sha || '').toLowerCase();
-        if (approvedSha && headSha && approvedSha === headSha) eligible = true;
-      }
-    } catch (_) { /* fall through */ }
-    if (!eligible) {
-      try {
-        const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
-        // Bind to the run's EXACT brief via a RAW load (PR r11 + r13 P1s):
-        // _loadReviewedBrief both falls back to the opportunity's LATEST
-        // brief and SYNTHESIZES a missing gsc_signal.intercept from the
-        // opportunity's CURRENT signal_metadata — either path could let a
-        // later intercept payload authorize an older PR it never produced.
-        // Only the brief row's own PERSISTED marker counts here; a run
-        // without a resolvable brief_id, or a marker-less legacy brief, is
-        // simply ineligible (fail closed).
-        let brief = null;
-        if (run.brief_id) {
-          const row = await db('content_briefs').where('id', run.brief_id).first('gsc_signal', 'action_type');
+        const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
+        pinnedShaOk = Boolean(pinned && headSha && pinned === headSha);
+        approvedAt = fresh.trust_build_approved_at || null;
+        const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+        approvedShaOk = Boolean(approvedAt && approvedSha && headSha && approvedSha === headSha);
+        // Intercept-class from the brief row's RAW persisted marker only
+        // (PR r11 + r13 P1s): no _loadReviewedBrief — its
+        // latest-for-opportunity fallback and signal_metadata backfill
+        // could each let a later intercept payload authorize this PR.
+        if (fresh.brief_id) {
+          const row = await db('content_briefs').where('id', fresh.brief_id).first('gsc_signal', 'action_type');
           if (row) {
             let gs = row.gsc_signal;
             if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
-            brief = { action_type: row.action_type, gsc_signal: gs };
+            rawBrief = { action_type: row.action_type, gsc_signal: gs };
+            interceptClass = gs?.intercept === true;
           }
         }
-        eligible = namedCompetitorAutopublishEligible(brief) === true;
-      } catch (_) { eligible = false; }
+      }
+    } catch (_) {
+      verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
     }
-    if (!eligible) {
-      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
-      return { pending: true, reason: 'named_competitor_autopublish_revoked' };
+    const governed = verdictFlagged || interceptClass || Boolean(approvedAt);
+    if (governed) {
+      if (!pinnedShaOk && !approvedShaOk) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: head ${pr.head?.sha || 'unknown'} is not a publisher-pinned or human-approved commit — PR left open for a human decision`);
+        return { pending: true, reason: 'publisher_head_pin_failed' };
+      }
+      if (!approvedShaOk) {
+        let eligible = false;
+        try {
+          const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
+          eligible = namedCompetitorAutopublishEligible(rawBrief) === true;
+        } catch (_) { eligible = false; }
+        if (!eligible) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
+          return { pending: true, reason: 'named_competitor_autopublish_revoked' };
+        }
+      }
     }
   }
 
-  // 3.6 Repeat the queue-state re-check: step 3.5 added real network time
-  //    (listPrFiles/getFile + brief lookups), so an operator requeue/dismiss
-  //    landing during it must still block the merge — only the PR SHA is
-  //    pinned by the merge call itself, not the queue decision.
+
+  // 3.6 Repeat the queue-state re-check: step 3.5 added async work (run +
+  //    brief reads), so an operator requeue/dismiss landing during it must
+  //    still block the merge — only the PR SHA is pinned by the merge call
+  //    itself, not the queue decision.
   if (!(await queueRowStillParked(run))) {
     logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during head-gate checks (operator action)`);
     return { pending: true, reason: 'queue_row_moved_during_gating' };

@@ -2260,12 +2260,36 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
-    // No comparison-verdict persistence here (PR r3 P2): the poller's merge
-    // gate independently re-evaluates every current-head blog file, so a
-    // stored verdict cannot protect the merge — persisting it only turned a
-    // transient DB failure into a post-push human-reconciliation park.
+    // Re-pin the run to THIS fix commit (PR r12): the poller's merge gate
+    // only auto-merges publisher-produced heads
+    // (draft_payload.autopublish_head_sha), and the remediation push is the
+    // new publisher output — its own gate pipeline (validateFixedBlogFile +
+    // validateAutonomousRunGates, eligibility included) just vetted it. A
+    // throw here post-push-parks the PR (fail closed: an unpinned fix head
+    // must wait for a human, never merge unverified).
     onRemediated: run && run.id
-      ? ({ frontmatterChanges }) => mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges)
+      ? async ({ frontmatterChanges, newHead }) => {
+        // Best-effort re-pin: a missing row or unparseable payload SKIPS the
+        // stamp (warn) rather than parking — an unpinned head simply cannot
+        // auto-merge on a governed run (the poller's pin check fails
+        // closed), and overwriting a corrupt payload would destroy data.
+        if (newHead) {
+          try {
+            const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+            let dp = fresh ? fresh.draft_payload : undefined;
+            if (typeof dp === 'string') dp = JSON.parse(dp);
+            if (fresh && (dp === null || dp === undefined || typeof dp === 'object')) {
+              const next = (dp && typeof dp === 'object') ? dp : {};
+              next.autopublish_head_sha = newHead;
+              await db('autonomous_runs').where({ id: run.id })
+                .update({ draft_payload: JSON.stringify(next), updated_at: new Date() });
+            }
+          } catch (e) {
+            logger.warn(`[codex-remediation] autopublish head re-pin skipped for run ${run.id}: ${e.message} — a governed merge of this head will wait for a human`);
+          }
+        }
+        return mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges);
+      }
       : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered

@@ -507,7 +507,9 @@ describe('lane entry points', () => {
 
   test('autonomous lane remediates from the PR object (.mdx) once the run gates re-pass', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb();
+    // onRemediated re-pins draft_payload.autopublish_head_sha (r12) — the
+    // run row must exist for the post-push stamp.
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: '{}' }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };

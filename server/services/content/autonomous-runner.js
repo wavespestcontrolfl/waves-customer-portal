@@ -2902,23 +2902,16 @@ class AutonomousRunner {
     }
 
     const published = !!patch.published_url;
-    // Bind the approval to the exact HEAD it produced (PR #3508 r7 P1): the
-    // poller's merge gate honors trust_build_approved_at ONLY when the PR
-    // head still equals this stamped SHA — a later push (even
-    // comparison-gate-clean copy) needs a fresh sign-off. A failed SHA read
-    // leaves the stamp absent, which fails CLOSED at the poller (the PR
-    // waits for a human merge instead of auto-merging).
-    if (!published && patch.astro_pr_url && draft) {
-      try {
-        const prNum = Number((String(patch.astro_pr_url).match(/\/pull\/(\d+)/) || [])[1]);
-        if (prNum) {
-          const gh = require('../content-astro/github-client');
-          const prInfo = await gh.getPr(prNum);
-          if (prInfo?.head?.sha) draft.trust_build_approved_head_sha = prInfo.head.sha;
-        }
-      } catch (err) {
-        logger.warn(`[autonomous-runner] approved-head SHA read failed for run ${run.id}: ${err.message} — auto-merge will wait for a human`);
-      }
+    // Bind the approval to the exact COMMIT the approved publish created
+    // (PR #3508 r7 + r12 P1s): the poller's merge gate honors
+    // trust_build_approved_at ONLY when the PR head still equals this SHA —
+    // a later push (even comparison-gate-clean copy) needs a fresh
+    // sign-off. Stamped from the publisher's own commit response, never a
+    // later mutable-head read (a push landing between createPr and a head
+    // lookup could otherwise be blessed). Absent SHA fails CLOSED at the
+    // poller (the PR waits for a human merge).
+    if (!published && patch.commit_sha && draft) {
+      draft.trust_build_approved_head_sha = patch.commit_sha;
     }
     // _publishAndDistribute mutates draft.frontmatter with the published
     // canonical/domains; persist the mutated draft so the PR poller can resolve
@@ -3265,6 +3258,15 @@ class AutonomousRunner {
       out.pending_url = isLive ? null : (r?.url || draft.url || null);
       out.publish_status = r?.status || (isLive ? 'live' : (r?.pr_url ? 'pr_open' : null));
       out.astro_pr_url = r?.pr_url || null;
+      out.commit_sha = r?.commit_sha || null;
+      // Pin the PR poller's unattended merge to the EXACT commit this
+      // publish created (PR #3508 r12): the persisted draft_payload carries
+      // it, and the named-competitor merge gate refuses any head the
+      // publisher (or its remediation) did not produce. Stamped from the
+      // publisher's own commit response — never a later mutable-head read.
+      if (r?.commit_sha && draft && typeof draft === 'object') {
+        draft.autopublish_head_sha = r.commit_sha;
+      }
     } else {
       throw new Error('astro-publisher draft/brief adapter unavailable');
     }
