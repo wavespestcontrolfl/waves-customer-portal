@@ -210,7 +210,7 @@ beforeEach(() => {
   // (which runs the REAL comparison gate against these contents) passes for
   // the unrelated merge tests.
   gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.mdx', status: 'added' }]);
-  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
 });
 
 afterEach(() => {
@@ -768,6 +768,52 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a NESTED file whose FRONTMATTER slug routes elsewhere is withheld too (PR r4 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /lawn-care/other-route/\n---\n\nContent routed away from the expected path.' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a REMOVED unrelated blog file withholds the merge; a same-route .md migration counterpart does not (PR r4 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/content/blog/pest-control/unrelated-post.md', status: 'removed' },
+    ]);
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    // Same-route .md→.mdx migration counterpart is legitimate.
+    jest.clearAllMocks();
+    pagesPoll.liveUrlResponds.mockResolvedValue(true);
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/content/blog/blog/test-post.md', status: 'removed' },
+    ]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res2 = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
   });
 
   test('a flat file whose FRONTMATTER slug routes elsewhere is withheld — filename alone never binds (PR r2 P1)', async () => {

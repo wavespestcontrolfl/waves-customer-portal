@@ -980,13 +980,13 @@ class AutonomousRunner {
     // park. Gate reads fail CLOSED: an unreadable flag keeps the review
     // park. With autopublish off (or out of scope) the run still uses the
     // approvable trust-build review path.
-    const interceptProvenance = brief?.gsc_signal?.intercept === true;
+    // The predicate is the SHARED one in comparison-table-gate — the
+    // remediation parks and the poller's merge gate make the identical
+    // decision from the same function (PR #3508 r4 P1).
     let namedCompetitorAutopublish = false;
     try {
-      const fg = require('../../config/feature-gates');
-      namedCompetitorAutopublish = interceptProvenance
-        && fg.isEnabled('namedCompetitorAutopublish') === true
-        && fg.isEnabled('namedCompetitorComparison') === true;
+      namedCompetitorAutopublish = require('./comparison-table-gate')
+        .namedCompetitorAutopublishEligible(brief) === true;
     } catch (_) { namedCompetitorAutopublish = false; }
     const forceNamedCompetitorReview = run.comparison_requires_review === true
       && !namedCompetitorAutopublish;

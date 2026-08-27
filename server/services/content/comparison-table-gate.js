@@ -2418,9 +2418,28 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   return { pass, findings, requiresHumanReview };
 }
 
+// Owner directive 2026-08-26: THE single scoped named-competitor autopublish
+// eligibility predicate — used identically by the runner's review-park
+// decision, both codex-remediation parks, and the PR poller's merge gate
+// (PR #3508 r4 P1: one mechanism, never per-site copies). TRUE only for a
+// brief carrying the canonical TRUE-intercept marker gsc_signal.intercept
+// (category/spoke seeds share the operator_intercept bucket and
+// operator_brief payload, so neither is sufficient) with BOTH
+// named-competitor gates on. Fail-closed: any read failure returns false and
+// the named-competitor review parks stand.
+function namedCompetitorAutopublishEligible(brief) {
+  try {
+    if (brief?.gsc_signal?.intercept !== true) return false;
+    const fg = require('../../config/feature-gates');
+    return fg.isEnabled('namedCompetitorAutopublish') === true
+      && fg.isEnabled('namedCompetitorComparison') === true;
+  } catch (_) { return false; }
+}
+
 module.exports = {
   evaluate,
   evaluateProse,
+  namedCompetitorAutopublishEligible,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

@@ -66,20 +66,11 @@ const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connector[bot]']);
 
-// Owner directive 2026-08-26: scoped named-competitor autopublish
-// eligibility. TRUE only for a brief carrying the canonical TRUE-intercept
-// marker gsc_signal.intercept (category/spoke seeds share the
-// operator_intercept bucket and operator_brief payload, so neither is
-// sufficient) with BOTH named-competitor gates on. Fail-closed: any read
-// failure returns false and the named-competitor review parks stand.
-function namedCompetitorAutopublishEligible(brief) {
-  try {
-    if (brief?.gsc_signal?.intercept !== true) return false;
-    const fg = require('../../config/feature-gates');
-    return fg.isEnabled('namedCompetitorAutopublish') === true
-      && fg.isEnabled('namedCompetitorComparison') === true;
-  } catch (_) { return false; }
-}
+// Owner directive 2026-08-26: the SINGLE scoped named-competitor autopublish
+// eligibility predicate lives in comparison-table-gate (PR #3508 r4 P1) —
+// re-exported here so every remediation call site and the PR poller share
+// the identical authorization decision.
+const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
 
 function remediationEnabled() {
   const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();

@@ -3035,9 +3035,14 @@ describe('named-competitor autopublish gate', () => {
       contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
       // Default: the gate PASSES but flags the named-competitor human-review
       // signal — the exact shape a validated curated-competitor table
-      // produces. Tests may override with a failing gate.
-      comparisonTableGate: comparisonGate
-        || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) },
+      // produces. Tests may override with a failing gate. The REAL shared
+      // eligibility predicate rides along — the runner reads it from this
+      // same module (comparison-table-gate owns it).
+      comparisonTableGate: {
+        namedCompetitorAutopublishEligible: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorAutopublishEligible,
+        ...(comparisonGate
+          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) }),
+      },
     });
     return { runner, queue, claimedAt };
   }

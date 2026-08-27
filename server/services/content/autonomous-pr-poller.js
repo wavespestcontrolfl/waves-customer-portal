@@ -888,12 +888,12 @@ async function maybeAutoMerge(run, pr) {
     // (src/content/blog{pathname}.mdx|.md) — otherwise an extra blog file
     // smuggled onto an eligible intercept PR would ride that brief's
     // competitor authorization. Unparseable payload/canonical fails closed.
-    // A flat-leaf binding routes by FRONTMATTER slug, not the filename, so
-    // the loop below must additionally verify the fetched file's slug routes
-    // to this expected path (PR r2 P1: a same-leaf flat file whose slug
-    // routes to a different category would otherwise merge unrelated content
-    // under the brief's authorization).
-    let flatBindingExpectedPath = null;
+    // Every file's frontmatter slug is additionally verified against this
+    // expected route inside the loop below (PR r2/r4 P1s: Astro routes blog
+    // entries by frontmatter, so a filename alone — nested OR flat — never
+    // binds; a bound-looking file whose slug routes elsewhere would merge
+    // unrelated content under the brief's authorization).
+    let boundExpectedPath = null;
     if (run.action_type === 'new_supporting_blog') {
       let boundOk = false;
       try {
@@ -902,21 +902,29 @@ async function maybeAutoMerge(run, pr) {
           if (typeof dp === 'string') dp = JSON.parse(dp);
           const canon = dp?.frontmatter?.canonical;
           const expectedPath = new URL(String(canon)).pathname.replace(/\/?$/, '/');
-          const rel = String(blogFiles[0].filename)
-            .replace(/^src\/content\/blog/, '')
-            .replace(/\.(md|mdx)$/, '');
+          const leaf = expectedPath.replace(/\/$/, '').split('/').pop();
+          const fileRoute = (name) => `${String(name).replace(/^src\/content\/blog/, '').replace(/\.(md|mdx)$/, '')}/`;
           // The nested category path is canonical, but the publisher also
           // updates a LEGACY FLAT file in place (src/content/blog/{leaf}.mdx
           // routing by frontmatter slug) when the existing post lives there —
           // accept that leaf too (PR review P1), subject to the slug check
           // in the loop below.
-          const leaf = expectedPath.replace(/\/$/, '').split('/').pop();
-          if (`${rel}/` === expectedPath) boundOk = true;
-          else if (Boolean(leaf) && `${rel}/` === `/${leaf}/`) { boundOk = true; flatBindingExpectedPath = expectedPath; }
+          const routeMatches = (name) => fileRoute(name) === expectedPath
+            || (Boolean(leaf) && fileRoute(name) === `/${leaf}/`);
+          // REMOVED blog rows are legitimate only as the expected post's own
+          // same-route .md↔.mdx migration counterpart — a deletion of any
+          // OTHER blog file must not ride this PR's authorization (PR r4 P1).
+          const removedBlog = prFiles.filter((f) => (
+            /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status === 'removed'));
+          const removedOk = removedBlog.every((f) => routeMatches(f.filename));
+          if (removedOk && routeMatches(blogFiles[0].filename)) {
+            boundOk = true;
+            boundExpectedPath = expectedPath;
+          }
         }
       } catch (_) { boundOk = false; }
       if (!boundOk) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR blog files do not match the run's single expected draft path — PR left open for a human decision`);
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR blog files (or removals) do not match the run's single expected draft route — PR left open for a human decision`);
         return { pending: true, reason: 'named_competitor_head_gate_failed' };
       }
     }
@@ -944,14 +952,14 @@ async function maybeAutoMerge(run, pr) {
         // as an empty — clean — draft (hook r8 P1).
         if (!file || typeof file.content !== 'string' || !file.content.trim()) { comparisonBlocked = true; break; }
         const parsed = fmMod.parse(file.content);
-        // Flat-leaf binding: the file routes by its frontmatter slug — it
-        // must route to the run's expected path or the binding above was
-        // satisfied by filename alone (PR r2 P1). Missing/foreign slug
-        // fails closed.
-        if (flatBindingExpectedPath) {
+        // Astro routes blog entries by FRONTMATTER slug — nested and flat
+        // alike, the fetched file's slug must route to the run's expected
+        // path, or the binding above was satisfied by filename alone
+        // (PR r2 + r4 P1s). Missing/foreign slug fails closed.
+        if (boundExpectedPath) {
           const rawSlug = String((parsed && parsed.data && parsed.data.slug) || '');
           const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
-          if (!rawSlug.trim() || slugPath !== flatBindingExpectedPath) { comparisonBlocked = true; break; }
+          if (!rawSlug.trim() || slugPath !== boundExpectedPath) { comparisonBlocked = true; break; }
         }
         const verdict = comparisonMod.evaluate(
           { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
@@ -988,7 +996,7 @@ async function maybeAutoMerge(run, pr) {
     } catch (_) { /* fall through */ }
     if (!eligible) {
       try {
-        const { namedCompetitorAutopublishEligible } = require('./codex-remediation');
+        const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
         const runner = require('./autonomous-runner');
         const brief = await runner._loadReviewedBrief(run);
         eligible = namedCompetitorAutopublishEligible(brief) === true;
