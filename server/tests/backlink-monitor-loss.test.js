@@ -294,6 +294,19 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'respelled' })]);
   });
 
+  test('target canonical SQL strips query/fragment BEFORE the trailing-slash strip (same order as the JS key)', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/page/?utm=x', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const raws = [];
+    scanWith({ items: [seen], active: [] });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = impl(table); const w = b.whereRaw; b.whereRaw = jest.fn((sql, bind) => { raws.push([sql, bind]); return w(sql, bind); }); return b; });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    const tgt = raws.find(r => /target_url/.test(r[0]));
+    expect(tgt[1]).toEqual(['wavespestcontrol.com/page']); // JS side: query gone, slash gone
+    // SQL side: the innermost expression is the query strip; the outermost is the trailing-slash strip
+    expect(tgt[0]).toMatch(/^regexp_replace\(.*regexp_replace\(target_url, '\[\?#\]\.\*\$', ''\).*'\/\+\$', ''\) = \?$/);
+  });
+
   test('two legacy rows under one canonical key are both seen by one report; neither is missed', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
     const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });

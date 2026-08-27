@@ -112,7 +112,10 @@ class BacklinkMonitor {
     const { normalizeComparableUrl, comparableUrlSql } = require('./link-prospect-verifier')._test;
     const canonicalTarget = (u) => normalizeComparableUrl(String(u || '').split('#')[0].split('?')[0]);
     const linkKey = (source, target) => `${normalizeComparableUrl(source)}::${canonicalTarget(target)}`;
-    const TARGET_CANONICAL_SQL = `regexp_replace(${comparableUrlSql('target_url')}, '[?#].*$', '')`;
+    // Query/fragment stripped FIRST, then the comparable normalization (which
+    // ends with the trailing-slash strip) — the same order as canonicalTarget(),
+    // so '/page/?utm=x' is '/page' on both sides.
+    const TARGET_CANONICAL_SQL = comparableUrlSql("regexp_replace(target_url, '[?#].*$', '')");
 
     // Build active link map with canonical keys BEFORE processing (a key may
     // hold several rows — legacy respelled duplicates — all seen together).

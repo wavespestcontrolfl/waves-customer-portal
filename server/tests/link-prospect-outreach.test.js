@@ -376,3 +376,18 @@ describe('reconcileSendError', () => {
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({ outreach_status: 'drafted', outreach_attempted_at: null }));
   });
 });
+
+describe('dailySendCount', () => {
+  test('sums current + prior attempt per row with each side COALESCEd (a NULL timestamp must not zero the row)', async () => {
+    const raws = [];
+    const q = Object.assign(() => q, {
+      whereRaw: jest.fn(() => q),
+      select: jest.fn(() => q),
+      first: jest.fn(async () => ({ c: '3' })),
+      raw: jest.fn((sql, bind) => { raws.push([sql, bind]); return { sql, bind }; }),
+    });
+    expect(await Outreach.dailySendCount(q)).toBe(3);
+    const [sql] = raws[0];
+    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ COALESCE\(\(NULLIF\(quality_signals->>'prior_outreach_attempted_at', ''\)::timestamptz >= \?\)::int, 0\)\)/);
+  });
+});

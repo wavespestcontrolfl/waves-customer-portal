@@ -87,7 +87,9 @@ async function dailySendCount(q = db) {
   const since = new Date(Date.now() - 24 * 3600 * 1000);
   const row = await q('seo_link_prospects')
     .whereRaw(`(outreach_attempted_at >= ? OR ${PRIOR_ATTEMPT_SQL} >= ?)`, [since, since])
-    .select(q.raw(`COALESCE(SUM((outreach_attempted_at >= ?)::int + (${PRIOR_ATTEMPT_SQL} >= ?)::int), 0) AS c`, [since, since]))
+    // Each side COALESCEd: a NULL timestamp compares to NULL, and NULL + 1 is
+    // NULL — which SUM would drop, counting an ordinary attempt as zero.
+    .select(q.raw(`COALESCE(SUM(COALESCE((outreach_attempted_at >= ?)::int, 0) + COALESCE((${PRIOR_ATTEMPT_SQL} >= ?)::int, 0)), 0) AS c`, [since, since]))
     .first();
   return parseInt(row && row.c, 10) || 0;
 }
@@ -344,7 +346,7 @@ module.exports = {
   saveDraft,
   sendOutreach,
   reconcileSendError,
-  dailySendCount,
+  dailySendCount, PRIOR_ATTEMPT_SQL,
   checkSendPreconditions,
   isValidEmail,
   textToHtml,
