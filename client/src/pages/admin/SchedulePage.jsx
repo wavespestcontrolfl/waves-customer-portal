@@ -6904,8 +6904,13 @@ export function TypedFindingsSection({
   const visibleFields = (schema.fields || []).filter(
     (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
   );
-  const primaryFields = visibleFields.filter((f) => !f.detail);
-  const detailFields = visibleFields.filter((f) => f.detail);
+  // A detail field that is REQUIRED for the current values (requiredUnless /
+  // conditional cores — flea evidence, roach follow-up window, rodent
+  // species when activity is found) renders on the primary form, not
+  // inside the "optional" drawer, so the tech never fails validation on a
+  // field they couldn't see (codex P1 on #3536).
+  const primaryFields = visibleFields.filter((f) => !f.detail || typedFieldRequiredNow(f, values));
+  const detailFields = visibleFields.filter((f) => f.detail && !typedFieldRequiredNow(f, values));
   const renderField = (field, index, list) => (
     <div key={field.key} style={{ marginBottom: 12 }}>
       {/* Sectioned schemas (rodent trapping): header above the first
