@@ -990,8 +990,15 @@ class AutonomousRunner {
     } catch (_) { namedCompetitorAutopublish = false; }
     const forceNamedCompetitorReview = run.comparison_requires_review === true
       && !namedCompetitorAutopublish;
+    // A named-competitor run the scoped eligibility cleared also satisfies
+    // the general trust-build ramp (hook r9 P1): the owner directive is a
+    // no-human-queue lane, and eligibility only applies when the comparison
+    // gate flagged the run (comparison_requires_review) — plain drafts keep
+    // the ordinary autoPublish/trust-count ramp.
     const trustBuildSatisfied = !forceNamedCompetitorReview
-      && (autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD);
+      && (autoPublish
+        || (namedCompetitorAutopublish && run.comparison_requires_review === true)
+        || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
     // 7. Decide outcome.

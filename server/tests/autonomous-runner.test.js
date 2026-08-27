@@ -3097,6 +3097,29 @@ describe('named-competitor autopublish gate', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
+  test('gate ON also satisfies the trust-build ramp — a clean eligible draft publishes with a NONZERO threshold and no AUTO_PUBLISH env (hook r9 P1)', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    process.env.TRUST_BUILD_THRESHOLD = '5';
+    delete process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG;
+    const publisher = {
+      publishOrUpdatePage: jest.fn().mockResolvedValue({
+        url: `https://www.wavespestcontrol.com${SLUG}`,
+        status: 'pr_open',
+        live: false,
+        pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/902',
+      }),
+    };
+    const { runner, queue } = namedCompetitorScenario({ publisher });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).not.toMatch(/^trust_build_/);
+    expect(result.skip_reason).not.toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+    expect(result.skip_reason).toBe('astro_pr_pending_merge');
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
   test('autopublish is scoped to the TRUE-intercept marker — a category/spoke seed (shared bucket + operator_brief, intercept:false) still parks (hook r3 P1)', async () => {
     process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
     const publisher = { publishOrUpdatePage: jest.fn() };

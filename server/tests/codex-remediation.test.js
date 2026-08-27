@@ -1076,6 +1076,20 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     expect(seenBody.indexOf(TERMITE_FM.meta_description)).toBeGreaterThan(seenBody.indexOf(META_SECTION_MARKER));
   });
 
+  test('validateFixedBlogFile forwards guardContext.operatorBriefText to the preflight comparison gate (hook r9 P1)', async () => {
+    const gateMod = require('../services/content/comparison-table-gate');
+    const spy = jest.spyOn(gateMod, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: false });
+    try {
+      const deps = { factCheckEvaluate: async () => ({ pass: true }), complianceEvaluate: async () => ({ pass: true }) };
+      const opText = 'Authorized competitor: HomeTeam Taexx (https://pestdefense.com/taexx/)';
+      const r = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true, guardContext: { operatorBriefText: opText } }, deps);
+      expect(r.ok).toBe(true);
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operatorBriefText: opText }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
     let optsSeen = null;
     const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };

@@ -708,7 +708,16 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
 
   let namedCompetitorEnabled = false;
   try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
-  const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
+  // Operator authorization rides guardContext from the autonomous lane
+  // (hook r9 P1): without it a competitor the intercept brief itself
+  // authorizes — but which is absent from the curated allowlist — P0s as
+  // COMPARISON_UNKNOWN_COMPETITOR here, before the run-context revalidation
+  // that knows the authorization ever runs. Scheduler lane passes none →
+  // unchanged (stricter) behavior.
+  const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, {
+    namedCompetitorEnabled,
+    operatorBriefText: (typeof runContext.operatorBriefText === 'string' && runContext.operatorBriefText) || null,
+  });
   if (!comparison.pass) {
     const blocking = (comparison.findings || []).filter((f) =>
       (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
@@ -2192,6 +2201,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         guardContext = {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
+          // Operator competitor authorization for the preflight comparison
+          // gate — same derivation the run-context revalidation uses.
+          operatorBriefText: (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
+            ? runner._internals.operatorBriefTextForComparisonGate(opp, brief)
+            : null,
         };
         namedCompetitorAutopublish = namedCompetitorAutopublishEligible(brief);
       }
