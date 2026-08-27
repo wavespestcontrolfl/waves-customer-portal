@@ -2,6 +2,12 @@ const db = require('../models/db');
 const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../config/locations');
 
 const MAIN_SITE_NAME = 'Main Site (wavespestcontrol.com)';
+// Seeded by migration 20260827000001. Web-form paid-Google leads go here so
+// form vs call conversions stay separable in source ROI. Matched by NAME:
+// source_type='google_ads' is shared by the call-extension number AND the
+// phone-less call-reporting bridge row, so neither source_type nor
+// "phone-less" identifies the web-form row.
+const GOOGLE_ADS_WEB_FORM_NAME = 'Google Ads — Web Form';
 
 const SPOKE_DOMAIN_TO_SOURCE_NAME = {
   'parrishfllawncare.com': 'Spoke Lawn — parrishfllawncare.com',
@@ -114,13 +120,12 @@ async function resolveLeadSource(attribution) {
     if (metaPaid) {
       row = await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first();
     } else if (googlePaid) {
-      // Two google_ads rows exist (call-extension number + web form). This is
-      // the web path, so prefer the phone-less web-form row; the call row is
-      // the fallback so a paid click never drops to NULL.
-      row = await db('lead_sources')
-        .where({ source_type: 'google_ads' })
-        .orderByRaw('(twilio_phone_number IS NULL) DESC')
-        .first();
+      // Several google_ads rows exist (call-extension number, call-reporting
+      // bridge, web form). This is the web path: the web-form row by name;
+      // any google_ads row only as a fallback so a paid click never drops to
+      // NULL (and never lands on Main Site).
+      row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()
+        || await db('lead_sources').where({ source_type: 'google_ads' }).first();
     } else {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
@@ -148,4 +153,4 @@ async function resolveLeadSource(attribution) {
   };
 }
 
-module.exports = { resolveLeadSource, MAIN_SITE_NAME, SPOKE_DOMAIN_TO_SOURCE_NAME };
+module.exports = { resolveLeadSource, MAIN_SITE_NAME, GOOGLE_ADS_WEB_FORM_NAME, SPOKE_DOMAIN_TO_SOURCE_NAME };

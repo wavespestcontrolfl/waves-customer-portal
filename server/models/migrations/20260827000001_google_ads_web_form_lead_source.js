@@ -28,8 +28,13 @@
 //      precedence rule as 20260626000008_backfill_gbp_web_leads_per_city:
 //      a customer's stale first touch must never override a lead that
 //      recorded a different source.
+// Scope: first_contact_channel = 'form' ONLY. ad_service_attribution
+// .lead_source='google_ads' is also written for paid CALLS
+// (recordCallPpcAttribution) and a customer's UTM first touch is not
+// form-specific — a NULL-source call lead must never be relabeled as a web
+// form (calls attribute by tracking number to the call-extension row).
 // Idempotent: the row is looked up by name; the backfill only touches
-// NULL-source, non-deleted leads.
+// NULL-source, non-deleted form leads.
 const WEB_FORM_NAME = 'Google Ads — Web Form';
 
 exports.up = async function up(knex) {
@@ -61,6 +66,7 @@ exports.up = async function up(knex) {
   const updated = await knex('leads')
     .whereNull('lead_source_id')
     .whereNull('deleted_at')
+    .where('first_contact_channel', 'form')
     .where((qb) => {
       qb.whereNotNull('gclid').orWhereNotNull('wbraid').orWhereNotNull('gbraid')
         .orWhereRaw("extracted_data->'attribution'->'leadSource'->>'source' = 'google_ads'");

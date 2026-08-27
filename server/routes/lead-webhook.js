@@ -80,6 +80,7 @@ const leadAttribution = require('../services/lead-attribution');
 // (lead-estimate-link.js) classifies with the exact same semantics. This route
 // keeps using — and re-exporting via `_test` — the shared implementation.
 const { determineLeadSource } = require('../services/lead-source-classify');
+const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 
 // Adam's personal cell for new-lead alerts — must be a real cell, never one
 // of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
@@ -315,19 +316,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         sourceRecord = await fbQuery.first();
       }
       if (!sourceRecord && leadSource.source === 'google_ads') {
-        // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Prefer the
-        // phone-less "Google Ads — Web Form" row over the call-extension
-        // tracking-number row so form vs call conversions stay separable in
-        // source ROI; the call row is the fallback so attribution never drops
-        // to NULL. (Before this branch every gclid form lead was Unattributed.)
+        // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Route to
+        // the "Google Ads — Web Form" row so form vs call conversions stay
+        // separable in source ROI. (Before this branch every gclid form lead
+        // was Unattributed.)
+        // Matched by NAME (source_type google_ads is shared with the
+        // call-extension number and the phone-less call-reporting bridge row).
         // Deliberately NOT filtered on is_active (same rationale as
         // lead-source-resolver): a paused web-form row is still the true
-        // channel — filtering it out would route form leads onto the call
-        // row and contaminate call ROI. Active rows only break ties.
-        sourceRecord = await db('lead_sources')
-          .where('source_type', 'google_ads')
-          .orderByRaw('(twilio_phone_number IS NULL) DESC, is_active DESC')
-          .first();
+        // channel — filtering it out would route form leads onto a call row
+        // and contaminate call ROI. Any google_ads row is the last-resort
+        // fallback so a paid click never drops to NULL.
+        sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()
+          || await db('lead_sources').where({ source_type: 'google_ads' }).first();
       }
       if (sourceRecord) leadSourceId = sourceRecord.id;
     } catch (e) {
