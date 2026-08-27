@@ -6887,8 +6887,11 @@ export function TypedFindingsSection({
           </div>
           {/* Gauge pills → the same select treatment as every other field
               (owner directive 2026-08-27). Stores the 0–5 score through the
-              existing onActivityTap contract, so the prefill-until-touched
-              behavior is unchanged. */}
+              existing onActivityTap contract. A native select only fires
+              onChange on a CHANGED value, so the untouched control renders
+              blank (the derived prefill is named in the helper line) — any
+              pick, including the derived value itself, then fires and pins
+              the score exactly like the old tap-to-pin (codex P1 r6). */}
           <ProjectFindingFieldInput
             field={{
               key: "activity_score",
@@ -6901,7 +6904,7 @@ export function TypedFindingsSection({
             }}
             id={`typed-activity-${schema.type}`}
             name="activityScore"
-            value={activityScore == null ? "" : String(activityScore)}
+            value={activityScoreTouched && activityScore != null ? String(activityScore) : ""}
             onChange={(value) => {
               if (value !== "") onActivityTap(Number(value));
             }}
@@ -6910,7 +6913,9 @@ export function TypedFindingsSection({
           <div style={{ fontSize: 12, color: mutedColor, marginTop: 6 }}>
             {activityScoreTouched
               ? "Set by technician"
-              : "Prefills from findings until you tap"}
+              : activityScore != null
+                ? `Prefills from findings: ${scoreLabels[activityScore] || activityScore} — choose to confirm or change`
+                : "Prefills from findings until you choose"}
           </div>
         </div>
       )}
