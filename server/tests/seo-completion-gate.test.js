@@ -288,6 +288,17 @@ describe('seo-completion-gate', () => {
     expect(termiteInspection.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(termiteInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // The catch-all specialty lane converts through pest wording.
+    const specialty = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Lubber grasshoppers strip ornamentals. [Get My Free Pest Control Estimate](/pest-control-calculator/) today.',
+      }),
+      brief: baseBrief({ service: 'specialty' }),
+      shadowMode: true,
+    });
+    expect(specialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(specialty.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // "-control" service ids land on their own specialty key.
     const rodent = SeoCompletionGate.evaluate({
       draft: baseDraft({

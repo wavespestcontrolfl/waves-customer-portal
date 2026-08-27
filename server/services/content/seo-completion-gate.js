@@ -300,6 +300,8 @@ const CTA_SERVICE_FAMILY = {
   // brief-builder's conversion-path aliases are untouched.
   'commercial-lawn': 'lawn',
   'commercial-pest': 'pest',
+  // The catch-all specialty lane converts through the pest paths.
+  specialty: 'pest',
 };
 
 function allowedAnchorServices(briefService) {
