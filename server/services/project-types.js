@@ -98,7 +98,7 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['exterior', 'foundation', 'garage', 'attic', 'crawlspace', 'evidence', 'other'],
     findingsFields: [
-      { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
+      { key: 'areas_inspected', detail: true, label: 'Areas inspected', type: 'textarea' },
       // FS 482.226 report-content requirements for a for-a-fee inspection
       // (owner Phase-3 signoff 2026-07-13): the report states visible
       // accessible areas not inspected (and why) and that the inspection
@@ -107,8 +107,8 @@ const PROJECT_TYPES = {
       { key: 'areas_not_inspected', label: 'Areas not inspected / why', type: 'textarea', placeholder: 'Visible accessible areas not inspected and why; inaccessible areas (e.g. attic decked over, locked shed). Write "None" if everything visible was inspected.' },
       { key: 'termite_type', label: 'Termite species (if found)', type: 'select', options: ['None observed', 'Eastern subterranean', 'Formosan', 'Drywood', 'Dampwood', 'Unknown — sample collected'] },
       { key: 'activity_status', label: 'Activity status', type: 'select', options: ['No activity', 'Old / inactive damage', 'Active infestation'] },
-      { key: 'infestation_extent', label: 'Infestation extent', type: 'textarea' },
-      { key: 'treatment_recommendation', label: 'Recommended treatment', type: 'textarea' },
+      { key: 'infestation_extent', detail: true, label: 'Infestation extent', type: 'textarea' },
+      { key: 'treatment_recommendation', detail: true, label: 'Recommended treatment', type: 'textarea' },
       { key: 'inspection_notice_affixed', label: 'Inspection notice affixed', type: 'select', options: ['Yes', 'No'] },
     ],
   },
@@ -121,7 +121,7 @@ const PROJECT_TYPES = {
     photoCategories: ['exterior', 'kitchen', 'bathroom', 'garage', 'attic', 'entry_point', 'evidence', 'other'],
     findingsFields: [
       { key: 'inspection_type', label: 'Inspection type', type: 'select', section: 'Inspection scope', options: ['General pest inspection', 'Callback diagnostic', 'Estimate inspection', 'Follow-up inspection'] },
-      { key: 'areas_inspected', label: 'Areas inspected', type: 'chips', section: 'Inspection scope', options: [
+      { key: 'areas_inspected', detail: true, label: 'Areas inspected', type: 'chips', section: 'Inspection scope', options: [
         'Exterior perimeter', 'Foundation', 'Garage', 'Attic entry', 'Kitchen', 'Bathrooms',
         'Bedrooms', 'Lanai', 'Pool cage', 'Eaves / soffits', 'Crawlspace', 'Landscaping',
         'Utility penetrations', 'Roofline from ground',
@@ -133,16 +133,16 @@ const PROJECT_TYPES = {
         'Moisture concern', 'Entry points found', 'Sanitation concern', 'Structural gaps',
         'Damage observed',
       ] },
-      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
+      { key: 'conducive_conditions', detail: true, label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
         'Moisture present', 'Food debris', 'Clutter / cardboard', 'Vegetation touching structure',
         'Gaps / unsealed penetrations', 'Trash storage issues',
       ] },
-      { key: 'access_limitations', label: 'Access limitations', type: 'chips', section: 'Limitations', options: [
+      { key: 'access_limitations', detail: true, label: 'Access limitations', type: 'chips', section: 'Limitations', options: [
         'No limitations', 'Attic not accessible', 'Stored items limited inspection',
         'Heavy vegetation', 'Locked gate', 'Pet present', 'Weather limited exterior',
         'Customer not home', 'Area not safely accessible',
       ] },
-      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'customer_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Seal entry gaps', 'Reduce clutter', 'Trim vegetation', 'Correct moisture issue',
         'Treatment program recommended', 'Monitor activity',
       ] },
@@ -167,7 +167,7 @@ const PROJECT_TYPES = {
       // Conditionally required: there is no truthful area to name on a
       // 'None observed' visit. requiredUnless is served in the schema slice
       // so the client pre-submit gate mirrors the server enforcement.
-      { key: 'activity_areas', label: 'Activity areas', type: 'chips', section: 'Activity', requiredUnless: { field: 'evidence_level', value: 'None observed' }, options: [
+      { key: 'activity_areas', detail: true, label: 'Activity areas', type: 'chips', section: 'Activity', requiredUnless: { field: 'evidence_level', value: 'None observed' }, options: [
         'Interior', 'Exterior lawn', 'Pet resting area', 'Shaded yard', 'Lanai',
         'Around bedding', 'Carpet / rugs', 'Furniture', 'Garage', 'Other',
       ] },
@@ -176,7 +176,7 @@ const PROJECT_TYPES = {
         'Crack / crevice treatment', 'Lawn treatment', 'Pet resting area treatment',
         'Inspection only', 'Limited treatment',
       ] },
-      { key: 'contributing_conditions', label: 'Contributing conditions', type: 'chips', section: 'Conditions', options: [
+      { key: 'contributing_conditions', detail: true, label: 'Contributing conditions', type: 'chips', section: 'Conditions', options: [
         'Pets present', 'Wildlife activity', 'Shaded / moist yard', 'Tall grass',
         'Pet bedding', 'Rugs / carpet', 'Vacuuming needed', 'Untreated pets', 'Access limitation',
       ] },
@@ -197,16 +197,16 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'species', label: 'Species', type: 'select', section: 'Species & activity', options: ['German', 'American', 'Smoky brown', 'Mixed', 'Unknown'] },
       { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Species & activity', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
-      { key: 'activity_locations', label: 'Where activity was noted', type: 'chips', section: 'Species & activity', options: [
+      { key: 'activity_locations', detail: true, label: 'Where activity was noted', type: 'chips', section: 'Species & activity', options: [
         'Kitchen', 'Bathrooms', 'Laundry', 'Garage', 'Pantry', 'Under sink',
         'Behind refrigerator', 'Behind stove', 'Dishwasher area', 'Cabinet hinges',
         'Plumbing penetrations', 'Exterior mulch / landscape', 'Lanai',
       ] },
-      { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
+      { key: 'evidence_observed', detail: true, label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
         'Live roaches', 'Dead roaches', 'Droppings', 'Egg cases', 'Cast skins', 'Odor',
         'Grease / food debris', 'Moisture present',
       ] },
-      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Evidence', options: [
+      { key: 'conducive_conditions', detail: true, label: 'Conducive conditions', type: 'chips', section: 'Evidence', options: [
         'Moisture / leaks', 'Food debris', 'Clutter', 'Cardboard storage', 'Open trash',
         'Pet food out', 'Gaps / unsealed penetrations',
       ] },
@@ -215,7 +215,7 @@ const PROJECT_TYPES = {
         'Dust application', 'Flush-out treatment', 'Exterior perimeter treatment',
         'Glue boards placed', 'Monitoring stations placed', 'Sanitation review completed',
       ] },
-      { key: 'customer_prep', label: 'How the customer can help', type: 'chips', section: 'Customer prep', options: [
+      { key: 'customer_prep', detail: true, label: 'How the customer can help', type: 'chips', section: 'Customer prep', options: [
         'Remove food debris', 'No over-the-counter sprays', 'Keep counters clean',
         'Reduce clutter', 'Empty trash nightly', 'Fix plumbing leaks',
         'Do not disturb bait placements',
@@ -398,14 +398,14 @@ const PROJECT_TYPES = {
         'Kitchen area', 'Laundry', 'Interior living areas', 'Crawlspace', 'Other',
       ] },
       { key: 'activity_found', label: 'Activity found', type: 'select', section: 'Findings', options: ['Yes', 'No'] },
-      { key: 'evidence_observed', label: 'Evidence type', type: 'chips', section: 'Findings', options: [
+      { key: 'evidence_observed', detail: true, label: 'Evidence type', type: 'chips', section: 'Findings', options: [
         'Droppings', 'Urine staining', 'Gnaw marks', 'Rub marks / grease trails',
         'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
         'Damaged insulation / wiring / stored items',
       ] },
-      { key: 'species', label: 'Suspected rodent type', type: 'select', section: 'Findings', options: ['Rat', 'Mouse', 'Unknown'] },
-      { key: 'entry_points_found', label: 'Entry points found', type: 'text', section: 'Findings', placeholder: 'AC line gap right side, garage door corner…' },
-      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
+      { key: 'species', detail: true, label: 'Suspected rodent type', type: 'select', section: 'Findings', options: ['Rat', 'Mouse', 'Unknown'] },
+      { key: 'entry_points_found', detail: true, label: 'Entry points found', type: 'text', section: 'Findings', placeholder: 'AC line gap right side, garage door corner…' },
+      { key: 'conducive_conditions', detail: true, label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
         'Gaps under doors', 'Garage door seal gaps', 'A/C line penetrations', 'Roof returns',
         'Soffit / fascia gaps', 'Weep holes', 'Utility penetrations', 'Vents / screens',
         'Vegetation touching structure', 'Pet food / bird seed accessible', 'Trash / clutter',
@@ -538,31 +538,31 @@ const PROJECT_TYPES = {
     // already tell the coverage story. (Termite bait stations unchanged.)
     findingsFields: [
       { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
-      { key: 'stations_inaccessible', label: 'Stations inaccessible', type: 'count', section: 'Station inspection' },
+      { key: 'stations_inaccessible', detail: true, label: 'Stations inaccessible', type: 'count', section: 'Station inspection' },
       { key: 'station_actions', label: 'Station service performed', type: 'chips', section: 'Station inspection', options: [
         'Cleaned', 'Refilled', 'Reset', 'Secured', 'Relocated', 'Replaced', 'New station added',
       ] },
       { key: 'bait_consumption', label: 'Bait consumption level', type: 'select', section: 'Bait & activity', options: [
         'None', 'Light', 'Moderate', 'Heavy', 'Empty',
       ] },
-      { key: 'bait_replaced', label: 'Bait replaced', type: 'select', section: 'Bait & activity', options: ['Yes', 'No'] },
-      { key: 'highest_activity_location', label: 'Highest-activity station / location', type: 'text', section: 'Bait & activity', placeholder: 'Rear-left near A/C pad…' },
-      { key: 'bait_issues', label: 'Bait / station contents', type: 'chips', section: 'Bait & activity', options: [
+      { key: 'bait_replaced', detail: true, label: 'Bait replaced', type: 'select', section: 'Bait & activity', options: ['Yes', 'No'] },
+      { key: 'highest_activity_location', detail: true, label: 'Highest-activity station / location', type: 'text', section: 'Bait & activity', placeholder: 'Rear-left near A/C pad…' },
+      { key: 'bait_issues', detail: true, label: 'Bait / station contents', type: 'chips', section: 'Bait & activity', options: [
         'Moldy / deteriorated bait', 'Non-target disturbance', 'Insects in station', 'Water intrusion',
       ] },
-      { key: 'evidence_observed', label: 'Rodent evidence nearby', type: 'chips', section: 'Rodent evidence', options: [
+      { key: 'evidence_observed', detail: true, label: 'Rodent evidence nearby', type: 'chips', section: 'Rodent evidence', options: [
         'Droppings', 'Gnaw marks', 'Rub marks', 'Burrows', 'Runways', 'Tracks',
         'Nesting material', 'Odor', 'Exterior harborage',
       ] },
-      { key: 'station_issues', label: 'Station condition issues', type: 'chips', section: 'Station condition', options: [
+      { key: 'station_issues', detail: true, label: 'Station condition issues', type: 'chips', section: 'Station condition', options: [
         'Station damaged', 'Station missing', 'Station unlocked / open', 'Anchor damaged', 'Needs replacement',
       ] },
-      { key: 'conducive_conditions', label: 'Attractants / harborage', type: 'chips', section: 'Conducive conditions', options: [
+      { key: 'conducive_conditions', detail: true, label: 'Attractants / harborage', type: 'chips', section: 'Conducive conditions', options: [
         'Pet food outside', 'Bird seed accessible', 'Fallen fruit', 'Trash bins open',
         'Compost', 'Dense vegetation', 'Woodpile', 'Stored items / clutter',
         'Garage door gaps', 'Crawlspace / utility gaps', 'Standing water', 'Livestock or chicken feed',
       ] },
-      { key: 'sanitation_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'sanitation_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Store pet food / bird seed in sealed containers', 'Remove fallen fruit', 'Keep trash lids closed',
         'Reduce clutter', 'Trim vegetation off structure', 'Do not move bait stations',
         'Keep stations accessible', 'Notify office if a station is damaged',
@@ -583,7 +583,7 @@ const PROJECT_TYPES = {
         'Burrows', 'Odor', 'Noises reported', 'Damaged vent / screen', 'Attic disturbance',
         'Insulation damage',
       ] },
-      { key: 'entry_points', label: 'Entry / access points', type: 'chips', section: 'Entry points', options: [
+      { key: 'entry_points', detail: true, label: 'Entry / access points', type: 'chips', section: 'Entry points', options: [
         'Roof returns', 'Soffit gaps', 'Fascia damage', 'Gable vents', 'Ridge vents',
         'Crawlspace openings', 'Foundation gaps', 'Dryer vents', 'Pool cage gaps',
         'Fence gaps', 'Burrow under structure', 'Tree limbs touching roof',
@@ -594,7 +594,7 @@ const PROJECT_TYPES = {
         'Trap installed', 'Trap checked', 'Capture removed', 'Traps reset', 'Bait/lure refreshed',
         'One-way door installed', 'Trap removed', 'No activity at traps',
       ] },
-      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'customer_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Trim branches off roofline', 'Repair vent screen', 'Secure trash', 'Remove attractants',
         'Approve exclusion repair', 'Attic sanitation recommended', 'Monitor noise / odor',
       ] },
@@ -609,12 +609,12 @@ const PROJECT_TYPES = {
     photoCategories: ['exterior', 'interior', 'kitchen', 'bathroom', 'garage', 'evidence', 'treatment_area', 'other'],
     findingsFields: [
       { key: 'target_pest', label: 'Target pest', type: 'text', placeholder: 'German roaches, wasps, fire ants, fleas/ticks…' },
-      { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
+      { key: 'areas_inspected', detail: true, label: 'Areas inspected', type: 'textarea' },
       { key: 'activity_level', label: 'Activity level', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
-      { key: 'products_used', label: 'Products used', type: 'textarea' },
-      { key: 'customer_instructions', label: 'Customer instructions', type: 'textarea' },
-      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+      { key: 'products_used', detail: true, label: 'Products used', type: 'textarea' },
+      { key: 'customer_instructions', detail: true, label: 'Customer instructions', type: 'textarea' },
+      { key: 'followup_plan', detail: true, label: 'Follow-up plan', type: 'textarea' },
     ],
   },
 
@@ -724,19 +724,19 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['palm', 'trunk', 'canopy', 'injection_site', 'disease', 'other'],
     findingsFields: [
-      { key: 'palm_species', label: 'Palm species', type: 'text', section: 'Palm condition' },
-      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm condition' },
+      { key: 'palm_species', detail: true, label: 'Palm species', type: 'text', section: 'Palm condition' },
+      { key: 'palms_serviced', detail: true, label: 'Palms serviced', type: 'count', section: 'Palm condition' },
       { key: 'palm_condition', label: 'Overall palm condition', type: 'select', section: 'Palm condition', options: ['Good', 'Fair', 'Poor', 'Declining'] },
-      { key: 'condition_observations', label: 'Canopy & growth observations', type: 'chips', section: 'Palm condition', options: [
+      { key: 'condition_observations', detail: true, label: 'Canopy & growth observations', type: 'chips', section: 'Palm condition', options: [
         'Healthy canopy color', 'Yellowing lower fronds', 'Thin canopy', 'Weak new growth',
         'New growth present', 'Firm spear leaf', 'Spear leaf concern', 'Trunk concern', 'Crown concern',
       ] },
-      { key: 'deficiency_signs', label: 'Nutrient observations', type: 'chips', section: 'Nutrient health', options: [
+      { key: 'deficiency_signs', detail: true, label: 'Nutrient observations', type: 'chips', section: 'Nutrient health', options: [
         'Potassium deficiency signs', 'Magnesium deficiency signs', 'Manganese deficiency signs',
         'General chlorosis', 'Frizzle top symptoms', 'Necrotic spotting on older fronds',
         'None observed today',
       ] },
-      { key: 'pest_disease_signs', label: 'Pest & disease check', type: 'chips', section: 'Pests & disease', options: [
+      { key: 'pest_disease_signs', detail: true, label: 'Pest & disease check', type: 'chips', section: 'Pests & disease', options: [
         'Scale', 'Mealybugs', 'Mites', 'Palm aphids', 'Weevil concern', 'Ganoderma conk visible',
         'Trunk decay signs', 'Crown rot symptoms', 'Leaf spot', 'Fungal staining',
         'None observed today',
@@ -747,7 +747,7 @@ const PROJECT_TYPES = {
         'Soil acidifier applied', 'Canopy / crown inspection', 'Photos taken',
         'Palm flagged for monitoring',
       ] },
-      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'customer_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Avoid over-pruning', 'Do not remove green fronds', 'Improve irrigation consistency',
         'Keep mulch away from trunks', 'Monitor spear leaf', 'Injection recommended',
         'Arborist evaluation recommended',
@@ -953,19 +953,19 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Inspection', placeholder: 'Primary bedroom, guest bedroom…' },
       { key: 'evidence_level', label: 'Evidence level', type: 'select', section: 'Evidence', options: ['No active signs observed', 'Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
-      { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
+      { key: 'evidence_observed', detail: true, label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
         'Live bed bugs', 'Dead bed bugs', 'Eggs', 'Cast skins', 'Fecal spotting',
         'Blood spotting', 'Bites reported by customer', 'No visible evidence',
       ] },
       { key: 'treatment_method', label: 'Treatment method', type: 'select', section: 'Work completed', options: ['Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical'] },
-      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
+      { key: 'work_completed', detail: true, label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
         'Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
         'Baseboard treatment', 'Furniture treatment', 'Dust application', 'Steam treatment',
         'Vacuuming completed', 'Encasement installed', 'Encasement recommended',
         'Interceptors installed', 'Adjacent rooms inspected',
       ] },
-      { key: 'prep_status', label: 'Customer prep status', type: 'select', section: 'Customer prep', options: ['Completed', 'Partial', 'Not started'] },
-      { key: 'customer_prep', label: 'How the customer can help', type: 'chips', section: 'Customer prep', options: [
+      { key: 'prep_status', detail: true, label: 'Customer prep status', type: 'select', section: 'Customer prep', options: ['Completed', 'Partial', 'Not started'] },
+      { key: 'customer_prep', detail: true, label: 'How the customer can help', type: 'chips', section: 'Customer prep', options: [
         'Dry bedding on high heat', 'Reduce clutter', 'Do not move items between rooms',
         'Do not discard furniture without guidance', 'Install encasements',
         'No over-the-counter sprays', 'Keep treated areas undisturbed',
