@@ -426,8 +426,19 @@ describe('autonomous versus lane (pest showdown)', () => {
   // ET noon on the given date keeps the ET calendar day equal to the UTC day.
   const etNoon = (iso) => new Date(`${iso}T16:00:00Z`);
 
-  afterEach(() => {
+  // Snapshot/restore the flag so a caller running with
+  // SOCIAL_AUTONOMOUS_INCLUDE_VERSUS=true (e.g. validating an enabled deploy)
+  // neither fails the dark-by-default test nor loses its setting.
+  let prevVersusFlag;
+  beforeAll(() => {
+    prevVersusFlag = process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+  beforeEach(() => {
     delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+  afterAll(() => {
+    if (prevVersusFlag === undefined) delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+    else process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = prevVersusFlag;
   });
 
   test('lane is dark by default (flag unset -> no versus plan)', () => {

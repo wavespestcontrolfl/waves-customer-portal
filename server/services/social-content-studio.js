@@ -289,11 +289,14 @@ const PEST_VERSUS_PAIRS = [
     verdict: 'The nest shape tells you who built it.',
   },
   {
+    // Diagnostics mirror the in-repo lawn protocol reference (service_protocols
+    // seed: chinch-damaged grass pulls up with no resistance; drought-stressed
+    // grass folds and stays rooted) — the pull test, not watering response.
     key: 'chinch_bug_vs_drought_stress',
     service: 'lawn care',
-    left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches spread outward', 'Stays brown even with water'] },
-    right: { name: 'Drought Stress', points: ['Even across the whole lawn', 'Footprints linger in the grass', 'Greens back up with water'] },
-    verdict: 'Water first. If it does not green up, look closer.',
+    left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches spread outward', 'Grass pulls up with no resistance'] },
+    right: { name: 'Drought Stress', points: ['Even across the whole lawn', 'Blades fold; footprints linger', 'Grass stays firmly rooted'] },
+    verdict: 'The pull test settles it: chinch-damaged grass lifts right out.',
   },
   {
     key: 'roof_rat_vs_norway_rat',
@@ -999,14 +1002,17 @@ async function selectAutonomousReviewPlan(now = new Date()) {
 function buildVersusDrafts(pair, city) {
   const leftName = pair.left.name;
   const rightName = pair.right.name;
-  const hook = `${leftName} or ${rightName}? ${city} homeowners mix these up all the time.`;
+  // Neutral comparison hook — never assert the two LOOK similar (some pairs
+  // differ visibly by the pair's own facts; an unconditional similarity claim
+  // would contradict the card copy).
+  const hook = `${leftName} or ${rightName}? Here is how ${city} homeowners can tell the difference.`;
   const leftLine = `${leftName}: ${pair.left.points.map((p) => p.toLowerCase()).join('; ')}.`;
   const rightLine = `${rightName}: ${pair.right.points.map((p) => p.toLowerCase()).join('; ')}.`;
   return {
     facebook: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Not sure which one you have? A quick inspection settles it.`,
     instagram: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Which one have you seen around the house?\n\n${hashtags({ topic: `${leftName} vs ${rightName}`, city, service: pair.service })}`,
     linkedin: `Correct pest ID changes the response. ${leftName} vs ${rightName}: ${pair.verdict} ${leftLine} ${rightLine} Waves turns local pest pressure and service data into practical homeowner guidance.`,
-    gbp: `${city} homeowners: ${leftName.toLowerCase()} and ${rightName.toLowerCase()} look similar at a glance. ${pair.verdict} ${leftLine} ${ctaText('book inspection')}.`,
+    gbp: `${city} homeowners: ${leftName.toLowerCase()} or ${rightName.toLowerCase()}? ${pair.verdict} ${leftLine} ${ctaText('book inspection')}.`,
   };
 }
 
