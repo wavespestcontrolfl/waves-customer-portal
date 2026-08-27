@@ -561,6 +561,21 @@ describe('autonomous review-milestone lane', () => {
       .toEqual({ count: 10, average: 4.6 });
   });
 
+  test('milestoneClaimDisposition: publish → published; nothing attempted → release; attempted failure → retain', () => {
+    const d = Studio.milestoneClaimDisposition;
+    expect(d({ success: true, platforms: [{ platform: 'facebook', success: true }] })).toBe('published');
+    expect(d({ success: false, platforms: [{ platform: 'gbp', success: false, error: 'x' }, { platform: 'instagram', success: true }] })).toBe('published');
+    // Empty channel set (blank SOCIAL_AUTONOMOUS_CHANNELS) → nothing reached a provider.
+    expect(d({ success: false, platforms: [] })).toBe('release');
+    expect(d(undefined)).toBe('release');
+    // Every entry skipped before an external call (paused / disabled / judge).
+    expect(d({ success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] })).toBe('release');
+    expect(d({ success: false, platforms: [{ platform: 'facebook', success: false, skipped: true, error: 'Compliance judge: x' }] })).toBe('release');
+    // Attempted and failed (or lost response) → keep ownership.
+    expect(d({ success: false, platforms: [{ platform: 'facebook', success: false, error: 'ETIMEDOUT' }] })).toBe('retain');
+    expect(d({ success: false, platforms: [{ platform: 'gbp', skipped: 'Disabled' }, { platform: 'facebook', success: false, error: '500' }] })).toBe('retain');
+  });
+
   test('milestoneDrift blocks a stored plan the current stats no longer support', () => {
     const plan = { milestone: 300, averageRating: 4.9 };
     expect(Studio.milestoneDrift(plan, { count: 312, average: 4.9 })).toBeNull();

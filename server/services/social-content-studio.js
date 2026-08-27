@@ -2215,23 +2215,32 @@ async function publishWithFleetStatsLease(plan, publishFn, runId) {
   // state is unknown, and a duplicate celebration is worse than a missed one.
   const outcome = await publishWithReviewLivenessLock(null, publishFn);
   if (!persistClaim) return outcome;
-  const platforms = Array.isArray(outcome?.result?.platforms) ? outcome.result.platforms : [];
-  const anySuccess = !!outcome?.result?.success || platforms.some((p) => p?.success);
-  // publishToAll turns provider exceptions into success:false — a lost
-  // response may still have gone live, so an ATTEMPTED failure retains the
-  // claim. Only a set that was entirely skipped before any external call
-  // (automation paused, channel disabled, judge rejection) releases it.
-  const nothingAttempted = platforms.length > 0 && platforms.every((p) => p?.skipped);
-  if (anySuccess) {
+  const disposition = milestoneClaimDisposition(outcome?.result);
+  if (disposition === 'published') {
     await markMilestonePublished(plan.milestone, runId).catch((err) => {
       logger.error(`[studio] milestone ${plan.milestone} published but stamp upgrade failed (claim retained): ${err.message}`);
     });
-  } else if (nothingAttempted) {
+  } else if (disposition === 'release') {
     await clearMilestoneStamp(plan.milestone, runId).catch(() => {});
   } else {
     logger.warn(`[studio] milestone ${plan.milestone} publish reported no success after provider attempts — claim retained (owner review)`);
   }
   return outcome;
+}
+
+// What happens to the durable claim after a publish attempt (pure):
+//   'published' — some provider accepted the post → claimed → published
+//   'release'   — NOTHING reached a provider (empty channel set, or every
+//                 entry skipped before an external call: automation
+//                 paused, channel disabled, judge rejection) → the
+//                 threshold is selectable again
+//   'retain'    — a provider was ATTEMPTED and reported failure; a lost
+//                 response may still have gone live, so ownership stays
+function milestoneClaimDisposition(result) {
+  const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
+  if (result?.success || platforms.some((p) => p?.success)) return 'published';
+  if (platforms.every((p) => p?.skipped)) return 'release';
+  return 'retain';
 }
 
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false, allowConsumedByRunId = null } = {}) {
@@ -3183,6 +3192,7 @@ module.exports = {
   buildMilestoneDrafts,
   milestoneThresholdFor,
   milestoneDrift,
+  milestoneClaimDisposition,
   fleetReviewStats,
   planMilestone,
   selectAutonomousMilestonePlan,
