@@ -1517,6 +1517,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // on an opted-in intercept PR continue past the named-competitor park
     // below. Fail-closed default: no caller opt-in → park as before.
     namedCompetitorAutopublish = false,
+    // When set (autonomous pinned lanes), the freshly fetched PR head must
+    // still equal this SHA before any fix is built — a push landing after
+    // the caller's parent check must not have its unrelated changes blessed
+    // by the post-fix re-pin (PR r16 P1).
+    expectedParentSha = null,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
@@ -1526,6 +1531,9 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+  if (expectedParentSha && String(headSha || '').toLowerCase() !== String(expectedParentSha).toLowerCase()) {
+    return { skipped: true, reason: 'pr head moved off the pinned parent during remediation — foreign parent needs a human decision' };
+  }
 
   if (state.status === 'closed') {
     // A 'closed' tombstone can go stale: PRs can be REOPENED, and this code
@@ -2182,6 +2190,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // carried (JS, config, assets, other content). Missing/unparseable
   // payload or a mismatched head skips remediation (fail closed: the PR
   // waits for a human; the universal merge pin withholds it anyway).
+  let expectedParentSha = null;
   if (run && run.id && (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page')) {
     let parentOk = false;
     try {
@@ -2191,8 +2200,8 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
       const headSha = String(pr?.head?.sha || '').toLowerCase();
       const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
       const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-      parentOk = Boolean(headSha) && ((pinned && pinned === headSha)
-        || (fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha));
+      if (headSha && pinned && pinned === headSha) { parentOk = true; expectedParentSha = pinned; }
+      else if (headSha && fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha) { parentOk = true; expectedParentSha = approvedSha; }
     } catch (_) { parentOk = false; }
     if (!parentOk) {
       return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };
@@ -2255,6 +2264,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // onRemediated can persist it atomically with the head pin (PR r13 P1).
   let lastComparisonVerdict = null;
   return runRemediationForPr({
+    // TOCTOU guard (PR r16 P1): runRemediationForPr re-fetches the PR — its
+    // freshly read head must still equal the pinned parent verified above,
+    // or a push landing in between would have its unrelated changes blessed
+    // by the re-pin.
+    expectedParentSha,
     guardContext,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
@@ -2304,12 +2318,12 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         // competitor must land its flagged verdict in the same update as
         // the head pin — a stale competitor-free verdict would leave the
         // run ungoverned and skip the kill-switch recheck entirely.
-        // Fail-soft (warn + skip) is allowed ONLY for a competitor-free
-        // verdict: an unpinned competitor-free head merges like any
-        // ordinary post. A FLAGGED verdict that cannot persist THROWS —
-        // runRemediationForPr post-push-parks the PR (fail closed).
+        // EVERY re-pin failure THROWS (PR r16 P1) — the merge pin is
+        // universal on these lanes, so an unpinned head (flagged or clean)
+        // would strand the PR at publisher_head_pin_failed while this
+        // return reported success; the throw post-push-parks it instead
+        // (retryable: a new head re-arms remediation).
         if (newHead) {
-          const flagged = Boolean(lastComparisonVerdict && lastComparisonVerdict.requiresHumanReview === true);
           try {
             const fresh = await db('autonomous_runs').where({ id: run.id }).first();
             if (!fresh) throw new Error('run row missing');
@@ -2335,8 +2349,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
             const stamped = await db('autonomous_runs').where({ id: run.id }).update(update);
             if (!stamped) throw new Error('update matched no row');
           } catch (e) {
-            if (flagged) throw new Error(`autopublish re-pin/verdict persist failed on a competitor-flagged fix: ${e.message}`);
-            logger.warn(`[codex-remediation] autopublish head re-pin skipped for run ${run.id}: ${e.message} — a governed merge of this head will wait for a human`);
+            throw new Error(`autopublish re-pin/verdict persist failed after the fix commit: ${e.message}`);
           }
         }
         return mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges);

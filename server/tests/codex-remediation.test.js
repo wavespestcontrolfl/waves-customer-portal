@@ -1683,6 +1683,25 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  test('a head that MOVES between the parent check and the refetch is withheld (TOCTOU, PR r16 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    // Caller's snapshot matches the pin, but the refetched PR shows a NEWER
+    // foreign head.
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: 'foreignpush999' } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/moved off the pinned parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
   test('a competitor-REMOVING fix keeps the bypass marker STICKY — the persisted verdict stays flagged (PR r15 P1)', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb({
