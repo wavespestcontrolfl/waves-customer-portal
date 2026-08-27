@@ -20,6 +20,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   mergePr: jest.fn(),
+  listPrFiles: jest.fn(),
+  getFile: jest.fn(),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -101,7 +103,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0, runFirst } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0 } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -147,14 +149,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         if (table === 'content_briefs') {
           return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
         }
-        // by-id lookup (named-competitor revoke check reads
-        // comparison_table_result fresh before merging) — defaults to a
-        // competitor-free verdict so unrelated merge tests are unaffected;
-        // the newer-sibling lookup in queueRowParkedState filters by
-        // opportunity_id instead.
-        if (table === 'autonomous_runs' && q._filters.id !== undefined) {
-          return Promise.resolve(runFirst !== undefined ? runFirst : { comparison_table_result: null });
-        }
+        // newer-sibling lookup in queueRowParkedState
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
       }),
@@ -204,6 +199,11 @@ beforeEach(() => {
   // exercise the awaiting_production_deploy gate.
   pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
   pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+  // Default: the PR's head carries one competitor-free blog file, so the
+  // pre-merge named-competitor head gate (which runs the REAL comparison
+  // gate against these contents) passes for the unrelated merge tests.
+  gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/pest-control/test-post.mdx', status: 'added' }]);
+  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
 });
 
 afterEach(() => {
@@ -677,61 +677,75 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
   });
 
-  // Owner directive 2026-08-26: a run whose comparison gate flagged
-  // requiresHumanReview only reached this unattended merge under the scoped
-  // named-competitor autopublish eligibility — the poller re-validates it
-  // (TRUE-intercept marker + both gates) immediately before gh.mergePr, so
-  // unsetting a kill switch stops an ALREADY-OPEN competitor PR.
-  test('named-competitor run: auto-merge WITHHELD when autopublish eligibility is not (or no longer) met', async () => {
+  // Owner directive 2026-08-26: the pre-merge named-competitor gate runs the
+  // deterministic comparison gate against the CURRENT HEAD's blog files (not
+  // a stored verdict — a remediation/human push moves the head), and a head
+  // that names competitors merges only while the scoped autopublish
+  // eligibility (TRUE-intercept marker + both gates) holds RIGHT NOW.
+  function greenMergePath() {
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+  }
+
+  test('named-competitor head: auto-merge WITHHELD when autopublish eligibility is not (or no longer) met', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({
-      pending: [makeRun()],
-      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: true } },
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    try {
+      const res = await poller.pollPending();
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { gate.evaluate.mockRestore(); }
+  });
+
+  test('head gate fails CLOSED when the PR files cannot be listed (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockRejectedValue(new Error('gh unavailable'));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a head whose comparison gate FAILS outright is withheld even with eligibility (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({
+      pass: false,
+      findings: [{ severity: 'P0', code: 'COMPARISON_DISPARAGEMENT' }],
+      requiresHumanReview: false,
     });
-    gh.getPr.mockResolvedValue(openPr());
-    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
-    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
-    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
-    publisher.assertCodexReviewClear.mockResolvedValue(true);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
+    try {
+      const res = await poller.pollPending();
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { gate.evaluate.mockRestore(); }
   });
 
-  test('revoke check fails CLOSED when the fresh run-row read finds no row (no merge)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()], runFirst: null });
-    gh.getPr.mockResolvedValue(openPr());
-    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
-    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
-    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
-    publisher.assertCodexReviewClear.mockResolvedValue(true);
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
-    expect(gh.mergePr).not.toHaveBeenCalled();
-  });
-
-  test('named-competitor run: auto-merge proceeds when the TRUE-intercept marker and both gates hold at merge time', async () => {
+  test('named-competitor head: auto-merge proceeds when the TRUE-intercept marker and both gates hold at merge time', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const fg = require('../config/feature-gates');
     const realIsEnabled = fg.isEnabled;
     jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
       (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
     try {
       setupDb({
         pending: [makeRun({ brief_id: 'brief-1' })],
         briefs: [{ id: 'brief-1', gsc_signal: { bucket: 'operator_intercept', intercept: true } }],
-        runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: true } },
       });
-      gh.getPr.mockResolvedValue(openPr());
-      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
-      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
-      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
-      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      greenMergePath();
       gh.mergePr.mockResolvedValue({ merged: true });
       indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
       publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -739,9 +753,12 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       const res = await poller.pollPending();
 
       expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      // The gate judged the CURRENT head's file, fetched at pr.head.sha.
+      expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', 'headsha1');
       expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     } finally {
       fg.isEnabled.mockRestore();
+      gate.evaluate.mockRestore();
     }
   });
 

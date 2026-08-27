@@ -255,6 +255,13 @@ async function listPrReviewComments(number) {
   return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/comments`);
 }
 
+// Changed files of a PR (filename/status per row) — used by the autonomous
+// merge path to re-run deterministic content gates against the CURRENT head.
+async function listPrFiles(number) {
+  const { owner, repo } = env();
+  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/files`);
+}
+
 async function mergePr(number, { method = 'squash', title, message, sha } = {}) {
   const { owner, repo } = env();
   const body = { merge_method: method, commit_title: title, commit_message: message };
@@ -320,6 +327,7 @@ module.exports = {
   listIssueComments,
   listPrReviews,
   listPrReviewComments,
+  listPrFiles,
   mergePr,
   getPr,
   closePr,

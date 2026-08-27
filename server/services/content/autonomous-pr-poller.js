@@ -857,27 +857,64 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
-  // 3.5 Named-competitor revoke check (owner directive 2026-08-26): a run
-  //    whose comparison gate flagged requiresHumanReview only got its PR
-  //    opened under the scoped autopublish eligibility — re-validate that
-  //    eligibility (TRUE-intercept marker + BOTH named-competitor gates)
-  //    fail-closed at the last instant, so unsetting the kill switch
-  //    (GATE_NAMED_COMPETITOR_AUTOPUBLISH or GATE_NAMED_COMPETITOR_COMPARISON)
-  //    during the build/Codex window stops an ALREADY-OPEN competitor PR
-  //    from merging. Fresh DB read (the tick's selection omits the column
-  //    and could be stale); any read/parse failure counts as flagged.
+  // 3.5 Named-competitor merge gate (owner directive 2026-08-26): re-run the
+  //    deterministic comparison gate against the CURRENT HEAD's blog files —
+  //    not a stored verdict, which is unbound to the head and could be stale
+  //    after a remediation/human push (hook r7 P1). Fail-closed throughout:
+  //    an unlistable PR, unreadable/unparseable file, or thrown gate
+  //    withholds the merge. A head that FAILS the gate outright is withheld
+  //    (a deterministic competitor finding reached a green build); a PASSING
+  //    head that names competitors (requiresHumanReview) merges only while
+  //    the scoped autopublish eligibility (TRUE-intercept marker on the
+  //    reviewed brief + BOTH named-competitor gates) holds RIGHT NOW — so
+  //    unsetting GATE_NAMED_COMPETITOR_AUTOPUBLISH (or
+  //    GATE_NAMED_COMPETITOR_COMPARISON) during the build/Codex window stops
+  //    an already-open competitor PR from publishing.
   let comparisonRequiresReview = true;
+  let comparisonBlocked = true;
   try {
-    const fresh = await db('autonomous_runs').where('id', run.id).first('comparison_table_result');
-    if (fresh) {
-      // A stored NULL is a valid competitor-free verdict (runs predating the
-      // comparison gate); a MISSING row or unparseable value keeps the
-      // fail-closed default true.
-      let ctr = fresh.comparison_table_result ?? null;
-      if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
-      if (ctr !== undefined) comparisonRequiresReview = Boolean(ctr && ctr.requiresHumanReview === true);
+    const prFiles = await gh.listPrFiles(pr.number);
+    const blogFiles = (Array.isArray(prFiles) ? prFiles : []).filter((f) => (
+      /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
+    if (blogFiles.length) {
+      const fmMod = require('../content-astro/frontmatter');
+      const comparisonMod = require('./comparison-table-gate');
+      const runner = require('./autonomous-runner');
+      let namedEnabled = false;
+      try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
+      // Operator authorization context — same inputs the runner's gate run
+      // used. Load failures leave it empty, which only makes the gate
+      // STRICTER (operator-authorized mentions read as unauthorized → fail
+      // → withheld).
+      let opText = '';
+      try {
+        const opp = run.opportunity_id ? await db('opportunity_queue').where('id', run.opportunity_id).first() : null;
+        const brief = await runner._loadReviewedBrief(run);
+        opText = runner._internals.operatorBriefTextForComparisonGate(opp, brief) || '';
+      } catch (_) { opText = ''; }
+      comparisonRequiresReview = false;
+      comparisonBlocked = false;
+      for (const f of blogFiles) {
+        const file = await gh.getFile(f.filename, pr.head?.sha);
+        const parsed = fmMod.parse(String(file?.content || ''));
+        const verdict = comparisonMod.evaluate(
+          { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
+          { namedCompetitorEnabled: namedEnabled, operatorBriefText: opText },
+        );
+        if (!verdict || verdict.pass !== true) { comparisonBlocked = true; break; }
+        if (verdict.requiresHumanReview === true) comparisonRequiresReview = true;
+      }
+    } else if (Array.isArray(prFiles)) {
+      // No blog content in the PR (defensive — this lane always commits the
+      // .mdx): nothing for the comparison gate to judge.
+      comparisonRequiresReview = false;
+      comparisonBlocked = false;
     }
-  } catch (_) { comparisonRequiresReview = true; }
+  } catch (_) { comparisonRequiresReview = true; comparisonBlocked = true; }
+  if (comparisonBlocked) {
+    logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: current-head comparison gate failed or was unreadable — PR left open for a human decision`);
+    return { pending: true, reason: 'named_competitor_head_gate_failed' };
+  }
   if (comparisonRequiresReview) {
     let eligible = false;
     try {
