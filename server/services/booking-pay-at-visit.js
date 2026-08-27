@@ -190,6 +190,16 @@ function resolveWizardSeriesPlan(estimate, serviceKey) {
     pattern = picked.visits === 12 ? 'monthly' : 'seasonal_feb_oct';
   }
   if (!pattern) return null;
+  // The converter's family-specific seeding eligibility is the cadence
+  // authority (codex #3504 r7): the generic promise table alone accepts
+  // internally consistent but RETIRED combinations — 4-visit quarterly
+  // lawn (owner-retired 2026-08-04), 12-visit monthly tree/shrub — that
+  // every accept path rejects, and a still-valid handoff whose mutable
+  // draft drifted into one would bypass those protections. It also brings
+  // the per-family data checks (cadence-field disagreement, nutritional/
+  // commercial palm, count conflicts) this resolver must match.
+  const { supportsConverterFollowUpSeeding } = require('./estimate-converter');
+  if (!supportsConverterFollowUpSeeding(picked.svc, {}, pattern)) return null;
   if (PATTERN_PROMISED_VISITS[pattern] !== picked.visits) return null;
   // Palm: ONLY the two-visit semiannual injection program is a recurring
   // plan (converter doctrine, codex #3504 r5) — the engine also emits

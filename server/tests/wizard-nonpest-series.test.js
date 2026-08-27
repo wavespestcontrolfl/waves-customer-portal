@@ -50,6 +50,31 @@ describe('resolveWizardSeriesPlan', () => {
     expect(resolveWizardSeriesPlan(mosquitoEstimate({ visits: 10 }), 'mosquito')).toBeNull();
   });
 
+  test('retired-but-consistent cadences fail closed via the converter eligibility gate', () => {
+    // codex #3504 r7: 4-visit quarterly lawn is owner-retired and 12-visit
+    // monthly tree/shrub was never sold — the accept paths reject both, so
+    // a drifted handoff draft must not activate them here either.
+    const retiredLawn = {
+      id: 'est-lawn-q', annual_total: 400, monthly_total: 33.33,
+      estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 33.33, annual: 400, perApp: 100, visitsPerYear: 4, frequency: 'quarterly' }] } },
+    };
+    expect(resolveWizardSeriesPlan(retiredLawn, 'lawn_care')).toBeNull();
+    const monthlyTree = {
+      id: 'est-tree-m', annual_total: 1200, monthly_total: 100,
+      estimate_data: { engineResult: { lineItems: [{ service: 'tree_shrub', name: 'Tree & Shrub', monthly: 100, annual: 1200, perApp: 100, visitsPerYear: 12, frequency: 'monthly' }] } },
+    };
+    expect(resolveWizardSeriesPlan(monthlyTree, 'tree_shrub')).toBeNull();
+    // ...while the sold tiers still resolve (Enhanced 9x tree carries the
+    // all-numeric-nine cadence fields that read every_6_weeks).
+    const soldTree = {
+      id: 'est-tree-9', annual_total: 900, monthly_total: 75,
+      estimate_data: { engineResult: { lineItems: [{ service: 'tree_shrub', name: 'Tree & Shrub', monthly: 75, annual: 900, perApp: 100, visits: 9, frequency: 9 }] } },
+    };
+    expect(resolveWizardSeriesPlan(soldTree, 'tree_shrub')).toEqual({ pattern: 'every_6_weeks', visits: 9 });
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'booking-pay-at-visit.js'), 'utf8');
+    expect(src).toMatch(/supportsConverterFollowUpSeeding\(picked\.svc, \{\}, pattern\)/);
+  });
+
   test('an off-tier mosquito count NEVER falls through to the generic buckets (runtime-config drift)', () => {
     // codex #3504 r6: pricing_config.mosquito_visits is configurable — a
     // seasonal program tuned to 6 visits would read 'bimonthly', pass the
@@ -240,9 +265,17 @@ describe('booking route wiring (source contracts)', () => {
     // while a delayed activation waits on the comms lock — seeding from
     // the stale in-memory row would underbill the series by the first
     // application. Any mismatch = stale, no seed, no write.
-    expect(booking).toMatch(/first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id'\)/);
+    // FOR UPDATE (codex #3504 r7): cancellation writers don't take the
+    // comms lock, so the parent row lock is what serializes them.
+    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id'\)/);
     expect(booking).toMatch(/lockedParent\.payment_method_preference !== 'pay_at_visit'\s*\n\s*\|\| lockedParent\.create_invoice_on_complete !== true\s*\n\s*\|\| Number\(lockedParent\.estimated_price\) !== Number\(visitPrice\)/);
     expect(booking).toMatch(/no longer matches its priced state under lock/);
+    // The correlation is stamped SERVER-SIDE from the verified pricing
+    // draft, never from the client's optional source_estimate_id field —
+    // otherwise an omitted/substituted value strands a priced visit the
+    // recovery sweep (joined on source_estimate_id) can never find
+    // (codex #3504 r7 hook P0).
+    expect(booking).toMatch(/if \(pricingTrusted\) sourceEstimateId = String\(pricing_estimate_id\);/);
     // Ordering: the alreadyActivated fast-path stays FIRST (an activated
     // parent is success, not staleness), then the priced-state check,
     // then the draft drift comparison.
@@ -412,6 +445,16 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/\} else if \(replayParentIsOwn && replayParent\.is_recurring\) \{/);
     const remGate = booking.indexOf('Gate on ACTIVATION SUCCESS, not on child count');
     expect(remGate).toBeGreaterThan(0);
+  });
+
+  test('a replay-activated (or replay-recognized) series converts the lead like the primary path', () => {
+    // codex #3504 r7: the replay branch returns before the primary lead
+    // conversion block — a plan booked on the retry must not leave the
+    // quote-wizard lead pre-sale.
+    expect(booking).toMatch(/if \(replaySeriesActivated\) \{[\s\S]{0,600}convertLeadFromEvent\(\{\s*\n\s*source: 'recurring_service_booked',/);
+    // Both replay shapes set the flag: fresh/already activation AND the
+    // committed-heal branch.
+    expect((booking.match(/replaySeriesActivated = true;/g) || []).length).toBe(2);
   });
 
   test('a stranded activation (worker died between booking commit and activation) is recovered by the strip sweep', () => {

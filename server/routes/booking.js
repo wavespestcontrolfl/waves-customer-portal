@@ -2252,6 +2252,17 @@ async function createSelfBooking(payload = {}) {
           visitPrice = priced.amount;
           followUpVisitPrice = priced.followUpAmount ?? priced.amount;
           paymentPref = 'pay_at_visit';
+          // Server-side correlation for TRUSTED wizard pricing (codex
+          // #3504 r7 hook P0): the parent's source_estimate_id is the
+          // binding every activation/recovery surface keys off (activation
+          // priced-state check, crash-retry replay bind, stranded-recovery
+          // sweep join, fee machinery) — but the client's source_estimate_id
+          // field is a SEPARATE optional input. An omitted/substituted
+          // value would mint an annual/N-priced visit whose activation
+          // stale-skips and whose stranded shape the sweep can never find.
+          // The HMAC-verified, customer-matched pricing draft IS the
+          // correlation; never trust the client field for it.
+          if (pricingTrusted) sourceEstimateId = String(pricing_estimate_id);
         }
       } catch (err) {
         logger.warn(`[booking:confirm] pay-at-visit price resolution failed for customer=${custId}: ${err.message}`);
@@ -2932,8 +2943,17 @@ async function createSelfBooking(payload = {}) {
           // activation (markParentRecurring), so an is_recurring parent
           // under the lock IS a completed activation: return success and
           // touch nothing.
+          // FOR UPDATE (codex #3504 r7): cancellation writers (e.g.
+          // transitionJobStatus) do not take the comms advisory lock, so
+          // without the row lock a staff cancel can commit between this
+          // read and the seed — markParentRecurring would then flip a
+          // CANCELLED parent recurring and insert billable children. The
+          // row lock holds through the transaction: a concurrent cancel
+          // now either commits first (the priced-state check below reads
+          // it and skips) or waits for this activation to finish.
           const lockedParent = await trx('scheduled_services')
             .where({ id: seriesParentRow.id })
+            .forUpdate()
             .first('id', 'is_recurring', 'status', 'payment_method_preference',
               'estimated_price', 'create_invoice_on_complete', 'source_estimate_id');
           if (lockedParent && lockedParent.is_recurring) {
@@ -3369,6 +3389,7 @@ async function createSelfBooking(payload = {}) {
             && String(replayParent.source_estimate_id) === String(pricing_estimate_id)
             && RecurringAppointmentSeeder.serviceKeyFor({ service_type: replayParent.service_type })
               === RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          let replaySeriesActivated = false;
           if (replayParentIsOwn
             && replayParent.payment_method_preference === 'pay_at_visit'
             && draftStillLive
@@ -3423,6 +3444,7 @@ async function createSelfBooking(payload = {}) {
             // before its own follow-through (every step idempotent;
             // codex #3504 r6 + hook).
             if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
+              replaySeriesActivated = true;
               await runWizardActivationFollowThrough(replayParent.id);
             }
           } else if (replayParentIsOwn && replayParent.is_recurring) {
@@ -3431,7 +3453,27 @@ async function createSelfBooking(payload = {}) {
             // that attempt may have died before its follow-through: heal
             // the property stamps / tier sync / welcome on the retry —
             // every step is idempotent (codex #3504 r6 hook).
+            replaySeriesActivated = true;
             await runWizardActivationFollowThrough(replayParent.id);
+          }
+          // Lead conversion on the REPLAY too (codex #3504 r7): the first
+          // request can die after the activation commits but before the
+          // primary path's conversion block, and this branch returns
+          // before ever reaching it — the quote-wizard lead would stay in
+          // its pre-sale stage despite a booked recurring plan. Same
+          // idempotent call the primary path makes (enforceOriginating;
+          // an already-won lead no-ops).
+          if (replaySeriesActivated) {
+            try {
+              const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+              await convertLeadFromEvent({
+                source: 'recurring_service_booked',
+                customerId: custId,
+                enforceOriginating: true,
+              });
+            } catch (leadErr) {
+              logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
+            }
           }
         } catch (err) {
           logger.warn(`[booking:confirm] replay series activation skipped for ${txResult.existing.id}: ${err.message}`);
