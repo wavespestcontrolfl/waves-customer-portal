@@ -215,7 +215,7 @@ export default function CustomerPropertiesPanelV2({
                       aria-label={`Edit label for ${p.address_line1}`}
                       disabled={!!rowBusy}
                       onClick={() => setLabelEdit({ id: p.id, value: p.label || "" })}
-                      className="text-12 text-ink-secondary hover:text-zinc-900 u-focus-ring text-left disabled:opacity-50"
+                      className="block p-0 border-0 bg-transparent text-12 text-ink-secondary hover:text-zinc-900 hover:underline u-focus-ring text-left disabled:opacity-50"
                     >
                       {p.label || "Add label"}
                     </button>
