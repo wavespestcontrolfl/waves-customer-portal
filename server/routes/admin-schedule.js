@@ -34,6 +34,7 @@ const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('..
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
+const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -2051,6 +2052,22 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
   return Math.min(subtotal, Math.max(0, Math.round(dollars * 100) / 100));
 }
 
+// Lines that never receive a PERCENTAGE appointment-level discount. The
+// WaveGuard exclusion map (pricing-engine constants — termite_bond, rodent
+// bait, palm injection, ...) is keyed by FAMILY key, while catalog rows and
+// service_key_snapshot carry term-suffixed keys ("termite_bond_1yr"), so a
+// trailing _<n>yr is stripped before the lookup. A line with no service key
+// resolves to "not excluded" — the pre-fix behavior for legacy rows. Fixed
+// dollar discounts are untouched: the owner ruling is "no bundle % discount"
+// on the bond, and a flat operator credit is not a bundle percentage.
+function lineExcludedFromPercentDiscount(serviceKey) {
+  const key = String(serviceKey || '').trim().toLowerCase();
+  if (!key) return false;
+  if (serviceExcludedFromPercentDiscount(key)) return true;
+  const family = key.replace(/_\d+yr$/, '');
+  return family !== key && serviceExcludedFromPercentDiscount(family);
+}
+
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
@@ -2064,10 +2081,16 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
     (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
     && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
   );
-  const discountBase = isServiceScoped
-    ? (matchesScope(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
+  const pctExcluded = (serviceKey) => discount?.discountType === 'percentage'
+    && lineExcludedFromPercentDiscount(serviceKey);
+  const lineEligible = (serviceKey, serviceCategory) => matchesScope(serviceKey, serviceCategory)
+    && !pctExcluded(serviceKey);
+  const anyPctExcluded = pctExcluded(pricing.primaryServiceKey)
+    || addons.some((line) => pctExcluded(line.serviceKey));
+  const discountBase = (isServiceScoped || anyPctExcluded)
+    ? (lineEligible(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
       + addons.reduce((sum, line) => (
-        matchesScope(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
+        lineEligible(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
       ), 0)
     : subtotal;
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
@@ -2100,17 +2123,25 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, d
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
   let discountBase = subtotal;
-  if (discountScope?.isScoped) {
-    const servicesById = discountScope.servicesById || new Map();
+  // Percent-excluded lines (termite bond, ...) come out of the base on every
+  // stored replay too, so an auto-extended / propagated visit never re-adds
+  // the bond to a WaveGuard percentage. Keys come from the identity
+  // snapshots the rows already carry — no catalog read.
+  const pctType = parent?.discount_type === 'percentage';
+  const parentPctExcluded = pctType && lineExcludedFromPercentDiscount(parent?.service_key_snapshot);
+  const addonPctExcluded = (addon) => pctType && lineExcludedFromPercentDiscount(addon?.service_key_snapshot);
+  if (discountScope?.isScoped || parentPctExcluded || addons.some(addonPctExcluded)) {
+    const servicesById = discountScope?.servicesById || new Map();
     const matchesScope = (serviceId) => {
+      if (!discountScope?.isScoped) return true;
       const service = servicesById.get(serviceId) || {};
       return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
         && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
     };
-    discountBase = matchesScope(parent?.service_id) ? primaryNet : 0;
+    discountBase = matchesScope(parent?.service_id) && !parentPctExcluded ? primaryNet : 0;
     discountBase += addons.reduce((sum, addon) => {
       const amount = Number(addon.estimated_price);
-      return matchesScope(addon.service_id) && Number.isFinite(amount) && amount > 0
+      return matchesScope(addon.service_id) && !addonPctExcluded(addon) && Number.isFinite(amount) && amount > 0
         ? sum + amount
         : sum;
     }, 0);
@@ -2537,6 +2568,8 @@ function mapAddonRow(row) {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
+    serviceKey: row.service_key_snapshot || null,
+    excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
     estimatedDuration: row.estimated_duration_minutes ?? null,
     basePrice: row.base_price != null ? Number(row.base_price) : null,
     estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
@@ -14417,6 +14450,8 @@ router.get('/services-dropdown', async (req, res, next) => {
             priceMax: toPrice(s.price_range_max ?? s.base_price),
             base_price: toPrice(s.base_price),
             default_duration_minutes: s.default_duration_minutes,
+            serviceKey: s.service_key || null,
+            excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
           });
         }
         groups = Object.values(byCategory);
@@ -15413,6 +15448,7 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  lineExcludedFromPercentDiscount,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,

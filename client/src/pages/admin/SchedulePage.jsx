@@ -1318,6 +1318,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: a.discountAmount != null ? a.discountAmount : null,
         _origDiscountId: a.discountId || null,
         _origDiscountName: a.discountName || null,
+        // Server-stamped: this line never takes a percentage appointment
+        // discount (termite bond, rodent bait, ...). Drives the preview only —
+        // the server recomputes the same exclusion on save.
+        excludedFromPercentDiscount: a.excludedFromPercentDiscount === true,
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
         recurringIntervalDays: a.recurringIntervalDays ?? null,
@@ -1728,6 +1732,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         _origDiscountAmount: null,
         _origDiscountId: null,
         _origDiscountName: null,
+        excludedFromPercentDiscount: false,
         estimatedDuration: "",
         recurringPattern: null,
         recurringIntervalDays: null,
@@ -2312,10 +2317,29 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     0,
   );
   const servicePrice = primaryPrice + addonLinesTotal;
+  // A percentage discount skips percent-excluded lines (termite bond, rodent
+  // bait, ...) — mirrors calculateVisitFinancialsForAddons on the server so
+  // the preview matches what saves. The primary line only carries the flag
+  // when it was picked from the catalog in this session; the server is
+  // authoritative either way.
+  const percentExcludedLines = serviceLines.filter(
+    (l) => l.excludedFromPercentDiscount === true,
+  );
+  const percentDiscountBase =
+    (form.excludedFromPercentDiscount === true ? 0 : primaryPrice) +
+    serviceLines.reduce(
+      (sum, l) =>
+        l.excludedFromPercentDiscount === true ||
+        l.price === "" ||
+        isNaN(parseFloat(l.price))
+          ? sum
+          : sum + parseFloat(l.price),
+      0,
+    );
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
-        ? servicePrice * (Number(discountAmount) / 100)
+        ? percentDiscountBase * (Number(discountAmount) / 100)
         : Number(discountAmount)
       : 0;
   const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
@@ -2552,6 +2576,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 }
                                 if (svc.id !== undefined) {
                                   onField("serviceId", svc.id || null);
+                                }
+                                if (svc.excludedFromPercentDiscount !== undefined) {
+                                  onField(
+                                    "excludedFromPercentDiscount",
+                                    svc.excludedFromPercentDiscount === true,
+                                  );
                                 }
                                 setPickerKey(null);
                                 setExpandedCategory(null);
@@ -3452,6 +3482,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
+                {discountType === "percentage" &&
+                  discountAmount !== "" &&
+                  percentExcludedLines.length > 0 && (
+                    <div
+                      style={{
+                        minWidth: 220,
+                        fontSize: 12,
+                        color: D.muted,
+                      }}
+                    >
+                      Not discounted:{" "}
+                      {percentExcludedLines
+                        .map((l) => l.serviceType || "add-on")
+                        .join(", ")}
+                    </div>
+                  )}
                 <div
                   style={{
                     minWidth: 220,

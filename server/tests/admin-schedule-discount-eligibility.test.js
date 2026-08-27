@@ -16,6 +16,7 @@ const {
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
+  lineExcludedFromPercentDiscount,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
@@ -250,6 +251,75 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(financials).toEqual({
       price: 100,
       appointmentDiscountDollars: 50,
+    });
+  });
+
+  test('maps term-suffixed catalog keys onto the percent-discount exclusion family', () => {
+    expect(lineExcludedFromPercentDiscount('termite_bond_1yr')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bait')).toBe(false);
+    expect(lineExcludedFromPercentDiscount('pest_general_quarterly')).toBe(false);
+    expect(lineExcludedFromPercentDiscount(null)).toBe(false);
+  });
+
+  test('keeps the termite bond out of a percentage appointment discount', () => {
+    // Quarterly pest $117 + bait $105.30 + bond $60, WaveGuard Silver 10%:
+    // the bond is a fixed warranty rider and never takes the bundle %.
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 117,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'percentage',
+        discountAmount: 10,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [
+      { price: 105.3, serviceKey: 'termite_bait', serviceCategory: 'termite' },
+      { price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' },
+    ]);
+
+    expect(financials).toEqual({
+      price: 260.07,
+      appointmentDiscountDollars: 22.23,
+    });
+  });
+
+  test('still spreads a fixed-dollar appointment discount across every line', () => {
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 100,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'fixed_amount',
+        discountAmount: 25,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
+
+    expect(financials).toEqual({ price: 135, appointmentDiscountDollars: 25 });
+  });
+
+  test('keeps the bond out of the percentage base on stored replays', () => {
+    const parent = {
+      service_id: 'pest-service',
+      service_key_snapshot: 'pest_general_quarterly',
+      primary_line_price: 117,
+      line_discount_dollars: 0,
+      discount_type: 'percentage',
+      discount_amount: 10,
+    };
+    const addons = [
+      { service_id: 'bait-service', service_key_snapshot: 'termite_bait', estimated_price: 105.3 },
+      { service_id: 'bond-service', service_key_snapshot: 'termite_bond_1yr', estimated_price: 60 },
+    ];
+
+    expect(calculateStoredVisitFinancials(parent, addons, addons, null)).toEqual({
+      price: 260.07,
+      appointmentDiscountDollars: 22.23,
     });
   });
 
