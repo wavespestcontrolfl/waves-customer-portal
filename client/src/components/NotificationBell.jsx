@@ -269,13 +269,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const markAllRead = async () => {
-    let readAllRes;
     try {
-      readAllRes = await requestJson(`${basePath}/read-all`, { method: 'PUT' });
+      await requestJson(`${basePath}/read-all`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
-    if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(0, readAllRes?.at);
+    // Icon badge: refetch the authoritative post-mutation count — read-all
+    // can fail soft on live-alert dismissal while still returning success,
+    // and clearing the icon with a fresh stamp would beat the delayed push
+    // for those alerts (codex round 15). Same pattern as markRead.
+    if (type === 'admin') fetchCount();
   };
 
   // Group by time: Today, Yesterday, This Week, Older

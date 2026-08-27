@@ -10,7 +10,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // Live-overlay math (per-admin dismissals, cron-row dedup, the combined
 // unread count) lives in services/admin-unread.js — shared with the push
 // app-icon badge in notification-triggers so the two counts can't drift.
-const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin, badgeOrderingStamp } = require('../services/admin-unread');
+const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 
 router.use(adminAuthenticate);
 
@@ -188,8 +188,11 @@ router.put('/read-all', async (req, res, next) => {
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
     if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
-    // Serialized DB-clock badge-ordering stamp — see /unread-count.
-    res.json({ success: true, at: await badgeOrderingStamp(req.technicianId) });
+    // No badge-ordering stamp here: the client re-syncs the icon via a
+    // fresh /unread-count after the mutation (authoritative count AND
+    // stamp from the locked section) — a stamp on this response could
+    // clear the icon even when live-alert dismissal failed soft.
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
@@ -311,12 +314,12 @@ router.put('/:id/read', async (req, res, next) => {
       }
       const alertId = id.slice('live:'.length);
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
-      return res.json({ success: true, live: true, dismissed: recorded > 0, at: await badgeOrderingStamp(req.technicianId) });
+      return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
     const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
-    // Serialized DB-clock badge-ordering stamp — see /unread-count.
-    res.json({ success: true, updated, at: await badgeOrderingStamp(req.technicianId) });
+    // No badge-ordering stamp — see /read-all.
+    res.json({ success: true, updated });
   } catch (err) { next(err); }
 });
 

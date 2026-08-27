@@ -261,12 +261,6 @@ async function runBadgeSection(key, fn) {
   });
 }
 
-// Cap on a QUEUED (trigger-path) section so one stuck query cannot wedge
-// the chain forever: the chain advances, the abandoned section finishes
-// in the background, and lock_timeout keeps follow-on sections from
-// stacking behind its advisory lock.
-const BADGE_SECTION_TIMEOUT_MS = 5000;
-
 async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandoned } = {}) {
   const key = String(adminUserId ?? '');
   const attempt = async () => {
@@ -290,31 +284,22 @@ async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandon
   }
   // QUEUED (push) path: no fallback at all — lock failure or missing
   // transaction support propagates, the caller logs and the push goes
-  // out without a badge. An unlocked snapshot must not be published,
-  // and its unbounded queries could outlive the queue's cap (codex
-  // round 14).
+  // out without a badge (codex round 14). The queue waits for the
+  // section to COMPLETE (commit or rollback) before advancing: the
+  // section's duration is structurally bounded (lock_timeout 2.5s,
+  // statement_timeout 4s per statement, a fixed handful of statements),
+  // so at most one badge transaction ever exists and a slow database
+  // cannot accumulate concurrent timed-out transactions (codex rounds
+  // 10/15). Callers never wait on this — their own 1.5s race simply
+  // omits the badge, and a task whose caller gave up while queued is
+  // dropped before it starts.
   return serializeBadgeSection(async () => {
-    // The trigger's own 1.5s race may have given up while this task sat
-    // in the queue — drop it before spending a transaction on a badge
-    // nobody will send (codex round 10).
     if (typeof abandoned === 'function' && abandoned()) {
       const err = new Error('badge snapshot abandoned by caller');
       err.badgeComputeError = true;
       throw err;
     }
-    let timer;
-    try {
-      return await Promise.race([
-        attempt(),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            reject(Object.assign(new Error('badge section timed out'), { badgeComputeError: true }));
-          }, BADGE_SECTION_TIMEOUT_MS);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    return attempt();
   });
 }
 
@@ -347,14 +332,4 @@ async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
   }), opts);
 }
 
-// Stamp-only critical section for read mutations (mark-read/read-all).
-// The mutation committed before this is called, so any snapshot
-// serialized after it both observes the mutation and stamps later; a
-// snapshot still holding the lock stamps earlier and correctly loses to
-// this fresher token.
-async function badgeOrderingStamp(adminUserId) {
-  const { at } = await withBadgeOrderingStamp(adminUserId, async () => ({}));
-  return at;
-}
-
-module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin, badgeOrderingStamp };
+module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin };
