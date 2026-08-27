@@ -332,14 +332,38 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /api/admin/social-media/analytics — aggregated analytics
-// On-demand engagement sweep (same code the 5:15 AM ET cron runs) — lets the
-// owner backfill/verify without waiting for the tick. Read-only upstream.
+// On-demand engagement sweep (same code + same lock as the 5:15 AM ET cron)
+// — lets the owner backfill/verify without waiting for the tick. Answers as
+// soon as the lease decision is known and lets the sweep finish in the
+// background: a provider outage can hold a sweep for minutes (posts × 10s
+// calls), past any proxy timeout, and a retried request must never start a
+// second concurrent sweep. 202 = started, 409 = a sweep already holds the lease.
 router.post('/engagement/sync', async (req, res, next) => {
   try {
+    const { runExclusive } = require('../utils/cron-lock');
     const { syncRecentEngagement } = require('../services/social-engagement');
     const days = Number(req.body?.days);
-    const summary = await syncRecentEngagement({ lookbackDays: Number.isFinite(days) && days > 0 ? days : 30 });
-    res.json({ success: true, ...summary });
+    const lookbackDays = Number.isFinite(days) && days > 0 ? days : 30;
+
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    runExclusive('social-engagement-ingest', async () => {
+      markStarted(true);
+      return syncRecentEngagement({ lookbackDays });
+    })
+      .then((result) => {
+        if (result?.skipped) markStarted(false);
+        else logger.info(`[social-engagement] manual sweep done: ${JSON.stringify(result)}`);
+      })
+      .catch((err) => {
+        markStarted(false);
+        logger.error(`[social-engagement] manual sweep failed: ${err.message}`);
+      });
+
+    const ok = await started;
+    res.status(ok ? 202 : 409).json(ok
+      ? { started: true, lookbackDays }
+      : { started: false, error: 'an engagement sweep is already running — try again in a few minutes' });
   } catch (err) {
     next(err);
   }
