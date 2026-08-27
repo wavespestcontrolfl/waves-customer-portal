@@ -162,7 +162,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(lost.patch).toEqual(expect.objectContaining({ lost_reason: 'link_removed', miss_count: 2 }));
     expect(lost.patch.lost_at).toEqual(new Date('2026-08-30T07:30:00Z'));
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'lost' })]);
-    expect(r).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, recoveryQueued: 1 }));
+    expect(r).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, alertedNew: 1, recoveryQueued: 1 }));
     expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'blog.example', lost_reason: 'link_removed', domain_rating: 45, alertable: true })]);
     // recovery reported a terminal outcome → the row is stamped so it is not swept again
     expect(updates.find(u => u.patch.recovery_queued_at)).toBeUndefined(); // stamp goes through whereIn, captured below
@@ -217,7 +217,8 @@ describe('BacklinkMonitor verified loss detection', () => {
     const owed = [{ id: 'old-1', source_url: 'https://old.example/res', target_url: 'https://wavespestcontrol.com/', source_domain: 'old.example', domain_rating: 60, anchor_text: null, severity: 'clean', link_type: null, lost_reason: 'page_gone' }];
     scanWith({ items: [seen], active: [], owed });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery });
-    expect(r).toEqual(expect.objectContaining({ lostCount: 0, lostDomains: 1, highValueLost: 1, recoveryQueued: 1 }));
+    // owed-only sweep (retry after an earlier queue error): re-queued, NOT re-alerted — the bell rang when it was verified
+    expect(r).toEqual(expect.objectContaining({ lostCount: 0, lostDomains: 1, highValueLost: 1, alertedNew: 0, recoveryQueued: 1 }));
     expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'old.example', backlink_id: 'old-1', lost_reason: 'page_gone', alertable: true })]);
   });
 
@@ -285,6 +286,22 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(resolve.wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
     expect(resolve.raws[0][0]).toMatch(/lost_recovery/);
     expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
+    // prospect closure and the lost→active flip share ONE transaction
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('if the backlink flip/ledger write fails after the prospect was closed, the whole recovery rolls back together', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
+    const { prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'seo_backlink_events') throw new Error('ledger down'); return impl(table); });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ recovered: 0, unresolvedRecoveries: 1, scanned: 1 }));
+    // the prospect update ran INSIDE the transaction that threw → rolled back with the flip, never committed alone
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    await expect(db.transaction.mock.results[0].value).rejects.toThrow('ledger down');
+    expect(prospectOps.some(o => o.op === 'update')).toBe(true);
   });
 
   test('if the recovery prospect cannot be resolved, the row stays lost for the next scan to retry', async () => {

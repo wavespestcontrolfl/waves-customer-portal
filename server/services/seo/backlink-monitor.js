@@ -132,30 +132,41 @@ class BacklinkMonitor {
         const newStatus = existing.status === 'disavowed' ? 'disavowed' : 'active';
         const patch = { ...record, status: newStatus, updated_at: now };
         const events = [];
-        if (existing.status === 'lost') {
-          // A recovery prospect queued for this link (still un-pitched) is now
-          // moot — resolve it BEFORE the row flips back to active. If that
-          // fails the row stays lost (and unstamped) so the next scan retries;
-          // flipping first would leave the prospect claimable forever.
+        const wasLost = existing.status === 'lost';
+        if (wasLost) {
+          patch.lost_at = null; patch.lost_reason = null; patch.recovery_queued_at = null;
+          events.push(['recovered', { previous_lost_reason: existing.lost_reason || null }]);
+        }
+        const relChanged = existing.is_dofollow != null && existing.is_dofollow !== isDofollow;
+        if (relChanged) {
+          events.push(['rel_changed', { from: existing.is_dofollow ? 'dofollow' : 'nofollow', to: isDofollow ? 'dofollow' : 'nofollow', source: 'dataforseo' }]);
+        }
+        if (wasLost) {
+          // The recovery prospect queued for this link (still un-pitched) is now
+          // moot. Its closure and the row's lost→active flip (+ ledger row) are
+          // ONE transaction: if either fails, both roll back — the row stays
+          // lost (and unstamped) so the next scan retries, and the prospect is
+          // never closed as live while the backlink is still recorded lost.
           try {
             const { resolveRecoveredLink } = require('./lost-link-recovery');
-            await resolveRecoveredLink({ ...existing, source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to }, now);
+            await db.transaction(async (trx) => {
+              await resolveRecoveredLink({ ...existing, source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to }, now, { trx });
+              await this.transition(existing.id, patch, events, trx);
+            });
           } catch (err) {
             unresolvedRecoveries++;
-            logger.warn(`Backlink scan: recovery prospect resolve failed for ${link.domain_from} — row left lost for retry: ${err.message}`);
+            logger.warn(`Backlink scan: recovery of ${link.domain_from} failed — row left lost for retry: ${err.message}`);
             scanned++;
             continue;
           }
-          patch.lost_at = null; patch.lost_reason = null; patch.recovery_queued_at = null;
           recovered++;
-          events.push(['recovered', { previous_lost_reason: existing.lost_reason || null }]);
-        }
-        if (existing.is_dofollow != null && existing.is_dofollow !== isDofollow) {
+          if (relChanged) relChanges++;
+        } else if (events.length) {
           relChanges++;
-          events.push(['rel_changed', { from: existing.is_dofollow ? 'dofollow' : 'nofollow', to: isDofollow ? 'dofollow' : 'nofollow', source: 'dataforseo' }]);
+          await this.transition(existing.id, patch, events);
+        } else {
+          await db('seo_backlinks').where('id', existing.id).update(patch);
         }
-        if (events.length) await this.transition(existing.id, patch, events);
-        else await db('seo_backlinks').where('id', existing.id).update(patch);
       } else {
         record.first_seen = today;
         record.status = 'active';
@@ -261,13 +272,18 @@ class BacklinkMonitor {
     // Alert on VERIFIED referring-domain losses only (DR>=30, non-directory) —
     // a rotated directory page or an index-churn miss is not worth a bell.
     const alertable = lostDomains.filter(d => d.alertable);
-    if (scanComplete && alertable.length > 0 && process.env.NODE_ENV === 'production') {
+    // …and only ONCE per loss: a domain re-swept purely because its recovery
+    // queueing errored last time (owed rows, nothing newly lost this scan) was
+    // already rung — the retry marker (recovery_queued_at) must not re-ring it.
+    const freshDomains = new Set(lostLinks.map(l => comparableDomain(l.source_domain)));
+    const alertNow = alertable.filter(d => freshDomains.has(d.domain));
+    if (scanComplete && alertNow.length > 0 && process.env.NODE_ENV === 'production') {
       try {
         const TwilioService = require('../twilio');
         if (process.env.ADAM_PHONE) {
-          const names = alertable.slice(0, 3).map(d => `${d.domain} DR${d.domain_rating} (${d.lost_reason})`).join(', ');
+          const names = alertNow.slice(0, 3).map(d => `${d.domain} DR${d.domain_rating} (${d.lost_reason})`).join(', ');
           await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `⚠️ ${alertable.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`,
+            `⚠️ ${alertNow.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`,
             { messageType: 'internal_alert', link: '/admin/seo' }
           );
         }
@@ -311,7 +327,7 @@ class BacklinkMonitor {
     return {
       scanned, newCritical, scanComplete, missed,
       lostCount: lostLinks.length, verifiedLive, unverified, relChanges, recovered, unresolvedRecoveries,
-      lostDomains: lostDomains.length, highValueLost: alertable.length, recoveryQueued,
+      lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, recoveryQueued,
       ...(snapshot ? { snapshotOk, snapshotError } : {}),
     };
   }
@@ -404,11 +420,14 @@ class BacklinkMonitor {
     await q('seo_backlink_events').insert({ backlink_id: backlinkId, event_type: eventType, detail: detail ? JSON.stringify(detail) : null });
   }
 
-  async transition(backlinkId, patch, events) {
-    await db.transaction(async (trx) => {
-      await trx('seo_backlinks').where('id', backlinkId).update(patch);
-      for (const [type, detail] of events) await this.recordEvent(backlinkId, type, detail, trx);
-    });
+  // Pass an open `trx` to join a caller's transaction (recovery closure + flip).
+  async transition(backlinkId, patch, events, trx = null) {
+    const body = async (q) => {
+      await q('seo_backlinks').where('id', backlinkId).update(patch);
+      for (const [type, detail] of events) await this.recordEvent(backlinkId, type, detail, q);
+    };
+    if (trx) return body(trx);
+    await db.transaction(body);
   }
 
   scoreToxicity(link) {

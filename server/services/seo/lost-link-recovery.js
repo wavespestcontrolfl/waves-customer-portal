@@ -218,6 +218,11 @@ async function queueOne(loss, out, scoreMod) {
     const inserted = await db('seo_link_prospects').insert({
       target_domain: domain,
       target_url: loss.source_url || null,
+      // live_url = the page the link lived on. It puts the row under the DAILY
+      // verifier (which selects on live_url), so a link that quietly returns
+      // between weekly inbound scans flips this row live before the drafter
+      // pitches for it — the weekly scan's resolveRecoveredLink is the backstop.
+      live_url: loss.source_url || null,
       target_page: targetPage,
       anchor_planned: loss.anchor_text || scored?.suggested_anchor || null,
       link_type: linkType,
@@ -259,13 +264,15 @@ async function queueOne(loss, out, scoreMod) {
  * page reappearing is the same evidence ("the domain links to us again") and
  * must close the same row, whatever target_page it was filed under.
  */
-async function resolveRecoveredLink(backlink, now = new Date()) {
+async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   const domain = normalizeDomain(backlink.source_domain);
   if (!domain) return { resolved: 0 };
   // Only UNSENT rows close automatically: a 'sending' row has a Gmail send in
   // flight whose finalizer needs the token; sent/send_error rows are the
   // operator's reconciliation, not ours.
-  const n = await db('seo_link_prospects')
+  // `trx`: the monitor joins this to the backlink's lost→active flip so the
+  // two commit (or roll back) together.
+  const n = await (trx || db)('seo_link_prospects')
     .where({ target_domain: domain, status: 'prospect' })
     .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
     .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
