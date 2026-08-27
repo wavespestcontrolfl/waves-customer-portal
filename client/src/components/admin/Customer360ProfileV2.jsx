@@ -3778,7 +3778,7 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
       onClick={() => !saving && onClose?.()}
     >
       <div
-        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4179,7 +4179,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       onClick={() => !saving && onClose?.()}
     >
       <div
-        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4448,7 +4448,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
       onClick={() => !running && onClose()}
     >
       <div
-        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4711,7 +4711,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
       onClick={() => !running && onClose()}
     >
       <div
-        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[440px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[440px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -7783,7 +7783,7 @@ export default function Customer360ProfileV2({
         >
           {" "}
           <div
-            className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+            className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
             {" "}

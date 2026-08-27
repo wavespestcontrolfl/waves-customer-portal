@@ -2732,7 +2732,7 @@ export default function DispatchPageV2({
           }}
         >
           <div
-            className="max-w-4xl mx-auto min-h-full sm:min-h-0 bg-white sm:bg-transparent my-0 sm:my-6 px-0 sm:px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+            className="max-w-4xl mx-auto min-h-full sm:min-h-0 bg-white sm:bg-transparent my-0 sm:my-6 px-0 sm:px-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* cancelled/no_show retirements aren't "closed" to

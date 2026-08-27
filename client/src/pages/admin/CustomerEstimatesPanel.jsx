@@ -149,7 +149,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
         aria-hidden
       />{" "}
       <aside
-        className="fixed inset-y-0 right-0 z-[110] h-[100dvh] max-h-[100dvh] w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="fixed inset-y-0 right-0 z-[110] h-[100dvh] max-h-[100dvh] w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         role="dialog"
         aria-label="Customer + estimate history"
         style={{ fontFamily: "'Roboto', Arial, sans-serif" }}

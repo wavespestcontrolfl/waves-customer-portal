@@ -1735,8 +1735,7 @@ function SendConfirmDialog({
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-2xl flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        style={{ maxHeight: "90vh" }}
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1849,8 +1848,7 @@ function PreviewDialog({ html, loading, onClose }) {
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-3xl flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        style={{ maxHeight: "90vh" }}
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-3xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}

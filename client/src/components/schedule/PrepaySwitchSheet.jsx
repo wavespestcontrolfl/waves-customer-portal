@@ -107,7 +107,7 @@ function friendlyDate(ymd) {
 function Shell({ children }) {
   return createPortal(
     <div className="fixed inset-0 z-[1200] flex items-center justify-center p-0 sm:p-4" style={{ background: 'rgba(15,23,42,0.55)' }}>
-      <div className="bg-white rounded-none sm:rounded-2xl w-full h-full sm:h-auto max-w-none sm:max-w-[460px] overflow-y-auto p-5 pt-[calc(20px+env(safe-area-inset-top))] pb-[calc(20px+env(safe-area-inset-bottom))] sm:pt-5 sm:pb-5">
+      <div className="bg-white rounded-none sm:rounded-2xl w-full h-full sm:h-auto max-w-none sm:max-w-[460px] overflow-y-auto box-border p-5 pt-[calc(20px+env(safe-area-inset-top))] pb-[calc(20px+env(safe-area-inset-bottom))] sm:pt-5 sm:pb-5">
         {children}
       </div>
     </div>,

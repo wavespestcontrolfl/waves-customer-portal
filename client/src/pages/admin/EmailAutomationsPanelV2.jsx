@@ -400,7 +400,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-lg my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-lg my-0 sm:my-8 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -687,7 +687,7 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-4xl my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-4xl my-0 sm:my-8 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1053,7 +1053,7 @@ function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-3xl my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-3xl my-0 sm:my-8 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}

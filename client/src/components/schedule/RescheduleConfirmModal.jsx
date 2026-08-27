@@ -116,7 +116,7 @@ export default function RescheduleConfirmModal({
         onClick={busy ? undefined : onCancel}
       />
       <div
-        className="relative w-full h-full sm:h-auto max-w-none sm:max-w-2xl bg-white rounded-none sm:rounded-md shadow-xl overflow-y-auto pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="relative w-full h-full sm:h-auto max-w-none sm:max-w-2xl bg-white rounded-none sm:rounded-md shadow-xl overflow-y-auto box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         style={{ border: '1px solid #E4E4E7', fontFamily: "'Roboto', system-ui, sans-serif" }}
       >
         {/* Header */}
