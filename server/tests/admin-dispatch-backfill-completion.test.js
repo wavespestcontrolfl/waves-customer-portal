@@ -2292,6 +2292,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
 
 describe('completion route wiring (source contracts)', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
     expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: req\.techRole \}\)/);
@@ -2360,18 +2361,18 @@ describe('completion route wiring (source contracts)', () => {
 
   test('appointment-card one-time lane: gated, hold-lane-exclusive, capped at the stamped price only', () => {
     // Fail-closed gate read + completed/satisfied row + no hold row.
-    expect(source).toMatch(/isEnabled\('apptCardCompletionCharge'\)/);
-    expect(source).toMatch(/\.whereIn\('status', \['completed', 'satisfied'\]\)/);
+    expect(verdictSource).toMatch(/isEnabled\('apptCardCompletionCharge'\)/);
+    expect(verdictSource).toMatch(/\.whereIn\('status', \['completed', 'satisfied'\]\)/);
     // r19: the lane additionally requires the consent row to belong to the
     // visit's CURRENT customer — reassignment never inherits consent.
-    expect(source).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow\s*\n\s*&& String\(laneRow\.customer_id\) === String\(svc\.customer_id\);/);
+    expect(verdictSource).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow\s*\n\s*&& String\(laneRow\.customer_id\) === String\(svc\.customer_id\);/);
     // One-time visits only, never the other explicit billing lanes.
-    expect(source).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
+    expect(verdictSource).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
     // The per-application acceptance-fee fallback and the setup-fee
     // allowances never widen this lane's cap.
-    expect(source).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
-    expect(source).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
-    expect(source).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
+    expect(verdictSource).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
+    expect(verdictSource).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
+    expect(verdictSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
     // Autopay-ledger entries name the actual lane (three-way since the
     // GATE_COMPLETION_AUTOPAY_CHARGE extension).
     expect(source).toMatch(/const completionChargeSource = perApplicationBilling\s*\n\s*\? 'per_application_completion'\s*\n\s*: \(apptCardOneTimeCharge \? 'appointment_card_completion' : 'autopay_completion'\);/);
@@ -2382,11 +2383,11 @@ describe('completion route wiring (source contracts)', () => {
     // Lane admission: gate read fail-closed (==='true' via feature-gates)
     // and mutually exclusive with the per-application / appointment-card
     // lanes — never a second classification for the same visit.
-    expect(source).toMatch(/const extendedAutopayCharge = !perApplicationBilling && !apptCardOneTimeCharge\n\s*&& require\('\.\.\/config\/feature-gates'\)\.gates\.completionAutopayCharge === true;/);
+    expect(verdictSource).toMatch(/const extendedAutopayCharge = !perApplicationBilling && !apptCardOneTimeCharge\n\s*&& require\('\.\.\/config\/feature-gates'\)\.gates\.completionAutopayCharge === true;/);
     // PRE-CREDIT anchor = the SAME completionInvoiceAmount resolution the
     // mint prices from, derived BEFORE the account-credit apply; over-cap
     // or anchor-less invoices keep their credit untouched for review.
-    expect(source).toMatch(/const duesAnchor = completionInvoiceAmount\(\{\s*\n\s*estimatedPrice: null,/);
+    expect(verdictSource).toMatch(/const duesAnchor = completionInvoiceAmount\(\{\s*\n\s*estimatedPrice: null,/);
     expect(source).toMatch(/&& !\(extendedChargeCandidate && extendedLaneOverCap\)/);
     // The anchor rides INTO the credit apply and is re-checked against the
     // LOCKED invoice (mirrors the appointment lane's frozen cap).
@@ -2421,7 +2422,7 @@ describe('completion route wiring (source contracts)', () => {
     // Round 5-6: entry keys on the FULL candidate (no-cost + unresolved
     // appt-lane exclusions included) and the money boundary excludes any
     // appointment-card consent row under the visit lock.
-    expect(source).toMatch(/&& !apptCardLaneUnresolved && !extendedHoldExcluded\n\s*&& !svc\.is_callback && !isAlwaysFreeServiceType\(svc\.service_type\)/);
+    expect(verdictSource).toMatch(/&& !apptCardLaneUnresolved && !extendedHoldExcluded\n\s*&& !svc\.is_callback && !isAlwaysFreeServiceType\(svc\.service_type\)/);
     expect(source).toMatch(/requireNoAppointmentCardLane: extendedAutopayCharge,/);
     expect(laneSource).toMatch(/reason: 'no_cost_visit'/);
   });
