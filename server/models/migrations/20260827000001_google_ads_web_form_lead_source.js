@@ -84,6 +84,9 @@ exports.up = async function up(knex) {
     // Nextdoor UTMs before Google click ids, and Facebook-keyed leads are
     // known to carry a lingering gclid (admin-dashboard.js). Mirror that.
     .whereRaw("COALESCE(extracted_data->'attribution'->'leadSource'->>'source', 'google_ads') = 'google_ads'")
+    // quote-wizard top-level UTM naming another source is the same kind of
+    // lead-level evidence (facebook / gbp / nextdoor …).
+    .whereRaw("COALESCE(NULLIF(LOWER(extracted_data->'utm'->>'source'), ''), 'google') = 'google'")
     .modify((qb) => {
       if (hasFunnelLeadId) {
         qb.whereNotExists(knex('ad_service_attribution as a2')
@@ -109,8 +112,12 @@ exports.up = async function up(knex) {
       }
       if (hasCustomerUtm) {
         qb.orWhere((q2) => {
-          // (contradictory funnel rows are already excluded above)
-          q2.whereRaw("extracted_data->'attribution' IS NULL");
+          // (contradictory funnel rows / UTMs are already excluded above);
+          // BOTH lead-level attribution locations must be absent — the
+          // webhook's attribution block AND the quote wizard's top-level utm
+          // — before a customer's stale first touch is consulted.
+          q2.whereRaw("extracted_data->'attribution' IS NULL")
+            .whereRaw("extracted_data->'utm' IS NULL");
           q2.whereExists(knex('customers as c')
             .whereRaw('c.id = leads.customer_id')
             .whereRaw("LOWER(COALESCE(c.utm_data->>'source', '')) = 'google'")
