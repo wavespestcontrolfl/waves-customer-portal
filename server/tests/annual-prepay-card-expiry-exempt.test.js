@@ -86,6 +86,21 @@ describe('getCardExpiryExemptCustomerIds', () => {
     expect((await getCardExpiryExemptCustomerIds('2026-09-03')).size).toBe(0);
   });
 
+  test('a paid term that starts AFTER today (covered at the horizon only) is not exempt', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const today = etDateString();
+    const calls = route({
+      terms: (own) => (askedDate(own) === '2026-12-01' ? [{ customer_id: 'c-future' }] : []),
+    });
+    expect((await getCardExpiryExemptCustomerIds('2026-12-01')).size).toBe(0);
+    // both ends of the window were asked
+    expect(calls.terms).toEqual(expect.arrayContaining([
+      ['where', 't.term_end', '>=', '2026-12-01'],
+      ['where', 't.term_end', '>=', today],
+    ]));
+    expect(calls.payments).toEqual([]);
+  });
+
   test('nobody covered → empty set without touching payments', async () => {
     const calls = route({ terms: [] });
     expect((await getCardExpiryExemptCustomerIds('2026-09-03')).size).toBe(0);

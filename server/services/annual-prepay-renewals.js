@@ -3419,20 +3419,32 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
  *       'auto_charge'), and invoices it otherwise; either way the card is
  *       live for it, so keep the warning (codex P1).
  *
- * A term ending inside the window is simply not covered at the horizon and
- * stays flagged (that card is needed to renew). Fails toward the warning:
- * any lookup error → empty set (nobody exempt).
+ * Coverage must hold at BOTH ends of the window (today and horizon — terms
+ * are contiguous): a term ending inside the window is not covered at the
+ * horizon and stays flagged (that card is needed to renew); a paid term
+ * starting inside the window does not cover today and stays flagged (the
+ * next monthly run before term_start still charges). Fails toward the
+ * warning: any lookup error → empty set (nobody exempt).
  */
 async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  const today = etDateString();
   let covered;
   try {
-    covered = await getActivelyCoveredCustomerIds(horizon, conn);
+    // Coverage must span the WHOLE window, not just its far end: a paid
+    // term that starts after today (future terms are first-class here and
+    // do not cover today) would otherwise exempt a customer whose next
+    // monthly run — before the term starts — still charges the card. A term
+    // is contiguous, so covered-today ∩ covered-at-horizon = covered
+    // throughout (codex hook P1).
+    const atHorizon = await getActivelyCoveredCustomerIds(horizon, conn);
+    covered = atHorizon.size
+      ? new Set([...(await getActivelyCoveredCustomerIds(today, conn))].filter((id) => atHorizon.has(id)))
+      : atHorizon;
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
     return new Set();
   }
   if (!covered.size) return covered;
-  const today = etDateString();
   try {
     // (a) armed retries — classify by obligation-date coverage like the sweep.
     const retrying = await conn('payments')
