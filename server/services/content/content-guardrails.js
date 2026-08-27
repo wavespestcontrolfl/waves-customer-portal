@@ -1905,8 +1905,10 @@ function blankNonRenderedMarkdown(text) {
     // column; a dedented non-blank line after a blank ends the list.
     // Quote-stripped indent is not comparable to the list content column,
     // so dedent-based list-END rules apply only to UNQUOTED lines.
-    const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
-    if (listItem) fenceListIndent = listItem[1].length;
+    // NESTED list markers sit up to 3 past the parent's content column
+    // ("- outer" + "    - inner") — the content column moves with them.
+    const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    if (listItem && listItem[1].length <= fenceListIndent + 3) fenceListIndent = listItem[1].length + listItem[2].length;
     else if (!blank && fencePrevBlank && depth === 0 && indent < fenceListIndent) fenceListIndent = 0;
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
@@ -1942,9 +1944,13 @@ function blankNonRenderedMarkdown(text) {
     const stripped = l.replace(quoteRe, '');
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
-    const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
-    if (listItem) { listContext = true; listContentIndent = listItem[1].length; }
-    else if (!blank && !indented && prevBlank && rawIndent < listContentIndent) listContext = false;
+    // NESTED list markers sit up to 3 past the parent's content column —
+    // the content column moves with them ("- outer" + "    - inner").
+    const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
+      listContext = true;
+      listContentIndent = listItem[1].length + listItem[2].length;
+    } else if (!blank && !indented && prevBlank && rawIndent < listContentIndent) listContext = false;
     prevBlank = blank;
     if (indented) {
       if (!listContext) return '';

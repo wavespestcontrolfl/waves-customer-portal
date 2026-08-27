@@ -2271,6 +2271,10 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // GFM allows EMPTY header cells — "| | |" over a matching delimiter is
     // a table.
     expect(guardrails.hasRawMarkdownTable('| | |\n|-|-|\n| a | b |')).toBe(true);
+    // NESTED list markers move the content column: a table indented 6 under
+    // "    - inner" is that item's child block, not indented code.
+    expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n      | A | B |\n      | - | - |')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n          | A | B |\n          | - | - |')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

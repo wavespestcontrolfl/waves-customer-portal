@@ -733,6 +733,29 @@ describe('seo-completion-gate', () => {
     });
     expect(quotedListFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // Destinations are canonicalized before classification: character
+    // references decode and dot segments resolve.
+    const entityDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href="/&#99;ontact/">Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(entityDest.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const dotSegments = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service](/x/../contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(dotSegments.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Reserve-style request verbs are inspection-request wording too.
+    const reserveInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Reserve a Termite Inspection](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(reserveInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     // Lawn specialty terms name the lawn family in CTA anchors.
     // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
     // it satisfies presence and is not forbidden wording.
@@ -769,6 +792,29 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(shrubFert.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Palm and ornamental are tree/shrub synonyms (service-normalizer):
+    // topic-accurate CTAs on a tree-shrub brief satisfy the gate.
+    const palmCare = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Palms. [Request a Palm Care Estimate](/contact/) now.' }),
+      brief: baseBrief({ service: 'tree-shrub-care' }),
+      shadowMode: true,
+    });
+    expect(palmCare.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(palmCare.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    const ornamental = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Shrubs. [Get an Ornamental Care Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'tree-shrub-care' }),
+      shadowMode: true,
+    });
+    expect(ornamental.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    // …and palm wording on the WRONG brief is still forbidden.
+    const palmWrongBrief = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get My Free Termite Estimate](/contact/) and [Request a Palm Care Estimate](/contact/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(palmWrongBrief.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
     const spacedDest = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate]( /contact/ ) today.' }),

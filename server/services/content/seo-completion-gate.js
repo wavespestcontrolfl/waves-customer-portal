@@ -264,6 +264,11 @@ function hasIncludedLinkReason(contract, reason) {
     && contract.includedInternalLinks.some((link) => link.reason === reason);
 }
 
+// Request-action verbs, shared by the coordinated-clause classifier and
+// the forbidden inspection-anchor gate (single source — partial verb lists
+// drifted apart across rounds).
+const REQUEST_VERB_SOURCE = 'request|schedule|book|get|arrange|order|buy|start|claim|reserve|secure';
+
 // Which service a CTA anchor names, if any — used to reject a wrong-service
 // CTA ("Get a Lawn Care Quote" on a termite post, "Get a Cockroach Quote"
 // on a bed-bug post). Broad-service keys match normalizeService's output;
@@ -274,7 +279,7 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   termite: /\btermite/i,
   mosquito: /\bmosquito/i,
   rodent: /\brodent|\brats?\b|\bmice\b|\bmouse\b/i,
-  'tree-shrub': /\btree\b|\bshrub/i,
+  'tree-shrub': /\btree\b|\bshrub|\bpalms?\b|\bornamentals?\b/i,
   'bed-bug': /\bbed[ -]?bug/i,
   cockroach: /\b(?:cock)?roach(?:es)?\b/i,
   ant: /\bants?\b/i,
@@ -416,12 +421,25 @@ function extractLinks(body) {
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
   // URL (hub or any spoke host, per the guardrails' hubHostSet) IS the
   // site-relative path spelled long-form.
-  const { hubHostSet } = require('./content-guardrails');
+  const { hubHostSet, decodeEntitiesForScan } = require('./content-guardrails');
   const firstParty = hubHostSet();
+  // Destinations are judged as RENDERED: character references decoded
+  // ("/&#99;ontact/" is /contact/) and dot segments resolved
+  // ("/x/../contact/" is /contact/) before classification.
   const dest = (h) => {
-    const raw = String(h || '').replace(/^<|>$/g, '');
+    let raw = decodeEntitiesForScan(String(h || '')).replace(/^<|>$/g, '');
     const abs = raw.match(/^https?:\/\/([^/\s]+)(\/[^\s]*)?$/i);
-    if (abs && firstParty.has(abs[1].toLowerCase())) return abs[2] || '/';
+    if (abs && firstParty.has(abs[1].toLowerCase())) raw = abs[2] || '/';
+    if (raw.startsWith('/') && /(?:^|\/)\.\.?(?:\/|$)/.test(raw)) {
+      const trailing = /\/$/.test(raw);
+      const segs = [];
+      for (const seg of raw.split('/')) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') segs.pop();
+        else segs.push(seg);
+      }
+      raw = `/${segs.join('/')}${trailing && segs.length ? '/' : ''}`;
+    }
     return raw;
   };
   while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[2]) });
@@ -537,7 +555,7 @@ function conversionCtaLinks(body) {
         // A trailing "for/on …" context clause is not a coordinated part.
         const coordinated = parts.map((part) => part.replace(/\s+(?:for|on)\s+.*$/i, '').trim()).filter(Boolean);
         const keywordRe = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
-        const requestVerbRe = /^(?:request|schedule|book|get|arrange|order|buy|start|claim)\b/i;
+        const requestVerbRe = new RegExp(`^(?:${REQUEST_VERB_SOURCE})\\b`, 'i');
         // A part is a SERVICE-REQUEST clause when it carries the estimate/
         // quote keyword OR opens with a request verb ("Schedule Pool
         // Cleaning") — such a clause naming no known service is an unknown
@@ -643,7 +661,7 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection". Qualifiers exclude the function words that mark EDITORIAL
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:please\s+)?(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:please\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\b)[a-z&-]+\s+){0,4}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
+const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z&-]+\\s+){0,4}inspection\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor
