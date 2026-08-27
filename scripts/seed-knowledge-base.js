@@ -284,6 +284,9 @@ If this rate changes, it needs to be updated in EVERY pricing model simultaneous
       category: 'credentials',
       tags: ['facebook', 'meta', 'oauth', 'token', 'social-media', 'api'],
       confidence: 'high',
+      // Corrected 2026-08-27 (engagement-ingest scopes) — the seeder skips
+      // existing slugs unless forced, so the live row must be republished.
+      forceUpdate: true,
       metadata: { envVar: 'FACEBOOK_ACCESS_TOKEN', ttlDays: 60, platform: 'facebook' },
       content: `# Facebook Page Access Token — Refresh Procedure
 
