@@ -700,12 +700,15 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
         const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
         const pr = { number: 7, state: 'open', head: { sha: HEAD_SHA, ref: 'content/autonomous-x' } };
         gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
-        return maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        const call = maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
           db, gh, callAnthropic: makeCall('FIXED'),
           // Named-competitor content in the fix: only the threaded
           // eligibility lets it continue past the park.
           validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
-          validateAutonomousRunGates: async () => ({ ok: true }),
+          validateAutonomousRunGates: async () => ({
+            ok: true,
+            comparisonResult: { pass: true, findings: [], requiresHumanReview: true },
+          }),
           autonomousRunner: {
             _loadReviewedBrief: async () => ({
               action_type: 'new_supporting_blog',
@@ -715,14 +718,20 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
             _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null }),
           },
         });
+        return call.then((result) => ({ result, db }));
       };
 
-      const eligible = await harness(true);
+      const { result: eligible, db: eligibleDb } = await harness(true);
       expect(eligible.remediated).toBe(true);
+      // Post-push, the fix's fresh comparison verdict is persisted onto the
+      // run so the poller's merge-time revoke check sees a competitor the
+      // FIX introduced (the stored verdict was from the original draft).
+      const stamped = eligibleDb._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      expect(JSON.parse(stamped.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
 
       // Category/spoke seed shape (shared bucket + operator_brief, no
       // TRUE-intercept marker) still parks.
-      const seed = await harness(false);
+      const { result: seed } = await harness(false);
       expect(seed.parked).toBe(true);
       expect(seed.reason).toMatch(/named-competitor/);
     } finally {
@@ -1243,11 +1252,11 @@ describe('validateAutonomousRunGates', () => {
       deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
-      // The FRESH verdict is persisted onto the run so the poller's
-      // merge-time revoke check sees the named-competitor flag even when
-      // the ORIGINAL draft's stored verdict was competitor-free (hook r5).
-      const stamped = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
-      expect(JSON.parse(stamped.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+      // The FRESH verdict rides on the result (the caller persists it AFTER
+      // the fix commit lands — never here, before the push): hook r6.
+      expect(r.comparisonResult).toMatchObject({ requiresHumanReview: true });
+      const row = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      expect(row.comparison_table_result).toBeUndefined();
     } finally {
       fg.isEnabled.mockRestore();
     }

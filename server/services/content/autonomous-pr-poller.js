@@ -869,9 +869,14 @@ async function maybeAutoMerge(run, pr) {
   let comparisonRequiresReview = true;
   try {
     const fresh = await db('autonomous_runs').where('id', run.id).first('comparison_table_result');
-    let ctr = fresh ? fresh.comparison_table_result : null;
-    if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
-    if (ctr !== undefined) comparisonRequiresReview = Boolean(ctr && ctr.requiresHumanReview === true);
+    if (fresh) {
+      // A stored NULL is a valid competitor-free verdict (runs predating the
+      // comparison gate); a MISSING row or unparseable value keeps the
+      // fail-closed default true.
+      let ctr = fresh.comparison_table_result ?? null;
+      if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
+      if (ctr !== undefined) comparisonRequiresReview = Boolean(ctr && ctr.requiresHumanReview === true);
+    }
   } catch (_) { comparisonRequiresReview = true; }
   if (comparisonRequiresReview) {
     let eligible = false;

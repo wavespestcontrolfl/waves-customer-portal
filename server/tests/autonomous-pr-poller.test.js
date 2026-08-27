@@ -148,10 +148,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
           return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
         }
         // by-id lookup (named-competitor revoke check reads
-        // comparison_table_result fresh before merging); the newer-sibling
-        // lookup in queueRowParkedState filters by opportunity_id instead.
-        if (table === 'autonomous_runs' && q._filters.id !== undefined && runFirst !== undefined) {
-          return Promise.resolve(runFirst);
+        // comparison_table_result fresh before merging) — defaults to a
+        // competitor-free verdict so unrelated merge tests are unaffected;
+        // the newer-sibling lookup in queueRowParkedState filters by
+        // opportunity_id instead.
+        if (table === 'autonomous_runs' && q._filters.id !== undefined) {
+          return Promise.resolve(runFirst !== undefined ? runFirst : { comparison_table_result: null });
         }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
@@ -686,6 +688,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       pending: [makeRun()],
       runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: true } },
     });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('revoke check fails CLOSED when the fresh run-row read finds no row (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()], runFirst: null });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
