@@ -232,3 +232,21 @@ describe('_private helpers', () => {
     expect(_private.pausedOn({ autopay_paused_until: new Date('2026-05-08T12:00:00Z') }, '2026-05-08')).toBe(true);
   });
 });
+
+describe('allowMissingCustomer (fail-toward-warning surfaces)', () => {
+  test('missing customer: state guards are skipped, row-level guards still decide', async () => {
+    const ctx = loadRetryContext();
+    const opts = { ctx, allowMissingCustomer: true };
+    // collectible when nothing at row level suppresses
+    expect((await classifyFailedPaymentRetry({ payment: monthlyRow(), customer: null, ...opts })).collectible).toBe(true);
+    // already collected still supersedes
+    mockCollectedRow = { id: 'x' };
+    expect((await classifyFailedPaymentRetry({ payment: monthlyRow(), customer: null, ...opts })).reason).toBe(REASONS.ALREADY_COLLECTED);
+    mockCollectedRow = null;
+    // parked still parks
+    const amb = monthlyRow({ stripe_payment_intent_id: null, metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: true }) });
+    expect((await classifyFailedPaymentRetry({ payment: amb, customer: null, ...opts })).reason).toBe(REASONS.AMBIGUOUS_OUTCOME_PARKED);
+    // the sweep's default still skips silently
+    expect((await classifyFailedPaymentRetry({ payment: monthlyRow(), customer: null, ctx })).reason).toBe(REASONS.CUSTOMER_MISSING);
+  });
+});

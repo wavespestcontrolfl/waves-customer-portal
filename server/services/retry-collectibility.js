@@ -188,7 +188,15 @@ function armedRetryQuery(conn = db, { dueBy = null, dueBefore = null, customerId
  *   obligationDateKey:string|null, collectedByPaymentId:*|null,
  *   resolvedLaneMode:string|null }}
  */
-async function classifyFailedPaymentRetry({ payment, customer, ctx, conn = ctx?.conn || db }) {
+async function classifyFailedPaymentRetry({
+  payment, customer, ctx, conn = ctx?.conn || db,
+  // A surface that could not read the customer row and fails toward "the
+  // sweep might charge" (the card-expiry exemption) passes true: the
+  // customer-level STATE guards (lane, disabled, paused) are skipped and
+  // only the row-level guards decide. The sweep itself never sets this —
+  // a missing/deleted customer is a silent skip there.
+  allowMissingCustomer = false,
+}) {
   const isMonthlyObligation = isMonthlyObligationRow(payment);
   const meta = parseMeta(payment);
   const obligationMonth = meta.billed_month || monthKeyOf(payment.payment_date);
@@ -205,8 +213,9 @@ async function classifyFailedPaymentRetry({ payment, customer, ctx, conn = ctx?.
   };
   const verdict = (reason, disposition, extra = {}) => ({ ...base, reason, disposition, ...extra });
 
-  if (!customer) return verdict(REASONS.CUSTOMER_MISSING, DISPOSITIONS.SKIP_SILENT);
-  if (customer.deleted_at) return verdict(REASONS.CUSTOMER_DELETED, DISPOSITIONS.SKIP_SILENT);
+  if (!customer && !allowMissingCustomer) return verdict(REASONS.CUSTOMER_MISSING, DISPOSITIONS.SKIP_SILENT);
+  if (customer?.deleted_at) return verdict(REASONS.CUSTOMER_DELETED, DISPOSITIONS.SKIP_SILENT);
+  const stateKnown = !!customer;
 
   // RESOLUTION GUARD: obligation month already collected through another
   // door (admin charge-now, self-pay, an overlapping collection path).
@@ -254,7 +263,7 @@ async function classifyFailedPaymentRetry({ payment, customer, ctx, conn = ctx?.
   // rows the resolver classifies non-monthly — with NO successfully paid
   // monthly charge on file is disarmed (likely mis-created; manual triage),
   // deliberately NOT superseded.
-  if (isMonthlyObligation) {
+  if (isMonthlyObligation && stateKnown) {
     const laneNotMonthly = NON_MONTHLY_MODES.includes(customer.billing_mode)
       || (!customer.billing_mode && resolveBillingLane(customer).mode !== 'monthly_membership');
     if (laneNotMonthly) {
@@ -272,12 +281,12 @@ async function classifyFailedPaymentRetry({ payment, customer, ctx, conn = ctx?.
   }
 
   // STATE GUARD (monthly GUARD 1): autopay disabled — disarm, no supersede.
-  if (customer.autopay_enabled === false) {
+  if (stateKnown && customer.autopay_enabled === false) {
     return verdict(REASONS.AUTOPAY_DISABLED, DISPOSITIONS.DISARM);
   }
 
   // STATE GUARD (monthly GUARD 2): paused — skip without disarming.
-  if (pausedOn(customer, ctx.asOf)) {
+  if (stateKnown && pausedOn(customer, ctx.asOf)) {
     return verdict(REASONS.AUTOPAY_PAUSED, DISPOSITIONS.SKIP_ARMED);
   }
 
