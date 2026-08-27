@@ -45,12 +45,14 @@ describe('20260826000006 rodent_trapping_followup included at $0', () => {
     expect(stateRow(db)).toBeUndefined();
   });
 
-  test('an admin-edited row is left alone', async () => {
+  test('an admin-edited NONZERO price still goes to $0 (any billable callback is wrong); custom copy is kept; down() restores the edited price', async () => {
     const db = seedDb({ base_price: 60, description: 'Custom follow-up copy' });
     await migration.up(fakeKnex(db));
-    expect(fu(db).base_price).toBe(60);
+    expect(fu(db).base_price).toBe(0);
     expect(fu(db).description).toBe('Custom follow-up copy');
-    expect(stateRow(db)).toBeUndefined();
+    expect(JSON.parse(stateRow(db).value)).toMatchObject({ priceChanged: true, priorPrice: 60, descriptionChanged: false });
+    await migration.down(fakeKnex(db));
+    expect(fu(db).base_price).toBe(60);
   });
 
   test('a row already priced NULL/variable still gets the included copy', async () => {

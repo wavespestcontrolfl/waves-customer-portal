@@ -6775,7 +6775,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
               serviceData.inspectionCreditOptIn = true;
               serviceData.inspectionCreditTerms = {
-                amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, soldInspectionAmount),
+                // The pre-lock pass resolves the sold amount only when the
+                // pre-lock profile was creditable; a repoint INTO an
+                // inspection that won the race arrives here with none, so
+                // resolve it from the locked row inside the transaction
+                // rather than freezing the live fee (uncapped audit P0).
+                amount: IC.closeoutCreditAmountForServiceKey(
+                  effectiveCompletionProfile?.serviceKey || null,
+                  soldInspectionAmount ?? await IC.soldInspectionAmountForVisit(trx, lockedSvcRow || svc),
+                ),
                 windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
                 serviceKey: effectiveCompletionProfile?.serviceKey || null,
               };

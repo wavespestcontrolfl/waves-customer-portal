@@ -824,7 +824,10 @@ describe('closeout route wiring — source contracts (the completion route is to
     // an inspection accepted at $125 before the fee dropped to $75 still
     // freezes $125 (#3521 r1 P0); the live config only when nothing sold.
     expect(source).toContain('amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, soldInspectionAmount),');
-    expect(source).toContain('amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, soldInspectionAmount),');
+    // The locked branch re-resolves the sold amount from the LOCKED row when
+    // the pre-lock pass produced none (a repoint into an inspection that won
+    // the race must still freeze the promised face, not the live fee).
+    expect(source).toContain('soldInspectionAmount ?? await IC.soldInspectionAmountForVisit(trx, lockedSvcRow || svc),');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmount(),');
   });

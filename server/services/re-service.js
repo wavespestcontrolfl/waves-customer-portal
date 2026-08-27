@@ -14,7 +14,11 @@
 //   2. the completion path suppresses the monthly-dues invoice fallback for
 //      callbacks so a "free" re-service never bills a recurring customer's
 //      monthly rate.
-const RE_SERVICE_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+// rodent_trapping_followup joins the set (owner directive 2026-08-26): the
+// Standard trapping plan includes unlimited callbacks, so a trap check is
+// a callback in every sense above — never a billable visit, and never the
+// monthly-dues fallback at completion (uncapped audit P0 on #3521).
+const RE_SERVICE_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service', 'rodent_trapping_followup']);
 
 // Matches the catalog name/type "... Re-Service" as a safety net when the
 // service_key isn't available (e.g. free-text service type). Anchored so it

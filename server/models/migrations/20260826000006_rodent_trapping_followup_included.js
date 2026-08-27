@@ -37,10 +37,15 @@ exports.up = async function up(knex) {
   const row = await knex('services').where({ service_key: 'rodent_trapping_followup' }).first();
   if (!row) return;
   const patch = {};
-  const state = { priceChanged: false, descriptionChanged: false };
-  if (Number(row.base_price) === LEGACY_PRICE) {
+  const state = { priceChanged: false, descriptionChanged: false, priorPrice: null };
+  // ANY nonzero price goes to $0 — an admin-edited $60 is just as billable
+  // as the seeded $95, and an included callback is never billable (uncapped
+  // audit P0 on #3521). The prior value rides the state for rollback.
+  const currentPrice = Number(row.base_price);
+  if (Number.isFinite(currentPrice) && currentPrice > 0) {
     patch.base_price = NEW_PRICE;
     state.priceChanged = true;
+    state.priorPrice = currentPrice;
   }
   if (String(row.description || '') === LEGACY_DESCRIPTION) {
     patch.description = NEW_DESCRIPTION;
@@ -58,7 +63,11 @@ exports.down = async function down(knex) {
   const row = await knex('services').where({ id: state.id, service_key: 'rodent_trapping_followup' }).first();
   if (row) {
     const patch = {};
-    if (state.priceChanged && Number(row.base_price) === NEW_PRICE) patch.base_price = LEGACY_PRICE;
+    if (state.priceChanged && Number(row.base_price) === NEW_PRICE) {
+      patch.base_price = Number.isFinite(Number(state.priorPrice)) && Number(state.priorPrice) > 0
+        ? Number(state.priorPrice)
+        : LEGACY_PRICE;
+    }
     if (state.descriptionChanged && String(row.description || '') === NEW_DESCRIPTION) patch.description = LEGACY_DESCRIPTION;
     if (Object.keys(patch).length) {
       await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });
