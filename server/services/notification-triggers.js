@@ -787,28 +787,31 @@ async function triggerNotification(triggerKey, payload = {}) {
         );
 
         // App-icon badge (installed-PWA Badging API / APNs aps.badge): mirror
-        // the bell's unread count, computed AFTER the bell write above so the
-        // triggering notification is included. The feed is role-scoped, not
-        // per-user, so one count per role covers every recipient; a failed
-        // count omits the badge (icon left untouched) rather than sending a
-        // wrong number.
-        const badgeByRole = new Map();
+        // EXACTLY what the bell's /unread-count returns — persisted unread
+        // plus live dashboard alerts after this admin's dismissals
+        // (admin-unread.js, shared with the route) — computed per recipient
+        // because dismissal state is per admin, and AFTER the bell write
+        // above so the triggering notification is included. A failed count
+        // omits the badge (icon left untouched) rather than sending a wrong
+        // number. Lazy require: admin-unread pulls in dashboard-alerts-cron,
+        // which requires this module back — a top-level require would cycle.
+        const { getUnreadCountForAdmin } = require('./admin-unread');
+        const badgeByUser = new Map();
         for (const user of activeAdmins) {
-          if (!enabledUserIds.includes(user.id) || badgeByRole.has(user.role)) continue;
+          if (!enabledUserIds.includes(user.id)) continue;
           try {
-            badgeByRole.set(user.role, await NotificationService.getAdminUnreadCount({ role: user.role }));
+            badgeByUser.set(user.id, await getUnreadCountForAdmin({ adminUserId: user.id, role: user.role }));
           } catch (e) {
-            badgeByRole.set(user.role, null);
-            logger.warn(`[notification-triggers] badge count failed for role '${user.role}': ${e.message}`);
+            badgeByUser.set(user.id, null);
+            logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
           }
         }
-        const roleByUser = new Map(activeAdmins.map((u) => [u.id, u.role]));
 
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
-            const badgeCount = badgeByRole.get(roleByUser.get(adminUserId));
+            const badgeCount = badgeByUser.get(adminUserId);
             return {
               title: built.title,
               body: built.body,
