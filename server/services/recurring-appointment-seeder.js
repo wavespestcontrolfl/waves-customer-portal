@@ -991,7 +991,15 @@ const WEEKDAY_PREF_VALUES = new Set(['monday', 'tuesday', 'wednesday', 'thursday
 async function customerPrefersNoWeekends(conn, customerId) {
   if (!conn || !customerId) return false;
   try {
-    const row = await conn('property_preferences').where({ customer_id: customerId }).first('preferred_day');
+    const read = (dbh) => dbh('property_preferences').where({ customer_id: customerId }).first('preferred_day');
+    // SAVEPOINT (nested trx) when the caller handed us a transaction: a
+    // failed optional lookup would leave that trx ABORTED in Postgres
+    // despite this catch (try/catch in a trx ≠ fail-open) and every
+    // scheduling write after it would 25P02. Rolling back to the
+    // savepoint keeps the caller's transaction healthy.
+    const row = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
     return WEEKDAY_PREF_VALUES.has(String(row?.preferred_day || '').toLowerCase());
   } catch {
     return false;

@@ -1031,7 +1031,10 @@ async function planUpdateDetailsRecurrenceDates(conn, {
             }),
             intervalDays: parent.recurring_interval_days,
           };
-          const skip = cols.skip_weekends ? !!parent.skip_weekends : false;
+          // B6: mirrors the reconcile WRITER's live-preference OR — a
+          // divergent plan locks the weekend slot while the writer shifts
+          // to a weekday and SERIES_CHANGED_RETRY loops forever (hook P1).
+          const skip = (cols.skip_weekends ? !!parent.skip_weekends : false) || prefNoWeekends;
           const dir = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
           const latest = await latestLiveSeriesVisit(conn, parentId);
           const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);

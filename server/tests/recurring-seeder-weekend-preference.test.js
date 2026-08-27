@@ -56,6 +56,9 @@ function makeConn({ prefRow = null, prefThrows = false } = {}) {
     throw new Error(`unexpected table ${table}`);
   };
   conn.isTransaction = true;
+  // The pref lookup runs in a SAVEPOINT (nested trx) on transactional
+  // conns so a failed optional query can't abort the caller's trx.
+  conn.transaction = async (fn) => fn(conn);
   conn.executionPromise = { then: () => {} };
   conn.raw = async () => ({});
   return { conn, inserted, parentUpdates };
@@ -80,8 +83,14 @@ describe('customerPrefersNoWeekends', () => {
     expect(await customerPrefersNoWeekends(makeConn({ prefRow: null }).conn, 'c1')).toBe(false);
     expect(await customerPrefersNoWeekends(makeConn({}).conn, null)).toBe(false);
   });
-  test('lookup error fails OPEN (keeps existing behavior)', async () => {
-    expect(await customerPrefersNoWeekends(makeConn({ prefThrows: true }).conn, 'c1')).toBe(false);
+  test('lookup error fails OPEN via the savepoint (keeps existing behavior, trx stays healthy)', async () => {
+    const { conn } = makeConn({ prefThrows: true });
+    const nested = jest.spyOn(conn, 'transaction');
+    expect(await customerPrefersNoWeekends(conn, 'c1')).toBe(false);
+    // On a transactional conn the lookup MUST run inside a nested
+    // trx/savepoint — a swallowed error would otherwise leave the
+    // caller's Postgres transaction aborted (25P02) despite the catch.
+    expect(nested).toHaveBeenCalledTimes(1);
   });
 });
 
