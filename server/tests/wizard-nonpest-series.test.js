@@ -744,6 +744,13 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r28: the sweep row-locks the draft before the generation compare, so the retire-handoff archive can never land on a concurrently refreshed newer quote', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    // The freshDraft read (whose updated_at the generation compare and the
+    // archive both trust) must hold the row lock /calculate's refresh takes.
+    expect(recoverySrc).toMatch(/const freshDraft = await trx\('estimates'\)\s*\n\s*\.where\(\{ id: parent\.source_estimate_id, source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)\s*\n\s*\.forUpdate\(\)\s*\n\s*\.first\(\);/);
+  });
+
   test('r27: bells match the billing state left on the visit; locked service identity is drift-checked; placeholder label reads ride the trx', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect((recoverySrc.match(/bell: mintedPriceConfirmed\s*\n\s*\?/g) || []).length).toBe(2);

@@ -216,9 +216,18 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         if (freshChild) return false;
         // Draft liveness shapes the office copy only (r21): a consumed or
         // archived draft still leaves THIS parent stranded and billable.
+        // FOR UPDATE (codex #3504 r28): the generation compare below and
+        // the retire-handoff archive must see one stable row — unlocked,
+        // a concurrent /calculate refresh could commit between them and
+        // the archive's predicate (draft + unarchived, no generation
+        // bound) would retire the customer's NEWLY issued quote. Same
+        // parent→draft order as the activation path; /calculate takes
+        // only this row lock, so the refresh serializes behind us (or we
+        // read its committed newer generation and leave the link alone).
         const freshDraft = await trx('estimates')
           .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
           .whereNull('archived_at')
+          .forUpdate()
           .first();
         const draftLive = !!freshDraft;
         // The draft PROVABLY still represents THIS parent only by the
